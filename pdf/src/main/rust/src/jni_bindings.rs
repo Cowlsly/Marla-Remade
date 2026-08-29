@@ -12,6 +12,21 @@ use std::panic::{catch_unwind, AssertUnwindSafe};
 /// Audit #7: unbounded convert_byte_array copy. An Intent with huge PDF could OOM native heap,
 /// and registry then duplicates via Document::load_mem.
 const MAX_JAVA_BYTE_ARRAY_BYTES: usize = 200 * 1024 * 1024;
+/// Drops the cached search index for `handle` on scope exit, so a document-mutating
+/// entry point cannot leave `ensure_index` serving text from before the edit.
+///
+/// A guard rather than a call at each return: these functions have several exit paths
+/// and a `catch_unwind` arm, and a panic can leave the document partially mutated — the
+/// one case where a surviving stale index is worst. Declared before `catch_unwind` so it
+/// drops after the unwind is caught.
+///
+/// Cheap: it only removes a map entry. The rebuild happens lazily on the next search.
+struct InvalidateSearchIndex(jlong);
+impl Drop for InvalidateSearchIndex {
+    fn drop(&mut self) {
+        crate::search::invalidate_index(self.0);
+    }
+}
 
 /// Throw a Java IllegalArgumentException (if possible). Requires &mut JNIEnv.
 fn throw_iae<'local>(env: &mut JNIEnv<'local>, msg: &str) {
@@ -738,6 +753,7 @@ pub extern "system" fn Java_com_vayunmathur_pdf_util_PdfNative_appendPdf<'local>
     handle: jlong,
     data: JByteArray<'local>,
 ) -> jint {
+    let _invalidate = InvalidateSearchIndex(handle);
     match catch_unwind(AssertUnwindSafe(|| append_pdf_inner(&mut env, handle, data))) {
         Ok(v) => v,
         Err(_) => {
@@ -758,6 +774,7 @@ pub extern "system" fn Java_com_vayunmathur_pdf_util_PdfNative_appendImagePage<'
     w: jint,
     h: jint,
 ) -> jint {
+    let _invalidate = InvalidateSearchIndex(handle);
     match catch_unwind(AssertUnwindSafe(|| {
         append_image_page_inner(&mut env, handle, jpeg, w, h)
     })) {
@@ -782,6 +799,7 @@ pub extern "system" fn Java_com_vayunmathur_pdf_util_PdfNative_movePage<'local>(
     from: jint,
     to: jint,
 ) -> jboolean {
+    let _invalidate = InvalidateSearchIndex(handle);
     match catch_unwind(AssertUnwindSafe(|| {
         move_page(handle, from.max(0) as usize, to.max(0) as usize) as jboolean
     })) {
@@ -801,6 +819,7 @@ pub extern "system" fn Java_com_vayunmathur_pdf_util_PdfNative_removePage<'local
     handle: jlong,
     index: jint,
 ) -> jboolean {
+    let _invalidate = InvalidateSearchIndex(handle);
     match catch_unwind(AssertUnwindSafe(|| {
         remove_page(handle, index.max(0) as usize) as jboolean
     })) {
@@ -821,6 +840,7 @@ pub extern "system" fn Java_com_vayunmathur_pdf_util_PdfNative_rotatePage<'local
     index: jint,
     delta: jint,
 ) -> jboolean {
+    let _invalidate = InvalidateSearchIndex(handle);
     match catch_unwind(AssertUnwindSafe(|| rotate_page(handle, index, delta) as jboolean)) {
         Ok(v) => v,
         Err(_) => {
@@ -919,6 +939,7 @@ pub extern "system" fn Java_com_vayunmathur_pdf_util_PdfNative_addTextAnnotation
     size: jfloat,
     text: JString<'local>,
 ) -> jlong {
+    let _invalidate = InvalidateSearchIndex(handle);
     match catch_unwind(AssertUnwindSafe(|| {
         add_free_text_inner(&mut env, handle, page, x0, y0, x1, y1, argb, size, text)
     })) {
@@ -947,6 +968,7 @@ pub extern "system" fn Java_com_vayunmathur_pdf_util_PdfNative_addHighlight<'loc
     y1: jfloat,
     argb: jint,
 ) -> jlong {
+    let _invalidate = InvalidateSearchIndex(handle);
     match catch_unwind(AssertUnwindSafe(|| {
         add_highlight(
             handle,
@@ -978,6 +1000,7 @@ pub extern "system" fn Java_com_vayunmathur_pdf_util_PdfNative_addTextMarkup<'lo
     argb: jint,
     kind: jint,
 ) -> jlong {
+    let _invalidate = InvalidateSearchIndex(handle);
     match catch_unwind(AssertUnwindSafe(|| {
         add_text_markup(
             handle,
@@ -1007,6 +1030,7 @@ pub extern "system" fn Java_com_vayunmathur_pdf_util_PdfNative_addNote<'local>(
     argb: jint,
     text: JString<'local>,
 ) -> jlong {
+    let _invalidate = InvalidateSearchIndex(handle);
     match catch_unwind(AssertUnwindSafe(|| {
         add_note_inner(&mut env, handle, page, x, y, argb, text)
     })) {
@@ -1033,6 +1057,7 @@ pub extern "system" fn Java_com_vayunmathur_pdf_util_PdfNative_addCallout<'local
     size: jfloat,
     text: JString<'local>,
 ) -> jlong {
+    let _invalidate = InvalidateSearchIndex(handle);
     match catch_unwind(AssertUnwindSafe(|| {
         add_callout_inner(&mut env, handle, page, ax, ay, bx, by, argb, size, text)
     })) {
@@ -1059,6 +1084,7 @@ pub extern "system" fn Java_com_vayunmathur_pdf_util_PdfNative_addRectAnnotation
     line_width: jfloat,
     fill: jboolean,
 ) -> jlong {
+    let _invalidate = InvalidateSearchIndex(handle);
     match catch_unwind(AssertUnwindSafe(|| {
         add_square(
             handle,
@@ -1093,6 +1119,7 @@ pub extern "system" fn Java_com_vayunmathur_pdf_util_PdfNative_addCircleAnnotati
     line_width: jfloat,
     fill: jboolean,
 ) -> jlong {
+    let _invalidate = InvalidateSearchIndex(handle);
     match catch_unwind(AssertUnwindSafe(|| {
         add_circle(
             handle,
@@ -1126,6 +1153,7 @@ pub extern "system" fn Java_com_vayunmathur_pdf_util_PdfNative_addPolyAnnotation
     closed: jboolean,
     pts: JFloatArray<'local>,
 ) -> jlong {
+    let _invalidate = InvalidateSearchIndex(handle);
     match catch_unwind(AssertUnwindSafe(|| {
         add_poly_inner(&mut env, handle, page, argb, line_width, fill, closed, pts)
     })) {
@@ -1148,6 +1176,7 @@ pub extern "system" fn Java_com_vayunmathur_pdf_util_PdfNative_addInkAnnotation<
     line_width: jfloat,
     pts: JFloatArray<'local>,
 ) -> jlong {
+    let _invalidate = InvalidateSearchIndex(handle);
     match catch_unwind(AssertUnwindSafe(|| {
         add_ink_inner(&mut env, handle, page, argb, line_width, pts)
     })) {
@@ -1175,6 +1204,7 @@ pub extern "system" fn Java_com_vayunmathur_pdf_util_PdfNative_addImageStamp<'lo
     img_h: jint,
     jpeg: JByteArray<'local>,
 ) -> jlong {
+    let _invalidate = InvalidateSearchIndex(handle);
     match catch_unwind(AssertUnwindSafe(|| {
         add_stamp_inner(&mut env, handle, page, x0, y0, x1, y1, img_w, img_h, jpeg)
     })) {
@@ -1199,6 +1229,7 @@ pub extern "system" fn Java_com_vayunmathur_pdf_util_PdfNative_updateAnnotationR
     x1: jfloat,
     y1: jfloat,
 ) -> jboolean {
+    let _invalidate = InvalidateSearchIndex(handle);
     match catch_unwind(AssertUnwindSafe(|| {
         update_annotation_rect(
             handle,
@@ -1223,6 +1254,7 @@ pub extern "system" fn Java_com_vayunmathur_pdf_util_PdfNative_updateTextAnnotat
     annot_id: jlong,
     text: JString<'local>,
 ) -> jboolean {
+    let _invalidate = InvalidateSearchIndex(handle);
     match catch_unwind(AssertUnwindSafe(|| {
         update_text_annotation_inner(&mut env, handle, annot_id, text)
     })) {
@@ -1242,6 +1274,7 @@ pub extern "system" fn Java_com_vayunmathur_pdf_util_PdfNative_deleteAnnotation<
     page: jint,
     annot_id: jlong,
 ) -> jboolean {
+    let _invalidate = InvalidateSearchIndex(handle);
     match catch_unwind(AssertUnwindSafe(|| {
         delete_annotation(handle, page, annot_id) as jboolean
     })) {
@@ -1261,6 +1294,7 @@ pub extern "system" fn Java_com_vayunmathur_pdf_util_PdfNative_detachAnnotation<
     page: jint,
     annot_id: jlong,
 ) -> jboolean {
+    let _invalidate = InvalidateSearchIndex(handle);
     match catch_unwind(AssertUnwindSafe(|| {
         detach_annotation(handle, page, annot_id) as jboolean
     })) {
@@ -1280,6 +1314,7 @@ pub extern "system" fn Java_com_vayunmathur_pdf_util_PdfNative_reattachAnnotatio
     page: jint,
     annot_id: jlong,
 ) -> jboolean {
+    let _invalidate = InvalidateSearchIndex(handle);
     match catch_unwind(AssertUnwindSafe(|| {
         reattach_annotation(handle, page, annot_id) as jboolean
     })) {
@@ -1301,6 +1336,7 @@ pub extern "system" fn Java_com_vayunmathur_pdf_util_PdfNative_duplicateAnnotati
     dx: jfloat,
     dy: jfloat,
 ) -> jlong {
+    let _invalidate = InvalidateSearchIndex(handle);
     match catch_unwind(AssertUnwindSafe(|| {
         duplicate_annotation(handle, page, annot_id, dx as f64, dy as f64)
     })) {
@@ -1320,6 +1356,7 @@ pub extern "system" fn Java_com_vayunmathur_pdf_util_PdfNative_setTextField<'loc
     widget_id: jlong,
     value: JString<'local>,
 ) -> jboolean {
+    let _invalidate = InvalidateSearchIndex(handle);
     match catch_unwind(AssertUnwindSafe(|| {
         set_text_field_inner(&mut env, handle, widget_id, value)
     })) {
@@ -1339,6 +1376,7 @@ pub extern "system" fn Java_com_vayunmathur_pdf_util_PdfNative_setCheckbox<'loca
     widget_id: jlong,
     on: jboolean,
 ) -> jboolean {
+    let _invalidate = InvalidateSearchIndex(handle);
     match catch_unwind(AssertUnwindSafe(|| {
         set_checkbox(handle, widget_id, on != 0) as jboolean
     })) {
@@ -1358,6 +1396,7 @@ pub extern "system" fn Java_com_vayunmathur_pdf_util_PdfNative_setChoiceField<'l
     widget_id: jlong,
     value: JString<'local>,
 ) -> jboolean {
+    let _invalidate = InvalidateSearchIndex(handle);
     match catch_unwind(AssertUnwindSafe(|| {
         set_choice_field_inner(&mut env, handle, widget_id, value)
     })) {
@@ -1412,6 +1451,7 @@ pub extern "system" fn Java_com_vayunmathur_pdf_util_PdfNative_flattenDocument<'
     _class: JClass<'local>,
     handle: jlong,
 ) -> jboolean {
+    let _invalidate = InvalidateSearchIndex(handle);
     match catch_unwind(AssertUnwindSafe(|| flatten_document(handle) as jboolean)) {
         Ok(v) => v,
         Err(_) => {
@@ -1428,6 +1468,7 @@ pub extern "system" fn Java_com_vayunmathur_pdf_util_PdfNative_applyRedactions<'
     _class: JClass<'local>,
     handle: jlong,
 ) -> jboolean {
+    let _invalidate = InvalidateSearchIndex(handle);
     match catch_unwind(AssertUnwindSafe(|| apply_redactions(handle) as jboolean)) {
         Ok(v) => v,
         Err(_) => {
@@ -1465,6 +1506,7 @@ pub extern "system" fn Java_com_vayunmathur_pdf_util_PdfNative_addRedaction<'loc
     x1: jfloat,
     y1: jfloat,
 ) -> jlong {
+    let _invalidate = InvalidateSearchIndex(handle);
     match catch_unwind(AssertUnwindSafe(|| {
         add_redaction(
             handle,

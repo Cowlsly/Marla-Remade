@@ -86,6 +86,40 @@ sealed interface PdfPrimitive {
         val bitmap: android.graphics.Bitmap?,
         val alpha: Float = 1f,
         val blend: BlendMode = BlendMode.Normal,
+        /**
+         * Whether to smooth the image when it is scaled up (wire v11). PDF 32000-1 §8.9.5.1
+         * Table 89: `/Interpolate` defaults to **false**, and bilevel art must never be
+         * smoothed — Rust decides this per image in `image_should_interpolate`. Defaults to
+         * true so an older wire behaves exactly as before the flag existed.
+         */
+        val interpolate: Boolean = true,
+    ) : PdfPrimitive
+
+    /**
+     * A tiling pattern drawn as ONE repeating cell rather than one [Image] per tile (wire
+     * tag 14). [ctm] maps the unit square onto one cell — one period of the lattice — so the
+     * bitmap's own dimensions ARE the repeat period; Rust rasterizes the cell at `/XStep` x
+     * `/YStep`, not at the pattern `/BBox`, with transparent padding where the step is larger.
+     * [xstep]/[ystep] are carried only so the renderer can assert that correspondence.
+     *
+     * [i0]/[j0]/[nx]/[ny] are the lattice extent in cell indices relative to [ctm]'s origin.
+     * A `REPEAT` shader tiles infinitely, so these only determine the region to fill.
+     *
+     * Only emitted for NON-overlapping patterns: PDF 32000-1 §8.7.3.1 permits `/XStep` smaller
+     * than the BBox with later tiles painted over earlier, and a periodic repeat cannot express
+     * overlap, so Rust routes that case to the per-tile path instead.
+     */
+    data class ImageTiled(
+        val ctm: FloatArray,
+        val bitmap: android.graphics.Bitmap?,
+        val xstep: Float,
+        val ystep: Float,
+        val i0: Int,
+        val j0: Int,
+        val nx: Int,
+        val ny: Int,
+        val alpha: Float = 1f,
+        val blend: BlendMode = BlendMode.Normal,
     ) : PdfPrimitive
 
     /**
@@ -130,6 +164,19 @@ sealed interface PdfPrimitive {
 
     /** Marker: switch from drawing the masked content to drawing the mask (v5). */
     data object SoftMaskContent : PdfPrimitive
+
+    /**
+     * The /TR transfer function of the enclosing [SoftMaskPush] (wire tag 13), reduced to
+     * `gain * m + bias` over the mask value m in 0..1. [affine] is false when the transmitted
+     * 256-entry LUT is too far from a straight line for that form to represent it, in which
+     * case the mask is left untransformed — see [SafePdfParser] for why an affine fit is the
+     * only shape that can be applied to a Canvas layer.
+     */
+    data class SoftMaskTransfer(
+        val gain: Float,
+        val bias: Float,
+        val affine: Boolean,
+    ) : PdfPrimitive
 
     /** End a soft-masked region: composite the mask onto the content (v5). */
     data object SoftMaskPop : PdfPrimitive

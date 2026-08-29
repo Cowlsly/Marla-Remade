@@ -194,15 +194,35 @@ pub(crate) fn parse_cs_array(doc: &Document, arr: &[Object], cs_resources: &Hash
         }
         b"ICCBased" => {
             let dict_obj = arr.get(1).and_then(|o| deref(doc, o));
-            let n = if let Some(Object::Stream(s)) = dict_obj {
-                s.dict.get(b"N").ok().and_then(num).unwrap_or(1.0) as u8
-            } else {
-                1
-            };
             // alt colorspace in dict /Alternate
-            let alt = if let Some(Object::Stream(s)) = dict_obj {
-                s.dict.get(b"Alternate").ok().and_then(|o| parse_cs_kind(doc, Some(o), cs_resources)).map(Box::new)
-            } else { None };
+            let alt = match dict_obj {
+                Some(Object::Stream(s)) => s
+                    .dict
+                    .get(b"Alternate")
+                    .ok()
+                    .and_then(|o| parse_cs_kind(doc, Some(o), cs_resources))
+                    .map(Box::new),
+                Some(Object::Dictionary(d)) => d
+                    .get(b"Alternate")
+                    .ok()
+                    .and_then(|o| parse_cs_kind(doc, Some(o), cs_resources))
+                    .map(Box::new),
+                _ => None,
+            };
+            // /N is required (§8.6.5.5) and must be 1, 3 or 4. When it is missing or
+            // bogus, infer from /Alternate rather than defaulting to 1: a wrong
+            // component count shifts every sample in an image and yields the
+            // distinctive diagonal-rainbow garbage. Accept a bare dictionary too,
+            // which `colorspace_info` already tolerated.
+            let declared = match dict_obj {
+                Some(Object::Stream(s)) => s.dict.get(b"N").ok().and_then(num),
+                Some(Object::Dictionary(d)) => d.get(b"N").ok().and_then(num),
+                _ => None,
+            };
+            let n = match declared {
+                Some(v) if matches!(v as u8, 1 | 3 | 4) => v as u8,
+                _ => alt.as_ref().map(|a| cs_kind_ncomp(a)).unwrap_or(3),
+            };
             Some(CsKind::ICCBased { n: n.max(1), alt })
         }
         b"Indexed" | b"I" => {
@@ -213,7 +233,15 @@ pub(crate) fn parse_cs_array(doc: &Document, arr: &[Object], cs_resources: &Hash
                 .unwrap_or(255).clamp(0, 65535) as u16;
             let lookup = match arr.get(3).and_then(|o| deref(doc, o)) {
                 Some(Object::String(s,_)) => s.clone(),
-                Some(Object::Stream(s)) => { s.decompressed_content().unwrap_or_else(|_| s.content.clone()) },
+                // NOT `decompressed_content()`. lopdf 0.36 implements only
+                // Flate/LZW/ASCII85, so RunLength or ASCIIHex hits the `Err` arm and the
+                // old fallback handed back the still-ENCODED bytes AS THE PALETTE. Worse,
+                // it reads /DecodeParms with `as_dict()`, so an INDIRECT or ARRAY
+                // /DecodeParms makes it return `Ok` with the PREDICTOR NEVER APPLIED —
+                // a success carrying garbage, which no `unwrap_or_else` can catch.
+                // Either way §8.6.6.3's palette is nonsense and every colour in the
+                // image is wrong. `stream_data_with_doc` runs our own chain.
+                Some(Object::Stream(s)) => stream_data_with_doc(doc, s),
                 _ => Vec::new(),
             };
             Some(CsKind::Indexed { base: Box::new(base), lookup, base_ncomp: base_n, hival })
@@ -249,6 +277,22 @@ pub(crate) fn cs_kind_ncomp(kind: &CsKind) -> u8 {
         CsKind::DeviceN { names, .. } => names.len() as u8,
         CsKind::Pattern { .. } => 0,
     }
+}
+
+/// Component count for an IMAGE sample in this colour space. Identical to
+/// [`cs_kind_ncomp`] except for Indexed, where one image sample is a single
+/// palette index (§8.6.6.3), not `base_ncomp` colour components.
+///
+/// Deliberately separate from [`cs_kind_ncomp`], which `shading.rs` relies on
+/// returning `base_ncomp` for Indexed. Clamped to 1..=32 so a bogus `/N` or a
+/// 255-name `/DeviceN` cannot turn `w*h*ncomp` into a huge allocation; Pattern
+/// (0 components, illegal for an image per §8.9.5.1) recovers as 1.
+pub(crate) fn cs_kind_image_ncomp(kind: &CsKind) -> u8 {
+    let n = match kind {
+        CsKind::Indexed { .. } => 1,
+        other => cs_kind_ncomp(other),
+    };
+    n.clamp(1, 32)
 }
 
 /// Initial color value when a color space is selected via `cs`/`CS` (PDF 8.6.8):
@@ -529,23 +573,24 @@ pub(crate) fn eval_cs_to_rgb(doc: &Document, kind: &CsKind, comps: &[f64], cs_re
             let t = comps.first().copied().unwrap_or(1.0).clamp(0.0, 1.0);
             if let Some(tf) = tint_fn {
                 let alt_comps = tf.eval(&[t]);
-                if let Some(rgb) = eval_cs_to_rgb(doc, alt, &alt_comps, cs_resources) {
-                    return Some(rgb);
+                // The tint transform must yield one value per component of the
+                // alternate space (§8.6.6.4). A short return means a broken function;
+                // passing it through would silently paint the wrong colour, so fall
+                // back instead. (audit-e owns making well-formed Type 2/3 functions
+                // return the full /Range arity; this is the backstop, not the fix.)
+                if alt_comps.len() >= cs_kind_ncomp(alt).max(1) as usize {
+                    if let Some(rgb) = eval_cs_to_rgb(doc, alt, &alt_comps, cs_resources) {
+                        return Some(rgb);
+                    }
                 }
             }
-            // P0 fix medium #17: No tint transform previously returned gray heuristic making PANTONE spots invisible.
-            // Use Alternate with tint value directly, then fallback with full tint 1.0 blended for visibility.
-            if let Some(rgb) = eval_cs_to_rgb(doc, alt, &[t], cs_resources) {
-                return Some(rgb);
-            }
-            if let Some(rgb_full) = eval_cs_to_rgb(doc, alt, &[1.0], cs_resources) {
-                // Scale full alternate color by tint: blend towards white
-                let a = t;
-                let r = ((rgb_full >> 16) & 0xFF) as f64 * a + 255.0 * (1.0 - a);
-                let g = ((rgb_full >> 8) & 0xFF) as f64 * a + 255.0 * (1.0 - a);
-                let b = (rgb_full & 0xFF) as f64 * a + 255.0 * (1.0 - a);
-                return Some(0xFF00_0000 | ((r as u32) << 16) | ((g as u32) << 8) | (b as u32));
-            }
+            // No usable tint transform. Tint is SUBTRACTIVE per §8.6.6.4: 0 means no
+            // colorant and 1 means maximum, so it must DARKEN. The old code fed `t`
+            // straight into the alternate space, and for a DeviceGray/CalGray alternate
+            // (which is also what a missing /Alternate defaults to) that inverted the
+            // ramp — maximum ink rendered as WHITE, making spot-colour artwork
+            // invisible on a white page. The correctly-polarised fallback below already
+            // existed but was unreachable, because DeviceGray always returned Some.
             Some(gray_to_argb(1.0 - t))
         }
         CsKind::DeviceN { names, alt, tint_fn } => {
@@ -635,9 +680,10 @@ pub(crate) fn colorspace_info(
                     let (base_n, _) = colorspace_info(doc, a.get(1));
                     let lookup = match a.get(3).and_then(|o| deref(doc, o)) {
                         Some(Object::String(s, _)) => s.clone(),
-                        Some(Object::Stream(s)) => {
-                            s.decompressed_content().unwrap_or_else(|_| s.content.clone())
-                        }
+                        // Same reasoning as the `parse_cs_array` Indexed arm above: an
+                        // indirect or array /DecodeParms makes lopdf's decoder return Ok
+                        // with the predictor unapplied, so the palette is silently garbage.
+                        Some(Object::Stream(s)) => stream_data_with_doc(doc, s),
                         _ => Vec::new(),
                     };
                     (1, Some((base_n, lookup)))
@@ -709,6 +755,78 @@ mod tests {
         let half = eval_cs_to_rgb(&doc, &cs, &[0.5], &res).unwrap();
         let r = (half >> 16) & 0xFF;
         assert!(r > 100 && r < 160, "half tint red channel ~128, got {r}");
+    }
+
+    // A Separation with no tint transform must DARKEN as tint rises (§8.6.6.4: 0 is
+    // no colorant, 1 is maximum). Feeding the tint straight into a DeviceGray
+    // alternate inverted it, so maximum ink rendered WHITE and spot-colour artwork
+    // was invisible on a white page.
+    #[test]
+    fn separation_without_tint_darkens_with_ink() {
+        let doc = Document::with_version("1.7");
+        let cs = CsKind::Separation {
+            name: b"Spot".to_vec(),
+            alt: Box::new(CsKind::DeviceGray),
+            tint_fn: None,
+        };
+        let res = HashMap::new();
+        let full = eval_cs_to_rgb(&doc, &cs, &[1.0], &res).unwrap() & 0xFF;
+        let none = eval_cs_to_rgb(&doc, &cs, &[0.0], &res).unwrap() & 0xFF;
+        assert_eq!(full, 0, "maximum ink must be dark, not white");
+        assert_eq!(none, 255, "zero tint leaves the page white");
+    }
+
+    // A tint transform that returns fewer components than the alternate space needs
+    // is broken; it must fall back to the subtractive grey ramp rather than paint a
+    // wrong colour or an inverted one.
+    #[test]
+    fn separation_short_tint_output_falls_back() {
+        let doc = Document::with_version("1.7");
+        let cs = CsKind::Separation {
+            name: b"Spot".to_vec(),
+            // DeviceCMYK needs 4 components; this Type 2 yields only 1.
+            alt: Box::new(CsKind::DeviceCMYK),
+            tint_fn: Some(PdfFunction::Exponential {
+                domain: [0.0, 1.0],
+                c0: vec![0.0],
+                c1: vec![1.0],
+                n: 1.0,
+            }),
+        };
+        let res = HashMap::new();
+        let full = eval_cs_to_rgb(&doc, &cs, &[1.0], &res).unwrap() & 0xFF;
+        assert_eq!(full, 0, "short tint output must still darken");
+    }
+
+    // §8.6.5.5: ICCBased /N is required, but when it is missing the alternate space's
+    // component count is a far better guess than defaulting to 1 (gray) — a wrong
+    // count shifts every sample in an image.
+    #[test]
+    fn iccbased_without_n_infers_from_alternate() {
+        use lopdf::{dictionary, Object, Stream};
+        let mut doc = Document::with_version("1.7");
+        let icc_id = doc.add_object(Stream::new(
+            dictionary! { "Alternate" => Object::Name(b"DeviceRGB".to_vec()) },
+            vec![0u8; 4],
+        ));
+        let arr = vec![Object::Name(b"ICCBased".to_vec()), Object::Reference(icc_id)];
+        let empty = HashMap::new();
+        let kind = parse_cs_array(&doc, &arr, &empty).expect("iccbased");
+        assert_eq!(cs_kind_ncomp(&kind), 3, "must infer 3 from /Alternate, not default to 1");
+    }
+
+    // An Indexed image sample is ONE palette index (§8.6.6.3), not base_ncomp colour
+    // components. cs_kind_ncomp deliberately still reports base_ncomp for shading.rs.
+    #[test]
+    fn indexed_image_ncomp_is_one() {
+        let cs = CsKind::Indexed {
+            base: Box::new(CsKind::DeviceRGB),
+            lookup: vec![0, 0, 0, 255, 255, 255],
+            base_ncomp: 3,
+            hival: 1,
+        };
+        assert_eq!(cs_kind_image_ncomp(&cs), 1, "one index per image sample");
+        assert_eq!(cs_kind_ncomp(&cs), 3, "shading.rs still sees the base arity");
     }
 
     // A named ICCBased colorspace stored as an INDIRECT array in the resource id
@@ -804,5 +922,60 @@ mod tests {
             }
             _ => panic!("expected Pattern with base colorspace"),
         }
+    }
+
+    // §8.6.6.3: an Indexed palette may be a STREAM, and the palette must actually be
+    // decoded. lopdf 0.36's `decompressed_content` implements only Flate/LZW/ASCII85, and
+    // the old `unwrap_or_else(|_| s.content.clone())` fallback handed back the still-
+    // ENCODED bytes as the palette — so every colour in the image was wrong.
+    #[test]
+    fn indexed_palette_stream_with_an_unsupported_filter_still_decodes() {
+        let mut doc = Document::with_version("1.7");
+        // Palette: black, red, green, blue as ASCIIHex.
+        let lookup = doc.add_object(Stream::new(
+            dictionary! { "Filter" => "ASCIIHexDecode" },
+            b"000000FF0000 00FF00 0000FF>".to_vec(),
+        ));
+        let arr = vec![
+            Object::Name(b"Indexed".to_vec()),
+            Object::Name(b"DeviceRGB".to_vec()),
+            Object::Integer(3),
+            Object::Reference(lookup),
+        ];
+        let empty = HashMap::new();
+        let kind = parse_cs_array(&doc, &arr, &empty).expect("indexed cs");
+        match kind {
+            CsKind::Indexed { lookup, base_ncomp, .. } => {
+                assert_eq!(base_ncomp, 3);
+                assert_eq!(
+                    lookup,
+                    vec![0, 0, 0, 0xFF, 0, 0, 0, 0xFF, 0, 0, 0, 0xFF],
+                    "the palette must be DECODED, not the raw ASCIIHex bytes"
+                );
+            }
+            _ => panic!("expected Indexed"),
+        }
+    }
+
+    // The same stream through `colorspace_info`, which has its own copy of the palette
+    // read and had the same defect.
+    #[test]
+    fn colorspace_info_indexed_palette_stream_also_decodes() {
+        let mut doc = Document::with_version("1.7");
+        let lookup = doc.add_object(Stream::new(
+            dictionary! { "Filter" => "ASCIIHexDecode" },
+            b"0000FF>".to_vec(),
+        ));
+        let cs = Object::Array(vec![
+            Object::Name(b"Indexed".to_vec()),
+            Object::Name(b"DeviceRGB".to_vec()),
+            Object::Integer(0),
+            Object::Reference(lookup),
+        ]);
+        let (ncomp, indexed) = colorspace_info(&doc, Some(&cs));
+        assert_eq!(ncomp, 1, "an Indexed image sample is one palette index");
+        let (base_n, palette) = indexed.expect("indexed info");
+        assert_eq!(base_n, 3);
+        assert_eq!(palette, vec![0x00, 0x00, 0xFF], "palette must be decoded");
     }
 }

@@ -14,7 +14,7 @@ pub(crate) fn create_empty_document() -> i64 {
     });
     doc.trailer.set("Root", catalog_id);
     let handle = next_handle();
-    registry().lock().unwrap().insert(handle, doc);
+    registry().lock().unwrap_or_else(|e| e.into_inner()).insert(handle, doc);
     handle
 }
 
@@ -91,7 +91,7 @@ pub(crate) fn append_pdf(handle: i64, bytes: &[u8]) -> i32 {
     if src.trailer.get(b"Encrypt").is_ok() {
         return 0;
     }
-    let mut reg = registry().lock().unwrap();
+    let mut reg = registry().lock().unwrap_or_else(|e| e.into_inner());
     let dest = match reg.get_mut(&handle) {
         Some(d) => d,
         None => return 0,
@@ -145,7 +145,7 @@ pub(crate) fn append_image_page(handle: i64, jpeg: &[u8], img_w: u32, img_h: u32
     if img_w == 0 || img_h == 0 {
         return 0;
     }
-    let mut reg = registry().lock().unwrap();
+    let mut reg = registry().lock().unwrap_or_else(|e| e.into_inner());
     let dest = match reg.get_mut(&handle) {
         Some(d) => d,
         None => return 0,
@@ -186,7 +186,7 @@ pub(crate) fn append_image_page(handle: i64, jpeg: &[u8], img_w: u32, img_h: u32
 
 /// Move the page at `from` to index `to` in the page order. Returns success.
 pub(crate) fn move_page(handle: i64, from: usize, to: usize) -> bool {
-    let mut reg = registry().lock().unwrap();
+    let mut reg = registry().lock().unwrap_or_else(|e| e.into_inner());
     let dest = match reg.get_mut(&handle) {
         Some(d) => d,
         None => return false,
@@ -209,7 +209,7 @@ pub(crate) fn move_page(handle: i64, from: usize, to: usize) -> bool {
 
 /// Delete the page at `index` from the page order (keeps orphan objects).
 pub(crate) fn remove_page(handle: i64, index: usize) -> bool {
-    let mut reg = registry().lock().unwrap();
+    let mut reg = registry().lock().unwrap_or_else(|e| e.into_inner());
     let dest = match reg.get_mut(&handle) {
         Some(d) => d,
         None => return false,
@@ -240,7 +240,7 @@ pub(crate) fn remove_page(handle: i64, index: usize) -> bool {
 
 /// Rotate the page at `index` by `delta` degrees (adjusts `/Rotate`).
 pub(crate) fn rotate_page(handle: i64, index: i32, delta: i32) -> bool {
-    let mut reg = registry().lock().unwrap();
+    let mut reg = registry().lock().unwrap_or_else(|e| e.into_inner());
     let doc = match reg.get_mut(&handle) {
         Some(d) => d,
         None => return false,
@@ -261,7 +261,7 @@ pub(crate) fn rotate_page(handle: i64, index: i32, delta: i32) -> bool {
 
 /// Extract the page at `index` into a standalone one-page PDF, returned as bytes.
 pub(crate) fn extract_page(handle: i64, index: i32) -> Option<Vec<u8>> {
-    let reg = registry().lock().unwrap();
+    let reg = registry().lock().unwrap_or_else(|e| e.into_inner());
     let src = reg.get(&handle)?;
     let src_page_id = nth_page_id(src, index)?;
 
@@ -395,6 +395,23 @@ pub(crate) fn add_page_xobject(doc: &mut Document, page_id: ObjectId, name: &str
     }
 }
 
+/// Prepend `content_id` (a content stream) before page `page_id`'s `/Contents`.
+pub(crate) fn prepend_content(doc: &mut Document, page_id: ObjectId, content_id: ObjectId) {
+    let current = doc.get_dictionary(page_id).ok().and_then(|d| d.get(b"Contents").ok()).cloned();
+    let new_contents = match current {
+        Some(Object::Reference(r)) => Object::Array(vec![Object::Reference(content_id), Object::Reference(r)]),
+        Some(Object::Array(a)) => {
+            let mut v = vec![Object::Reference(content_id)];
+            v.extend(a);
+            Object::Array(v)
+        }
+        _ => Object::Array(vec![Object::Reference(content_id)]),
+    };
+    if let Ok(p) = doc.get_dictionary_mut(page_id) {
+        p.set("Contents", new_contents);
+    }
+}
+
 /// Append `content_id` (a content stream) to page `page_id`'s `/Contents`.
 pub(crate) fn append_content(doc: &mut Document, page_id: ObjectId, content_id: ObjectId) {
     let current = doc.get_dictionary(page_id).ok().and_then(|d| d.get(b"Contents").ok()).cloned();
@@ -414,7 +431,7 @@ pub(crate) fn append_content(doc: &mut Document, page_id: ObjectId, content_id: 
 /// Flatten every annotation's appearance into its page content stream, then drop
 /// the annotations. Makes overlays (incl. redaction boxes) permanent.
 pub(crate) fn flatten_document(handle: i64) -> bool {
-    let mut reg = registry().lock().unwrap();
+    let mut reg = registry().lock().unwrap_or_else(|e| e.into_inner());
     let doc = match reg.get_mut(&handle) {
         Some(d) => d,
         None => return false,
@@ -440,18 +457,46 @@ pub(crate) fn flatten_document(handle: i64) -> bool {
                 Ok(d) => d,
                 Err(_) => continue,
             };
-            let flags = dict.get(b"F").ok().and_then(num).unwrap_or(0.0) as i64;
-            if flags & 0b10 != 0 {
+            // Must match the renderer exactly: baking a NoView (§12.5.3),
+            // /OC-disabled (§8.11.2) or /Popup (§12.5.6.14) annotation into page
+            // content makes it permanently visible, and /Annots is dropped below
+            // so it cannot be undone.
+            if !annot_visible_on_screen(doc, dict) {
                 continue;
             }
             let rect = match dict.get(b"Rect").ok().and_then(|o| read_rect(doc, o)) {
                 Some(r) => r,
                 None => continue,
             };
-            let ap_id = match dict.get(b"AP").ok().and_then(|o| deref(doc, o)).and_then(|o| o.as_dict().ok())
+            // §12.5.5: /AP /N may be a SUBDICTIONARY of appearance states keyed by
+            // /AS — how every checkbox and radio button stores its on/off art.
+            // Resolving only a direct reference skipped those annotations, and
+            // /Annots is removed below, so flattening a filled form silently
+            // erased every check mark. Mirror the renderer's selection policy so a
+            // flattened page matches what was on screen.
+            let ap_n = match dict.get(b"AP").ok().and_then(|o| deref(doc, o)).and_then(|o| o.as_dict().ok())
                 .and_then(|ap| ap.get(b"N").ok())
-                .and_then(|n| n.as_reference().ok())
             {
+                Some(n) => n,
+                None => continue,
+            };
+            let picked = match deref(doc, ap_n) {
+                Some(Object::Dictionary(states)) => {
+                    match dict.get(b"AS").ok().and_then(|o| o.as_name().ok()) {
+                        Some(a) => states.get(a).ok().or_else(|| states.get(b"Off").ok()),
+                        None => states.get(b"Off").ok().or_else(|| {
+                            if states.len() == 1 {
+                                states.iter().next().map(|(_, v)| v)
+                            } else {
+                                None
+                            }
+                        }),
+                    }
+                    .and_then(|o| o.as_reference().ok())
+                }
+                _ => ap_n.as_reference().ok(),
+            };
+            let ap_id = match picked {
                 Some(id) => id,
                 None => continue,
             };
@@ -477,6 +522,14 @@ pub(crate) fn flatten_document(handle: i64) -> bool {
             ));
         }
         let cid = doc.add_object(Stream::new(dictionary! {}, content.into_bytes()));
+        // §7.8.2: the streams of a /Contents array are concatenated into a single
+        // stream, so state the original content changed and never restored (CTM,
+        // colour, clip) would leak into the overlay. Bracket the original in q/Q
+        // so the overlay starts from the default graphics state.
+        let qid = doc.add_object(Stream::new(dictionary! {}, b"q\n".to_vec()));
+        let unqid = doc.add_object(Stream::new(dictionary! {}, b"\nQ\n".to_vec()));
+        prepend_content(doc, page_id, qid);
+        append_content(doc, page_id, unqid);
         append_content(doc, page_id, cid);
         for (name, ap_id, _) in &placements {
             add_page_xobject(doc, page_id, name, *ap_id);
@@ -592,11 +645,9 @@ pub(crate) fn redact_operations(
     out
 }
 
-/// Permanently remove content under redaction annotations, cover with black, and
-/// delete the annotations. Returns whether any redaction was applied.
 /// Whether the document has any redaction annotations pending.
 pub(crate) fn has_redactions(handle: i64) -> bool {
-    let reg = registry().lock().unwrap();
+    let reg = registry().lock().unwrap_or_else(|e| e.into_inner());
     let doc = match reg.get(&handle) {
         Some(d) => d,
         None => return false,
@@ -620,14 +671,34 @@ pub(crate) fn has_redactions(handle: i64) -> bool {
     false
 }
 
+/// Remove content under redaction annotations and cover the region with black,
+/// then delete the annotations. Returns whether any redaction was applied.
+///
+/// SECURITY LIMITATION — this is NOT a true redaction. `redact_operations`
+/// removes only text-showing operators whose ORIGIN falls inside a rect, using an
+/// approximate advance, so it does not remove images, inline images, form
+/// XObjects, shadings or vector artwork; nor text that starts outside the rect
+/// and runs into it; nor the pre-redaction content stream object, which
+/// `save_document` leaves in the file (only the separate `save_compressed` path
+/// prunes it). For all of those the black rectangle only COVERS the content,
+/// which remains extractable from the saved file. Anything relying on this for
+/// confidentiality needs content-level removal per §12.5.6.24 first.
+///
+/// Refuses the WHOLE operation, without touching the document, if any page's content
+/// stream can only be recovered by the lenient tokenizer — see the comment at the
+/// `page_operations` call below.
 pub(crate) fn apply_redactions(handle: i64) -> bool {
-    let mut reg = registry().lock().unwrap();
+    let mut reg = registry().lock().unwrap_or_else(|e| e.into_inner());
     let doc = match reg.get_mut(&handle) {
         Some(d) => d,
         None => return false,
     };
     let page_ids: Vec<ObjectId> = doc.get_pages().values().copied().collect();
-    let mut applied = false;
+    // Phase 1 collects the work for every page and may refuse outright; phase 2 is the
+    // only part that mutates. Nothing is written until every page has been read, so a
+    // refusal can never leave the document half-redacted.
+    type PageWork = (ObjectId, Vec<[f64; 4]>, Vec<ObjectId>, Vec<lopdf::content::Operation>);
+    let mut work: Vec<PageWork> = Vec::new();
     for page_id in page_ids {
         let annot_ids: Vec<ObjectId> = match doc
             .get_dictionary(page_id)
@@ -653,12 +724,42 @@ pub(crate) fn apply_redactions(handle: i64) -> bool {
         if rects.is_empty() {
             continue;
         }
-        let content = match doc.get_and_decode_page_content(page_id) {
-            Ok(c) => c,
-            Err(_) => continue,
-        };
-        let new_ops = redact_operations(content.operations, &rects);
-        let mut bytes = lopdf::content::Content { operations: new_ops }.encode().unwrap_or_default();
+        // §8.9.7: lopdf 0.36 parses inline images inside nom's `cut(...)`, so one inline
+        // image fails the entire stream. Every other caller falls back to the lenient
+        // tokenizer and draws whatever it recovered, but redaction must not: an operator
+        // the recovery skipped is a text-show operator we never had the chance to drop,
+        // and re-encoding the recovered list would also discard whatever it could not
+        // tokenize. Either way we would paint the black box, delete the annotation and
+        // hand back a file the user believes is redacted with the text still in it. That
+        // is worse than not redacting, so fail loudly: the annotations stay, so
+        // `has_redactions` stays true and the UI keeps offering the action, and no black
+        // box appears to claim otherwise.
+        let (ops, recovered) = crate::content::page_operations(doc, page_id);
+        if recovered {
+            if cfg!(debug_assertions) {
+                eprintln!(
+                    "[pdf_render/docedit] page {page_id:?}: strict content parse failed; \
+                     refusing to redact a stream that could only be recovered leniently"
+                );
+            }
+            return false;
+        }
+        work.push((page_id, rects, redact_ids, ops));
+    }
+
+    let mut applied = false;
+    for (page_id, rects, redact_ids, ops) in work {
+        let new_ops = redact_operations(ops, &rects);
+        let encoded = lopdf::content::Content { operations: new_ops }.encode().unwrap_or_default();
+        // §7.8.2: the page content is one concatenated stream, and the redacted
+        // operator list can end with an unbalanced `q ... cm` or an active clip.
+        // Bracketing it in q/Q means the cover rectangles below are painted from
+        // the default graphics state — otherwise a leftover CTM could translate
+        // them off the region they must hide, or a leftover clip discard them
+        // entirely. Same fix flatten_document applies for the same reason.
+        let mut bytes = b"q\n".to_vec();
+        bytes.extend_from_slice(&encoded);
+        bytes.extend_from_slice(b"\nQ\n");
         let mut cover = String::new();
         for r in &rects {
             cover.push_str(&format!(
@@ -681,10 +782,126 @@ pub(crate) fn apply_redactions(handle: i64) -> bool {
 }
 
 pub(crate) fn save_document(handle: i64) -> Option<Vec<u8>> {
-    let mut reg = registry().lock().unwrap();
+    let mut reg = registry().lock().unwrap_or_else(|e| e.into_inner());
     let doc = reg.get_mut(&handle)?;
     let mut buf = Vec::new();
     doc.save_to(&mut buf).ok()?;
     Some(buf)
+}
+
+#[cfg(test)]
+mod redaction_tests {
+    use super::*;
+
+    /// One-page document whose `/Contents` is `content`, carrying a single `/PdfRedact`
+    /// annotation over `rect`. Returns its registry handle plus the page and annot ids.
+    fn redactable_doc(content: &[u8], rect: [i64; 4]) -> (i64, ObjectId, ObjectId) {
+        let mut doc = Document::with_version("1.5");
+        let content_id = doc.add_object(Stream::new(dictionary! {}, content.to_vec()));
+        let pages_id = doc.new_object_id();
+        let annot_id = doc.add_object(dictionary! {
+            "Type" => "Annot",
+            "Subtype" => "Square",
+            "Rect" => vec![rect[0].into(), rect[1].into(), rect[2].into(), rect[3].into()],
+            "PdfRedact" => true,
+        });
+        let page_id = doc.add_object(dictionary! {
+            "Type" => "Page",
+            "Parent" => pages_id,
+            "Contents" => content_id,
+            "MediaBox" => vec![0.into(), 0.into(), 612.into(), 792.into()],
+            "Annots" => vec![annot_id.into()],
+        });
+        doc.objects.insert(
+            pages_id,
+            Object::Dictionary(dictionary! {
+                "Type" => "Pages",
+                "Kids" => vec![page_id.into()],
+                "Count" => 1,
+            }),
+        );
+        let catalog_id = doc.add_object(dictionary! {
+            "Type" => "Catalog",
+            "Pages" => pages_id,
+        });
+        doc.trailer.set("Root", catalog_id);
+        let handle = next_handle();
+        registry().lock().unwrap_or_else(|e| e.into_inner()).insert(handle, doc);
+        (handle, page_id, annot_id)
+    }
+
+    /// Decoded bytes of the page's current `/Contents`, which `apply_redactions` writes
+    /// uncompressed.
+    fn page_bytes(handle: i64, page_id: ObjectId) -> Vec<u8> {
+        let reg = registry().lock().unwrap_or_else(|e| e.into_inner());
+        let doc = reg.get(&handle).expect("handle is registered");
+        let mut out = Vec::new();
+        for id in doc.get_page_contents(page_id) {
+            if let Ok(Object::Stream(s)) = doc.get_object(id) {
+                out.extend_from_slice(&s.content);
+            }
+        }
+        out
+    }
+
+    fn annot_exists(handle: i64, annot_id: ObjectId) -> bool {
+        let reg = registry().lock().unwrap_or_else(|e| e.into_inner());
+        let doc = reg.get(&handle).expect("handle is registered");
+        doc.get_dictionary(annot_id).is_ok()
+    }
+
+    /// An inline image makes lopdf reject the whole stream, and the lenient tokenizer
+    /// cannot promise it saw every text-show operator. Redacting anyway would cover the
+    /// text with black, drop the annotation and still ship the text inside the file, so
+    /// the operation must refuse and leave the document exactly as it was.
+    #[test]
+    fn a_stream_only_the_lenient_tokenizer_can_read_is_not_redacted() {
+        // No /BPC, so lopdf's inline-image parser errors inside `cut(...)`.
+        let mut content = b"BT /F1 12 Tf 100 700 Td (secret) Tj ET\n".to_vec();
+        content.extend_from_slice(b"BI /W 2 /H 2 /CS /G ID ");
+        content.extend_from_slice(&[0x00, 0x40, 0x80, 0xFF]);
+        content.extend_from_slice(b" EI\n");
+        let (handle, page_id, annot_id) = redactable_doc(&content, [90, 690, 200, 720]);
+        {
+            let reg = registry().lock().unwrap_or_else(|e| e.into_inner());
+            let doc = reg.get(&handle).expect("handle is registered");
+            assert!(
+                doc.get_and_decode_page_content(page_id).is_err(),
+                "precondition: lopdf is expected to reject this content stream"
+            );
+        }
+
+        assert!(!apply_redactions(handle), "redaction must report failure, not success");
+        assert!(
+            annot_exists(handle, annot_id),
+            "the annotation must survive so has_redactions stays true"
+        );
+        let after = page_bytes(handle, page_id);
+        assert_eq!(after, content, "the content stream must be left untouched");
+        close_document(handle);
+    }
+
+    /// The refusal above must not cost the normal path: a stream lopdf parses is still
+    /// redacted, so the fix cannot regress any document that redacts today.
+    #[test]
+    fn a_stream_lopdf_parses_is_still_redacted() {
+        let content = b"BT /F1 12 Tf 100 700 Td (secret) Tj ET\n";
+        let (handle, page_id, annot_id) = redactable_doc(content, [90, 690, 200, 720]);
+
+        assert!(apply_redactions(handle), "a healthy page must still redact");
+        assert!(!annot_exists(handle, annot_id), "the applied annotation must be removed");
+        let after = page_bytes(handle, page_id);
+        assert!(
+            !after.windows(6).any(|w| w == b"secret"),
+            "the text under the rect must be gone: {}",
+            String::from_utf8_lossy(&after)
+        );
+        assert!(
+            after.windows(5).any(|w| w == b" re f"),
+            "the region must be covered: {}",
+            String::from_utf8_lossy(&after)
+        );
+        close_document(handle);
+    }
 }
 

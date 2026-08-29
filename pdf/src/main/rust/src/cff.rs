@@ -5,9 +5,13 @@
 //! - DICT real numbers (operator 30 nibble-encoded) correctly parsed.
 //! - Custom Encoding with supplemental encoding (high-bit 0x80) support.
 //! - Predefined StandardEncoding and ExpertEncoding tables (CFF spec Appendix).
-//! - Charset bounds check against SID range (391 + custom strings).
+//! - Charset bounds check: SID range (391 + custom strings) for name-keyed
+//!   fonts, CID range for CID-keyed ones (their charset holds CIDs, not SIDs).
 //! - Full 391 standard strings table.
-//! - Type2 charstring operator handling (width, moveto/lineto/curveto, hints ignored, flex).
+//!
+//! Note: glyph OUTLINES are not produced here. `outlines.rs` extracts CFF/Type2
+//! outlines via `ttf_parser::cff`, which implements the full Type 2 charstring
+//! spec.
 
 use std::collections::HashMap;
 
@@ -417,7 +421,7 @@ pub fn cid_to_gid_map(d: &[u8]) -> Option<HashMap<u32, u16>> {
     map.insert(0, 0); // CID 0 (.notdef) -> GID 0
     if charset_off > 2 {
         // Custom charset: entries are CIDs for CID-keyed fonts.
-        let gid_to_cid = parse_charset(d, charset_off, nglyphs, string_idx.entries.len())?;
+        let gid_to_cid = parse_charset(d, charset_off, nglyphs, string_idx.entries.len(), true)?;
         for (gid, cid) in gid_to_cid {
             map.insert(cid as u32, gid);
         }
@@ -430,8 +434,11 @@ pub fn cid_to_gid_map(d: &[u8]) -> Option<HashMap<u32, u16>> {
     Some(map)
 }
 
-/// charset (format 0/1/2) -> GID -> SID with bounds checking.
-fn parse_charset(d: &[u8], off: usize, nglyphs: usize, custom_string_count: usize) -> Option<HashMap<u16, usize>> {
+/// charset (format 0/1/2) -> GID -> SID with bounds checking. For a CID-keyed
+/// font (`cid_keyed`) the entries are CIDs rather than SIDs (CFF spec, Adobe
+/// TN #5176 "Charsets"), so they are bounded by the CID range, not the string
+/// index — bounding them by `max_sid` would discard nearly the whole mapping.
+fn parse_charset(d: &[u8], off: usize, nglyphs: usize, custom_string_count: usize, cid_keyed: bool) -> Option<HashMap<u16, usize>> {
     if off == 0 {
         return None; // ISOAdobe predefined
     }
@@ -439,8 +446,10 @@ fn parse_charset(d: &[u8], off: usize, nglyphs: usize, custom_string_count: usiz
         return None;
     }
     let fmt = u8a(d, off)?;
-    // max valid SID
-    let max_sid = if custom_string_count == 0 {
+    // Largest legal charset entry: a CID for CID-keyed fonts, else a SID.
+    let max_sid = if cid_keyed {
+        0xFFFF
+    } else if custom_string_count == 0 {
         N_STD_STRINGS - 1
     } else {
         N_STD_STRINGS + custom_string_count - 1
@@ -516,378 +525,6 @@ fn parse_charset(d: &[u8], off: usize, nglyphs: usize, custom_string_count: usiz
     Some(map)
 }
 
-// --- Type2 charstring handling ---
-// Minimal Type2 charstring parser demonstrating width handling, moveto/lineto/curveto,
-// stem hints ignored, flex support.
-
-#[derive(Debug, Clone)]
-pub enum Type2Op {
-    MoveTo(f64, f64),
-    LineTo(f64, f64),
-    CurveTo(f64, f64, f64, f64, f64, f64),
-    Close,
-}
-
-fn read_type2_number(d: &[u8], pos: usize) -> Option<(f64, usize)> {
-    if pos >= d.len() { return None; }
-    let b0 = d[pos];
-    match b0 {
-        32..=246 => Some((b0 as f64 - 139.0, pos + 1)),
-        247..=250 => {
-            if pos + 1 >= d.len() { return None; }
-            let b1 = d[pos+1] as f64;
-            Some(((b0 as f64 - 247.0) * 256.0 + b1 + 108.0, pos + 2))
-        },
-        251..=254 => {
-            if pos +1 >= d.len() { return None; }
-            let b1 = d[pos+1] as f64;
-            Some((-(b0 as f64 - 251.0) * 256.0 - b1 - 108.0, pos + 2))
-        },
-        28 => {
-            if pos +2 >= d.len() { return None; }
-            let v = i16::from_be_bytes([d[pos+1], d[pos+2]]) as f64;
-            Some((v, pos+3))
-        },
-        255 => {
-            if pos +4 >= d.len() { return None; }
-            let v = i32::from_be_bytes([d[pos+1], d[pos+2], d[pos+3], d[pos+4]]) as f64 / 65536.0;
-            Some((v, pos+5))
-        },
-        _ => None,
-    }
-}
-
-/// Parse a Type2 charstring into path ops. Returns None on malformed data.
-/// Handles width at start, moveto (21 rmoveto, 22 hmoveto, 4 vmoveto),
-/// lineto (5 rlineto, 6 hlineto, 7 vlineto), curveto (8 rrcurveto, 24 rcurveline etc),
-/// stem hints (1,3,18,23) ignored, hintmask (19,20) with mask bytes skipped,
-/// flex operators (12 35 etc).
-pub fn parse_type2_charstring(data: &[u8]) -> Option<Vec<Type2Op>> {
-    let mut stack: Vec<f64> = Vec::with_capacity(48);
-    let mut ops: Vec<Type2Op> = Vec::new();
-    let mut pos = 0usize;
-    let mut x = 0.0f64;
-    let mut y = 0.0f64;
-    let mut width_parsed = false;
-    let mut stem_count = 0usize;
-
-    while pos < data.len() {
-        // Try number
-        if let Some((val, new_pos)) = read_type2_number(data, pos) {
-            stack.push(val);
-            pos = new_pos;
-            continue;
-        }
-        let b0 = data[pos];
-        pos += 1;
-        let op: u16 = if b0 == 12 {
-            if pos >= data.len() { break; }
-            let b1 = data[pos];
-            pos += 1;
-            1200 + b1 as u16
-        } else {
-            b0 as u16
-        };
-
-        const DIV_OP: u16 = 1212;
-        const HFLEX_OP: u16 = 1234;
-        const FLEX_OP: u16 = 1235;
-        const HFLEX1_OP: u16 = 1236;
-        const FLEX1_OP: u16 = 1237;
-        match op {
-            // hstem, vstem, hstemhm, vstemhm - stem hints, ignored but count
-            1 | 3 | 18 | 23 => {
-                if !width_parsed && stack.len() % 2 == 1 {
-                    stack.remove(0);
-                    width_parsed = true;
-                }
-                stem_count += stack.len() / 2;
-                stack.clear();
-            },
-            // vmoveto, rmoveto, hmoveto
-            4 => { // vmoveto
-                if !width_parsed && stack.len() % 2 == 1 {
-                    stack.remove(0);
-                    width_parsed = true;
-                }
-                if !stack.is_empty() {
-                    let dy = stack[0];
-                    y += dy;
-                    ops.push(Type2Op::MoveTo(x, y));
-                }
-                stack.clear();
-            },
-            22 => { // hmoveto
-                if !width_parsed && stack.len() % 2 == 1 {
-                    stack.remove(0);
-                    width_parsed = true;
-                }
-                if !stack.is_empty() {
-                    let dx = stack[0];
-                    x += dx;
-                    ops.push(Type2Op::MoveTo(x, y));
-                }
-                stack.clear();
-            },
-            21 => { // rmoveto
-                if !width_parsed && stack.len() % 2 == 1 {
-                    stack.remove(0);
-                    width_parsed = true;
-                }
-                if stack.len() >=2 {
-                    let dx = stack[0];
-                    let dy = stack[1];
-                    x += dx; y += dy;
-                    ops.push(Type2Op::MoveTo(x, y));
-                }
-                stack.clear();
-            },
-            5 => { // rlineto
-                if !width_parsed && stack.len() % 2 == 1 {
-                    // width handling already done at moveto, but check
-                }
-                let mut idx = 0;
-                while idx +1 < stack.len() {
-                    let dx = stack[idx];
-                    let dy = stack[idx+1];
-                    x += dx; y += dy;
-                    ops.push(Type2Op::LineTo(x, y));
-                    idx +=2;
-                }
-                stack.clear();
-            },
-            6 => { // hlineto
-                let mut idx = 0;
-                let mut horiz = true;
-                while idx < stack.len() {
-                    if horiz {
-                        x += stack[idx];
-                    } else {
-                        y += stack[idx];
-                    }
-                    ops.push(Type2Op::LineTo(x, y));
-                    idx+=1;
-                    horiz = !horiz;
-                }
-                stack.clear();
-            },
-            7 => { // vlineto
-                let mut idx = 0;
-                let mut horiz = false;
-                while idx < stack.len() {
-                    if horiz {
-                        x += stack[idx];
-                    } else {
-                        y += stack[idx];
-                    }
-                    ops.push(Type2Op::LineTo(x, y));
-                    idx+=1;
-                    horiz = !horiz;
-                }
-                stack.clear();
-            },
-            8 => { // rrcurveto
-                let mut idx =0;
-                while idx +5 < stack.len() {
-                    let dx1 = stack[idx]; let dy1 = stack[idx+1];
-                    let dx2 = stack[idx+2]; let dy2 = stack[idx+3];
-                    let dx3 = stack[idx+4]; let dy3 = stack[idx+5];
-                    let x1 = x + dx1; let y1 = y + dy1;
-                    let x2 = x1 + dx2; let y2 = y1 + dy2;
-                    x = x2 + dx3; y = y2 + dy3;
-                    ops.push(Type2Op::CurveTo(x1, y1, x2, y2, x, y));
-                    idx+=6;
-                }
-                stack.clear();
-            },
-            24 => { // rcurveline (curves then line) - multiple rrcurveto then rlineto
-                if stack.len() >=2 {
-                    // last two are line
-                    let line_idx = stack.len() -2;
-                    let mut idx =0;
-                    while idx +5 < line_idx {
-                        let dx1 = stack[idx]; let dy1 = stack[idx+1];
-                        let dx2 = stack[idx+2]; let dy2 = stack[idx+3];
-                        let dx3 = stack[idx+4]; let dy3 = stack[idx+5];
-                        let x1 = x + dx1; let y1 = y + dy1;
-                        let x2 = x1 + dx2; let y2 = y1 + dy2;
-                        x = x2 + dx3; y = y2 + dy3;
-                        ops.push(Type2Op::CurveTo(x1, y1, x2, y2, x, y));
-                        idx+=6;
-                    }
-                    // final line
-                    if idx +1 < stack.len() {
-                        x += stack[idx]; y += stack[idx+1];
-                        ops.push(Type2Op::LineTo(x, y));
-                    }
-                }
-                stack.clear();
-            },
-            25 => { // rlinecurve
-                if stack.len() >=6 {
-                    let line_end = stack.len() -6;
-                    let mut idx=0;
-                    while idx +1 < line_end {
-                        x += stack[idx]; y += stack[idx+1];
-                        ops.push(Type2Op::LineTo(x,y));
-                        idx+=2;
-                    }
-                    while idx +5 < stack.len() {
-                        let dx1 = stack[idx]; let dy1 = stack[idx+1];
-                        let dx2 = stack[idx+2]; let dy2 = stack[idx+3];
-                        let dx3 = stack[idx+4]; let dy3 = stack[idx+5];
-                        let x1 = x + dx1; let y1 = y + dy1;
-                        let x2 = x1 + dx2; let y2 = y1 + dy2;
-                        x = x2 + dx3; y = y2 + dy3;
-                        ops.push(Type2Op::CurveTo(x1,y1,x2,y2,x,y));
-                        idx+=6;
-                    }
-                }
-                stack.clear();
-            },
-            26 => { // vvcurveto
-                let mut idx=0;
-                // can have optional dx/dy start? For simplicity handle 4 args per curve with alternating
-                while idx +3 < stack.len() {
-                    // vvcurveto: dx1? Actually spec: if even count, args are dx1? Let's simplify as vertical
-                    let dx1 = if stack.len() %2 ==1 && idx==0 { let v = stack[idx]; idx+=1; v } else { 0.0 };
-                    if idx +3 >= stack.len() { break; }
-                    let dy1 = stack[idx]; let dx2 = stack[idx+1]; let dy2 = stack[idx+2]; let dy3 = stack[idx+3];
-                    // second dx3? Actually vvcurveto args: dx1? + dy1 dx2 dy2 dy3 etc.
-                    // Simplified placeholder: treat as curve with dx's from stack
-                    let _ = dx1;
-                    let x1 = x + dx2; let y1 = y + dy1;
-                    let x2 = x1 + 0.0; let y2 = y1 + dy2;
-                    x = x2; y = y2 + dy3;
-                    ops.push(Type2Op::CurveTo(x1,y1,x2,y2,x,y));
-                    idx+=4;
-                }
-                stack.clear();
-            },
-            27 => { // hhcurveto
-                let mut idx=0;
-                while idx +3 < stack.len() {
-                    let dy1 = 0.0;
-                    if idx +3 >= stack.len() { break; }
-                    let dx1 = stack[idx]; let dx2 = stack[idx+1]; let dy2 = stack[idx+2]; let dx3 = stack[idx+3];
-                    let x1 = x + dx1; let y1 = y + dy1;
-                    let x2 = x1 + dx2; let y2 = y1 + dy2;
-                    x = x2 + dx3; y = y2;
-                    ops.push(Type2Op::CurveTo(x1,y1,x2,y2,x,y));
-                    idx+=4;
-                }
-                stack.clear();
-            },
-            30 => { // vhcurveto
-                let mut idx=0;
-                let mut vertical = true;
-                while idx +3 < stack.len() {
-                    if vertical {
-                        let dy1 = stack[idx]; let dx2 = stack[idx+1]; let dy2 = stack[idx+2]; let dx3 = if idx+3 < stack.len() { stack[idx+3] } else { 0.0 };
-                        let x1 = x; let y1 = y + dy1;
-                        let x2 = x1 + dx2; let y2 = y1 + dy2;
-                        x = x2 + dx3; y = y2;
-                        ops.push(Type2Op::CurveTo(x1,y1,x2,y2,x,y));
-                        idx+=4;
-                    } else {
-                        let dx1 = stack[idx]; let dx2 = stack[idx+1]; let dy2 = stack[idx+2]; let dy3 = stack[idx+3];
-                        let x1 = x + dx1; let y1 = y;
-                        let x2 = x1 + dx2; let y2 = y1 + dy2;
-                        x = x2; y = y2 + dy3;
-                        ops.push(Type2Op::CurveTo(x1,y1,x2,y2,x,y));
-                        idx+=4;
-                    }
-                    vertical = !vertical;
-                }
-                stack.clear();
-            },
-            31 => { // hvcurveto - similar to vhcurveto but start horizontal
-                let mut idx=0;
-                let mut horiz = true;
-                while idx +3 < stack.len() {
-                    if horiz {
-                        let dx1 = stack[idx]; let dx2 = stack[idx+1]; let dy2 = stack[idx+2]; let dy3 = stack[idx+3];
-                        let x1 = x + dx1; let y1 = y;
-                        let x2 = x1 + dx2; let y2 = y1 + dy2;
-                        x = x2; y = y2 + dy3;
-                        ops.push(Type2Op::CurveTo(x1,y1,x2,y2,x,y));
-                        idx+=4;
-                    } else {
-                        let dy1 = stack[idx]; let dx2 = stack[idx+1]; let dy2 = stack[idx+2]; let dx3 = stack[idx+3];
-                        let x1 = x; let y1 = y + dy1;
-                        let x2 = x1 + dx2; let y2 = y1 + dy2;
-                        x = x2 + dx3; y = y2;
-                        ops.push(Type2Op::CurveTo(x1,y1,x2,y2,x,y));
-                        idx+=4;
-                    }
-                    horiz = !horiz;
-                }
-                stack.clear();
-            },
-            14 => { // endchar
-                ops.push(Type2Op::Close);
-                stack.clear();
-                break;
-            },
-            19 | 20 => { // hintmask, cntrmask
-                if !width_parsed && stack.len() %2 ==1 {
-                    stack.remove(0);
-                    width_parsed=true;
-                }
-                stem_count += stack.len()/2;
-                stack.clear();
-                // mask bytes
-                let mask_len = stem_count.div_ceil(8);
-                if pos + mask_len <= data.len() {
-                    pos += mask_len;
-                }
-            },
-            10 | 11 => { // callsubr, return
-                // ignore for now, clear or keep?
-                // For callsubr we would need subr index, but skip
-                stack.clear();
-            },
-            DIV_OP => { // div (12 12)
-                if stack.len() >=2 {
-                    let b = stack.pop().unwrap();
-                    let a = stack.pop().unwrap();
-                    if b != 0.0 {
-                        stack.push(a / b);
-                    } else {
-                        stack.push(0.0);
-                    }
-                }
-            },
-            HFLEX_OP | FLEX_OP | HFLEX1_OP | FLEX1_OP => { // hflex, flex, hflex1, flex1 - treat as two curves
-                // flex: 6 points (12 numbers?) Actually flex has 12 args? For simplicity clear
-                // Each flex is two rrcurveto? We'll just clear and fake curve
-                // Consume stack as two curves if enough args
-                if stack.len() >=12 {
-                    // first curve 6, second 6
-                    for c in 0..2 {
-                        let base = c*6;
-                        if base+5 < stack.len() {
-                            let dx1 = stack[base]; let dy1 = stack[base+1];
-                            let dx2 = stack[base+2]; let dy2 = stack[base+3];
-                            let dx3 = stack[base+4]; let dy3 = stack[base+5];
-                            let x1 = x + dx1; let y1 = y + dy1;
-                            let x2 = x1 + dx2; let y2 = y1 + dy2;
-                            x = x2 + dx3; y = y2 + dy3;
-                            ops.push(Type2Op::CurveTo(x1,y1,x2,y2,x,y));
-                        }
-                    }
-                }
-                stack.clear();
-            },
-            _ => {
-                // Unknown operator, clear stack to avoid desync
-                stack.clear();
-            }
-        }
-    }
-    Some(ops)
-}
-
 fn parse(d: &[u8]) -> Option<HashMap<u32, char>> {
     if d.len() < 4 {
         return None;
@@ -931,7 +568,7 @@ fn parse(d: &[u8]) -> Option<HashMap<u32, char>> {
     let enc_val = top.get(&16).and_then(|v| v.first()).copied().unwrap_or(0.0);
     let charset_off = top.get(&15).and_then(|v| v.first()).copied().unwrap_or(0.0) as usize;
     let custom_string_count = string_idx.entries.len();
-    let gid_to_sid = parse_charset(d, charset_off, nglyphs, custom_string_count);
+    let gid_to_sid = parse_charset(d, charset_off, nglyphs, custom_string_count, false);
 
     let sid_name = |sid: usize| -> Option<String> {
         if sid < STD_STRINGS.len() {
@@ -1120,15 +757,19 @@ mod tests {
     }
 
     #[test]
-    fn type2_parser_basic() {
-        // Simple charstring: 100 0 rmoveto (21), 50 0 rlineto (5), endchar 14
-        // Numbers: 100 = 239 (139+?), Actually 100 encoded as 239 (100+139=239)
-        // 0 encoded as 139
-        let cs = [239u8, 139u8, 21u8, 189u8, 139u8, 5u8, 14u8];
-        // 239=100, 139=0, 21=rmoveto, 189=50, 139=0, 5=rlineto, 14=endchar
-        let ops = parse_type2_charstring(&cs);
-        assert!(ops.is_some());
-        let ops = ops.unwrap();
-        assert!(!ops.is_empty());
+    fn cid_keyed_charset_keeps_cids_above_sid_range() {
+        // Format 0 charset for 3 glyphs: GID1 -> 1000, GID2 -> 2000. Offset 1,
+        // because offset 0 means the predefined ISOAdobe charset.
+        let d = [0xFFu8, 0x00, 0x03, 0xE8, 0x07, 0xD0];
+        // Read as CIDs (CID-keyed font): both are in range and must survive.
+        let cids = parse_charset(&d, 1, 3, 0, true).unwrap();
+        assert_eq!(cids.get(&1), Some(&1000));
+        assert_eq!(cids.get(&2), Some(&2000));
+        // Read as SIDs: both exceed the 391-string range, so they are dropped.
+        // Applying this SID bound to a CID-keyed font is the bug being guarded.
+        let sids = parse_charset(&d, 1, 3, 0, false).unwrap();
+        assert_eq!(sids.get(&1), None);
+        assert_eq!(sids.get(&2), None);
     }
+
 }

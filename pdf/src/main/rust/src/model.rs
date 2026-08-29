@@ -1,8 +1,11 @@
 use crate::*;
 
-/// Drawing primitives in PDF page space (origin bottom-left). Kotlin performs
-/// the Y-flip and fit-to-width scale. Extended v3 adds GroupPush/Pop and blend.
-/// v8 adds font style flags for bold/italic synthesis.
+/// Drawing primitives in the page's *display* space: `page_base_matrix` has
+/// already been applied, so `/CropBox` origin and `/Rotate` are baked into every
+/// coordinate here. The origin is still bottom-left and Kotlin performs only the
+/// Y-flip and the fit-to-width scale — it must NOT re-apply a crop or rotation.
+/// Extended v3 adds GroupPush/Pop and blend. v8 adds font style flags for
+/// bold/italic synthesis.
 pub(crate) enum Prim {
     Text {
         x: f32,
@@ -69,6 +72,47 @@ pub(crate) enum Prim {
         /// Blend mode (from the graphics-state `/BM`) for compositing the image.
         blend: BlendMode,
     },
+    /// A tiling pattern (§8.7.3.3) as ONE cell bitmap repeated periodically, rather than
+    /// as thousands of re-interpreted cells. Renders as a `BitmapShader` with
+    /// `TileMode.REPEAT`: one draw call regardless of how many tiles are covered, and
+    /// memory is O(one cell) instead of O(tiles).
+    ///
+    /// `ctm` maps the unit square onto ONE CELL, i.e. one period of the lattice. The
+    /// bitmap's own dimensions ARE the repeat period, which is why `w`/`h` must be
+    /// rasterized at `/XStep` x `/YStep` and NOT at the pattern `/BBox`: the two are
+    /// independent in PDF, and a bitmap sized to the bbox would silently retile at the
+    /// wrong spacing. Where the step exceeds the bbox the extra margin is transparent
+    /// padding, which scales with the cell.
+    ///
+    /// Only emitted for NON-overlapping patterns. §8.7.3.1 permits `/XStep` smaller than
+    /// the bbox, with later tiles painted over earlier ones; a periodic repeat cannot
+    /// express overlap at any cost, so that case must use the per-tile path instead.
+    /// `images::rasterize_pattern_cell` enforces both rules.
+    ImageTiled {
+        ctm: Mat,
+        /// Cell raster, always RGBA8888 (`w*h*4` bytes). Transparent where unpainted.
+        w: u32,
+        h: u32,
+        data: Vec<u8>,
+        /// Lattice period in the `ctm`'s own (pattern) space. ADVISORY ONLY: do NOT
+        /// compare these against `w`/`h`. Cell resolution is a free parameter — an
+        /// over-budget cell is scaled down UNIFORMLY, which is transparent to a renderer
+        /// that maps the bitmap's own corners onto the one-cell quad from `ctm`, so the
+        /// bitmap dimensions and the period are related only by an arbitrary scale.
+        /// (Cropping the cell or fitting sub-tiles inside it WOULD break the period; only
+        /// uniform scaling is safe. `rasterize_pattern_cell` only ever scales uniformly.)
+        xstep: f32,
+        ystep: f32,
+        /// Lattice extent to cover, in cell indices relative to `ctm`'s origin. A
+        /// `REPEAT` shader may instead rely on the active clip, provided it covers at
+        /// least this range.
+        i0: i32,
+        j0: i32,
+        nx: u32,
+        ny: u32,
+        alpha: f32,
+        blend: BlendMode,
+    },
     ClipPush {
         even_odd: bool,
         /// Full path with bezier retention: flat encoding where cubic points are marked via flag?
@@ -94,6 +138,18 @@ pub(crate) enum Prim {
     /// 1 = luminosity. Primitives until `SoftMaskContent` are the masked
     /// content; those from `SoftMaskContent` to `SoftMaskPop` are the mask.
     SoftMaskPush { mask_type: u8 },
+    /// `/TR` transfer function for the soft mask just pushed, as a 256-entry lookup
+    /// table (§11.6.5.2). Emitted IMMEDIATELY AFTER `SoftMaskPush` and only when `/TR`
+    /// is not the identity; absent therefore means identity, which is the common case
+    /// and costs nothing.
+    ///
+    /// A separate primitive rather than a field on `SoftMaskPush` so it is purely
+    /// additive: not emitting it is a no-op, whereas a versioned field that someone
+    /// forgets to write desynchronises the wire stream from that byte onward.
+    ///
+    /// Boxed because 256 bytes inline would grow every `Prim` in the page vector by
+    /// ~3x — see `MAX_PRIMITIVES` for why per-prim size is load-bearing here.
+    SoftMaskTransfer(Box<[u8; 256]>),
     /// Marker: switch from masked content to mask drawing (v5).
     SoftMaskContent,
     /// End a soft-masked region; composite the mask onto the content (v5).
@@ -139,12 +195,20 @@ pub(crate) fn scale_prim_alpha(prim: &mut Prim, alpha_mul: f64) {
             let na = (cur * alpha_mul.clamp(0.0,1.0)).clamp(0.0,1.0) as f32;
             *img_a = if na.is_nan() { 1.0 } else { na };
         },
+        Prim::ImageTiled { alpha: img_a, .. } => {
+            let cur = *img_a as f64;
+            let na = (cur * alpha_mul.clamp(0.0,1.0)).clamp(0.0,1.0) as f32;
+            *img_a = if na.is_nan() { 1.0 } else { na };
+        },
         Prim::ClipPush { .. } => {},
         Prim::ClipPop => {},
         Prim::TextClipApply => {},
         Prim::GroupPush { alpha: ga, .. } => { let cur = *ga as f64; *ga = (cur * alpha_mul.clamp(0.0,1.0)) as f32; },
         Prim::GroupPop => {},
         Prim::SoftMaskPush { .. } => {},
+        // A transfer LUT is a mask-shape function, not colour; constant opacity does
+        // not scale it. Scaling it here would distort the mask curve rather than fade it.
+        Prim::SoftMaskTransfer(_) => {},
         Prim::SoftMaskContent => {},
         Prim::SoftMaskPop => {},
     }

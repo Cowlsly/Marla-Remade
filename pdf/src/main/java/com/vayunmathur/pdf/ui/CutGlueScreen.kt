@@ -48,6 +48,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.nativeCanvas
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.unit.dp
@@ -275,7 +276,20 @@ private fun ComposePageThumb(
             if (current == null || current.width <= 0f) {
                 CircularProgressIndicator(Modifier.align(Alignment.Center))
             } else {
-                Canvas(Modifier.fillMaxSize()) { drawSafePage(current) }
+                Canvas(Modifier.fillMaxSize()) {
+                    // drawSafePage only drains its save/saveLayer levels on the normal path, so
+                    // a throwing primitive would leave them open and corrupt the sibling
+                    // thumbnails drawn after this one. Anchor on the entry count and restore to
+                    // it either way, as SafePdfPageCanvas does for the reader.
+                    val base = drawContext.canvas.nativeCanvas.saveCount
+                    try {
+                        drawSafePage(current)
+                    } catch (t: Throwable) {
+                        android.util.Log.w("CutGlueScreen", "drawSafePage failed", t)
+                    } finally {
+                        drawContext.canvas.nativeCanvas.restoreToCount(base)
+                    }
+                }
             }
         }
         IconButton(

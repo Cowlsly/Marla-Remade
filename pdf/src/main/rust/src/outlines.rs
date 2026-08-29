@@ -79,6 +79,15 @@ impl ContourBuilder {
         }
     }
 
+    /// Append an already-flattened contour. Used by `seac` accent composition,
+    /// which must interpret the accent at its natural origin and then translate
+    /// the result, because the accent's own `hsbw` overwrites the current point.
+    pub(crate) fn add_contour(&mut self, c: Vec<(f64, f64)>) {
+        if c.len() >= 3 {
+            self.contours.push(c);
+        }
+    }
+
     pub(crate) fn finish(mut self) -> Vec<Vec<(f64, f64)>> {
         self.flush();
         self.contours
@@ -187,7 +196,7 @@ pub(crate) type GlyphContours = (Vec<Vec<(f64, f64)>>, f64);
 /// Return the flattened outline (font-unit contours) and units-per-em for `code`.
 /// `code` is the raw content-stream code (CID for Type0, byte for simple fonts).
 pub(crate) fn glyph_outline(fi: &FontInfo, code: u32) -> Option<GlyphContours> {
-    let program = fi.glyph_program.as_ref()?;
+    let program = fi.glyph_program.as_deref()?;
     match program {
         GlyphProgram::Type1(t1) => {
             let name = fi
@@ -228,6 +237,21 @@ pub(crate) fn glyph_outline(fi: &FontInfo, code: u32) -> Option<GlyphContours> {
     }
 }
 
+/// Glyph names of the form `gNN`, `glyphNN`, `cidNN` or `indexNN` are direct
+/// glyph-index references emitted by some subsetters. They carry no Unicode
+/// meaning, so they cannot be resolved through the AGL and are decoded here.
+/// Only consulted after the font's own name tables have failed.
+fn name_as_gid(name: &str) -> Option<u32> {
+    for prefix in ["glyph", "index", "cid", "g"] {
+        if let Some(rest) = name.strip_prefix(prefix) {
+            if !rest.is_empty() && rest.bytes().all(|b| b.is_ascii_digit()) {
+                return rest.parse::<u32>().ok();
+            }
+        }
+    }
+    None
+}
+
 /// Map a content-stream code to a glyph id in a bare CFF table. `cff_cid_to_gid`
 /// is the font's own charset inversion for CID-keyed CFF.
 fn resolve_cff_gid(fi: &FontInfo, table: &ttf_parser::cff::Table, code: u32, cff_cid_to_gid: Option<&HashMap<u32, u16>>) -> Option<ttf_parser::GlyphId> {
@@ -236,17 +260,28 @@ fn resolve_cff_gid(fi: &FontInfo, table: &ttf_parser::cff::Table, code: u32, cff
         if g < n as u32 { Some(ttf_parser::GlyphId(g as u16)) } else { None }
     };
     if fi.two_byte {
-        // Map code -> CID (via /Encoding CMap), then CID -> GID: prefer the PDF
-        // /CIDToGIDMap, then the CFF's own charset, then identity.
+        // Map code -> CID (via /Encoding CMap), then CID -> GID. A /CIDToGIDMap
+        // stream is authoritative (PDF 32000-1 9.7.4.2): an entry of 0, or a CID
+        // past the end of the stream, means .notdef — report None so the caller
+        // substitutes, instead of falling through to identity and drawing an
+        // arbitrary glyph. Identity applies only to /CIDToGIDMap /Identity or an
+        // absent key, which `fi.cid_to_gid == None` already encodes.
         let cid = fi.to_cid(code);
-        let gid = fi.cid_to_gid.as_ref().and_then(|m| m.get(&cid).copied())
-            .or_else(|| cff_cid_to_gid.and_then(|m| m.get(&cid).copied()))
-            .unwrap_or(cid as u16);
+        let gid = match fi.cid_to_gid.as_ref() {
+            Some(m) => match m.get(&cid).copied() {
+                Some(0) | None => return None,
+                Some(g) => g,
+            },
+            None => cff_cid_to_gid.and_then(|m| m.get(&cid).copied()).unwrap_or(cid as u16),
+        };
         return as_gid(gid as u32);
     }
     // Simple CFF: prefer glyph name, then the CFF's own 8-bit encoding.
     if let Some(name) = fi.glyph_names.get(&code) {
         if let Some(gid) = table.glyph_index_by_name(name) {
+            return Some(gid);
+        }
+        if let Some(gid) = name_as_gid(name).and_then(as_gid) {
             return Some(gid);
         }
     }
@@ -272,10 +307,18 @@ fn resolve_gid(fi: &FontInfo, face: &ttf_parser::Face, code: u32) -> Option<ttf_
     };
 
     if fi.two_byte {
-        // Type0/CID: map code -> CID (via /Encoding CMap) then CID -> GID via
-        // CIDToGIDMap, else identity.
+        // Type0/CID: map code -> CID (via /Encoding CMap) then CID -> GID. A
+        // /CIDToGIDMap stream is authoritative (PDF 32000-1 9.7.4.2): an entry of
+        // 0, or a CID past the end of the stream, means .notdef — report None
+        // rather than falling through to identity and drawing a wrong glyph.
         let cid = fi.to_cid(code);
-        let gid = fi.cid_to_gid.as_ref().and_then(|m| m.get(&cid).copied()).unwrap_or(cid as u16);
+        let gid = match fi.cid_to_gid.as_ref() {
+            Some(m) => match m.get(&cid).copied() {
+                Some(0) | None => return None,
+                Some(g) => g,
+            },
+            None => cid as u16,
+        };
         return as_gid(gid as u32);
     }
 
@@ -283,6 +326,9 @@ fn resolve_gid(fi: &FontInfo, face: &ttf_parser::Face, code: u32) -> Option<ttf_
     // cmap, then treat the code itself as a gid (common for subset fonts).
     if let Some(name) = fi.glyph_names.get(&code) {
         if let Some(gid) = face.glyph_index_by_name(name) {
+            return Some(gid);
+        }
+        if let Some(gid) = name_as_gid(name).and_then(as_gid) {
             return Some(gid);
         }
     }
@@ -306,7 +352,19 @@ fn resolve_gid(fi: &FontInfo, face: &ttf_parser::Face, code: u32) -> Option<ttf_
     // fall through to code-as-gid. Query every subtable with the raw code (and
     // the 0xF000 symbol alias) before that last resort.
     if let Some(cmap) = face.tables().cmap {
-        for st in cmap.subtables {
+        // PDF 9.6.6.4 fixes the precedence for a symbolic TrueType font: the
+        // (3,0) Microsoft Symbol subtable is consulted FIRST, then (1,0)
+        // Macintosh Roman. Scanning in the font's own record order instead let
+        // whichever subtable happened to be stored first win, so a font
+        // carrying both picked the wrong one and drew unrelated glyphs.
+        let rank = |st: &ttf_parser::cmap::Subtable| match (st.platform_id, st.encoding_id) {
+            (ttf_parser::PlatformId::Windows, 0) => 0u8, // (3,0) Symbol
+            (ttf_parser::PlatformId::Macintosh, 0) => 1, // (1,0) Roman
+            _ => 2,
+        };
+        let mut ordered: Vec<_> = cmap.subtables.into_iter().collect();
+        ordered.sort_by_key(rank);
+        for st in ordered {
             if let Some(gid) = st.glyph_index(code) {
                 return Some(gid);
             }
@@ -314,6 +372,13 @@ fn resolve_gid(fi: &FontInfo, face: &ttf_parser::Face, code: u32) -> Option<ttf_
                 return Some(gid);
             }
         }
+        // The font has a cmap and none of its subtables map this code, so the
+        // code genuinely has no glyph. Report None so the caller can fall back to
+        // a substitute face; treating the code as a glyph id here would draw an
+        // unrelated glyph and suppress that fallback. Code-as-gid stays below for
+        // subset fonts that ship no cmap at all, where it is the only convention
+        // available.
+        return None;
     }
     as_gid(code)
 }

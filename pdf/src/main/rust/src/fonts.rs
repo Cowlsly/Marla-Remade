@@ -1,4 +1,10 @@
 use crate::*;
+use std::sync::Arc;
+
+/// Highest CID a composite font may use (PDF 32000-1 9.7.4.3). Ranges read from
+/// untrusted `/W`, `/W2` and CMap data are clamped to this so a corrupt or
+/// hostile upper bound cannot drive a multi-billion-iteration loop.
+pub(crate) const MAX_CID: u32 = 0xFFFF;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub(crate) struct FontStyle {
@@ -6,15 +12,20 @@ pub(crate) struct FontStyle {
     pub(crate) italic: bool,
 }
 
+#[derive(Clone)]
 pub(crate) struct FontInfo {
     /// Type0 (Identity-H) fonts use 2-byte codes; simple fonts use 1 byte.
     pub(crate) two_byte: bool,
     pub(crate) wmode: u8,
+    /// CID -> `(w1_y, v_x)` from `/W2`: the vertical displacement and the x
+    /// component of the position vector, in text-space units (glyph units/1000).
     pub(crate) vertical_metrics: HashMap<u32, (f64, f64)>,
+    /// `(v_y, w1_y)` from `/DW2`, text-space units. Spec default `[880 -1000]`.
     pub(crate) default_vertical: (f64, f64),
     pub(crate) cid_to_gid: Option<HashMap<u32, u16>>,
     /// `code -> unicode string` from the font's `/ToUnicode` CMap, if any.
-    pub(crate) to_unicode: Option<HashMap<u32, String>>,
+    /// Shared, not owned: see [`FontCacheScope`].
+    pub(crate) to_unicode: Option<Arc<HashMap<u32, String>>>,
     /// `code -> unicode char` from the simple-font encoding (base + Differences),
     /// used when `/ToUnicode` is absent or lacks the code.
     pub(crate) encoding: HashMap<u32, char>,
@@ -39,8 +50,10 @@ pub(crate) struct FontInfo {
     /// Descriptive base font name for fallback shaping (optional).
     pub(crate) base_font: String,
     /// Embedded font program (TrueType/CFF/Type1) for rendering the PDF's real
-    /// glyph outlines. `None` falls back to system-font substitution.
-    pub(crate) glyph_program: Option<crate::outlines::GlyphProgram>,
+    /// glyph outlines. `None` falls back to system-font substitution. Shared
+    /// rather than owned because it holds the whole decompressed program: see
+    /// [`FontCacheScope`].
+    pub(crate) glyph_program: Option<Arc<crate::outlines::GlyphProgram>>,
     /// `code -> glyph name` from the PDF `/Encoding` `/Differences`, used to look
     /// up outlines by name in Type1 / CFF programs.
     pub(crate) glyph_names: HashMap<u32, String>,
@@ -48,26 +61,12 @@ pub(crate) struct FontInfo {
 
 /// Type 3 font: glyphs are content streams drawn in glyph space, mapped to text
 /// space by `font_matrix`.
+#[derive(Clone)]
 pub(crate) struct Type3Font {
     pub(crate) font_matrix: Mat,
     /// Character code -> CharProc stream object id (via `/Encoding` Differences).
     pub(crate) char_procs: HashMap<u32, ObjectId>,
     pub(crate) resources: Option<Dictionary>,
-}
-
-/// Whether `cp` is a space-like codepoint for `Tw` word-spacing detection.
-fn is_space_codepoint(cp: u32, decoded_text: Option<&str>) -> bool {
-    // Core ASCII + NBSP + full-width ideographic space 0x3000 + other
-    // commonly-checked unicode spaces relevant for Tw detection.
-    matches!(
-        cp,
-        32 |              // ASCII space
-        0x00A0 |          // NBSP
-        0x2000..=0x200A | // En quad .. hair space (covers en/em/thin space)
-        0x202F |          // Narrow NBSP
-        0x205F |          // Medium mathematical space
-        0x3000            // Ideographic space (CJK full-width)
-    ) || decoded_text.map(|s| s.chars().any(|c| c.is_whitespace())).unwrap_or(false)
 }
 
 impl FontInfo {
@@ -104,10 +103,10 @@ impl FontInfo {
         } else {
             for &b in bytes {
                 let code = b as u32;
-                let is_space = code == 32
-                    || code == 0x00A0
-                    || self.encoding.get(&code).map(|c| c.is_whitespace()).unwrap_or(false);
-                f(code, is_space);
+                // PDF 9.3.3: Tw applies to the single-byte code 32 and to nothing
+                // else. Notably NOT to NBSP, which must not stretch under
+                // justification, nor to other codes the encoding maps to a space.
+                f(code, code == 32);
             }
         }
     }
@@ -153,6 +152,59 @@ impl FontInfo {
     }
 }
 
+thread_local! {
+    /// Populated only inside a [`FontCacheScope`]. `None` means "no cache", which
+    /// is the safe default: an entry cannot go stale if none is stored.
+    static FONT_CACHE: std::cell::RefCell<Option<HashMap<(usize, ObjectId), FontInfo>>> =
+        std::cell::RefCell::new(None);
+}
+
+/// Enables the [`FontInfo`] cache for the lifetime of the guard.
+///
+/// [`font_info`] decompresses and parses the entire embedded font program, and
+/// [`fonts_from_resources`] runs on *every* `interpret_content` call — so without
+/// a cache a font shared by N pages is parsed N times to render and another N
+/// times to build the search index.
+///
+/// The key is the font dictionary's object id *paired with the identity of the
+/// `Document` it came from*, and it is a *complete* key only while that document
+/// is not mutated. That is precisely why the cache is scoped to one top-level
+/// operation and dropped at the end instead of living in a global: a `docedit`
+/// mutation between operations cannot be served a stale entry, because between
+/// operations there is no cache at all. The document component means a scope that
+/// happens to span two documents cannot collide on a shared object id. Fonts
+/// written as direct (non-indirect) dictionaries have no object id and are never
+/// cached.
+///
+/// Nesting is safe — only the outermost guard installs and tears down the cache —
+/// so callers may create one without knowing whether an outer one exists.
+pub(crate) struct FontCacheScope {
+    outermost: bool,
+}
+
+impl FontCacheScope {
+    pub(crate) fn new() -> Self {
+        let outermost = FONT_CACHE.with(|c| {
+            let mut c = c.borrow_mut();
+            if c.is_none() {
+                *c = Some(HashMap::new());
+                true
+            } else {
+                false
+            }
+        });
+        FontCacheScope { outermost }
+    }
+}
+
+impl Drop for FontCacheScope {
+    fn drop(&mut self) {
+        if self.outermost {
+            FONT_CACHE.with(|c| *c.borrow_mut() = None);
+        }
+    }
+}
+
 /// Build a `font resource name -> FontInfo` map from a resources dictionary.
 pub(crate) fn fonts_from_resources(doc: &Document, res_dict: &lopdf::Dictionary) -> HashMap<Vec<u8>, FontInfo> {
     let mut fonts = HashMap::new();
@@ -161,11 +213,39 @@ pub(crate) fn fonts_from_resources(doc: &Document, res_dict: &lopdf::Dictionary)
         _ => return fonts,
     };
     for (name, font_ref) in font_dict.iter() {
+        // Only an indirect font can be cached: a direct dictionary has no
+        // identity to key on. The document address distinguishes equal object ids
+        // coming from different documents; it is stable because the document
+        // outlives the scope.
+        let key = match font_ref {
+            Object::Reference(id) => Some((doc as *const Document as usize, *id)),
+            _ => None,
+        };
+        if let Some(hit) = key.and_then(cached_font) {
+            fonts.insert(name.clone(), hit);
+            continue;
+        }
         if let Some(Object::Dictionary(fd)) = deref(doc, font_ref) {
-            fonts.insert(name.clone(), font_info(doc, fd));
+            let fi = font_info(doc, fd);
+            if let Some(key) = key {
+                cache_font(key, &fi);
+            }
+            fonts.insert(name.clone(), fi);
         }
     }
     fonts
+}
+
+fn cached_font(key: (usize, ObjectId)) -> Option<FontInfo> {
+    FONT_CACHE.with(|c| c.borrow().as_ref()?.get(&key).cloned())
+}
+
+fn cache_font(key: (usize, ObjectId), fi: &FontInfo) {
+    FONT_CACHE.with(|c| {
+        if let Some(map) = c.borrow_mut().as_mut() {
+            map.insert(key, fi.clone());
+        }
+    });
 }
 
 pub(crate) fn font_info(doc: &Document, font: &lopdf::Dictionary) -> FontInfo {
@@ -192,7 +272,21 @@ pub(crate) fn font_info(doc: &Document, font: &lopdf::Dictionary) -> FontInfo {
             Some(Object::Name(n)) => {
                 let name = String::from_utf8_lossy(n);
                 if name.ends_with("-V") { cmap_wmode = 1; }
-                // Identity-H/V and unembeddable predefined names -> identity (None).
+                // A predefined CMap cannot be embedded, so its code->CID table is
+                // unavailable and CID lookups stay identity. For the mixed-width
+                // families we can still install the codespace ranges, which is what
+                // determines how many bytes each code consumes -- without them a
+                // 1-byte ASCII code inside a Shift-JIS/GBK/Big5/UHC string is read
+                // as half of a 2-byte code and the whole rest of the string
+                // desynchronizes. Identity-H/V and the Uni*-UCS2-* families are
+                // pure 2-byte and need no CMap at all.
+                if let Some(codespace) = cmap::predefined_codespace(&name) {
+                    encoding_cmap = Some(cmap::EncodingCMap {
+                        codespace,
+                        wmode: cmap_wmode,
+                        ..Default::default()
+                    });
+                }
             }
             Some(Object::Stream(s)) => {
                 let cm = cmap::parse_encoding_cmap(&stream_data(s));
@@ -204,8 +298,8 @@ pub(crate) fn font_info(doc: &Document, font: &lopdf::Dictionary) -> FontInfo {
     }
 
     // WMode: 0 horizontal (default), 1 vertical. Detect from Type0 font dict and descendant.
-    let wmode: u8 = font.get(b"WMode").ok().and_then(num).map(|v| if v >= 1.0 { 1 } else { 0 }).unwrap_or(0) as u8;
-    let desc_wmode: u8 = font.get(b"DescendantFonts").ok().and_then(|o| deref(doc, o)).and_then(|o| match o { Object::Array(a) => a.first(), _ => None }).and_then(|o| deref(doc, o)).and_then(|o| o.as_dict().ok()).and_then(|d| d.get(b"WMode").ok()).and_then(num).map(|v| if v >= 1.0 { 1 } else { 0 }).unwrap_or(wmode);
+    let wmode: u8 = font.get(b"WMode").ok().and_then(|o| deref(doc, o)).and_then(num).map(|v| if v >= 1.0 { 1 } else { 0 }).unwrap_or(0) as u8;
+    let desc_wmode: u8 = font.get(b"DescendantFonts").ok().and_then(|o| deref(doc, o)).and_then(|o| match o { Object::Array(a) => a.first(), _ => None }).and_then(|o| deref(doc, o)).and_then(|o| o.as_dict().ok()).and_then(|d| d.get(b"WMode").ok()).and_then(|o| deref(doc, o)).and_then(num).map(|v| if v >= 1.0 { 1 } else { 0 }).unwrap_or(wmode);
     let effective_wmode = desc_wmode.max(wmode).max(cmap_wmode);
 
     // CIDToGIDMap
@@ -218,11 +312,24 @@ pub(crate) fn font_info(doc: &Document, font: &lopdf::Dictionary) -> FontInfo {
                     for (i, chunk) in data.chunks(2).enumerate() {
                         if chunk.len() < 2 { break; }
                         let gid = ((chunk[0] as u16) << 8) | chunk[1] as u16;
+                        // Zeros are deliberately NOT inserted. Do not "fix" this:
+                        // outlines.rs treats an explicit map as authoritative and
+                        // returns .notdef for a miss, so an absent entry and a
+                        // present 0 already mean the same thing (PDF 9.7.4.2). If
+                        // zeros were inserted here while that lookup fell back to
+                        // identity, a CID mapped to .notdef would instead select the
+                        // glyph at index == cid; if they were inserted and the
+                        // lookup drew GID 0, every such glyph would render as a
+                        // visible hollow .notdef box.
                         if gid != 0 {
                             map.insert(i as u32, gid);
                         }
                     }
-                    Some(map)
+                    // A zero-length or undecodable stream must not yield an empty
+                    // map: `Some` means "an explicit mapping exists", and callers
+                    // treat it as authoritative. Returning `Some(empty)` would send
+                    // every CID of the font to .notdef.
+                    if map.is_empty() { None } else { Some(map) }
                 }
                 Some(Object::Name(n)) if n == b"Identity" => None, // identity = no remap
                 _ => None,
@@ -254,11 +361,13 @@ pub(crate) fn font_info(doc: &Document, font: &lopdf::Dictionary) -> FontInfo {
         simple_widths(doc, font)
     };
 
-    // Vertical widths /W2 /DW2 for WMode=1 (best-effort: keep horizontal fallback for now, but record metrics)
+    // Vertical metrics /W2 + /DW2 for WMode 1 (PDF 9.7.4.3), consumed by the
+    // vertical branch of `show_string`.
     let vert_desc = font.get(b"DescendantFonts").ok().and_then(|o| deref(doc, o)).and_then(|o| match o { Object::Array(a) => a.first(), _ => None }).and_then(|o| deref(doc, o)).and_then(|o| o.as_dict().ok()).cloned();
     let (vert_map, default_vert): (HashMap<u32, (f64, f64)>, (f64, f64)) = {
         let mut vm = HashMap::new();
-        let mut dw2 = (0.0, -1000.0); // default per spec approx
+        // /DW2 is [v_y, w1_y]; the spec default is [880 -1000].
+        let mut dw2 = (0.880, -1.0);
         if let Some(ref df) = vert_desc {
             if let Some(Object::Array(arr)) = df.get(b"DW2").ok().and_then(|o| deref(doc, o)) {
                 let v: Vec<f64> = arr.iter().filter_map(|o| deref(doc, o).and_then(num).or_else(|| num(o))).collect();
@@ -266,26 +375,41 @@ pub(crate) fn font_info(doc: &Document, font: &lopdf::Dictionary) -> FontInfo {
                     dw2 = (v[0] / 1000.0, v[1] / 1000.0);
                 }
             }
+            // /W2 has two forms:
+            //   c [w1y v1x v1y  w1y v1x v1y ...]   consecutive CIDs from c
+            //   cFirst cLast w1y v1x v1y           one entry for the whole range
+            // Per-CID v_y is not retained (the map holds `(w1_y, v_x)` and v_y
+            // comes from /DW2); a CID-specific v_y is vanishingly rare and the
+            // struct shape is shared with fixtures outside this module.
             if let Some(Object::Array(w2)) = df.get(b"W2").ok().and_then(|o| deref(doc, o)) {
                 let mut i = 0;
-                while i + 2 < w2.len() {
-                    let c0 = match deref(doc, &w2[i]).and_then(num) { Some(v) => v as u32, None => break };
-                    let c1 = match deref(doc, &w2[i+1]).and_then(num) { Some(v) => v as u32, None => break };
-                    // w2 entries: c0 c1 w1 v1 v2 ...? spec: c0 c1 w1 v_h v_v OR c0 [w1 v_h v_v ...]
-                    // Simplified best-effort:
-                    if let Some(Object::Array(list)) = w2.get(i+2).and_then(|o| deref(doc, o)) {
-                        for (j, item) in list.iter().enumerate() {
-                            // Expect sequence of w, vx, vy triplets? Could be [w vx vy w vx vy...]
-                            // Best-effort placeholder
-                            if let Some(_w) = deref(doc, item).and_then(num) { vm.insert(c0 + j as u32, (dw2.0, _w / 1000.0)); }
+                while i < w2.len() {
+                    let c0 = match w2.get(i).and_then(|o| deref(doc, o)).and_then(num) {
+                        Some(v) => v.max(0.0) as u32,
+                        None => break,
+                    };
+                    match w2.get(i + 1).and_then(|o| deref(doc, o)) {
+                        Some(Object::Array(list)) => {
+                            let vals: Vec<f64> =
+                                list.iter().filter_map(|o| deref(doc, o).and_then(num)).collect();
+                            for (j, t) in vals.chunks(3).enumerate() {
+                                if t.len() < 3 { break; }
+                                vm.insert(c0 + j as u32, (t[0] / 1000.0, t[1] / 1000.0));
+                            }
+                            i += 2;
                         }
-                        i += 3;
-                    } else {
-                        let _w = w2.get(i+2).and_then(|o| deref(doc, o)).and_then(num).unwrap_or(-1000.0) / 1000.0;
-                        let vx = w2.get(i+3).and_then(|o| deref(doc, o)).and_then(num).unwrap_or(0.0) / 1000.0;
-                        let vy = w2.get(i+4).and_then(|o| deref(doc, o)).and_then(num).unwrap_or(0.0) / 1000.0;
-                        for cid in c0..=c1 { vm.insert(cid, (vx, vy)); }
-                        i += 5;
+                        _ => {
+                            let c1 = w2.get(i + 1).and_then(|o| deref(doc, o)).and_then(num);
+                            let w1y = w2.get(i + 2).and_then(|o| deref(doc, o)).and_then(num);
+                            let v1x = w2.get(i + 3).and_then(|o| deref(doc, o)).and_then(num);
+                            if let (Some(c1), Some(w1y), Some(v1x)) = (c1, w1y, v1x) {
+                                let c1 = (c1.max(0.0) as u32).min(MAX_CID);
+                                for cid in c0..=c1 {
+                                    vm.insert(cid, (w1y / 1000.0, v1x / 1000.0));
+                                }
+                            }
+                            i += 5;
+                        }
                     }
                 }
             }
@@ -293,8 +417,8 @@ pub(crate) fn font_info(doc: &Document, font: &lopdf::Dictionary) -> FontInfo {
         (vm, dw2)
     };
 
-    let encoding = if two_byte {
-        HashMap::new()
+    let (encoding, builtin_first) = if two_byte {
+        (HashMap::new(), false)
     } else {
         encoding::build(doc, font)
     };
@@ -317,6 +441,22 @@ pub(crate) fn font_info(doc: &Document, font: &lopdf::Dictionary) -> FontInfo {
         }
         m
     };
+
+    // PDF 9.6.6.1 resolution order for a symbolic font with no /Encoding and no
+    // /BaseEncoding: the font program's BUILT-IN encoding outranks any implicit
+    // base encoding. `encoding::build` left the base empty in that case, so
+    // `encoding` currently holds only /Differences (which always wins) and the
+    // built-in map in `cmap_uni` is consulted next by `push_code`. WinAnsi is
+    // backfilled only for codes neither covers, so a font whose symbolic flag is
+    // set spuriously and whose program yields no built-in encoding still decodes.
+    let mut encoding = encoding;
+    if builtin_first {
+        for (code, ch) in encoding::win_ansi() {
+            if !encoding.contains_key(&code) && !cmap_uni.contains_key(&code) {
+                encoding.insert(code, ch);
+            }
+        }
+    }
 
     // --- Font style detection for bold/italic synthesis ---
     let base_font_name = font.get(b"BaseFont").ok().and_then(|o| o.as_name().ok())
@@ -357,21 +497,21 @@ pub(crate) fn font_info(doc: &Document, font: &lopdf::Dictionary) -> FontInfo {
         italic = true;
     }
     if let Some(ref desc) = fd {
-        if let Some(flags) = desc.get(b"Flags").ok().and_then(num) {
+        if let Some(flags) = desc.get(b"Flags").ok().and_then(|o| deref(doc, o)).and_then(num) {
             let f = flags as i64;
             // Bit 18 (1<<18 = 262144) = Italic per PDF spec 9.8.2
             if f & (1<<18) != 0 || f & 64 != 0 { italic = true; } // 64 is common non-spec but some generators
             // There is no bold flag but some files use bit 6? Actually force bold is 18? We'll rely on StemV/Weight
         }
-        if let Some(angle) = desc.get(b"ItalicAngle").ok().and_then(num) {
+        if let Some(angle) = desc.get(b"ItalicAngle").ok().and_then(|o| deref(doc, o)).and_then(num) {
             if angle.abs() > 0.5 { italic = true; }
         }
-        if let Some(weight) = desc.get(b"FontWeight").ok().and_then(num) {
+        if let Some(weight) = desc.get(b"FontWeight").ok().and_then(|o| deref(doc, o)).and_then(num) {
             if weight >= 600.0 { bold = true; }
-        } else if let Some(name) = desc.get(b"FontWeight").ok().and_then(|o| o.as_name().ok()) {
+        } else if let Some(name) = desc.get(b"FontWeight").ok().and_then(|o| deref(doc, o)).and_then(|o| o.as_name().ok()) {
             if String::from_utf8_lossy(name).to_lowercase().contains("bold") { bold = true; }
         }
-        if let Some(stemv) = desc.get(b"StemV").ok().and_then(num) {
+        if let Some(stemv) = desc.get(b"StemV").ok().and_then(|o| deref(doc, o)).and_then(num) {
             if stemv.abs() > 140.0 { bold = true; }
         }
         if desc.get(b"FontName").ok().and_then(|o| o.as_name().ok())
@@ -429,7 +569,7 @@ pub(crate) fn font_info(doc: &Document, font: &lopdf::Dictionary) -> FontInfo {
         || lower.contains("roman"));
     let mut family: u8 = if is_mono_name { 2 } else if is_serif_name { 1 } else { 0 };
     if let Some(ref desc) = fd {
-        if let Some(flags) = desc.get(b"Flags").ok().and_then(num) {
+        if let Some(flags) = desc.get(b"Flags").ok().and_then(|o| deref(doc, o)).and_then(num) {
             let f = flags as i64;
             if f & 1 != 0 {
                 family = 2; // FixedPitch -> monospace
@@ -445,7 +585,7 @@ pub(crate) fn font_info(doc: &Document, font: &lopdf::Dictionary) -> FontInfo {
         vertical_metrics: vert_map,
         default_vertical: default_vert,
         cid_to_gid,
-        to_unicode,
+        to_unicode: to_unicode.map(Arc::new),
         encoding,
         cmap_uni,
         cmap: encoding_cmap,
@@ -455,7 +595,7 @@ pub(crate) fn font_info(doc: &Document, font: &lopdf::Dictionary) -> FontInfo {
         style: FontStyle { bold, italic },
         family,
         base_font: base_font_name,
-        glyph_program,
+        glyph_program: glyph_program.map(Arc::new),
         glyph_names,
     }
 }
@@ -465,7 +605,7 @@ pub(crate) fn font_info(doc: &Document, font: &lopdf::Dictionary) -> FontInfo {
 /// simple fonts).
 fn type3_widths(doc: &Document, font: &lopdf::Dictionary, fm_scale: f64) -> (HashMap<u32, f64>, f64) {
     let mut widths = HashMap::new();
-    let first_char = font.get(b"FirstChar").ok().and_then(num).unwrap_or(0.0) as u32;
+    let first_char = font.get(b"FirstChar").ok().and_then(|o| deref(doc, o)).and_then(num).unwrap_or(0.0) as u32;
     if let Some(Object::Array(arr)) = font.get(b"Widths").ok().and_then(|o| deref(doc, o)) {
         for (i, w) in arr.iter().enumerate() {
             if let Some(w) = deref(doc, w).and_then(num) {
@@ -480,9 +620,12 @@ fn type3_widths(doc: &Document, font: &lopdf::Dictionary, fm_scale: f64) -> (Has
 /// `/FontDescriptor /MissingWidth` fallback. Values are glyph units / 1000.
 pub(crate) fn simple_widths(doc: &Document, font: &lopdf::Dictionary) -> (HashMap<u32, f64>, f64) {
     let mut widths = HashMap::new();
+    // `/FirstChar` may be an indirect reference; `num` does not dereference, so
+    // without the `deref` the whole width table silently shifts by FirstChar.
     let first_char = font
         .get(b"FirstChar")
         .ok()
+        .and_then(|o| deref(doc, o))
         .and_then(num)
         .unwrap_or(0.0) as u32;
     if let Some(Object::Array(arr)) = font.get(b"Widths").ok().and_then(|o| deref(doc, o)) {
@@ -498,6 +641,7 @@ pub(crate) fn simple_widths(doc: &Document, font: &lopdf::Dictionary) -> (HashMa
         .and_then(|o| deref(doc, o))
         .and_then(|o| o.as_dict().ok())
         .and_then(|d| d.get(b"MissingWidth").ok())
+        .and_then(|o| deref(doc, o))
         .and_then(num)
         .unwrap_or(0.0)
         / 1000.0;
@@ -529,7 +673,7 @@ pub(crate) fn cid_widths(doc: &Document, font: &lopdf::Dictionary) -> (HashMap<u
         None => return (widths, default_width),
     };
 
-    if let Some(dw) = df.get(b"DW").ok().and_then(num) {
+    if let Some(dw) = df.get(b"DW").ok().and_then(|o| deref(doc, o)).and_then(num) {
         default_width = dw / 1000.0;
     }
 
@@ -554,7 +698,10 @@ pub(crate) fn cid_widths(doc: &Document, font: &lopdf::Dictionary) -> (HashMap<u
                     let c_last = w.get(i + 1).and_then(|o| deref(doc, o)).and_then(num);
                     let width = w.get(i + 2).and_then(|o| deref(doc, o)).and_then(num);
                     if let (Some(c_last), Some(width)) = (c_last, width) {
-                        for cid in c..=(c_last as u32) {
+                        // CIDs are bounded at 65535 (PDF 9.7.4.3), so a corrupt or
+                        // hostile `cLast` cannot drive a multi-billion-iteration loop.
+                        let c_last = (c_last.max(0.0) as u32).min(MAX_CID);
+                        for cid in c..=c_last {
                             widths.insert(cid, width / 1000.0);
                         }
                     }
@@ -677,6 +824,16 @@ pub(crate) mod ttf {
         ((u16b(b, o) as u32) << 16) | u16b(b, o + 2) as u32
     }
 
+    /// Group count for the range-based cmap subtable formats, clamped to the
+    /// groups that actually fit in `b`. Out-of-bounds reads return 0 rather than
+    /// failing, so an unclamped count from corrupt data would otherwise spin for
+    /// billions of iterations appending junk entries.
+    fn group_count(b: &[u8], count_off: usize, groups_off: usize, group_size: usize) -> usize {
+        let declared = u32b(b, count_off) as usize;
+        let fits = b.len().saturating_sub(groups_off) / group_size;
+        declared.min(fits)
+    }
+
     fn table_offset(b: &[u8], tag: &[u8; 4]) -> Option<usize> {
         let num = u16b(b, 4) as usize;
         for i in 0..num {
@@ -687,6 +844,14 @@ pub(crate) mod ttf {
         }
         None
     }
+
+    /// Upper bound on the pairs one `cmap` subtable may yield. Formats 8, 12 and
+    /// 13 are group lists where each group expands to a code RANGE, so the
+    /// existing per-group clamps (group count x 65536 codes each) still multiply
+    /// out to billions of entries for a subtable that is only a few KB on disk.
+    /// A Unicode-complete cmap needs ~0x110000 pairs, so this cannot truncate a
+    /// legitimate font.
+    const MAX_CMAP_PAIRS: usize = 0x20_0000;
 
     /// Parse a subtable at `off` into (code, glyphId) pairs.
     fn parse_subtable(b: &[u8], off: usize) -> Vec<(u32, u16)> {
@@ -849,7 +1014,7 @@ pub(crate) mod ttf {
                 let groups_off = ngroups_off + 4;
                 for g in 0..ngroups.min(100_000) {
                     let go = groups_off + g * 12;
-                    if go + 12 > b.len() {
+                    if go + 12 > b.len() || out.len() >= MAX_CMAP_PAIRS {
                         break;
                     }
                     let sc = u32b(b, go);
@@ -875,8 +1040,11 @@ pub(crate) mod ttf {
                 }
             }
             12 => {
-                let ngroups = u32b(b, off + 12) as usize;
+                let ngroups = group_count(b, off + 12, off + 16, 12);
                 for i in 0..ngroups {
+                    if out.len() >= MAX_CMAP_PAIRS {
+                        break;
+                    }
                     let g = off + 16 + i * 12;
                     let sc = u32b(b, g);
                     let ec = u32b(b, g + 4);
@@ -892,8 +1060,11 @@ pub(crate) mod ttf {
             13 => {
                 // Many-to-one range mappings: every code in a group maps to the
                 // same glyph (used for e.g. "last resort" fonts).
-                let ngroups = u32b(b, off + 12) as usize;
+                let ngroups = group_count(b, off + 12, off + 16, 12);
                 for i in 0..ngroups {
+                    if out.len() >= MAX_CMAP_PAIRS {
+                        break;
+                    }
                     let g = off + 16 + i * 12;
                     let sc = u32b(b, g);
                     let ec = u32b(b, g + 4);
@@ -953,6 +1124,26 @@ pub(crate) mod ttf {
         out
     }
 
+    /// `gid -> unicode` recovered from the `post` table's glyph names via the
+    /// Adobe Glyph List. Only used when the font has no Unicode `cmap` subtable.
+    /// Parsing is delegated to `ttf-parser` (the `glyph-names` feature) rather
+    /// than hand-rolling another untrusted-binary reader.
+    fn gid_names_to_unicode(b: &[u8]) -> HashMap<u16, u32> {
+        let mut m = HashMap::new();
+        let face = match ttf_parser::Face::parse(b, 0) {
+            Ok(f) => f,
+            Err(_) => return m,
+        };
+        for gid in 0..face.number_of_glyphs() {
+            if let Some(name) = face.glyph_name(ttf_parser::GlyphId(gid)) {
+                if let Some(c) = super::encoding::glyph_to_char(name) {
+                    m.insert(gid, c as u32);
+                }
+            }
+        }
+        m
+    }
+
     pub fn code_to_unicode(b: &[u8]) -> HashMap<u32, char> {
         let mut result = HashMap::new();
         let cmap = match table_offset(b, b"cmap") {
@@ -986,11 +1177,26 @@ pub(crate) mod ttf {
                 }
                 m
             }
-            None => return result,
+            // A symbolic font may carry only a (3,0) Symbol and/or (1,0)
+            // Macintosh subtable and no Unicode subtable at all. Bailing here left
+            // the whole map empty, so such a font contributed nothing to selection
+            // or search even though its glyph names say exactly what the glyphs
+            // are. Recover `gid -> unicode` from the `post` table's glyph names
+            // through the Adobe Glyph List: names are an authoritative Unicode
+            // source, unlike guessing Unicode from the raw character code, which
+            // is what would actually pollute the text index.
+            None => gid_names_to_unicode(b),
         };
+        if gid_to_uni.is_empty() {
+            return result;
+        }
 
-        // code -> glyph (from Mac and/or Symbol subtables), then -> unicode.
-        for sub in [mac_sub, sym_sub].into_iter().flatten() {
+        // code -> glyph (from Symbol and/or Mac subtables), then -> unicode.
+        // PDF 9.6.6.4: a symbolic TrueType font is looked up through the (3,0)
+        // Microsoft Symbol subtable in preference to (1,0) Macintosh, and the
+        // presence of a (3,0) table is itself the strongest symbolic signal we
+        // have here. `or_insert` makes the first source win, so (3,0) leads.
+        for sub in [sym_sub, mac_sub].into_iter().flatten() {
             for (code, gid) in parse_subtable(b, sub) {
                 if let Some(&uni) = gid_to_uni.get(&gid) {
                     if let Some(c) = char::from_u32(uni) {
@@ -1060,7 +1266,12 @@ pub(crate) mod encoding {
     /// Build a `code -> unicode char` map for a simple font: start from the base
     /// encoding (WinAnsi / MacRoman / Standard, or Symbol / ZapfDingbats for
     /// those base fonts), then apply any `/Encoding /Differences`.
-    pub fn build(doc: &Document, font: &lopdf::Dictionary) -> HashMap<u32, char> {
+    ///
+    /// Returns `(map, builtin_first)`. `builtin_first` is true when the font is
+    /// symbolic AND declares neither `/Encoding` nor `/BaseEncoding`: PDF 9.6.6.1
+    /// gives the font program's built-in encoding priority there, so the base is
+    /// left empty and the caller layers the built-in map underneath /Differences.
+    pub fn build(doc: &Document, font: &lopdf::Dictionary) -> (HashMap<u32, char>, bool) {
         let base_font = font
             .get(b"BaseFont")
             .ok()
@@ -1069,6 +1280,7 @@ pub(crate) mod encoding {
             .unwrap_or_default();
 
         let enc_obj = font.get(b"Encoding").ok().and_then(|o| deref(doc, o));
+        let mut builtin_first = false;
         let base_name = match &enc_obj {
             Some(Object::Name(n)) => Some(String::from_utf8_lossy(n).into_owned()),
             Some(Object::Dictionary(d)) => d
@@ -1083,6 +1295,11 @@ pub(crate) mod encoding {
             symbol_table()
         } else if base_font.contains("ZapfDingbats") || base_font.contains("Dingbats") {
             zapf_table()
+        } else if base_name.is_none() && is_symbolic(doc, font) {
+            // Built-in encoding takes priority (PDF 9.6.6.1); the caller layers it
+            // in. Only /Differences belongs in this map.
+            builtin_first = true;
+            HashMap::new()
         } else {
             match base_name.as_deref() {
                 Some("WinAnsiEncoding") => win_ansi(),
@@ -1104,7 +1321,9 @@ pub(crate) mod encoding {
                 for item in diffs {
                     match item {
                         Object::Integer(_) | Object::Real(_) => {
-                            code = num(item).unwrap_or(0.0) as u32;
+                            // Clamp negatives to 0 to match outlines.rs's
+                            // /Differences parser, which does `n.max(0)`.
+                            code = num(item).unwrap_or(0.0).max(0.0) as u32;
                         }
                         Object::Name(name) => {
                             if let Some(c) = glyph_to_char(&String::from_utf8_lossy(name)) {
@@ -1117,7 +1336,20 @@ pub(crate) mod encoding {
                 }
             }
         }
-        map
+        (map, builtin_first)
+    }
+
+    /// FontDescriptor `/Flags` bit 3 (value 4) = Symbolic (PDF 9.8.2, Table 121).
+    fn is_symbolic(doc: &Document, font: &lopdf::Dictionary) -> bool {
+        font.get(b"FontDescriptor")
+            .ok()
+            .and_then(|o| deref(doc, o))
+            .and_then(|o| o.as_dict().ok())
+            .and_then(|d| d.get(b"Flags").ok())
+            .and_then(|o| deref(doc, o))
+            .and_then(num)
+            .map(|f| (f as i64) & 4 != 0)
+            .unwrap_or(false)
     }
 
     /// Resolve an Adobe glyph name to a Unicode scalar. Handles `uniXXXX`,
@@ -1406,6 +1638,204 @@ mod type1_tests {
         assert_eq!(m.get(&97), Some(&'a'));
         assert_eq!(m.get(&233), Some(&'\u{00E9}'));
     }
+
+    #[test]
+    fn rksj_codespace_segments_mixed_width_codes() {
+        // 90ms-RKSJ-H interleaves 1-byte and 2-byte codes. Decoding as fixed
+        // 2-byte codes would pair 'A' with the kanji lead byte and desynchronize
+        // the rest of the string.
+        let cs = cmap::predefined_codespace("90ms-RKSJ-H").expect("RKSJ recognized");
+        let cm = cmap::EncodingCMap { codespace: cs, ..Default::default() };
+        assert_eq!(cm.code_len(b'A'), 1, "ASCII is single-byte");
+        assert_eq!(cm.code_len(0x82), 2, "kanji lead byte is double-byte");
+        assert_eq!(cm.code_len(0xB0), 1, "half-width katakana is single-byte");
+        assert_eq!(cm.code_len(0xE0), 2, "second kanji lead range is double-byte");
+    }
+
+    #[test]
+    fn ucs2_cmaps_are_not_given_a_codespace() {
+        // Pure 2-byte families already decode correctly via the Identity path.
+        assert!(cmap::predefined_codespace("UniJIS-UCS2-H").is_none());
+        assert!(cmap::predefined_codespace("UniGB-UCS2-H").is_none());
+        assert!(cmap::predefined_codespace("UniKS-UCS2-H").is_none());
+        assert!(cmap::predefined_codespace("Identity-H").is_none());
+        assert!(cmap::predefined_codespace("Identity-V").is_none());
+        // The ISO-2022 families are <2121>-<7E7E>, i.e. pure 2-byte.
+        assert!(cmap::predefined_codespace("Add-H").is_none());
+        assert!(cmap::predefined_codespace("Ext-V").is_none());
+    }
+
+    #[test]
+    fn mixed_width_cmap_families_are_recognized() {
+        // Each of these has 1-byte ranges alongside its 2-byte ranges, so a fixed
+        // 2-byte decode desynchronizes the byte stream (PDF 9.7.6.2).
+        let len = |name: &str, b: u8| {
+            let cs = cmap::predefined_codespace(name).unwrap_or_else(|| panic!("{name} recognized"));
+            cmap::EncodingCMap { codespace: cs, ..Default::default() }.code_len(b)
+        };
+        // Big5, GBK, EUC-CN, UHC, EUC-KR: ASCII single-byte, lead byte double.
+        for (name, lead) in [
+            ("ETen-B5-H", 0xA1u8),
+            ("B5pc-H", 0xA1),
+            ("GBK-EUC-H", 0x81),
+            ("GB-EUC-H", 0xA1),
+            ("GBpc-EUC-V", 0xA1),
+            ("KSCms-UHC-H", 0x81),
+            ("KSC-EUC-H", 0x81),
+            ("KSCpc-EUC-H", 0x81),
+        ] {
+            assert_eq!(len(name, b'A'), 1, "{name}: ASCII must be single-byte");
+            assert_eq!(len(name, lead), 2, "{name}: lead byte must be double-byte");
+        }
+        // Japanese EUC: 1-byte ASCII, 2-byte for both the 0x8E single-shift form
+        // and the standard 0xA1.. plane.
+        assert_eq!(len("EUC-H", b'A'), 1);
+        assert_eq!(len("EUC-H", 0x8E), 2);
+        assert_eq!(len("EUC-H", 0xA1), 2);
+    }
+
+    #[test]
+    fn utf8_and_utf16_cmaps_segment_by_lead_byte() {
+        // UniJIS-UTF8-H etc. are 1-4 bytes; a fixed 2-byte read desynchronizes on
+        // the first ASCII character.
+        let cs = cmap::predefined_codespace("UniJIS-UTF8-H").expect("UTF8 recognized");
+        let cm = cmap::EncodingCMap { codespace: cs, ..Default::default() };
+        assert_eq!(cm.code_len(b'A'), 1);
+        assert_eq!(cm.code_len(0xC3), 2);
+        assert_eq!(cm.code_len(0xE3), 3);
+        assert_eq!(cm.code_len(0xF0), 4);
+        // UTF-16 is 2 bytes except surrogate pairs, which are 4.
+        let cs = cmap::predefined_codespace("UniGB-UTF16-H").expect("UTF16 recognized");
+        let cm = cmap::EncodingCMap { codespace: cs, ..Default::default() };
+        assert_eq!(cm.code_len(0x00), 2);
+        assert_eq!(cm.code_len(0xD8), 4, "high surrogate starts a 4-byte code");
+        assert_eq!(cm.code_len(0xE0), 2);
+    }
+
+    #[test]
+    fn for_each_code_resegments_a_mixed_width_string() {
+        // End-to-end: the whole point of the codespace is that a 1-byte code in
+        // the middle of a CJK string does not shift every following code by one
+        // byte. "A" + 2-byte kanji + "B" must yield exactly three codes.
+        let cs = cmap::predefined_codespace("90ms-RKSJ-H").unwrap();
+        let fi = FontInfo {
+            two_byte: true,
+            cmap: Some(cmap::EncodingCMap { codespace: cs, ..Default::default() }),
+            ..simple_font_with_encoding()
+        };
+        let mut got = Vec::new();
+        fi.for_each_code(&[0x41, 0x82, 0xA0, 0x42], |c, sp| got.push((c, sp)));
+        assert_eq!(got, vec![(0x41, false), (0x82A0, false), (0x42, false)]);
+        // A single-byte code 32 still reports as a word-spacing space, and a
+        // 2-byte code whose value happens to be 0x20 does not (PDF 9.3.3).
+        let mut spaces = Vec::new();
+        fi.for_each_code(&[0x20, 0x82, 0x20], |c, sp| spaces.push((c, sp)));
+        assert_eq!(spaces, vec![(0x20, true), (0x8220, false)]);
+    }
+
+    #[test]
+    fn w_range_form_cannot_allocate_unbounded_widths() {
+        // A hostile `cLast` must not drive a multi-billion-iteration insert loop.
+        let mut doc = Document::new();
+        let desc = doc.add_object(lopdf::dictionary! {
+            "Type" => "Font",
+            "Subtype" => "CIDFontType2",
+            "W" => vec![0.into(), 4_000_000_000u32.into(), 500.into()],
+        });
+        let font = lopdf::dictionary! {
+            "Type" => "Font",
+            "Subtype" => "Type0",
+            "DescendantFonts" => vec![desc.into()],
+        };
+        let (widths, _) = cid_widths(&doc, &font);
+        assert!(widths.len() <= MAX_CID as usize + 1);
+        assert_eq!(widths.get(&0), Some(&0.5));
+        assert_eq!(widths.get(&MAX_CID), Some(&0.5));
+    }
+
+    #[test]
+    fn bfrange_cannot_allocate_unbounded_strings() {
+        // A 4-byte `hi` in a bfrange must be clamped, not expanded to 4 billion
+        // entries.
+        let map = cmap::parse(b"1 beginbfrange\n<00000000> <FFFFFFFF> <0041>\nendbfrange");
+        assert!(map.len() <= MAX_CID as usize + 1);
+        assert_eq!(map.get(&0).map(String::as_str), Some("A"));
+    }
+
+    #[test]
+    fn tw_applies_only_to_single_byte_code_32() {
+        // PDF 9.3.3: Tw applies to code 32 and nothing else -- notably not NBSP,
+        // which must not stretch under justification.
+        let fi = simple_font_with_encoding();
+        let mut seen = Vec::new();
+        fi.for_each_code(&[32, 0xA0, b'A'], |code, is_space| seen.push((code, is_space)));
+        assert_eq!(seen, vec![(32, true), (0xA0, false), (65, false)]);
+    }
+
+    #[test]
+    fn font_cache_shares_parsed_fonts_only_inside_a_scope() {
+        // The cache exists because `fonts_from_resources` runs per page and
+        // re-parses each font's embedded program every time. Assert on Arc
+        // identity rather than on equality: equal contents would also hold if the
+        // font had been re-parsed, which is exactly the bug being fixed.
+        let mut doc = Document::with_version("1.7");
+        let tu = doc.add_object(Stream::new(
+            dictionary! {},
+            b"1 beginbfchar\n<41> <0041>\nendbfchar".to_vec(),
+        ));
+        let font = doc.add_object(dictionary! {
+            "Type" => "Font",
+            "Subtype" => "TrueType",
+            "BaseFont" => "Helvetica",
+            "ToUnicode" => tu,
+        });
+        let res = dictionary! { "Font" => dictionary! { "F1" => font } };
+
+        // No scope active: the default must stay uncached, so nothing can ever go
+        // stale in a mutated document.
+        let a = fonts_from_resources(&doc, &res);
+        let b = fonts_from_resources(&doc, &res);
+        let (au, bu) = (
+            a[b"F1".as_ref()].to_unicode.as_ref().unwrap(),
+            b[b"F1".as_ref()].to_unicode.as_ref().unwrap(),
+        );
+        assert_eq!(au.get(&0x41).map(String::as_str), Some("A"), "parse still works");
+        assert!(!Arc::ptr_eq(au, bu), "must not cache without an active scope");
+
+        // Inside a scope the second lookup reuses the first parse.
+        let _scope = FontCacheScope::new();
+        let c = fonts_from_resources(&doc, &res);
+        let d = fonts_from_resources(&doc, &res);
+        assert!(
+            Arc::ptr_eq(
+                c[b"F1".as_ref()].to_unicode.as_ref().unwrap(),
+                d[b"F1".as_ref()].to_unicode.as_ref().unwrap()
+            ),
+            "font should be parsed once per scope"
+        );
+    }
+
+    fn simple_font_with_encoding() -> FontInfo {
+        FontInfo {
+            two_byte: false,
+            wmode: 0,
+            vertical_metrics: HashMap::new(),
+            default_vertical: (0.880, -1.0),
+            cid_to_gid: None,
+            to_unicode: None,
+            encoding: encoding::win_ansi(),
+            cmap_uni: HashMap::new(),
+            cmap: None,
+            widths: HashMap::new(),
+            default_width: 0.5,
+            t3: None,
+            style: FontStyle::default(),
+            family: 0,
+            base_font: String::new(),
+            glyph_program: None,
+            glyph_names: HashMap::new(),
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1460,6 +1890,10 @@ pub(crate) mod cmap {
                         match (tokens.get(i), tokens.get(i + 1), tokens.get(i + 2)) {
                             (Some(Token::Hex(lo)), Some(Token::Hex(hi)), Some(Token::Hex(dst))) => {
                                 let (lo, hi) = (code(lo), code(hi));
+                                // A single bfrange cannot sanely span more than the
+                                // 16-bit code space; clamp so a corrupt 4-byte `hi`
+                                // cannot allocate billions of strings.
+                                let hi = hi.min(lo.saturating_add(super::MAX_CID));
                                 let base = utf16be_units(dst);
                                 for (n, c) in (lo..=hi).enumerate() {
                                     map.insert(c, units_to_string_incremented(&base, n as u32));
@@ -1557,9 +1991,81 @@ pub(crate) mod cmap {
         c
     }
 
+    /// Codespace ranges for the predefined mixed-width CMap families (PDF 9.7.5.2,
+    /// Table 118). These interleave 1-byte and 2-byte codes, so decoding them as
+    /// fixed 2-byte codes desynchronizes the byte stream for the rest of the
+    /// string. The CID mapping itself still needs the real compiled table, but
+    /// getting the segmentation right makes `/ToUnicode` (which is keyed by CODE)
+    /// resolve correctly, which is what most such files rely on.
+    ///
+    /// Returning `None` means "fixed 2-byte", which is right for Identity-H/V,
+    /// the `Uni*-UCS2-*` families, and the pure-2-byte ISO-2022 families
+    /// (`H`, `V`, `Add-H`, `Ext-H`, whose codespace is <2121>-<7E7E>).
+    pub fn predefined_codespace(name: &str) -> Option<Vec<(u32, u32, u8)>> {
+        // UTF-8 (UniJIS-UTF8-H, UniGB-UTF8-H, UniCNS-UTF8-H, UniKS-UTF8-H): 1-4
+        // bytes, so a fixed 2-byte read desynchronizes on the very first ASCII
+        // character. Checked before the region families because the names
+        // overlap (e.g. "UniGB-UTF8-H" also contains "GB").
+        if name.contains("UTF8") {
+            return Some(vec![
+                (0x00, 0x7F, 1),
+                (0xC080, 0xDFBF, 2),
+                (0xE08080, 0xEFBFBF, 3),
+                (0xF0808080, 0xF7BFBFBF, 4),
+            ]);
+        }
+        // UTF-16: 2 bytes, except surrogate pairs which are 4.
+        if name.contains("UTF16") {
+            return Some(vec![
+                (0x0000, 0xD7FF, 2),
+                (0xD800DC00, 0xDBFFDFFF, 4),
+                (0xE000, 0xFFFF, 2),
+            ]);
+        }
+        // Shift-JIS: 90ms-RKSJ-H, 90msp-RKSJ-V, 90pv-RKSJ-H, Add-RKSJ-H, Ext-RKSJ-H
+        if name.contains("RKSJ") {
+            return Some(vec![
+                (0x00, 0x80, 1),
+                (0x8140, 0x9FFC, 2),
+                (0xA0, 0xDF, 1),
+                (0xE040, 0xFCFC, 2),
+            ]);
+        }
+        // Japanese EUC: EUC-H, EUC-V. The 0x8E single-shift form is a 2-byte code.
+        if name.starts_with("EUC-") {
+            return Some(vec![(0x00, 0x80, 1), (0x8EA0, 0x8EFE, 2), (0xA1A1, 0xFEFE, 2)]);
+        }
+        // GBK: GBK-EUC-H, GBKp-EUC-H, GBK2K-H
+        //
+        // GBK2K-H (GB18030) additionally has a 4-byte plane whose codes are
+        // distinguished from 2-byte codes only by the SECOND byte (0x30-0x39),
+        // which `code_len` cannot see — it dispatches on the first byte alone.
+        // Those codes therefore still mis-segment. Left as-is deliberately: the
+        // 1- and 2-byte planes cover essentially all real GBK2K content, and
+        // widening `code_len` to a multi-byte lookahead would change
+        // `for_each_code` for every font to fix a rare case.
+        if name.contains("GBK") {
+            return Some(vec![(0x00, 0x80, 1), (0x8140, 0xFEFE, 2)]);
+        }
+        // EUC-CN: GB-EUC-H, GBpc-EUC-H (checked after GBK, whose names also
+        // contain "GB").
+        if name.contains("GB") && name.contains("EUC") {
+            return Some(vec![(0x00, 0x80, 1), (0xA1A1, 0xFEFE, 2)]);
+        }
+        // Big5: ETen-B5-H, ETenms-B5-H, B5pc-H, HKscs-B5-H
+        if name.contains("-B5") || name.starts_with("B5") {
+            return Some(vec![(0x00, 0x80, 1), (0xA140, 0xFEFE, 2)]);
+        }
+        // Korean UHC / EUC-KR: KSCms-UHC-H, KSCms-UHC-HW-V, KSC-EUC-H, KSCpc-EUC-H
+        if name.contains("UHC") || name.contains("KSC") {
+            return Some(vec![(0x00, 0x80, 1), (0x8141, 0xFEFE, 2)]);
+        }
+        None
+    }
+
     /// A Type0 `/Encoding` CMap: variable-length codespace ranges plus code->CID
     /// mappings (from `begincidrange`/`begincidchar`), and the writing mode.
-    #[derive(Default)]
+    #[derive(Default, Clone)]
     pub struct EncodingCMap {
         /// (lo, hi, byte_len) codespace ranges.
         pub codespace: Vec<(u32, u32, u8)>,
@@ -1626,7 +2132,9 @@ pub(crate) mod cmap {
             } else if b.is_ascii_alphabetic() || b == b'/' {
                 let s = i;
                 i += 1;
-                while i < data.len() && (data[i].is_ascii_alphanumeric() || data[i] == b'/' || data[i] == b'.') { i += 1; }
+                // '-' is part of predefined CMap names (`/90ms-RKSJ-H usecmap`), so
+                // it must not terminate the token.
+                while i < data.len() && (data[i].is_ascii_alphanumeric() || data[i] == b'/' || data[i] == b'.' || data[i] == b'-') { i += 1; }
                 toks.push(T::Kw(String::from_utf8_lossy(&data[s..i]).into_owned()));
             } else {
                 i += 1;
@@ -1636,6 +2144,27 @@ pub(crate) mod cmap {
         let mut j = 0;
         while j < toks.len() {
             match &toks[j] {
+                // `/SomeCMap usecmap` inherits the referenced CMap. Only a
+                // predefined name can be inherited here (an embedded one would have
+                // to be reachable through the stream's own /UseCMap, which lopdf
+                // does not hand us), and only its codespace ranges are recoverable,
+                // so inherit those and let this stream's own ranges override.
+                T::Kw(k) if k == "usecmap" => {
+                    if let Some(T::Kw(name)) = j.checked_sub(1).and_then(|p| toks.get(p)) {
+                        let base = name.trim_start_matches('/');
+                        if let Some(cs) = predefined_codespace(base) {
+                            for r in cs {
+                                if !cm.codespace.contains(&r) {
+                                    cm.codespace.push(r);
+                                }
+                            }
+                        }
+                        if base.ends_with("-V") {
+                            cm.wmode = 1;
+                        }
+                    }
+                    j += 1;
+                }
                 T::Kw(k) if k == "/WMode" => {
                     if let Some(T::Int(w)) = toks.get(j + 1) { cm.wmode = if *w >= 1 { 1 } else { 0 }; }
                     j += 1;

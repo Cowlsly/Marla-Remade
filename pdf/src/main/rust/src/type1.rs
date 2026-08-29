@@ -89,6 +89,22 @@ fn find_from(hay: &[u8], needle: &[u8], start: usize) -> Option<usize> {
     find(&hay[start..], needle).map(|p| p + start)
 }
 
+/// Find a whitespace-delimited PostScript token. Searching for a bare `end`
+/// substring would match inside a glyph name such as `/endash`.
+fn find_token(hay: &[u8], tok: &[u8], start: usize) -> Option<usize> {
+    let mut at = start;
+    while let Some(p) = find_from(hay, tok, at) {
+        let before_ok = p == 0 || hay[p - 1].is_ascii_whitespace();
+        let after = p + tok.len();
+        let after_ok = after >= hay.len() || hay[after].is_ascii_whitespace();
+        if before_ok && after_ok {
+            return Some(p);
+        }
+        at = p + 1;
+    }
+    None
+}
+
 /// Parse `n` decimal integer tokens starting at/after `pos`, returning them with
 /// the index just past the last one consumed.
 fn read_int(data: &[u8], mut i: usize) -> Option<(i64, usize)> {
@@ -292,7 +308,7 @@ fn parse_private(dec: &[u8]) -> (Vec<Vec<u8>>, HashMap<String, Vec<u8>>) {
                 None => {
                     i = je;
                     // `end` closes the dict.
-                    if let Some(ep) = find_from(dec, b"end", cp) {
+                    if let Some(ep) = find_token(dec, b"end", cp) {
                         if slash > ep {
                             break;
                         }
@@ -637,7 +653,7 @@ impl<'a> Interp<'a> {
 
     /// seac: compose an accented glyph from base `bchar` + accent `achar`, both
     /// referenced by StandardEncoding code.
-    fn seac(&mut self, out: &mut ContourBuilder, _asb: f64, adx: f64, ady: f64, bchar: i32, achar: i32) {
+    fn seac(&mut self, out: &mut ContourBuilder, asb: f64, adx: f64, ady: f64, bchar: i32, achar: i32) {
         let bname = std_name(bchar);
         let aname = std_name(achar);
         if let Some(name) = bname {
@@ -659,22 +675,30 @@ impl<'a> Interp<'a> {
         }
         if let Some(name) = aname {
             if let Some(cs) = self.glyphs.get(name).cloned() {
+                // The accent's own `hsbw` resets the current point to its side
+                // bearing, so seeding x/y here cannot place it. Interpret the
+                // accent at its natural origin, then translate the finished
+                // contours by `sbx + adx - asb` / `ady`: per TN #5015 `asb` is the
+                // accent's own side bearing, which its `hsbw` re-applies, so it
+                // must be subtracted out.
+                let dx = self.sbx + adx - asb;
+                let mut acc = ContourBuilder::new();
                 let mut sub = Interp {
                     stack: Vec::new(),
                     ps_stack: Vec::new(),
-                    x: self.sbx + adx,
-                    y: ady,
-                    sbx: self.sbx + adx,
+                    x: 0.0,
+                    y: 0.0,
+                    sbx: 0.0,
                     flex_pts: Vec::new(),
                     in_flex: false,
                     subrs: self.subrs,
                     glyphs: self.glyphs,
                     depth: self.depth,
                 };
-                // Accent glyphs start with hsbw which resets x; offset via translate:
-                // simplest is to run and then it will start at its own sbx; to place it
-                // at adx we rely on the accent's own sidebearing plus adx. Set origin.
-                sub.exec(&cs, out);
+                sub.exec(&cs, &mut acc);
+                for c in acc.finish() {
+                    out.add_contour(c.into_iter().map(|(px, py)| (px + dx, py + ady)).collect());
+                }
             }
         }
     }
@@ -740,3 +764,80 @@ pub(crate) static STANDARD_ENCODING: &[(u8, &str)] = &[
     (227, "ordfeminine"), (232, "Lslash"), (233, "Oslash"), (234, "OE"), (235, "ordmasculine"),
     (241, "ae"), (245, "dotlessi"), (248, "lslash"), (249, "oslash"), (250, "oe"), (251, "germandbls"),
 ];
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Type 1 charstring number encoding (Adobe Type 1 Font Format 6.2).
+    fn n(v: i32) -> Vec<u8> {
+        if (-107..=107).contains(&v) {
+            vec![(v + 139) as u8]
+        } else if (108..=1131).contains(&v) {
+            let d = v - 108;
+            vec![(247 + d / 256) as u8, (d % 256) as u8]
+        } else if (-1131..=-108).contains(&v) {
+            let d = -v - 108;
+            vec![(251 + d / 256) as u8, (d % 256) as u8]
+        } else {
+            let b = v.to_be_bytes();
+            vec![255, b[0], b[1], b[2], b[3]]
+        }
+    }
+
+    #[test]
+    fn flex_emits_one_contour_and_leaves_the_current_point_correct() {
+        // OtherSubrs 1/2/0 flex (Adobe Type 1 Font Format 8.3). The seven
+        // rmovetos are reference points, NOT contour starts, and OtherSubr 0
+        // returns the end point for the trailing `pop pop setcurrentpoint`.
+        // Getting either wrong restarts the contour seven times and corrupts the
+        // current point, damaging every segment drawn after the flex.
+        let mut cs: Vec<u8> = Vec::new();
+        cs.extend(n(0));
+        cs.extend(n(500));
+        cs.push(13); // hsbw
+        cs.extend(n(0));
+        cs.extend(n(0));
+        cs.push(21); // rmoveto -> contour starts at (0, 0)
+        cs.extend(n(0));
+        cs.extend(n(1));
+        cs.extend([12, 16]); // 0 1 callothersubr -> begin flex
+        for (dx, dy) in [(50, 50), (10, 10), (10, 10), (10, -10), (10, -10), (10, 10), (10, 10)] {
+            cs.extend(n(dx));
+            cs.extend(n(dy));
+            cs.push(21); // rmoveto -> reference point
+            cs.extend(n(0));
+            cs.extend(n(2));
+            cs.extend([12, 16]); // 0 2 callothersubr -> collect
+        }
+        cs.extend(n(50)); // flex depth
+        cs.extend(n(110)); // end x
+        cs.extend(n(70)); // end y
+        cs.extend(n(3));
+        cs.extend(n(0));
+        cs.extend([12, 16]); // 3 0 callothersubr -> end flex
+        cs.extend([12, 17, 12, 17, 12, 33]); // pop pop setcurrentpoint
+        cs.extend(n(10));
+        cs.extend(n(0));
+        cs.push(5); // rlineto -> (120, 70), proves the pen survived the flex
+        cs.push(14); // endchar
+
+        let mut cb = ContourBuilder::new();
+        run_charstring(&cs, &[], &HashMap::new(), &mut cb);
+        let contours = cb.finish();
+
+        assert_eq!(contours.len(), 1, "flex must not start new contours");
+        let c = &contours[0];
+        assert_eq!(c.first().copied(), Some((0.0, 0.0)));
+        let last = *c.last().unwrap();
+        assert!(
+            (last.0 - 120.0).abs() < 1e-6 && (last.1 - 70.0).abs() < 1e-6,
+            "trailing rlineto ended at {last:?}, expected (120, 70)"
+        );
+        // The join between the two cubics is the flex midpoint, reference point 3.
+        assert!(
+            c.iter().any(|&(x, y)| (x - 80.0).abs() < 1e-6 && (y - 60.0).abs() < 1e-6),
+            "first flex curve must end at (80, 60)"
+        );
+    }
+}

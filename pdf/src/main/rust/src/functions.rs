@@ -22,6 +22,13 @@ const MAX_PS_STEPS: usize = 5_000_000;
 const MAX_PS_DEPTH: u32 = 64;
 /// Cap on total sampled-function bytes we will hold / interpolate.
 const MAX_SAMPLED_BYTES: usize = 64 * 1024 * 1024;
+/// Cap on a sampled function's input arity. `eval_sampled` interpolates over
+/// `2^m` grid corners per evaluation and runs once per pixel for a shading, so an
+/// unbounded `m` taken from `/Size` is a hang. Real-world m is 1 or 2 (7.10.2).
+const MAX_SAMPLED_INPUTS: usize = 8;
+/// Cap on a function's output arity, so a bogus `/Range` cannot make every
+/// evaluation allocate an absurd vector.
+const MAX_FN_OUTPUTS: usize = 32;
 
 #[derive(Clone)]
 pub(crate) enum PdfFunction {
@@ -135,6 +142,20 @@ impl PdfFunction {
                 if size.is_empty() || range.is_empty() || domain_pairs.is_empty() {
                     return None;
                 }
+                // 7.10.2 Table 39: BitsPerSample shall be one of these. An
+                // out-of-set value (notably 0) makes the sample normaliser divide
+                // by zero, and the resulting NaN survives the Range clamp and
+                // poisons every output component.
+                if !matches!(bps, 1 | 2 | 4 | 8 | 12 | 16 | 24 | 32) {
+                    return None;
+                }
+                // Guard the 2^m corner interpolation and the flattened index maths.
+                if size.len() > MAX_SAMPLED_INPUTS || range.len() > MAX_FN_OUTPUTS {
+                    return None;
+                }
+                if size.iter().any(|s| *s == 0) {
+                    return None;
+                }
                 let n_in = size.len();
                 let n_out = range.len();
                 let encode = {
@@ -162,14 +183,21 @@ impl PdfFunction {
                 })
             }
             2 => {
-                let c0 = {
-                    let v = read_floats(dict.get(b"C0").ok());
-                    if v.is_empty() { vec![0.0] } else { v }
-                };
-                let c1 = {
-                    let v = read_floats(dict.get(b"C1").ok());
-                    if v.is_empty() { vec![1.0] } else { v }
-                };
+                let mut c0 = read_floats(dict.get(b"C0").ok());
+                let mut c1 = read_floats(dict.get(b"C1").ok());
+                if c0.is_empty() { c0 = vec![0.0]; }
+                if c1.is_empty() { c1 = vec![1.0]; }
+                // j is over-determined: 7.10.3 Table 40 makes C0/C1 arrays of j
+                // numbers, and Table 38 requires /Range (when present) to hold 2*j
+                // entries. Materialise all of them at the widest arity so the scalar
+                // C0/C1 defaults broadcast, instead of pinning j to 1 and handing
+                // the target colour space too few components. The padding values are
+                // the same per-index defaults `eval` already applied, so this is a
+                // no-op for every well-formed function.
+                let range_j = read_pairs(dict.get(b"Range").ok()).len();
+                let j = c0.len().max(c1.len()).max(range_j).min(MAX_FN_OUTPUTS);
+                c0.resize(j, 0.0);
+                c1.resize(j, 1.0);
                 let n = dict.get(b"N").ok().and_then(num).unwrap_or(1.0);
                 let domain = domain_pairs.first().copied().unwrap_or([0.0, 1.0]);
                 Some(PdfFunction::Exponential { domain, c0, c1, n })
@@ -180,6 +208,13 @@ impl PdfFunction {
                 let mut functions = Vec::new();
                 for o in funcs_arr {
                     functions.push(PdfFunction::parse(doc, o)?);
+                }
+                // An empty /Functions array would make `eval` return an empty
+                // vector, which downstream colour code cannot distinguish from a
+                // one-component result. Reject it here so a parse failure is
+                // reported as None instead.
+                if functions.is_empty() {
+                    return None;
                 }
                 let bounds = read_floats(dict.get(b"Bounds").ok());
                 let encode = read_pairs(dict.get(b"Encode").ok());
@@ -201,7 +236,15 @@ impl PdfFunction {
         match self {
             PdfFunction::Exponential { domain, c0, c1, n } => {
                 let t = inputs.first().copied().unwrap_or(0.0).clamp(domain[0], domain[1]);
-                let tn = if *n == 1.0 { t } else { t.powf(*n) };
+                // 7.10.3 constrains Domain so that t^N is defined, but a malformed
+                // file can still reach negative t with a non-integer N, which gives
+                // NaN and would poison every output component.
+                let tn = if *n == 1.0 {
+                    t
+                } else {
+                    let p = t.powf(*n);
+                    if p.is_finite() { p } else { 0.0 }
+                };
                 let len = c0.len().max(c1.len());
                 (0..len)
                     .map(|i| {
@@ -271,6 +314,29 @@ impl PdfFunction {
         }
     }
 
+    /// Sample a one-in/one-out function into a 256-entry lookup table over the input
+    /// range [0,1], with both index and value in 0..=255.
+    ///
+    /// This is the form a transfer function has to take to be usable per-pixel: it is
+    /// evaluated once here instead of once per mask sample, and it can be carried over
+    /// the wire and applied by a GPU shader or a bitmap remap, neither of which can run
+    /// a PostScript calculator. Only the FIRST output component is used, which is what
+    /// §11.6.5.2's `/TR` and §11.7.4's transfer functions specify.
+    pub(crate) fn to_lut256(&self) -> [u8; 256] {
+        let mut lut = [0u8; 256];
+        for (i, slot) in lut.iter_mut().enumerate() {
+            let v = self.eval(&[i as f64 / 255.0]).first().copied().unwrap_or(0.0);
+            // A NaN from a malformed function must not become an arbitrary byte;
+            // `clamp` propagates NaN, so test for it explicitly.
+            *slot = if v.is_finite() {
+                (v.clamp(0.0, 1.0) * 255.0).round() as u8
+            } else {
+                i as u8
+            };
+        }
+        lut
+    }
+
     fn eval_sampled(&self, inputs: &[f64]) -> Vec<f64> {
         let (domain, range, size, bps, encode, decode, samples, n_in, n_out) = match self {
             PdfFunction::Sampled {
@@ -319,9 +385,23 @@ impl PdfFunction {
             // Flatten grid index (first dimension varies fastest per spec).
             let mut flat = 0usize;
             let mut stride = 1usize;
+            let mut ok = true;
             for i in 0..n_in {
-                flat += grid[i] * stride;
-                stride *= size[i].max(1);
+                match grid[i].checked_mul(stride).and_then(|v| flat.checked_add(v)) {
+                    Some(f) => flat = f,
+                    None => { ok = false; break; }
+                }
+                // Only advance the stride when another dimension follows, so a
+                // harmless overflow on the final axis cannot discard a valid corner.
+                if i + 1 < n_in {
+                    match stride.checked_mul(size[i].max(1)) {
+                        Some(s) => stride = s,
+                        None => { ok = false; break; }
+                    }
+                }
+            }
+            if !ok {
+                continue;
             }
             for (j, o) in out.iter_mut().enumerate() {
                 let sample_idx = flat * n_out + j;
@@ -341,9 +421,16 @@ impl PdfFunction {
     }
 }
 
-/// Read the `idx`-th packed sample of `bps` bits (big-endian bit order).
+/// Read the `idx`-th packed sample of `bps` bits (big-endian bit order). Returns
+/// 0 when the sample lies wholly or partly past the end of `data`: a truncated
+/// sample stream must not yield a partially-shifted value, which looks plausible
+/// but is wrong.
 fn read_sample(data: &[u8], idx: usize, bps: u32) -> f64 {
     let bit_pos = idx as u64 * bps as u64;
+    let end_bit = bit_pos + bps as u64;
+    if end_bit > (data.len() as u64).saturating_mul(8) {
+        return 0.0;
+    }
     let mut value: u64 = 0;
     for b in 0..bps as u64 {
         let bit = bit_pos + b;
@@ -634,6 +721,30 @@ fn exec_ps_op(op: PsOp, stack: &mut Vec<PsVal>, steps: &mut usize, depth: u32) -
     Some(())
 }
 
+/// Read a transfer function entry (`/TR` in an ExtGState soft-mask dictionary,
+/// §11.6.5.2) as a 256-entry lookup table, or `None` when it has no effect.
+///
+/// §11.6.5.2 requires the mask value to pass THROUGH `/TR` before it is used as the
+/// alpha. Ignoring it is not merely imprecise: an inverting `/TR` (`{ 1 exch sub }`, or
+/// a Type 2 with `/C0 [1] /C1 [0]`) is the standard idiom for "mask out where the group
+/// is bright", so with one present we hide exactly the wrong half of the content.
+///
+/// `None` is returned for `/Identity`, for an unparseable function, and for any function
+/// whose sampled table is within one 8-bit step of the identity everywhere — the
+/// overwhelmingly common case, which callers should not pay to carry or apply.
+pub(crate) fn read_transfer_lut(doc: &Document, obj: &Object) -> Option<[u8; 256]> {
+    if let Some(Object::Name(n)) = deref(doc, obj) {
+        if n.as_slice() == b"Identity" || n.as_slice() == b"Default" {
+            return None;
+        }
+    }
+    let lut = PdfFunction::parse(doc, obj)?.to_lut256();
+    if lut.iter().enumerate().all(|(i, v)| v.abs_diff(i as u8) <= 1) {
+        return None;
+    }
+    Some(lut)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -700,5 +811,144 @@ mod tests {
         // input 0.0 -> 2*0-1 = -1 < 0 -> 0
         let out2 = eval_ps(&prog, &[0.0]).unwrap();
         assert!((out2[0] - 0.0).abs() < 1e-9);
+    }
+
+    // A truncated sample stream must read as 0, not as a partially shifted value
+    // that looks like a plausible sample.
+    #[test]
+    fn read_sample_past_end_is_zero() {
+        let data = [0xFFu8]; // one byte = one 8-bit sample
+        assert!((read_sample(&data, 0, 8) - 255.0).abs() < 1e-9);
+        assert_eq!(read_sample(&data, 1, 8), 0.0, "sample past the end reads 0");
+        // A 16-bit sample straddling the end must also read 0, not 0xFF00.
+        assert_eq!(read_sample(&data, 0, 16), 0.0, "partial sample reads 0");
+    }
+
+    // A Type 2 whose C0/C1 are absent must broadcast its scalar defaults to the
+    // arity implied by /Range (7.10.3 Table 40 + Table 38), otherwise a spot colour
+    // over a 4-component alternate space receives one component and degrades.
+    #[test]
+    fn exponential_broadcasts_defaults_to_range_arity() {
+        let mut doc = Document::with_version("1.7");
+        let id = doc.add_object(dictionary! {
+            "FunctionType" => 2,
+            "Domain" => vec![0.into(), 1.into()],
+            "N" => 1,
+            // 4 pairs => j = 4, with no C0/C1 given.
+            "Range" => vec![0.into(), 1.into(), 0.into(), 1.into(),
+                            0.into(), 1.into(), 0.into(), 1.into()],
+        });
+        let f = PdfFunction::parse(&doc, &Object::Reference(id)).expect("type 2 parses");
+        let out = f.eval(&[0.5]);
+        assert_eq!(out.len(), 4, "arity comes from /Range when C0/C1 are absent");
+        for v in &out {
+            assert!((v - 0.5).abs() < 1e-9, "each component ramps 0 -> 1");
+        }
+    }
+
+    // /BitsPerSample outside Table 39's set is rejected at parse. bps == 0 used to
+    // divide by zero and produce NaN components that survived the Range clamp.
+    #[test]
+    fn sampled_rejects_illegal_bits_per_sample() {
+        let mk = |bps: i64| {
+            let mut doc = Document::with_version("1.7");
+            let id = doc.add_object(Stream::new(
+                dictionary! {
+                    "FunctionType" => 0,
+                    "Domain" => vec![0.into(), 1.into()],
+                    "Range" => vec![0.into(), 1.into()],
+                    "Size" => vec![2.into()],
+                    "BitsPerSample" => bps,
+                },
+                vec![0u8, 255u8],
+            ));
+            PdfFunction::parse(&doc, &Object::Reference(id)).is_some()
+        };
+        assert!(mk(8), "8 bps is legal");
+        assert!(!mk(0), "0 bps must be rejected");
+        assert!(!mk(5), "5 bps is not in Table 39");
+    }
+
+    // A sampled function's input arity is taken from /Size and drives a 2^m corner
+    // loop per evaluation, so an absurd /Size must be rejected rather than hang.
+    #[test]
+    fn sampled_rejects_absurd_input_arity() {
+        let mut doc = Document::with_version("1.7");
+        let size: Vec<Object> = (0..32).map(|_| Object::Integer(2)).collect();
+        let id = doc.add_object(Stream::new(
+            dictionary! {
+                "FunctionType" => 0,
+                "Domain" => vec![0.into(), 1.into()],
+                "Range" => vec![0.into(), 1.into()],
+                "Size" => size,
+                "BitsPerSample" => 8,
+            },
+            vec![0u8; 64],
+        ));
+        assert!(
+            PdfFunction::parse(&doc, &Object::Reference(id)).is_none(),
+            "32 input dimensions would mean 2^32 corner evaluations per call"
+        );
+    }
+
+    // §11.6.5.2: an INVERTING /TR is the standard idiom for "mask out where the group is
+    // bright", so it must survive sampling into the LUT exactly. Ignoring it hides the
+    // wrong half of the content, which is the visible symptom this LUT exists to fix.
+    #[test]
+    fn inverting_transfer_function_becomes_an_inverting_lut() {
+        let mut doc = Document::with_version("1.7");
+        // { 1 exch sub } — the canonical inverter.
+        let id = doc.add_object(Stream::new(
+            dictionary! {
+                "FunctionType" => 4,
+                "Domain" => vec![0.into(), 1.into()],
+                "Range" => vec![0.into(), 1.into()],
+            },
+            b"{ 1 exch sub }".to_vec(),
+        ));
+        let lut = read_transfer_lut(&doc, &Object::Reference(id)).expect("inverting /TR is not identity");
+        assert_eq!(lut[0], 255, "0 maps to 255");
+        assert_eq!(lut[255], 0, "255 maps to 0");
+        assert!(lut[128].abs_diff(127) <= 1, "midpoint stays mid, got {}", lut[128]);
+    }
+
+    // /Identity, and anything indistinguishable from it at 8-bit precision, must report
+    // None so callers do not pay to carry or apply a no-op table.
+    #[test]
+    fn identity_transfer_function_is_none() {
+        let mut doc = Document::with_version("1.7");
+        assert!(
+            read_transfer_lut(&doc, &Object::Name(b"Identity".to_vec())).is_none(),
+            "/Identity has no effect"
+        );
+        // A Type 2 ramp 0 -> 1 with N=1 IS the identity.
+        let id = doc.add_object(dictionary! {
+            "FunctionType" => 2,
+            "Domain" => vec![0.into(), 1.into()],
+            "C0" => vec![0.into()],
+            "C1" => vec![1.into()],
+            "N" => 1,
+        });
+        assert!(
+            read_transfer_lut(&doc, &Object::Reference(id)).is_none(),
+            "a 0->1 linear ramp is the identity to within one 8-bit step"
+        );
+        // Something that is not a function at all also yields None rather than garbage.
+        assert!(read_transfer_lut(&doc, &Object::Integer(3)).is_none());
+    }
+
+    // A non-monotonic /TR must be carried faithfully; only the FIRST output component is
+    // used, per 11.6.5.2's one-in/one-out requirement.
+    #[test]
+    fn transfer_lut_uses_only_the_first_output() {
+        let f = PdfFunction::Exponential {
+            domain: [0.0, 1.0],
+            c0: vec![1.0, 0.0, 0.0],
+            c1: vec![0.0, 1.0, 1.0],
+            n: 1.0,
+        };
+        let lut = f.to_lut256();
+        assert_eq!(lut[0], 255, "first component starts at 1.0");
+        assert_eq!(lut[255], 0, "and ends at 0.0");
     }
 }

@@ -1,11 +1,32 @@
 use crate::*;
 
 const WIRE_MAGIC: u32 = 0x50444657; // 'PDFW'
-/// Bump to V10 to carry the per-image blend mode (V9 added per-image alpha).
+/// The version this serializer EMITS. V10 carries the per-image blend mode (V9 added
+/// per-image alpha).
+///
+/// KEEP IN SYNC WITH `SafePdfParser.WIRE_VERSION` in
+/// `pdf/src/main/java/com/vayunmathur/pdf/util/SafePdfParser.kt`. That constant is the
+/// HIGHEST version the parser understands, so it may legitimately run AHEAD of this one
+/// (it gates the newer fields off) but must never fall behind it: the parser does not
+/// reject a higher version, it forward-compat parses with those gates closed and so reads
+/// too few bytes per primitive, desyncing the rest of the buffer.
+/// `wire_version_is_not_ahead_of_the_kotlin_parser` asserts that by reading the Kotlin
+/// file, and `wire_version_matches_the_image_payload_layout` pins this constant to the
+/// fields the Image arm actually writes.
+///
+/// V11 means one thing only: a `u8 interpolate` in the Image arm, which the parser reads
+/// behind its `isV11` gate. Bumping to 11 without writing that byte makes the parser eat
+/// the first byte of the image's `u32 len` as interpolate and desync every primitive from
+/// there on, so the bump and the field must land in the same change.
+/// `images::image_should_interpolate` already computes the value, but `Prim::Image` does
+/// not carry it yet, so nothing serializes it and the parser's pre-v11 default (smooth)
+/// applies.
 const WIRE_VERSION: u32 = 10;
 #[allow(dead_code)]
 const WIRE_VERSION_V2: u32 = 2;
+#[allow(dead_code)]
 const WIRE_VERSION_V7: u32 = 7;
+#[allow(dead_code)]
 const WIRE_VERSION_V8: u32 = 8;
 #[allow(dead_code)]
 const WIRE_VERSION_V9: u32 = 9;
@@ -21,6 +42,26 @@ const TAG_TEXT_CLIP_APPLY: u8 = 9;
 const TAG_SMASK_PUSH: u8 = 10;
 const TAG_SMASK_CONTENT: u8 = 11;
 const TAG_SMASK_POP: u8 = 12;
+/// Added alongside v11 but NOT version-gated: the /TR transfer function of the immediately
+/// preceding SoftMaskPush, as 256 u8 samples of the mask value. Kotlin handles this tag
+/// regardless of the declared
+/// WIRE_VERSION, so emitting it needs no version bump and a stream without it is unaffected.
+/// Emit ONLY for a non-identity /TR — absent means identity, which is cheaper and identical.
+const TAG_SMASK_TRANSFER: u8 = 13;
+/// Sample count of a serialized /TR LUT.
+pub(crate) const TRANSFER_LUT_SIZE: usize = 256;
+/// Tiling pattern as one cell bitmap plus a lattice (§8.7.3.3), rendered as a
+/// `BitmapShader` with `TileMode.REPEAT`. Additive like tag 13: not emitting it is a
+/// no-op, so it needs no WIRE_VERSION coupling.
+///
+/// Layout: 6xf32 ctm, u32 w, u32 h, f32 xstep, f32 ystep, i32 i0, i32 j0, u32 nx, u32 ny,
+/// f32 alpha, u8 blend, u32 byte length, then `w*h*4` RGBA bytes.
+///
+/// The bitmap's dimensions ARE the repeat period, so `w`/`h` correspond to xstep/ystep and
+/// NOT to the pattern /BBox — `xstep`/`ystep` travel alongside purely so the decoder can
+/// assert that. Rust only emits this for non-overlapping patterns, because a periodic
+/// repeat cannot express §8.7.3.1 overlap; see `images::rasterize_pattern_cell`.
+const TAG_IMAGE_TILED: u8 = 14;
 
 const PATHOP_MOVE: u8 = 0;
 const PATHOP_LINE: u8 = 1;
@@ -46,17 +87,29 @@ fn truncate_str_safe(s: &str, max_bytes: usize) -> &str {
     }
 }
 
-/// Serialize a page into a compact little-endian buffer v9:
+/// Serialize a page into a compact little-endian buffer v10:
 ///
 /// ```text
-/// header: u32 MAGIC=0x50444657, u32 VERSION=9, f32 pageWidth, f32 pageHeight, u32 primitiveCount
+/// header: u32 MAGIC=0x50444657, u32 VERSION=10, f32 pageWidth, f32 pageHeight, u32 primitiveCount
 /// per primitive: u8 tag, then payload
 ///   1 Text:   f32 x, f32 y, f32 size, u32 argb, u16 len, [utf8], u8 hasStroke, u32 strokeArgb, f32 strokeWidth, u8 renderMode (v4), u8 blend (v5), f32 advance (v7), u8 fontFlags (v8: bit0 bold bit1 italic, bits2-3 family 0=sans 1=serif 2=mono, bit4 outline-drawn), f32 hScale (v8)
 ///   2 Fill:   u32 argb, u8 evenOdd, u16 nContours, [u16 nPts, [f32 x,y]...]... (v6), u8 blend (v5)
 ///   3 Stroke: u32 argb, f32 width, u8 nDash, [f32 dash]..., f32 phase, u8 cap, u8 join, f32 miter, u16 nPts, [f32 x, f32 y]..., u8 blend (v5)
-///   4 Image:  6×f32 ctm, u32 w, u32 h, u8 format, f32 alpha (v9), u8 blend (v10), u32 len, [bytes] (format 0=RGBA8888, 1=JPEG)
+///   4 Image:  6×f32 ctm, u32 w, u32 h, u8 format, f32 alpha (v9), u8 blend (v10), u8 interpolate (v11, NOT emitted while VERSION is 10), u32 len, [bytes] (format 0=RGBA8888, 1=JPEG)
 ///   5 ClipPush: u8 evenOdd, u16 nPts, [f32 x,y]..., u16 nPathOps, [u8 kind, coords]...  (path-ops section is v4)
 ///              path-op kinds: 0 Move(2f32) 1 Line(2f32) 2 Cubic(6f32) 3 Close(0)
+///
+/// ROW ORDER CONTRACT, for every raster payload (tag 4 Image and tag 14 ImageTiled):
+/// **row 0 is the TOP of the unit square, i.e. v = 1.** That is PDF 32000-1 8.9.5.2 for image
+/// XObjects ("the first sample of the first row" is at the upper-left), and the Kotlin decoder
+/// implements exactly that: it pairs bitmap pixel (0,0) with `ctm` applied to (u=0, v=1).
+///
+/// A SYNTHETIC raster must be written top-down too. A rasterizer whose pixel loop maps row 0 to
+/// the LOW y of its bbox — `fy = bbox[1] + (y+0.5)/h * (bbox[3]-bbox[1])` — emits bottom-up
+/// rows, and paired with a positive-`d` placement matrix like `[bw, 0, 0, bh, bbox[0], bbox[1]]`
+/// that renders VERTICALLY FLIPPED. Fix it in the producer: write rows in reverse, or negate `d`
+/// and offset `f` to `bbox[3]`. Do NOT change the decoder — its convention is correct for real
+/// images, which are the common case, so "fixing" it there would flip those instead.
 ///   6 ClipPop: empty
 ///   7 GroupPush: u8 isolated, u8 knockout, f32 alpha, u8 blend
 ///   8 GroupPop: empty
@@ -64,7 +117,16 @@ fn truncate_str_safe(s: &str, max_bytes: usize) -> &str {
 ///   10 SoftMaskPush: u8 maskType (0 alpha, 1 luminosity) (v5)
 ///   11 SoftMaskContent: empty (v5)
 ///   12 SoftMaskPop: empty (v5)
+///   13 SoftMaskTransfer: 256×u8 LUT over the mask value (v11) — the /TR of the preceding
+///      SoftMaskPush, `lut[i] = round(255 * clamp(TR(i/255), 0, 1))`. Emitted only for a
+///      non-identity /TR. Tag-gated rather than version-gated, so it cannot desync a decoder
+///      that predates it.
 /// v1 legacy (no magic), v2..v9 remain backward compatible for cached pages (Kotlin should handle older versions).
+///
+/// The consumer is `SafePdfParser.kt`, which must read exactly these fields in exactly this
+/// order. Its `MAX_PRIMITIVES` is only a backstop against a corrupt count field and sits well
+/// above the real ceiling: `MAX_PRIMITIVES` here IS enforced at every content-emitting push,
+/// and `MAX_CONTENT_OPS` truncates the operator stream before that even comes into play.
 /// ```
 pub fn serialize(page: &PageData) -> Vec<u8> {
     let mut buf = Vec::new();
@@ -176,6 +238,30 @@ pub fn serialize(page: &PageData) -> Vec<u8> {
                 buf.extend_from_slice(&final_len.to_le_bytes());
                 buf.extend_from_slice(final_slice);
             }
+            Prim::ImageTiled { ctm, w, h, data, xstep, ystep, i0, j0, nx, ny, alpha, blend } => {
+                buf.push(TAG_IMAGE_TILED);
+                for v in ctm {
+                    buf.extend_from_slice(&(*v as f32).to_le_bytes());
+                }
+                buf.extend_from_slice(&w.to_le_bytes());
+                buf.extend_from_slice(&h.to_le_bytes());
+                buf.extend_from_slice(&xstep.to_le_bytes());
+                buf.extend_from_slice(&ystep.to_le_bytes());
+                buf.extend_from_slice(&i0.to_le_bytes());
+                buf.extend_from_slice(&j0.to_le_bytes());
+                buf.extend_from_slice(&nx.to_le_bytes());
+                buf.extend_from_slice(&ny.to_le_bytes());
+                buf.extend_from_slice(&alpha.to_le_bytes());
+                buf.push(*blend as u8);
+                // Length-prefixed like TAG_IMAGE, and clamped the same way so the field
+                // can never disagree with the bytes actually written.
+                let (len_u32, data_slice) = match u32::try_from(data.len()) {
+                    Ok(n) => (n, &data[..]),
+                    Err(_) => (u32::MAX, &data[..u32::MAX as usize]),
+                };
+                buf.extend_from_slice(&len_u32.to_le_bytes());
+                buf.extend_from_slice(data_slice);
+            }
             Prim::ClipPush { even_odd, pts, path_ops } => {
                 buf.push(TAG_CLIP_PUSH);
                 buf.push(if *even_odd { 1 } else { 0 });
@@ -201,6 +287,14 @@ pub fn serialize(page: &PageData) -> Vec<u8> {
             Prim::SoftMaskPush { mask_type } => {
                 buf.push(TAG_SMASK_PUSH);
                 buf.push(*mask_type);
+            }
+            // Exactly TRANSFER_LUT_SIZE raw bytes, no length prefix, per the agreed
+            // format. `Prim` guarantees the array length, so the assert is a wire-format
+            // invariant rather than a runtime check.
+            Prim::SoftMaskTransfer(lut) => {
+                debug_assert_eq!(lut.len(), TRANSFER_LUT_SIZE);
+                buf.push(TAG_SMASK_TRANSFER);
+                buf.extend_from_slice(&lut[..]);
             }
             Prim::SoftMaskContent => {
                 buf.push(TAG_SMASK_CONTENT);
@@ -434,5 +528,81 @@ mod tests {
         assert!(truncated.is_char_boundary(truncated.len()));
         assert!(std::str::from_utf8(truncated.as_bytes()).is_ok());
         assert_eq!(truncated.len() % 2, 0);
+    }
+
+    /// `SafePdfParser.kt` is the only consumer of this format, and its own constant is the
+    /// highest version it understands. Ours may lag it (the parser gates the newer fields
+    /// off and the stream simply lacks them) but must never lead it: a version above what
+    /// the parser knows is NOT rejected — it logs and attempts a forward-compat parse with
+    /// every unknown field's gate closed, so it reads too few bytes per primitive, desyncs
+    /// and truncates the page at the first byte it mistakes for a tag.
+    ///
+    /// Nothing else catches that: both constants are valid integers, Kotlin still compiles,
+    /// and the Rust round-trip tests only ever read back what Rust wrote. So assert it
+    /// across the language boundary against the real file.
+    #[test]
+    fn wire_version_is_not_ahead_of_the_kotlin_parser() {
+        let path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../java/com/vayunmathur/pdf/util/SafePdfParser.kt"
+        );
+        let src = std::fs::read_to_string(path)
+            .unwrap_or_else(|e| panic!("cannot read the wire format's only consumer {path}: {e}"));
+        let decl = |prefix: &str| -> String {
+            src.lines()
+                .find_map(|l| l.trim().strip_prefix(prefix).map(|v| v.to_string()))
+                .unwrap_or_else(|| panic!("SafePdfParser.kt must declare `{prefix}<value>`"))
+        };
+        let kotlin_version: u32 = decl("const val WIRE_VERSION: Int = ")
+            .split_whitespace()
+            .next()
+            .and_then(|v| v.parse().ok())
+            .expect("SafePdfParser.WIRE_VERSION must be a bare integer literal");
+        assert!(
+            WIRE_VERSION <= kotlin_version,
+            "wire.rs emits v{WIRE_VERSION} but SafePdfParser.kt understands only up to \
+             v{kotlin_version}, so it would parse every page with the newer fields' gates \
+             closed and desync. Bump the Kotlin constant and teach the parser the new \
+             fields in the same change."
+        );
+        let magic = decl("const val WIRE_MAGIC: Int = ");
+        let magic = magic.split_whitespace().next().unwrap_or_default();
+        let kotlin_magic = u32::from_str_radix(magic.trim_start_matches("0x"), 16)
+            .expect("SafePdfParser.WIRE_MAGIC must be a hex literal");
+        assert_eq!(
+            WIRE_MAGIC, kotlin_magic,
+            "the magic disagrees, so the parser takes every buffer for a headerless v1 one"
+        );
+    }
+
+    /// A version bump only means something if the payload changes with it, and the reverse
+    /// is just as fatal. Pin the emitted Image payload to the exact v10 field list so that
+    /// bumping WIRE_VERSION without writing the v11 interpolate byte — or writing the byte
+    /// without bumping — fails here instead of silently desyncing the decoder.
+    #[test]
+    fn wire_version_matches_the_image_payload_layout() {
+        let page = PageData {
+            width: 10.0,
+            height: 10.0,
+            prims: vec![Prim::Image {
+                ctm: [1.0, 0.0, 0.0, 1.0, 0.0, 0.0],
+                w: 1,
+                h: 1,
+                format: 0,
+                data: vec![1, 2, 3, 4],
+                alpha: 1.0,
+                blend: BlendMode::Normal,
+            }],
+        };
+        // header: magic + version + width + height + count. Payload: tag + 6xf32 ctm +
+        // u32 w + u32 h + u8 format + f32 alpha (v9) + u8 blend (v10) + u32 len + 4 bytes.
+        let v10_len = (4 + 4 + 4 + 4 + 4) + 1 + 24 + 4 + 4 + 1 + 4 + 1 + 4 + 4;
+        assert_eq!(
+            (serialize(&page).len(), WIRE_VERSION),
+            (v10_len, 10),
+            "the Image payload and WIRE_VERSION must move together: SafePdfParser.kt reads \
+             a u8 interpolate between the blend byte and the u32 length once the declared \
+             version reaches 11"
+        );
     }
 }

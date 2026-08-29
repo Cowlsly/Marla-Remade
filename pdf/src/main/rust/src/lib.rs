@@ -18,9 +18,11 @@
 //! shading patterns, Type 3 fonts, filters (Flate/LZW with predictors, ASCII85,
 //! ASCIIHex, RunLength, CCITT, JBIG2, DCT/JPX passthrough), standard-security
 //! decryption/encryption (RC4 + AES-128/256), annotations, AcroForm fields, and
-//! text search. Genuinely unsupported items (public-key encryption; Type1/CFF
-//! outline *vector* rendering — text is emitted as Unicode runs) are documented
-//! in `README.md`.
+//! text search. Genuinely unsupported items (public-key encryption; the compiled
+//! code->CID tables of the predefined CJK CMaps) are documented in `README.md`.
+//! Note that TrueType/CFF/Type1 outlines ARE rendered as real vector contours
+//! (see [`crate::outlines`]); substitute-typeface text runs are the fallback for
+//! fonts with no usable embedded program, not the primary path.
 
 pub(crate) use std::collections::HashMap;
 pub(crate) use std::io::Cursor;
@@ -45,6 +47,7 @@ mod type3;
 
 mod registry;
 pub(crate) use registry::*;
+mod content;
 mod decrypt;
 pub(crate) use decrypt::*;
 mod docedit;
@@ -78,6 +81,8 @@ mod wire;
 mod jni_bindings;
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod golden_tests;
 #[cfg(test)]
 mod debug_ishi_test;
 #[cfg(test)]

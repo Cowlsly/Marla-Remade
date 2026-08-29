@@ -9,9 +9,11 @@ type CryptFnFactory = Box<dyn Fn(ObjectId) -> CryptFn>;
 /// the empty password does not satisfy. Returns: 0 no, 1 needs password, 2
 /// unsupported encryption (e.g. AES).
 pub(crate) fn pdf_password_state(bytes: &[u8]) -> i32 {
-    let mut doc = match Document::load_mem(bytes) {
-        Ok(d) => d,
-        Err(_) => return 0,
+    // Must match open_document_pw's loader: using the strict Document::load_mem here made a
+    // damaged encrypted file report "no password needed" and then fail to open with no prompt.
+    let mut doc = match crate::registry::load_document_lenient(bytes) {
+        Some(d) => d,
+        None => return 0,
     };
     if doc.trailer.get(b"Encrypt").is_err() {
         return 0;
@@ -103,12 +105,48 @@ pub(crate) enum CryptMethod {
 }
 
 /// Decrypt a standard-encrypted document (RC4 or AES) in place with `password`.
+///
+/// Tries lopdf's own standard-security-handler first. That matters for correctness, not
+/// just economy: lopdf honours `/StrF` and the `/Identity` crypt filter, applies
+/// Algorithm 2 step (f) for `/EncryptMetadata false`, and skips `/Type /XRef` streams.
+/// Our implementation is retained for the files lopdf cannot authenticate.
 pub(crate) fn decrypt_in_place(doc: &mut Document, password: &[u8]) -> DecryptStatus {
+    // Authenticate WITHOUT mutating first. lopdf's decrypt_raw applies `?` to each object
+    // inside its mutation loop (document.rs:486-493), so a mid-loop failure leaves the
+    // document HALF-decrypted. Running our fallback over that would decrypt the already
+    // plaintext prefix a second time — and RC4 is symmetric, so it would re-encrypt it
+    // into noise. Deciding up front which implementation owns the document avoids that.
+    if doc.authenticate_raw_password(password).is_ok() {
+        return match doc.decrypt_raw(password) {
+            // decrypt_raw also re-expands object streams and clears /Encrypt.
+            Ok(()) => DecryptStatus::Ok,
+            Err(_) => {
+                // Partially decrypted. Keep what succeeded rather than corrupting it, on
+                // the same "partial data beats no data" principle used for Flate/LZW.
+                //
+                // decrypt_raw bails out of its per-object loop (document.rs:492) BEFORE
+                // it reaches its own object-stream expansion (document.rs:496-517), so
+                // without this the ObjStm-contained objects — /Root, /Pages and the page
+                // dictionaries for essentially every modern encrypted PDF — stay missing
+                // and the document opens with zero pages. Only ever adds objects.
+                expand_object_streams(doc);
+                doc.trailer.remove(b"Encrypt");
+                DecryptStatus::Ok
+            }
+        };
+    }
+    // lopdf could not authenticate, so it has not touched the document: our own handler
+    // gets a pristine copy.
+    decrypt_in_place_fallback(doc, password)
+}
+
+/// Our own standard-security-handler implementation, used when lopdf declines the file.
+fn decrypt_in_place_fallback(doc: &mut Document, password: &[u8]) -> DecryptStatus {
     let enc_id = match doc.trailer.get(b"Encrypt").and_then(|o| o.as_reference()) {
         Ok(id) => id,
         Err(_) => return DecryptStatus::Unsupported,
     };
-    let (o, u, ue, oe, p, r, length, method, _cf_dict_opt) = {
+    let (o, u, ue, oe, p, r, length, method, encrypt_metadata, _cf_dict_opt) = {
         let enc = match doc.get_dictionary(enc_id) {
             Ok(d) => d,
             Err(_) => return DecryptStatus::Unsupported,
@@ -189,7 +227,10 @@ pub(crate) fn decrypt_in_place(doc: &mut Document, password: &[u8]) -> DecryptSt
         let p = enc.get(b"P").ok().and_then(num).unwrap_or(0.0) as i32;
         let default_len = if method == CryptMethod::AesV2 { 128.0 } else { 40.0 };
         let length = enc.get(b"Length").ok().and_then(num).unwrap_or(default_len) as usize;
-        (o, u, ue, oe, p, r, length, method, cf_dict_opt)
+        // §7.6.3.3 Algorithm 2 step (f): with /EncryptMetadata false and R >= 4 the key
+        // derivation takes four extra 0xFF bytes. Default true.
+        let encrypt_metadata = !matches!(enc.get(b"EncryptMetadata"), Ok(Object::Boolean(false)));
+        (o, u, ue, oe, p, r, length, method, encrypt_metadata, cf_dict_opt)
     };
 
     let id0 = trailer_id0(doc);
@@ -214,7 +255,7 @@ pub(crate) fn decrypt_in_place(doc: &mut Document, password: &[u8]) -> DecryptSt
             // which already checks U against key derived from pw (user). Owner-only docs use empty user pw that still validates,
             // but some require owner.
             // Attempt direct authenticate with given password (user path)
-            if let Some(k) = crypto::authenticate(password, &o, &u, p, &id0, n, r as u8) {
+            if let Some(k) = crypto::authenticate(password, &o, &u, p, &id0, n, r as u8, encrypt_metadata) {
                 k
             } else {
                 // Owner path: if owner pw supplied, O entry contains user pw encrypted; try to brute cheap?
@@ -225,7 +266,7 @@ pub(crate) fn decrypt_in_place(doc: &mut Document, password: &[u8]) -> DecryptSt
                 // Try derive candidate owner key and then decrypt O to get user pw, then authenticate that user pw
                 // Algorithm 3 reverse: owner pw -> okey -> user_pad = rc4 decypt O etc.
                 // We'll delegate to helper.
-                if let Some(k) = crypto::authenticate_owner_fallback(password, &o, &u, p, &id0, n, r as u8) {
+                if let Some(k) = crypto::authenticate_owner_fallback(password, &o, &u, p, &id0, n, r as u8, encrypt_metadata) {
                     found = Some(k);
                 }
                 if let Some(k) = found {
@@ -240,6 +281,17 @@ pub(crate) fn decrypt_in_place(doc: &mut Document, password: &[u8]) -> DecryptSt
     let ids: Vec<ObjectId> = doc.objects.keys().copied().collect();
     for id in ids {
         if id == enc_id {
+            continue;
+        }
+        // §7.5.8.2: a cross-reference stream shall not be encrypted, and neither shall
+        // the strings in its dictionary.
+        let is_xref_stream = doc
+            .objects
+            .get(&id)
+            .and_then(|o| o.as_stream().ok())
+            .map(|s| s.dict.has_type(b"XRef"))
+            .unwrap_or(false);
+        if is_xref_stream {
             continue;
         }
         let apply: CryptFn = match method {
@@ -260,8 +312,38 @@ pub(crate) fn decrypt_in_place(doc: &mut Document, password: &[u8]) -> DecryptSt
             crypt_object(obj, &apply);
         }
     }
+    expand_object_streams(doc);
     doc.trailer.remove(b"Encrypt");
     DecryptStatus::Ok
+}
+
+/// Expand every `/Type /ObjStm` into its contained objects.
+///
+/// lopdf skips object-stream expansion at load time when the trailer has `/Encrypt`
+/// (reader.rs: `if stream.dict.has_type(b"ObjStm") && !is_encrypted`) because the bytes
+/// are still ciphertext, and it only auto-decrypts for the EMPTY password. So a document
+/// with a real password reached this point with every ObjStm-contained object missing —
+/// including `/Root`, `/Pages` and the page dictionaries, which is where §7.5.7 puts them
+/// for essentially every modern encrypted PDF. The result was a correct password opening
+/// a document with zero pages.
+fn expand_object_streams(doc: &mut Document) {
+    let mut recovered: Vec<(ObjectId, Object)> = Vec::new();
+    for (_, object) in doc.objects.iter() {
+        let Ok(stream) = object.as_stream() else {
+            continue;
+        };
+        if !stream.dict.has_type(b"ObjStm") {
+            continue;
+        }
+        let mut stream = stream.clone();
+        if let Ok(obj_stream) = lopdf::ObjectStream::new(&mut stream) {
+            recovered.extend(obj_stream.objects);
+        }
+    }
+    // Only add, never replace: a top-level definition supersedes one inside an ObjStm.
+    for (id, obj) in recovered {
+        doc.objects.entry(id).or_insert(obj);
+    }
 }
 
 /// Which standard-security-handler algorithm to write on save.
@@ -332,7 +414,7 @@ pub(crate) fn encrypt_doc_bytes(
             EncryptAlgo::Rc4_128 => {
                 let (n, rev) = (16usize, 3u8);
                 let o = crypto::compute_o(owner, user_pw, n, rev);
-                let key = crypto::compute_key(user_pw, &o, p, &id0, n, rev);
+                let key = crypto::compute_key(user_pw, &o, p, &id0, n, rev, true);
                 let u = crypto::compute_u(&key, &id0, rev);
                 let mut enc = Dictionary::new();
                 enc.set("Filter", name_obj("Standard"));
@@ -352,7 +434,7 @@ pub(crate) fn encrypt_doc_bytes(
             EncryptAlgo::Aes128 => {
                 let (n, rev) = (16usize, 4u8);
                 let o = crypto::compute_o(owner, user_pw, n, rev);
-                let key = crypto::compute_key(user_pw, &o, p, &id0, n, rev);
+                let key = crypto::compute_key(user_pw, &o, p, &id0, n, rev, true);
                 let u = crypto::compute_u(&key, &id0, rev);
                 let mut cf = Dictionary::new();
                 let mut stdcf = Dictionary::new();

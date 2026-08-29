@@ -1,12 +1,30 @@
 use crate::*;
 
-pub(crate) fn bezier_steps_for_flatness(flatness: f64) -> usize {
-    // PDF spec: flatness is tolerance, higher => fewer steps (previously inverted)
-    if flatness <= 0.0 {
-        return BEZIER_STEPS;
+/// Recursion depth allowed for transparency groups and soft masks. Kept in step
+/// with the form-XObject limit in the `Do` arm: gating these at
+/// [`MAX_PATTERN_RECURSION`] (4) while forms recurse to 10 silently dropped the
+/// mask and painted the form unmasked.
+pub(crate) const MAX_GROUP_DEPTH: u32 = 10;
+
+/// Hard ceiling on saved graphics states. §8.4.2 puts no limit on `q` nesting, and
+/// declining to save on overflow let colour/CTM changes leak past the matching
+/// `Q`, misrendering everything after it. This is deliberately far above any real
+/// document so the lossy path is unreachable in practice.
+pub(crate) const MAX_GRAPHICS_STACK_HARD: usize = MAX_GRAPHICS_STACK * 16;
+
+pub(crate) fn bezier_steps_for_flatness(hull: [(f64, f64); 4], flatness: f64) -> usize {
+    // §10.6.2 defines flatness as a tolerance in DEVICE space, so the segment
+    // count has to scale with the curve's device-space size. A fixed count made
+    // large curves visibly faceted, and `i` could collapse a curve to one line.
+    let mut len = 0.0;
+    for w in hull.windows(2) {
+        len += (w[1].0 - w[0].0).hypot(w[1].1 - w[0].1);
     }
-    let steps = (BEZIER_STEPS as f64 / (1.0 + flatness / 3.0)).round() as usize;
-    steps.clamp(1, 32)
+    if !len.is_finite() || len <= 0.0 {
+        return 1;
+    }
+    let tol = if flatness > 0.0 { flatness.min(3.0) } else { 0.25 };
+    ((len / tol).sqrt().ceil() as usize).clamp(4, 64)
 }
 
 pub(crate) fn shoelace_area(pts: &[(f64,f64)]) -> f64 {
@@ -21,7 +39,10 @@ pub(crate) fn shoelace_area(pts: &[(f64,f64)]) -> f64 {
 
 /// Parse ExtGState dash `D`: Spec §8.4.3.6 canonical is [[dashArray] phase] nested. Flat [a b c] lenient where last=phase only for len>=3 (critical fix: pure [3 3] must NOT become [3] phase 3).
 pub(crate) fn parse_dash_d_array(doc: &Document, arr: &[Object]) -> (Vec<f64>, f64) {
-    const MAX_DASH: usize = 64;
+    // Derived from the shared cap, not a local literal: Kotlin's wire decoder
+    // rejects a page outright when the dash array exceeds its own bound, so the
+    // parser must not allow a longer one.
+    const MAX_DASH: usize = MAX_DASH_LEN;
     if arr.is_empty() {
         return (Vec::new(), 0.0);
     }
@@ -85,21 +106,40 @@ pub(crate) fn interpret_page(doc: &Document, page_id: ObjectId) -> Result<PageDa
     let (width, height) = page_display_size(doc, page_id);
     let base = page_base_matrix(doc, page_id);
 
-    let content = doc
-        .get_and_decode_page_content(page_id)
-        .map_err(|e| format!("decode content failed: {e:?}"))?;
+    // `fonts_from_resources` runs on EVERY `interpret_content` call — the page,
+    // every form XObject it reaches, every tiling-pattern cell and every
+    // annotation appearance stream — and re-parses the whole embedded font
+    // program each time. One scope per page collapses that to once per font.
+    let _font_cache = crate::FontCacheScope::new();
+
+    // §7.7.3.3: /Contents is optional, and a tokenizer failure must not lose the
+    // whole page. `page_operations` returns lopdf's strict parse unchanged when it
+    // succeeds and only re-tokenizes leniently when it fails, which is the
+    // all-or-nothing inline-image case (§8.9.7) that used to blank a whole page.
+    let (ops, recovered) = crate::content::page_operations(doc, page_id);
+    if recovered && cfg!(debug_assertions) {
+        eprintln!(
+            "[pdf_render/interpret] page {page_id:?}: strict content parse failed, \
+             recovered {} operations leniently",
+            ops.len()
+        );
+    }
     let res = resources_dict(doc, page_id);
 
     let mut prims = Vec::new();
     let init = GraphicsState { ctm: base, ..Default::default() };
-    interpret_content(
+    // §8.7.4.1: with no clipping path, `sh` paints across the whole page, so seed
+    // the clip extent with the page box. Prims are emitted in page space, so that
+    // box is simply [0, 0, width, height].
+    interpret_content_seeded(
         doc,
-        &content.operations,
+        &ops,
         res.as_ref(),
         init,
         &mut prims,
         0,
         false,
+        Some([0.0, 0.0, width as f64, height as f64]),
     );
     render_annotations(doc, page_id, &base, &mut prims);
 
@@ -122,6 +162,23 @@ pub(crate) fn interpret_content(
     prims: &mut Vec<Prim>,
     depth: u32,
     text_only: bool,
+) {
+    interpret_content_seeded(doc, ops, resources, init, prims, depth, text_only, None);
+}
+
+/// As [`interpret_content`], but seeds the initial device-space clip extent.
+/// Only the page-level caller has a meaningful starting clip region (the page
+/// box); nested streams start with none.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn interpret_content_seeded(
+    doc: &Document,
+    ops: &[lopdf::content::Operation],
+    resources: Option<&lopdf::Dictionary>,
+    init: GraphicsState,
+    prims: &mut Vec<Prim>,
+    depth: u32,
+    text_only: bool,
+    init_clip_bbox: Option<[f64; 4]>,
 ) {
     let fonts = resources
         .map(|r| fonts_from_resources(doc, r))
@@ -169,8 +226,7 @@ pub(crate) fn interpret_content(
     fn emit_one_clip(prims: &mut Vec<Prim>, pc: PendingClip, clip_depth: &mut usize, clip_bbox: &mut Option<[f64;4]>, text_only: bool, oc_hidden: bool) {
         if text_only || oc_hidden { return; }
         if *clip_depth >= MAX_CLIP_DEPTH { return; }
-        let has_valid = pc.polys.iter().any(|poly| poly.len() >= 3 && shoelace_area(poly).abs() >= 1e-3) || !pc.path_ops.is_empty();
-        if !has_valid && pc.polys.is_empty() && pc.path_ops.is_empty() { return; }
+        if pc.polys.is_empty() && pc.path_ops.is_empty() { return; }
         // Intersect the accumulated clip bbox with this clip's device bbox.
         let mut nx0 = f64::INFINITY; let mut ny0 = f64::INFINITY;
         let mut nx1 = f64::NEG_INFINITY; let mut ny1 = f64::NEG_INFINITY;
@@ -198,13 +254,32 @@ pub(crate) fn interpret_content(
     let mut subpaths: Vec<Vec<(f64, f64)>> = Vec::new();
     let mut cur_user: (f64, f64) = (0.0, 0.0);
     let mut start_user: (f64, f64) = (0.0, 0.0);
-    // OCG visibility stack: true=visible, false=hidden (marked content /OC)
-    let mut oc_stack: Vec<bool> = Vec::new(); // true means currently invisible due to OCG suppression
+    // Marked-content stack, one entry per BMC/BDC: true means content in this
+    // frame is suppressed by optional content. §14.6 requires 1:1 nesting, so a
+    // frame is pushed for EVERY BMC/BDC even when visibility is unchanged.
+    let mut oc_stack: Vec<bool> = Vec::new();
+    // BMC/BDC pushes dropped at MAX_OC_STACK, so EMC can discard the matching
+    // pop instead of popping a frame it does not own (which un-hid content).
+    let mut oc_overflow: usize = 0;
     let mut group_depth: usize = 0;
     let mut pending_clip: Option<PendingClip> = None;
+    // §11.6.5.1: the soft mask is a graphics-state parameter, not a per-operator
+    // one. Tracks the last bracket emitted so a run of paints under the same mask
+    // expands the mask group once instead of once per painting operator.
+    let mut mask_bracket: Option<MaskBracket> = None;
+    // `oc_object_hidden` re-reads the catalog's /OCProperties and clones its /ON
+    // and /OFF arrays on every call, and a layer is opened and closed many times
+    // per page. Within one content stream the /Properties resource is fixed, so
+    // each distinct property list resolves to the same answer every time.
+    #[derive(PartialEq, Eq, Hash)]
+    enum OcKey {
+        Named(Vec<u8>),
+        Ref(ObjectId),
+    }
+    let mut oc_cache: HashMap<OcKey, bool> = HashMap::new();
     // Device-space bbox of the accumulated (committed) clip region, tracked so the
     // `sh` operator can fill the current clip even after `W n` clears pending_clip.
-    let mut current_clip_bbox: Option<[f64; 4]> = None;
+    let mut current_clip_bbox: Option<[f64; 4]> = init_clip_bbox;
     let mut clip_depth: usize = 0;
     let mut clip_path_ops: Vec<PathOp> = Vec::new(); // current clip path ops before W
     // Whether the current text object (BT..ET) used a clip render mode (Tr 4-7).
@@ -212,18 +287,14 @@ pub(crate) fn interpret_content(
 
     let dev = |gs: &GraphicsState, x: f64, y: f64| transform(&gs.ctm, x, y);
 
-    for op in ops {
+    for op in ops.iter().take(MAX_CONTENT_OPS) {
         let o = &op.operands;
         match op.operator.as_str() {
             "q" => {
-                const MAX_SUBPATHS_LOCAL: usize = 20000;
-                if stack.len() < MAX_GRAPHICS_STACK {
+                if stack.len() < MAX_GRAPHICS_STACK_HARD {
                     stack.push(SavedState { gs: gs.clone(), clip_depth, group_depth, clip_bbox: current_clip_bbox });
                 } else {
                     q_overflow += 1;
-                }
-                if subpaths.len() > MAX_SUBPATHS_LOCAL {
-                    subpaths.truncate(MAX_SUBPATHS_LOCAL);
                 }
             }
             "Q" => {
@@ -240,11 +311,19 @@ pub(crate) fn interpret_content(
                     }
                     current_clip_bbox = saved.clip_bbox;
                     gs = saved.gs;
+                    // A pending `W` belongs to the path being built inside this
+                    // q/Q pair; it must not survive to clip later content.
+                    pending_clip = None;
                 }
             }
             "cm" => {
                 if let Some(m) = read_matrix(o) {
-                    gs.ctm = mat_mul(&m, &gs.ctm);
+                    // A non-finite CTM poisons every coordinate derived from it,
+                    // which makes whole regions of the page silently disappear.
+                    let next = mat_mul(&m, &gs.ctm);
+                    if next.iter().all(|v| v.is_finite()) {
+                        gs.ctm = next;
+                    }
                 }
             }
             "w" => {
@@ -263,7 +342,6 @@ pub(crate) fn interpret_content(
                 if let Some(v) = o.first().and_then(|x| deref(doc, x).and_then(num).or_else(|| num(x))) { gs.flatness = v.clamp(0.0, 100.0); }
             }
             "d" => {
-                const MAX_DASH_LEN: usize = 64;
                 let dash_obj = o.first().and_then(|x| deref(doc, x).or(Some(x)));
                 let mut dashes = if let Some(Object::Array(arr)) = dash_obj {
                     arr.iter().filter_map(|x| deref(doc, x).and_then(num).or_else(|| num(x))).filter(|v| *v >= 0.0).take(MAX_DASH_LEN).collect()
@@ -325,18 +403,10 @@ pub(crate) fn interpret_content(
                                 }
                             }
                         }
-                        // Overprint: /OP (stroking), /op (nonstroking; defaults
-                        // to /OP when absent), /OPM (overprint mode 0|1).
-                        if let Some(b) = dict.get(b"OP").ok().and_then(|o| deref(doc, o).or(Some(o))).and_then(|o| match o { Object::Boolean(v) => Some(*v), _ => None }) {
-                            gs.overprint_stroke = b;
-                            gs.overprint_fill = b; // op defaults to OP unless overridden below
-                        }
-                        if let Some(b) = dict.get(b"op").ok().and_then(|o| deref(doc, o).or(Some(o))).and_then(|o| match o { Object::Boolean(v) => Some(*v), _ => None }) {
-                            gs.overprint_fill = b;
-                        }
-                        if let Some(v) = dict.get(b"OPM").ok().and_then(num) {
-                            gs.overprint_mode = (v as i64).clamp(0, 1) as u8;
-                        }
+                        // /OP, /op and /OPM are deliberately not parsed. §8.6.7
+                        // scopes overprint to devices with separable colorants; an
+                        // additive RGB compositor has none, so there is nothing to
+                        // record and no consumer for it.
                         // Soft mask: /SMask /None clears; dict may have /G as Ref OR direct Stream (P0 fix)
                         if let Ok(sm_raw) = dict.get(b"SMask") {
                             if let Ok(n) = sm_raw.as_name() {
@@ -360,7 +430,17 @@ pub(crate) fn interpret_content(
                                         } else { g.as_reference().ok() }
                                     });
                                     if let Some(gid) = gid_opt {
-                                        gs.soft_mask = Some(SoftMask { group_id: gid, mask_type, ctm: gs.ctm, backdrop });
+                                        // §11.6.5.2: the mask value passes through /TR
+                                        // before use. `read_transfer_lut` returns None for
+                                        // /Identity and for anything within one 8-bit step
+                                        // of it, so the common case costs nothing.
+                                        // (imaging owns functions.rs/graphics_state.rs;
+                                        // this line only populates the new field.)
+                                        let tr = smdict
+                                            .get(b"TR")
+                                            .ok()
+                                            .and_then(|o| functions::read_transfer_lut(doc, o));
+                                        gs.soft_mask = Some(SoftMask { group_id: gid, mask_type, ctm: gs.ctm, backdrop, tr });
                                     }
                                 }
                             }
@@ -398,20 +478,24 @@ pub(crate) fn interpret_content(
                     cur_user = (x, y);
                     start_user = (x, y);
                     let (dx, dy) = dev(&gs, x, y);
-                    subpaths.push(vec![(dx, dy)]);
-                    clip_path_ops.push(PathOp::Move(dx as f32, dy as f32));
+                    if subpaths.len() < MAX_SUBPATHS {
+                        subpaths.push(vec![(dx, dy)]);
+                        clip_path_ops.push(PathOp::Move(dx as f32, dy as f32));
+                    }
                 }
             }
             "l" => {
                 let xn = o.first().and_then(|x| deref(doc, x).and_then(num).or_else(|| num(x)));
                 let yn = o.get(1).and_then(|x| deref(doc, x).and_then(num).or_else(|| num(x)));
                 if let (Some(x), Some(y)) = (xn, yn) {
+                    // §8.5.2.1: `l` with no current point is an error. Fabricating a
+                    // subpath here desynchronised `subpaths` from `clip_path_ops`,
+                    // and an unmatched Line makes Android's Path start at (0,0).
+                    if subpaths.is_empty() { continue; }
                     cur_user = (x, y);
                     let (dx, dy) = dev(&gs, x, y);
                     if let Some(sp) = subpaths.last_mut() {
                         sp.push((dx, dy));
-                    } else {
-                        subpaths.push(vec![(dx, dy)]);
                     }
                     clip_path_ops.push(PathOp::Line(dx as f32, dy as f32));
                 }
@@ -433,7 +517,16 @@ pub(crate) fn interpret_content(
                     _ => continue,
                 };
                 let p0 = cur_user;
-                let bez_steps = bezier_steps_for_flatness(gs.flatness);
+                // Same rule as `l`: a curve with no current point is a no-op.
+                if subpaths.is_empty() { continue; }
+                let (d0x, d0y) = dev(&gs, p0.0, p0.1);
+                let (c1x, c1y) = dev(&gs, p1.0, p1.1);
+                let (c2x, c2y) = dev(&gs, p2.0, p2.1);
+                let (c3x, c3y) = dev(&gs, p3.0, p3.1);
+                let bez_steps = bezier_steps_for_flatness(
+                    [(d0x, d0y), (c1x, c1y), (c2x, c2y), (c3x, c3y)],
+                    gs.flatness,
+                );
                 for step in 1..=bez_steps {
                     let t = step as f64 / bez_steps as f64;
                     let (bx, by) = cubic_bezier(p0, p1, p2, p3, t);
@@ -443,9 +536,6 @@ pub(crate) fn interpret_content(
                 }
                 cur_user = p3;
                 // Record the exact cubic (device space) for bezier-retentive clips.
-                let (c1x, c1y) = dev(&gs, p1.0, p1.1);
-                let (c2x, c2y) = dev(&gs, p2.0, p2.1);
-                let (c3x, c3y) = dev(&gs, p3.0, p3.1);
                 clip_path_ops.push(PathOp::Cubic(c1x as f32, c1y as f32, c2x as f32, c2y as f32, c3x as f32, c3y as f32));
             }
             "re" => {
@@ -459,6 +549,7 @@ pub(crate) fn interpret_content(
                         dev(&gs, x, y + h),
                         dev(&gs, x, y),
                     ];
+                    if subpaths.len() >= MAX_SUBPATHS { continue; }
                     subpaths.push(rect);
                     let (mx, my) = dev(&gs, x, y);
                     let (x1, y1d) = dev(&gs, x + w, y);
@@ -495,12 +586,12 @@ pub(crate) fn interpret_content(
                 if !text_only && !oc_stack.last().copied().unwrap_or(false) {
                     let sm_start = prims.len();
                     if let Some(pid) = gs.stroke_pattern {
-                        paint_pattern_stroke(doc, pid, &subpaths, &gs, &pattern_base_ctm, prims, depth);
+                        paint_pattern_stroke(doc, pid, &subpaths, &gs, &pattern_base_ctm, prims, depth, clip_depth);
                     } else if prims.len() < MAX_PRIMITIVES {
                         emit_stroke(prims, &subpaths, &gs);
                     }
                     if let Some(m) = gs.soft_mask.clone() {
-                        wrap_with_soft_mask(prims, sm_start, doc, resources, &m, depth);
+                        wrap_with_soft_mask(prims, sm_start, doc, resources, &m, depth, &mut mask_bracket);
                     }
                 }
                 subpaths.clear(); clip_path_ops.clear();
@@ -512,13 +603,12 @@ pub(crate) fn interpret_content(
                 if !text_only && !oc_stack.last().copied().unwrap_or(false) {
                     let sm_start = prims.len();
                     if let Some(pid) = gs.fill_pattern {
-                        paint_pattern_fill(doc, pid, &subpaths, op.operator == "f*", &pattern_base_ctm, gs.fill, gs.alpha_fill as f32, gs.blend_mode, prims, depth);
+                        paint_pattern_fill(doc, pid, &subpaths, op.operator == "f*", &pattern_base_ctm, gs.fill, gs.alpha_fill as f32, gs.blend_mode, prims, depth, clip_depth);
                     } else if prims.len() < MAX_PRIMITIVES {
-                        let fb = if gs.overprint_fill && gs.blend_mode == BlendMode::Normal { BlendMode::Multiply } else { gs.blend_mode };
-                        emit_fill(prims, &subpaths, gs.fill, op.operator == "f*", gs.alpha_fill, fb);
+                        emit_fill(prims, &subpaths, gs.fill, op.operator == "f*", gs.alpha_fill, gs.blend_mode);
                     }
                     if let Some(m) = gs.soft_mask.clone() {
-                        wrap_with_soft_mask(prims, sm_start, doc, resources, &m, depth);
+                        wrap_with_soft_mask(prims, sm_start, doc, resources, &m, depth, &mut mask_bracket);
                     }
                 }
                 subpaths.clear(); clip_path_ops.clear();
@@ -535,18 +625,17 @@ pub(crate) fn interpret_content(
                 if !text_only && !oc_stack.last().copied().unwrap_or(false) {
                     let sm_start = prims.len();
                     if let Some(pid) = gs.fill_pattern {
-                        paint_pattern_fill(doc, pid, &subpaths, op.operator.ends_with('*'), &pattern_base_ctm, gs.fill, gs.alpha_fill as f32, gs.blend_mode, prims, depth);
+                        paint_pattern_fill(doc, pid, &subpaths, op.operator.ends_with('*'), &pattern_base_ctm, gs.fill, gs.alpha_fill as f32, gs.blend_mode, prims, depth, clip_depth);
                     } else if prims.len() < MAX_PRIMITIVES {
-                        let fb = if gs.overprint_fill && gs.blend_mode == BlendMode::Normal { BlendMode::Multiply } else { gs.blend_mode };
-                        emit_fill(prims, &subpaths, gs.fill, op.operator.ends_with('*'), gs.alpha_fill, fb);
+                        emit_fill(prims, &subpaths, gs.fill, op.operator.ends_with('*'), gs.alpha_fill, gs.blend_mode);
                     }
                     if let Some(pid) = gs.stroke_pattern {
-                        paint_pattern_stroke(doc, pid, &subpaths, &gs, &pattern_base_ctm, prims, depth);
+                        paint_pattern_stroke(doc, pid, &subpaths, &gs, &pattern_base_ctm, prims, depth, clip_depth);
                     } else if prims.len() < MAX_PRIMITIVES {
                         emit_stroke(prims, &subpaths, &gs);
                     }
                     if let Some(m) = gs.soft_mask.clone() {
-                        wrap_with_soft_mask(prims, sm_start, doc, resources, &m, depth);
+                        wrap_with_soft_mask(prims, sm_start, doc, resources, &m, depth, &mut mask_bracket);
                     }
                 }
                 subpaths.clear(); clip_path_ops.clear();
@@ -566,7 +655,7 @@ pub(crate) fn interpret_content(
                         if let Some(img) = extract_inline_image(doc, stream, gs.fill, &colorspaces) {
                             let sm_start = prims.len();
                             if prims.len() < MAX_PRIMITIVES { prims.push(Prim::Image { ctm: gs.ctm, w: img.w, h: img.h, format: img.format, data: img.data, alpha: gs.alpha_fill as f32, blend: gs.blend_mode }); }
-                            if let Some(m) = gs.soft_mask.clone() { wrap_with_soft_mask(prims, sm_start, doc, resources, &m, depth); }
+                            if let Some(m) = gs.soft_mask.clone() { wrap_with_soft_mask(prims, sm_start, doc, resources, &m, depth, &mut mask_bracket); }
                         }
                     }
                 }
@@ -592,7 +681,7 @@ pub(crate) fn interpret_content(
                                     if let Some(img) = extract_image(doc, stream, gs.fill, &colorspaces) {
                                         let sm_start = prims.len();
                                         if prims.len() < MAX_PRIMITIVES { prims.push(Prim::Image { ctm: gs.ctm, w: img.w, h: img.h, format: img.format, data: img.data, alpha: gs.alpha_fill as f32, blend: gs.blend_mode }); }
-                                        if let Some(m) = gs.soft_mask.clone() { wrap_with_soft_mask(prims, sm_start, doc, resources, &m, depth); }
+                                        if let Some(m) = gs.soft_mask.clone() { wrap_with_soft_mask(prims, sm_start, doc, resources, &m, depth, &mut mask_bracket); }
                                     }
                                 }
                             } else if subtype == Some(b"Form") && depth < 10 {
@@ -600,7 +689,7 @@ pub(crate) fn interpret_content(
                                     .dict
                                     .get(b"Matrix")
                                     .ok()
-                                    .and_then(read_matrix_obj)
+                                    .and_then(|o| read_matrix_obj(deref(doc, o).unwrap_or(o)))
                                     .unwrap_or(IDENTITY);
                                 let form_res = stream
                                     .dict
@@ -629,10 +718,13 @@ pub(crate) fn interpret_content(
                                     && !text_only
                                     && !oc_stack.last().copied().unwrap_or(false)
                                     && prims.len() < crate::MAX_PRIMITIVES
-                                    && depth < crate::MAX_PATTERN_RECURSION;
+                                    && depth < MAX_GROUP_DEPTH;
                                 let sm_start = prims.len();
-                                let should_emit_group = is_transparency_group && !use_smask && !text_only && !oc_stack.last().copied().unwrap_or(false) && depth < crate::MAX_PATTERN_RECURSION;
-                                if should_emit_group && prims.len() < crate::MAX_PRIMITIVES && group_depth < 32 {
+                                let should_emit_group = is_transparency_group && !use_smask && !text_only && !oc_stack.last().copied().unwrap_or(false) && depth < MAX_GROUP_DEPTH;
+                                let pushed_group = should_emit_group
+                                    && prims.len() < crate::MAX_PRIMITIVES
+                                    && group_depth < 32;
+                                if pushed_group {
                                     // The nonstroking constant alpha (ca) applies to the
                                     // group as a whole when it is painted; NOT ca*CA.
                                     prims.push(Prim::GroupPush { isolated, knockout, alpha: gs.alpha_fill as f32, blend: gs.blend_mode });
@@ -664,18 +756,29 @@ pub(crate) fn interpret_content(
                                         }
                                     }
                                 }
-                                if let Ok(sub) = Content::decode(&stream_data_with_doc(doc, stream)) {
+                                // §8.9.7: lopdf wraps inline-image parsing in nom
+                                // `cut(...)`, so ONE inline image it cannot handle
+                                // failed this whole form and blanked it, exactly as it
+                                // used to blank a whole page. `stream_operations`
+                                // returns lopdf's result untouched when it succeeds, so
+                                // a form that renders today is unaffected.
+                                let sub_ops = crate::content::stream_operations(doc, stream);
+                                if !sub_ops.is_empty() {
                                         let mut sub_gs = gs.clone();
                                         sub_gs.ctm = form_ctm;
-                                        // A soft mask does not re-apply to nested Do's inside the
-                                        // (masked) form content.
-                                        sub_gs.soft_mask = None;
+                                        // A soft mask applies once, to this form as a
+                                        // whole. Only clear it when the wrap actually
+                                        // happened; otherwise the mask must stay in the
+                                        // state and be applied per element inside, since
+                                        // §11.6.5.1 makes it inherited state that cannot
+                                        // silently vanish.
+                                        if use_smask { sub_gs.soft_mask = None; }
                                         // Per PDF 11.6.6: on entering a transparency group the
                                         // alpha constants reset to 1.0 and blend to Normal — they
                                         // are applied when the group's result is composited (via
                                         // GroupPush), not again to each element inside. Without
                                         // this, ca is double-applied and low-alpha groups vanish.
-                                        if should_emit_group {
+                                        if pushed_group {
                                             sub_gs.alpha_fill = 1.0;
                                             sub_gs.alpha_stroke = 1.0;
                                             sub_gs.blend_mode = BlendMode::Normal;
@@ -683,7 +786,7 @@ pub(crate) fn interpret_content(
                                         let res_ref = form_res.as_ref().or(resources);
                                         interpret_content(
                                             doc,
-                                            &sub.operations,
+                                            &sub_ops,
                                             res_ref,
                                             sub_gs,
                                             prims,
@@ -696,11 +799,19 @@ pub(crate) fn interpret_content(
                                     // was hit inside the form, to keep the clip stack sane.
                                     prims.push(Prim::ClipPop);
                                 }
+                                // §8.10.1: `Do` on a form behaves as `q … Q`, so the
+                                // group must be composited here rather than being left
+                                // open until the next `Q` (or end of stream), which let
+                                // its alpha and blend mode leak onto later content.
+                                if pushed_group {
+                                    prims.push(Prim::GroupPop);
+                                    group_depth -= 1;
+                                }
                                 // Bracket the whole form as the masked content, then
                                 // append the mask group (rendered at the mask's set-time CTM).
                                 if use_smask {
                                     if let Some(mask) = active_smask {
-                                        wrap_with_soft_mask(prims, sm_start, doc, resources, &mask, depth);
+                                        wrap_with_soft_mask(prims, sm_start, doc, resources, &mask, depth, &mut mask_bracket);
                                     }
                                 }
                             }
@@ -840,7 +951,7 @@ pub(crate) fn interpret_content(
                                     if prims.len() < MAX_PRIMITIVES && !oc_stack.last().copied().unwrap_or(false) {
                                         let sm_start = prims.len();
                                         prims.push(Prim::Image { ctm, w, h, format: 0, data, alpha: gs.alpha_fill as f32, blend: gs.blend_mode });
-                                        if let Some(m) = gs.soft_mask.clone() { wrap_with_soft_mask(prims, sm_start, doc, resources, &m, depth); }
+                                        if let Some(m) = gs.soft_mask.clone() { wrap_with_soft_mask(prims, sm_start, doc, resources, &m, depth, &mut mask_bracket); }
                                     }
                                 }
                             }
@@ -849,11 +960,8 @@ pub(crate) fn interpret_content(
                 }
             }
             "BMC" => {
-                if let Some(&hidden) = oc_stack.last() {
-                    if hidden && oc_stack.len() < MAX_OC_STACK {
-                        oc_stack.push(true);
-                    }
-                }
+                let hidden = oc_stack.last().copied().unwrap_or(false);
+                if oc_stack.len() < MAX_OC_STACK { oc_stack.push(hidden); } else { oc_overflow += 1; }
             }
             "BDC" => {
                 // Optional content: `/OC <props> BDC`, where <props> is the OCG/OCMD
@@ -867,13 +975,19 @@ pub(crate) fn interpret_content(
                             Object::Name(n) => {
                                 // Resolve via the /Properties resource, keeping the
                                 // indirect reference so ON/OFF lists can match it.
-                                if let Some(res_dict) = resources {
+                                if let Some(&cached) = oc_cache.get(&OcKey::Named(n.clone())) {
+                                    should_hide = cached;
+                                } else if let Some(res_dict) = resources {
                                     if let Some(prop_dict) = res_dict.get(b"Properties").ok().and_then(|ob| deref(doc, ob)).and_then(|ob| ob.as_dict().ok()) {
                                         if let Ok(oc_ref) = prop_dict.get(n) {
                                             should_hide = oc_object_hidden(doc, oc_ref);
+                                            oc_cache.insert(OcKey::Named(n.clone()), should_hide);
                                         }
                                     }
                                 }
+                            }
+                            Object::Reference(id) => {
+                                should_hide = *oc_cache.entry(OcKey::Ref(*id)).or_insert_with(|| oc_object_hidden(doc, prop_obj));
                             }
                             other => {
                                 should_hide = oc_object_hidden(doc, other);
@@ -881,21 +995,18 @@ pub(crate) fn interpret_content(
                         }
                     }
                 }
-                if should_hide {
-                    if oc_stack.len() < MAX_OC_STACK { oc_stack.push(true); }
-                } else {
-                    // Non-OC (or visible) marked content: inherit the current hidden state.
-                    if let Some(&hidden) = oc_stack.last() {
-                        if hidden && oc_stack.len() < MAX_OC_STACK { oc_stack.push(true); }
-                    }
-                }
+                // Hiding is inherited: a visible OCG nested inside a hidden
+                // region stays hidden (§8.11.4.5).
+                let hidden = oc_stack.last().copied().unwrap_or(false) || should_hide;
+                if oc_stack.len() < MAX_OC_STACK { oc_stack.push(hidden); } else { oc_overflow += 1; }
             }
             "MP" | "DP" => {
                 // Marked-content point operators: no matching EMC, so they must not
                 // affect the marked-content / optional-content stack.
             }
             "EMC" => {
-                if !oc_stack.is_empty() { oc_stack.pop(); }
+                // Exactly one frame per EMC (§14.6). Unmatched EMCs are ignored.
+                if oc_overflow > 0 { oc_overflow -= 1; } else { oc_stack.pop(); }
             }
             "d0" | "d1" => {
                 // Type3 glyph width+bbox: record if inside Type3 context (in draw.rs)
@@ -953,10 +1064,8 @@ pub(crate) fn interpret_content(
             }
             "Tr" => {
                 if let Some(v) = o.first().and_then(num) {
-                    gs.render_mode = v as i64;
-                    if gs.render_mode >= 4 {
-                        text_clip_used = true;
-                    }
+                    // §9.3.6 defines modes 0..7 only.
+                    gs.render_mode = (v as i64).clamp(0, 7);
                 }
             }
             "Td" => {
@@ -985,15 +1094,28 @@ pub(crate) fn interpret_content(
             "Tj" => {
                 if let Some(Object::String(bytes, _)) = o.first() {
                     let sm_start = prims.len();
+                    if gs.render_mode >= 4 { text_clip_used = true; }
+                    // §8.11.2: content in a disabled optional-content group shall
+                    // not be drawn — text as much as paths. Render mode 3 is
+                    // precisely "neither fill nor stroke" (§9.3.6), so borrow it for
+                    // the duration of the show rather than discarding the glyphs:
+                    // the layer is hidden, not absent, and `search::build_index`
+                    // runs this same code, so dropping them would silently remove
+                    // the text from the search index too.
+                    let oc_hidden = oc_stack.last().copied().unwrap_or(false);
+                    let shown_mode = gs.render_mode;
+                    if oc_hidden { gs.render_mode = 3; }
                     let adv = show_string(doc, prims, &gs, &fonts, &text_matrix, bytes, depth);
+                    gs.render_mode = shown_mode;
                     if fonts.get(&gs.font_key).map(|f| f.wmode == 1).unwrap_or(false) {
                         text_matrix = mat_mul(&translate(0.0, adv), &text_matrix);
                     } else {
                         text_matrix = mat_mul(&translate(adv, 0.0), &text_matrix);
                     }
-                    // P0 fix #24/#25: soft-mask must also cover invisible-clip modes 4-6, not only 0-2
-                    let paint_mode = matches!(gs.render_mode, 0|1|2|4|5|6);
-                    if paint_mode { if let Some(m) = gs.soft_mask.clone() { wrap_with_soft_mask(prims, sm_start, doc, resources, &m, depth); } }
+                    // Soft-mask must also cover invisible-clip modes 4-6, not only 0-2.
+                    if !oc_hidden && matches!(gs.render_mode, 0|1|2|4|5|6) {
+                        if let Some(m) = gs.soft_mask.clone() { wrap_with_soft_mask(prims, sm_start, doc, resources, &m, depth, &mut mask_bracket); }
+                    }
                 }
             }
             "'" => {
@@ -1002,14 +1124,20 @@ pub(crate) fn interpret_content(
                 if let Some(Object::String(bytes, _)) = o.first() {
                     // P0 fix #24: soft-mask must apply to ' operator
                     let sm_start = prims.len();
+                    if gs.render_mode >= 4 { text_clip_used = true; }
+                    let oc_hidden = oc_stack.last().copied().unwrap_or(false);
+                    let shown_mode = gs.render_mode;
+                    if oc_hidden { gs.render_mode = 3; }
                     let adv = show_string(doc, prims, &gs, &fonts, &text_matrix, bytes, depth);
+                    gs.render_mode = shown_mode;
                     if fonts.get(&gs.font_key).map(|f| f.wmode == 1).unwrap_or(false) {
                         text_matrix = mat_mul(&translate(0.0, adv), &text_matrix);
                     } else {
                         text_matrix = mat_mul(&translate(adv, 0.0), &text_matrix);
                     }
-                    let paint_mode = matches!(gs.render_mode, 0|1|2|4|5|6);
-                    if paint_mode { if let Some(m) = gs.soft_mask.clone() { wrap_with_soft_mask(prims, sm_start, doc, resources, &m, depth); } }
+                    if !oc_hidden && matches!(gs.render_mode, 0|1|2|4|5|6) {
+                        if let Some(m) = gs.soft_mask.clone() { wrap_with_soft_mask(prims, sm_start, doc, resources, &m, depth, &mut mask_bracket); }
+                    }
                 }
             }
             "\"" => {
@@ -1020,18 +1148,28 @@ pub(crate) fn interpret_content(
                 if let Some(Object::String(bytes, _)) = o.get(2) {
                     // P0 fix #24: soft-mask must apply to " operator
                     let sm_start = prims.len();
+                    if gs.render_mode >= 4 { text_clip_used = true; }
+                    let oc_hidden = oc_stack.last().copied().unwrap_or(false);
+                    let shown_mode = gs.render_mode;
+                    if oc_hidden { gs.render_mode = 3; }
                     let adv = show_string(doc, prims, &gs, &fonts, &text_matrix, bytes, depth);
+                    gs.render_mode = shown_mode;
                     if fonts.get(&gs.font_key).map(|f| f.wmode == 1).unwrap_or(false) {
                         text_matrix = mat_mul(&translate(0.0, adv), &text_matrix);
                     } else {
                         text_matrix = mat_mul(&translate(adv, 0.0), &text_matrix);
                     }
-                    let paint_mode = matches!(gs.render_mode, 0|1|2|4|5|6);
-                    if paint_mode { if let Some(m) = gs.soft_mask.clone() { wrap_with_soft_mask(prims, sm_start, doc, resources, &m, depth); } }
+                    if !oc_hidden && matches!(gs.render_mode, 0|1|2|4|5|6) {
+                        if let Some(m) = gs.soft_mask.clone() { wrap_with_soft_mask(prims, sm_start, doc, resources, &m, depth, &mut mask_bracket); }
+                    }
                 }
             }
             "TJ" => {
                 let sm_start = prims.len();
+                if gs.render_mode >= 4 { text_clip_used = true; }
+                let oc_hidden = oc_stack.last().copied().unwrap_or(false);
+                let shown_mode = gs.render_mode;
+                if oc_hidden { gs.render_mode = 3; }
                 if let Some(Object::Array(arr)) = o.first() {
                     for el in arr {
                         match el {
@@ -1058,8 +1196,10 @@ pub(crate) fn interpret_content(
                         }
                     }
                 }
-                let paint_mode = matches!(gs.render_mode, 0|1|2|4|5|6);
-                if paint_mode { if let Some(m) = gs.soft_mask.clone() { wrap_with_soft_mask(prims, sm_start, doc, resources, &m, depth); } }
+                if oc_hidden { gs.render_mode = shown_mode; }
+                if !oc_hidden && matches!(gs.render_mode, 0|1|2|4|5|6) {
+                    if let Some(m) = gs.soft_mask.clone() { wrap_with_soft_mask(prims, sm_start, doc, resources, &m, depth, &mut mask_bracket); }
+                }
             }
             // Explicit no-ops (documented): rendering intent, and compatibility
             // sections have no effect on our flat-primitive output.
@@ -1147,9 +1287,54 @@ fn stroke_outline_quads(subpaths: &[Vec<(f64, f64)>], hw: f64) -> Vec<Vec<(f64, 
     quads
 }
 
-/// Paint a tiling/shading pattern along a stroked path. The stroke is converted
-/// to outline quads (`stroke_outline_quads`); each quad is clipped independently
-/// and the pattern rasterized within it, so the painted region is the union of
+/// Identity of a soft mask, used to decide whether an already-emitted bracket
+/// can absorb another painting operation.
+///
+/// §11.6.5.2 renders the mask group with the CTM in effect when `gs` set the
+/// mask, so the CTM is part of the identity: the same group under two different
+/// CTMs is two different masks. `/BC` changes the rendered group and `/TR` the
+/// push record, so both are included.
+#[derive(PartialEq)]
+pub(crate) struct MaskKey {
+    group_id: ObjectId,
+    mask_type: u8,
+    ctm: [u64; 6],
+    backdrop: Option<Vec<u64>>,
+    tr: Option<[u8; 256]>,
+}
+
+impl MaskKey {
+    fn of(mask: &SoftMask) -> Self {
+        let mut ctm = [0u64; 6];
+        for (dst, src) in ctm.iter_mut().zip(mask.ctm.iter()) {
+            *dst = src.to_bits();
+        }
+        MaskKey {
+            group_id: mask.group_id,
+            mask_type: mask.mask_type,
+            ctm,
+            backdrop: mask
+                .backdrop
+                .as_ref()
+                .map(|b| b.iter().map(|v| v.to_bits()).collect()),
+            tr: mask.tr,
+        }
+    }
+}
+
+/// The soft-mask bracket most recently emitted into `prims`, so a following
+/// painting operation under the same mask can extend it.
+pub(crate) struct MaskBracket {
+    key: MaskKey,
+    /// Index of the `SoftMaskPush`.
+    push: usize,
+    /// Index of the `SoftMaskContent` separator.
+    content: usize,
+    /// `prims.len()` when the bracket was closed. Coalescing is only sound while
+    /// the bracket is still the tail of `prims`.
+    end: usize,
+}
+
 /// Render an ExtGState soft-mask group into `prims` as the mask content of a
 /// SoftMaskPush/Content/Pop bracket. The group is placed at the CTM captured
 /// when the mask was set. For a luminosity mask with a `/BC` backdrop, a
@@ -1169,7 +1354,7 @@ pub(crate) fn render_soft_mask_group(
         Ok(Object::Stream(s)) => s.clone(),
         _ => return,
     };
-    let mmatrix = mstream.dict.get(b"Matrix").ok().and_then(read_matrix_obj).unwrap_or(IDENTITY);
+    let mmatrix = mstream.dict.get(b"Matrix").ok().and_then(|o| read_matrix_obj(deref(doc, o).unwrap_or(o))).unwrap_or(IDENTITY);
     let group_ctm = mat_mul(&mmatrix, &mask.ctm);
     let mres = mstream.dict.get(b"Resources").ok()
         .and_then(|o| deref(doc, o))
@@ -1201,7 +1386,8 @@ pub(crate) fn render_soft_mask_group(
             }
         }
     }
-    if let Ok(msub) = Content::decode(&stream_data_with_doc(doc, &mstream)) {
+    let msub_ops = crate::content::stream_operations(doc, &mstream);
+    if !msub_ops.is_empty() {
         let mgs = GraphicsState {
             ctm: group_ctm,
             soft_mask: None,
@@ -1211,13 +1397,29 @@ pub(crate) fn render_soft_mask_group(
             ..Default::default()
         };
         let mres_ref = mres.as_ref().or(resources);
-        interpret_content(doc, &msub.operations, mres_ref, mgs, prims, depth + 1, false);
+        interpret_content(doc, &msub_ops, mres_ref, mgs, prims, depth + 1, false);
     }
 }
 
 /// Bracket the primitives appended since `start` with the given soft mask so
 /// they are drawn only where the mask is opaque/luminous. No-op if nothing was
 /// emitted. Reuses the SoftMaskPush/Content/Pop wire prims.
+///
+/// §11.6.5.1 makes the soft mask a graphics-state PARAMETER: one mask covers
+/// every operation painted while it is set. So when the bracket in `bracket` is
+/// still the tail of `prims` and carries the same mask, this operation's
+/// primitives are moved inside it instead of opening a second bracket. Opening
+/// one per operation re-interprets the mask's whole content stream every time,
+/// which on a page with one gradient mask over hundreds of shapes expands the
+/// mask hundreds of times and pushes the page past [`MAX_PRIMITIVES`], dropping
+/// real content.
+///
+/// The merge composites the coalesced operations against each other inside the
+/// masked layer before the mask is applied, rather than masking each one
+/// separately against the backdrop. Those agree exactly for a fully opaque or
+/// fully transparent mask and for non-overlapping content — which is what a run
+/// of shapes under one mask is in practice — and differ only in the alpha
+/// arithmetic where partially-masked content overlaps itself.
 pub(crate) fn wrap_with_soft_mask(
     prims: &mut Vec<Prim>,
     start: usize,
@@ -1225,14 +1427,43 @@ pub(crate) fn wrap_with_soft_mask(
     resources: Option<&lopdf::Dictionary>,
     mask: &SoftMask,
     depth: u32,
+    bracket: &mut Option<MaskBracket>,
 ) {
     if start >= prims.len() || prims.len() >= MAX_PRIMITIVES {
         return;
     }
+    let key = MaskKey::of(mask);
+    // Structural re-validation rather than invalidating on every other push: the
+    // recorded indices must still name the bracket's own prims, and the bracket
+    // must end exactly where this operation began.
+    if let Some(b) = bracket.as_mut() {
+        if b.key == key
+            && b.end == start
+            && b.push < b.content
+            && b.content < b.end
+            && matches!(prims.get(b.push), Some(Prim::SoftMaskPush { .. }))
+            && matches!(prims.get(b.content), Some(Prim::SoftMaskContent))
+            && matches!(prims.get(b.end - 1), Some(Prim::SoftMaskPop))
+        {
+            let added: Vec<Prim> = prims.drain(start..).collect();
+            let n = added.len();
+            prims.splice(b.content..b.content, added);
+            b.content += n;
+            b.end += n;
+            return;
+        }
+    }
     prims.insert(start, Prim::SoftMaskPush { mask_type: mask.mask_type });
+    // §11.6.5.2: the mask value is passed through `/TR` before use. `model.rs`
+    // specifies this immediately after the push, and it is `None` for `/Identity`.
+    if let Some(lut) = mask.tr {
+        prims.insert(start + 1, Prim::SoftMaskTransfer(Box::new(lut)));
+    }
+    let content = prims.len();
     prims.push(Prim::SoftMaskContent);
     render_soft_mask_group(doc, resources, mask, prims, depth);
     prims.push(Prim::SoftMaskPop);
+    *bracket = Some(MaskBracket { key, push: start, content, end: prims.len() });
 }
 
 /// Bounding box (device space) of a set of polygons, or `None` if empty.
@@ -1256,7 +1487,14 @@ pub(crate) fn paint_pattern_stroke(
     pattern_base_ctm: &Mat,
     prims: &mut Vec<Prim>,
     depth: u32,
+    clip_depth: usize,
 ) {
+    // These clips are pushed and popped inside this function, so they never
+    // unbalance the stream — but they DO consume renderer clip levels, so they
+    // have to respect the same ceiling as `emit_one_clip`.
+    if clip_depth >= MAX_CLIP_DEPTH {
+        return;
+    }
     if depth >= MAX_PATTERN_RECURSION || prims.len() >= MAX_PRIMITIVES {
         return;
     }
@@ -1270,7 +1508,7 @@ pub(crate) fn paint_pattern_stroke(
         _ => return,
     };
     let ptype = dict.get(b"PatternType").ok().and_then(num).unwrap_or(0.0) as i64;
-    let matrix = dict.get(b"Matrix").ok().and_then(read_matrix_obj).unwrap_or(IDENTITY);
+    let matrix = dict.get(b"Matrix").ok().and_then(|o| read_matrix_obj(deref(doc, o).unwrap_or(o))).unwrap_or(IDENTITY);
     let pmat = mat_mul(&matrix, pattern_base_ctm);
 
     // Half stroke width in device space (CTM average axis scale).
@@ -1281,30 +1519,52 @@ pub(crate) fn paint_pattern_stroke(
     // P0 fix medium #23: don't enlarge hairlines via min 0.35 – keep true width, Kotlin handles 1 device px hairline
     let hw = (gs.line_width * scale) / 2.0;
 
-    let quads = stroke_outline_quads(subpaths, hw);
+    // Build ONE clip covering every stroke quad, then paint the pattern ONCE.
+    // Rasterizing the shading per quad allocated a full bbox-sized image for each
+    // of the ~2N quads of an N-point path (up to ~4 MB each), i.e. multi-GB on any
+    // gradient-stroked curve.
+    const MAX_STROKE_QUADS: usize = 4096;
+    let mut quads = stroke_outline_quads(subpaths, hw);
+    if quads.len() > MAX_STROKE_QUADS {
+        quads.truncate(MAX_STROKE_QUADS);
+    }
     let stroke_bbox = polys_device_bbox(subpaths);
+    let mut path_ops: Vec<PathOp> = Vec::new();
     for quad in &quads {
-        if prims.len() >= MAX_PRIMITIVES { break; }
         if quad.len() < 3 || shoelace_area(quad).abs() < 1e-3 { continue; }
-        prims.push(Prim::ClipPush {
-            even_odd: false,
-            pts: quad.iter().map(|&(x, y)| (x as f32, y as f32)).collect(),
-            path_ops: None,
-        });
-        if ptype == 2 {
-            if let Some(shobj) = dict.get(b"Shading").ok().and_then(|o| deref(doc, o)) {
-                if let Some((ctm, w, h, data)) = rasterize_shading(doc, shobj, &pmat, &HashMap::new(), 0, stroke_bbox) {
-                    if prims.len() < MAX_PRIMITIVES {
-                        prims.push(Prim::Image { ctm, w, h, format: 0, data, alpha: gs.alpha_stroke as f32, blend: gs.blend_mode });
-                    }
+        // The quads deliberately overlap (segment bodies plus vertex squares).
+        // Normalize each to positive winding so they UNION under the nonzero rule
+        // rather than cancelling each other into holes.
+        let mut q: Vec<(f64, f64)> = quad.clone();
+        if shoelace_area(&q) < 0.0 {
+            q.reverse();
+        }
+        path_ops.push(PathOp::Move(q[0].0 as f32, q[0].1 as f32));
+        for &(x, y) in &q[1..] {
+            path_ops.push(PathOp::Line(x as f32, y as f32));
+        }
+        path_ops.push(PathOp::Close);
+    }
+    if path_ops.is_empty() || prims.len() >= MAX_PRIMITIVES {
+        return;
+    }
+    let pts: Vec<(f32, f32)> = quads
+        .first()
+        .map(|q| q.iter().map(|&(x, y)| (x as f32, y as f32)).collect())
+        .unwrap_or_default();
+    prims.push(Prim::ClipPush { even_odd: false, pts, path_ops: Some(path_ops) });
+    if ptype == 2 {
+        if let Some(shobj) = dict.get(b"Shading").ok().and_then(|o| deref(doc, o)) {
+            if let Some((ctm, w, h, data)) = rasterize_shading(doc, shobj, &pmat, &HashMap::new(), 0, stroke_bbox) {
+                if prims.len() < MAX_PRIMITIVES {
+                    prims.push(Prim::Image { ctm, w, h, format: 0, data, alpha: gs.alpha_stroke as f32, blend: gs.blend_mode });
                 }
             }
-        } else if ptype == 1 {
-            let region = std::slice::from_ref(quad);
-            paint_tiling_pattern(doc, obj, dict, &pmat, gs.stroke, region, prims, depth);
         }
-        prims.push(Prim::ClipPop);
+    } else if ptype == 1 {
+        paint_tiling_pattern(doc, obj, dict, &pmat, gs.stroke, &quads, prims, depth, gs.alpha_stroke as f32, gs.blend_mode);
     }
+    prims.push(Prim::ClipPop);
 }
 
 pub(crate) fn paint_pattern_fill(
@@ -1318,7 +1578,11 @@ pub(crate) fn paint_pattern_fill(
     blend: BlendMode,
     prims: &mut Vec<Prim>,
     depth: u32,
+    clip_depth: usize,
 ) {
+    if clip_depth >= MAX_CLIP_DEPTH {
+        return;
+    }
     if depth >= MAX_PATTERN_RECURSION || prims.len() >= MAX_PRIMITIVES {
         return;
     }
@@ -1332,24 +1596,35 @@ pub(crate) fn paint_pattern_fill(
         _ => return,
     };
     let ptype = dict.get(b"PatternType").ok().and_then(num).unwrap_or(0.0) as i64;
-    let matrix = dict.get(b"Matrix").ok().and_then(read_matrix_obj).unwrap_or(IDENTITY);
+    let matrix = dict.get(b"Matrix").ok().and_then(|o| read_matrix_obj(deref(doc, o).unwrap_or(o))).unwrap_or(IDENTITY);
     let pmat = mat_mul(&matrix, pattern_base_ctm);
 
-    // Clip to the fill region.
-    let mut pushed = 0usize;
+    // ONE clip for the whole fill region.
+    // per contour made a path with disjoint subpaths paint nothing at all, and
+    // more than 63 contours tripped the renderer's clip-depth guard and discarded
+    // the rest of the page. path_ops carries every contour so holes survive.
+    let mut path_ops: Vec<PathOp> = Vec::new();
+    let mut first: Option<&Vec<(f64, f64)>> = None;
     for poly in polys {
-        if poly.len() >= 3 && shoelace_area(poly).abs() >= 1e-3 && prims.len() < MAX_PRIMITIVES {
-            prims.push(Prim::ClipPush {
-                even_odd,
-                pts: poly.iter().map(|&(x, y)| (x as f32, y as f32)).collect(),
-                path_ops: None,
-            });
-            pushed += 1;
+        if poly.len() < 3 {
+            continue;
         }
+        if first.is_none() {
+            first = Some(poly);
+        }
+        path_ops.push(PathOp::Move(poly[0].0 as f32, poly[0].1 as f32));
+        for &(x, y) in &poly[1..] {
+            path_ops.push(PathOp::Line(x as f32, y as f32));
+        }
+        path_ops.push(PathOp::Close);
     }
-    if pushed == 0 {
+    if path_ops.is_empty() || prims.len() >= MAX_PRIMITIVES {
         return;
     }
+    let pts: Vec<(f32, f32)> = first
+        .map(|p| p.iter().map(|&(x, y)| (x as f32, y as f32)).collect())
+        .unwrap_or_default();
+    prims.push(Prim::ClipPush { even_odd, pts, path_ops: Some(path_ops) });
 
     if ptype == 2 {
         if let Some(shobj) = dict.get(b"Shading").ok().and_then(|o| deref(doc, o)) {
@@ -1361,12 +1636,10 @@ pub(crate) fn paint_pattern_fill(
             }
         }
     } else if ptype == 1 {
-        paint_tiling_pattern(doc, obj, dict, &pmat, base_argb, polys, prims, depth);
+        paint_tiling_pattern(doc, obj, dict, &pmat, base_argb, polys, prims, depth, alpha_fill, blend);
     }
 
-    for _ in 0..pushed {
-        prims.push(Prim::ClipPop);
-    }
+    prims.push(Prim::ClipPop);
 }
 
 fn paint_tiling_pattern(
@@ -1378,6 +1651,8 @@ fn paint_tiling_pattern(
     polys: &[Vec<(f64, f64)>],
     prims: &mut Vec<Prim>,
     depth: u32,
+    alpha: f32,
+    blend: BlendMode,
 ) {
     let stream = match obj {
         Object::Stream(s) => s,
@@ -1387,6 +1662,10 @@ fn paint_tiling_pattern(
     let bbox = dict.get(b"BBox").ok().and_then(|o| read_rect(doc, o)).unwrap_or([0.0, 0.0, 1.0, 1.0]);
     let xstep = dict.get(b"XStep").ok().and_then(num).unwrap_or(bbox[2] - bbox[0]);
     let ystep = dict.get(b"YStep").ok().and_then(num).unwrap_or(bbox[3] - bbox[1]);
+    // The tile lattice spacing is a magnitude; a negative /XStep or /YStep made
+    // i0 > i1 so the loop body never ran and the pattern painted nothing.
+    let xstep = xstep.abs();
+    let ystep = ystep.abs();
     // Zero-step pattern is malformed — show bbox once instead of blanking
     if xstep.abs() < 1e-6 || ystep.abs() < 1e-6 {
         let res = dict
@@ -1395,10 +1674,13 @@ fn paint_tiling_pattern(
             .and_then(|o| deref(doc, o))
             .and_then(|o| o.as_dict().ok())
             .cloned();
-        if let Ok(content) = Content::decode(&stream_data_with_doc(doc, stream)) {
-            let mut tile_gs = GraphicsState { ctm: *pmat, ..GraphicsState::default() };
+        // Same all-or-nothing hazard as a page or a form: one inline image lopdf
+        // rejects would otherwise blank the whole cell.
+        let cell_ops = crate::content::stream_operations(doc, stream);
+        if !cell_ops.is_empty() {
+            let mut tile_gs = GraphicsState { ctm: *pmat, alpha_fill: alpha as f64, alpha_stroke: alpha as f64, blend_mode: blend, ..GraphicsState::default() };
             if paint_type == 2 { tile_gs.fill = base_argb; tile_gs.stroke = base_argb; }
-            interpret_content(doc, &content.operations, res.as_ref(), tile_gs, prims, depth + 1, false);
+            interpret_content(doc, &cell_ops, res.as_ref(), tile_gs, prims, depth + 1, false);
         }
         return;
     }
@@ -1408,10 +1690,10 @@ fn paint_tiling_pattern(
         .and_then(|o| deref(doc, o))
         .and_then(|o| o.as_dict().ok())
         .cloned();
-    let content = match Content::decode(&stream_data_with_doc(doc, stream)) {
-        Ok(c) => c,
-        Err(_) => return,
-    };
+    let content_ops = crate::content::stream_operations(doc, stream);
+    if content_ops.is_empty() {
+        return;
+    }
 
     // Device-space bounding box of the fill region.
     let (mut minx, mut miny, mut maxx, mut maxy) = (f64::MAX, f64::MAX, f64::MIN, f64::MIN);
@@ -1431,9 +1713,9 @@ fn paint_tiling_pattern(
     let inv = mat_inverse(pmat);
     // Singular pattern matrix — degrade to single tile instead of blank.
     if (inv[0]*inv[3] - inv[1]*inv[2]).abs() < 1e-12 {
-        let mut tile_gs = GraphicsState { ctm: *pmat, ..GraphicsState::default() };
+        let mut tile_gs = GraphicsState { ctm: *pmat, alpha_fill: alpha as f64, alpha_stroke: alpha as f64, blend_mode: blend, ..GraphicsState::default() };
         if paint_type == 2 { tile_gs.fill = base_argb; tile_gs.stroke = base_argb; }
-        interpret_content(doc, &content.operations, res.as_ref(), tile_gs, prims, depth + 1, false);
+        interpret_content(doc, &content_ops, res.as_ref(), tile_gs, prims, depth + 1, false);
         return;
     }
     let (mut pminx, mut pminy, mut pmaxx, mut pmaxy) = (f64::MAX, f64::MAX, f64::MIN, f64::MIN);
@@ -1448,21 +1730,103 @@ fn paint_tiling_pattern(
     let i1 = ((pmaxx - bbox[0]) / xstep).ceil() as i64;
     let j0 = ((pminy - bbox[3]) / ystep).floor() as i64;
     let j1 = ((pmaxy - bbox[1]) / ystep).ceil() as i64;
-
-    const MAX_TILES: i64 = 400;
-    // Cap tile range to MAX_TILES instead of blanking — degrade at high zoom.
     let total_i = (i1 - i0 + 1).max(0);
     let total_j = (j1 - j0 + 1).max(0);
-    let (i1_clamped, j1_clamped) = if total_i * total_j > MAX_TILES {
-        // Prioritize tiles around origin for single-tile fallback quality
-        let side = (MAX_TILES as f64).sqrt() as i64;
-        (i0 + side.min(total_i), j0 + side.min(total_j))
+
+    // §8.7.3.3 requires the cell replicated across the WHOLE region. Rasterizing
+    // the cell ONCE and emitting a periodic bitmap makes the tile count
+    // irrelevant, which is the only way to satisfy that: the per-tile path below
+    // has to cap the count, and any cap leaves part of a large hatched region
+    // blank.
+    //
+    // Restricted to cells made only of fills and strokes, because
+    // `rasterize_prims_to_rgba` has no glyph rasterizer and ignores images, clips
+    // and groups — a cell containing any of those would silently lose it, so it
+    // keeps the per-tile path. `rasterize_pattern_cell` owns the other gates (the
+    // period being the step and not the bbox, and bounding the copies-per-period
+    // needed to honour §8.7.3.1 overlap).
+    let mut cell_prims: Vec<Prim> = Vec::new();
+    let mut cell_gs = GraphicsState {
+        ctm: IDENTITY,
+        // §11.6.7 treats the pattern as a transparency group: alpha and blend ride
+        // on the composited result, not on each element inside the cell.
+        alpha_fill: 1.0,
+        alpha_stroke: 1.0,
+        ..GraphicsState::default()
+    };
+    if paint_type == 2 { cell_gs.fill = base_argb; cell_gs.stroke = base_argb; }
+    interpret_content(doc, &content_ops, res.as_ref(), cell_gs, &mut cell_prims, depth + 1, false);
+    if !cell_prims.is_empty()
+        && cell_prims.iter().all(|p| matches!(p, Prim::Fill { .. } | Prim::Stroke { .. }))
+        && prims.len() < MAX_PRIMITIVES
+    {
+        // Pattern-space -> device scale, so the cell is rasterized at display
+        // resolution instead of an arbitrary fixed size.
+        let sx = (pmat[0] * pmat[0] + pmat[1] * pmat[1]).sqrt();
+        let sy = (pmat[2] * pmat[2] + pmat[3] * pmat[3]).sqrt();
+        if let Some((cw, ch, data)) =
+            rasterize_pattern_cell(&cell_prims, bbox, xstep, ystep, sx.max(sy))
+        {
+            // The unit square maps onto ONE CELL — one period of the lattice —
+            // anchored at the bbox origin, matching `rasterize_pattern_cell`'s
+            // step rect.
+            let cell_mat: Mat = [xstep, 0.0, 0.0, ystep, bbox[0], bbox[1]];
+            // For a PERIODIC bitmap the extent is counted in whole periods
+            // relative to the region: cell `i` spans pattern x in
+            // [bbox[0] + i*xstep, bbox[0] + (i+1)*xstep). That differs from the
+            // per-tile loop's `i0`/`i1`, which are in bbox-overlap terms and
+            // deliberately start a cell early — here that would report an extent
+            // a period wider than the region on every side.
+            let ti0 = ((pminx - bbox[0]) / xstep).floor();
+            let tj0 = ((pminy - bbox[1]) / ystep).floor();
+            let tnx = (((pmaxx - bbox[0]) / xstep).ceil() - ti0).max(1.0);
+            let tny = (((pmaxy - bbox[1]) / ystep).ceil() - tj0).max(1.0);
+            prims.push(Prim::ImageTiled {
+                ctm: mat_mul(&cell_mat, pmat),
+                w: cw,
+                h: ch,
+                data,
+                xstep: xstep as f32,
+                ystep: ystep as f32,
+                i0: ti0.clamp(i32::MIN as f64, i32::MAX as f64) as i32,
+                j0: tj0.clamp(i32::MIN as f64, i32::MAX as f64) as i32,
+                nx: tnx.clamp(1.0, u32::MAX as f64) as u32,
+                ny: tny.clamp(1.0, u32::MAX as f64) as u32,
+                alpha,
+                blend,
+            });
+            return;
+        }
+    }
+
+    // Per-tile fallback. Reached when the cell contains text, an image or its own
+    // clipping (see the gate above), and when `rasterize_pattern_cell` declines:
+    // a degenerate step, or a `/BBox` so much larger than the step that honouring
+    // §8.7.3.1 overlap would need more than its copies-per-period budget. Plain
+    // overlap is NOT a fallback case — that path composites the cell at each
+    // reaching lattice offset and stays periodic.
+    //
+    // Each cell is REPLAYED as primitives here, so the count has to be capped.
+    const MAX_TILES: i64 = 20_000;
+    // §8.7.3.3 requires the cell replicated across the WHOLE region, so when the
+    // lattice exceeds the budget, thin it out UNIFORMLY. Taking a dense square
+    // patch anchored at one corner instead — which is what this used to do — left
+    // the rest of the region empty, and a 2pt lattice over a 400x400 region is
+    // 40,401 tiles, so it covered barely half. A lower-density cell over the whole
+    // region still reads as the texture that was asked for; a correct patch beside
+    // a blank area reads as missing content.
+    //
+    // f64 for the product: `i1`/`j1` come from a division by a step that may be
+    // tiny, so `total_i * total_j` can overflow `i64` and panic in a debug build.
+    let need = total_i as f64 * total_j as f64;
+    let stride = if need > MAX_TILES as f64 {
+        ((need / MAX_TILES as f64).sqrt().ceil() as i64).max(1)
     } else {
-        (i1, j1)
+        1
     };
     let mut count = 0i64;
-    'outer: for j in j0..=j1_clamped {
-        for i in i0..=i1_clamped {
+    'outer: for j in (j0..=j1).step_by(stride as usize) {
+        for i in (i0..=i1).step_by(stride as usize) {
             if count >= MAX_TILES || prims.len() >= MAX_PRIMITIVES {
                 break 'outer;
             }
@@ -1487,12 +1851,12 @@ fn paint_tiling_pattern(
                 PathOp::Close,
             ];
             prims.push(Prim::ClipPush { even_odd: false, pts: cell_pts, path_ops: Some(cell_po) });
-            let mut tile_gs = GraphicsState { ctm: tile_ctm, ..GraphicsState::default() };
+            let mut tile_gs = GraphicsState { ctm: tile_ctm, alpha_fill: alpha as f64, alpha_stroke: alpha as f64, blend_mode: blend, ..GraphicsState::default() };
             if paint_type == 2 {
                 tile_gs.fill = base_argb;
                 tile_gs.stroke = base_argb;
             }
-            interpret_content(doc, &content.operations, res.as_ref(), tile_gs, prims, depth + 1, false);
+            interpret_content(doc, &content_ops, res.as_ref(), tile_gs, prims, depth + 1, false);
             prims.push(Prim::ClipPop);
         }
     }

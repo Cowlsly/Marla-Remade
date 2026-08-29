@@ -23,6 +23,13 @@ impl<'a> BitReader<'a> {
     fn remaining_bits(&self) -> usize {
         (self.data.len() * 8).saturating_sub(self.bitpos)
     }
+    /// Skip to the next byte boundary, discarding any padding bits. Free-form
+    /// (Type 4) meshes pad each *vertex* and Coons/tensor (Type 6/7) meshes pad
+    /// each *patch* to a whole number of bytes; without this every record after
+    /// the first non-byte-aligned one decodes as garbage.
+    fn align(&mut self) {
+        self.bitpos = (self.bitpos + 7) & !7;
+    }
     /// Read `bits` (<=64) as an unsigned integer, or `None` if exhausted.
     fn read(&mut self, bits: u32) -> Option<u64> {
         if bits == 0 {
@@ -118,7 +125,23 @@ pub fn rasterize_shading_mesh(
     if (xmax - xmin).abs() < 1e-9 || (ymax - ymin).abs() < 1e-9 {
         return None;
     }
-    let bounds = [xmin, ymin, xmax, ymax];
+    let bounds = {
+        let mut b = [xmin, ymin, xmax, ymax];
+        // The shading shall be painted only inside /BBox (Table 78), which is
+        // expressed in the shading's own target coordinate space. Intersecting it
+        // with the /Decode extent means geometry outside the box lands outside the
+        // raster and is never drawn, and the raster resolution is spent only on
+        // the visible region. /BBox may be given unnormalised, so order it first.
+        if let Some(bb) = dict.get(b"BBox").ok().and_then(|o| read_rect(doc, o)) {
+            let (bx0, bx1) = (bb[0].min(bb[2]), bb[0].max(bb[2]));
+            let (by0, by1) = (bb[1].min(bb[3]), bb[1].max(bb[3]));
+            b = [b[0].max(bx0), b[1].max(by0), b[2].min(bx1), b[3].min(by1)];
+            if b[2] - b[0] < 1e-9 || b[3] - b[1] < 1e-9 {
+                return None;
+            }
+        }
+        b
+    };
 
     // Prefer the stream body; fall back to a /DataSource stream/string.
     let owned_ds;
@@ -149,10 +172,6 @@ pub fn rasterize_shading_mesh(
         eval_cs_to_rgb(doc, &cs_kind, use_comps, cs_resources).unwrap_or(0xFF80_8080)
     };
 
-    let w = size as usize;
-    let h = size as usize;
-    let mut rgba = vec![0u8; w * h * 4];
-
     let triangles: Vec<(Vertex, Vertex, Vertex)> = match shading_type {
         4 => parse_type4(data, bps_flag, bps_coord, bps_comp, ncomp, &decode),
         5 => {
@@ -167,27 +186,47 @@ pub fn rasterize_shading_mesh(
     };
 
     if triangles.is_empty() {
-        // Nothing parseable: honor /Background if present, else give up (no
-        // more gray placeholder).
-        let bg = dict
-            .get(b"Background")
-            .ok()
-            .and_then(|o| deref(doc, o))
-            .and_then(|o| o.as_array().ok())
-            .map(|a| a.iter().filter_map(|o| deref(doc, o).and_then(num)).collect::<Vec<f64>>());
-        let bgc = bg?;
-        let argb = color_of(&bgc);
-        for px in rgba.chunks_mut(4) {
-            px[0] = ((argb >> 16) & 0xFF) as u8;
-            px[1] = ((argb >> 8) & 0xFF) as u8;
-            px[2] = (argb & 0xFF) as u8;
-            px[3] = 255;
-        }
-        let ctm = placement_ctm(&bounds, base_ctm);
-        return Some((ctm, size, size, rgba));
+        // Nothing parseable. Do NOT fall back to flooding the area with
+        // /Background: per Table 78 /Background fills only the portions that lie
+        // OUTSIDE the shading's own extent and "shall be ignored by the sh
+        // operator", so painting it over the whole Decode box turned a failed
+        // mesh into an opaque rectangle covering the entire clip — hiding page
+        // content. With no triangles we cannot know the shading's extent, so the
+        // only correct answer is to paint nothing at all.
+        return None;
     }
 
-    for (v0, v1, v2) in triangles.into_iter().take(MAX_SHADING_PATCHES * 512) {
+    // Size the raster to the shading's aspect ratio instead of forcing a square.
+    // A wide, shallow gradient band used to allocate size*size regardless (up to
+    // 4 MB for a few-point-tall bar), and a page with many shadings multiplied that
+    // waste through `prims`, the wire buffer and again as Kotlin bitmaps. The
+    // placement CTM maps the unit square, so a non-square raster is geometrically
+    // identical. Both extents are already known non-degenerate.
+    let (w, h) = {
+        let bw = bounds[2] - bounds[0];
+        let bh = bounds[3] - bounds[1];
+        let long = size as usize;
+        let short = |r: f64| (((size as f64) * r).round() as usize).clamp(1, long);
+        if bh <= bw { (long, short(bh / bw)) } else { (short(bw / bh), long) }
+    };
+    // Bound this single raster's bytes as well as its shape — see
+    // MAX_SHADING_RASTER_BYTES for why per-page peak residency, not per-shading
+    // size, is the binding constraint. Scaling both axes by sqrt keeps the aspect.
+    let (w, h) = {
+        let bytes = w.saturating_mul(h).saturating_mul(4);
+        if bytes > MAX_SHADING_RASTER_BYTES {
+            let s = (MAX_SHADING_RASTER_BYTES as f64 / bytes as f64).sqrt();
+            (
+                ((w as f64 * s).round() as usize).max(1),
+                ((h as f64 * s).round() as usize).max(1),
+            )
+        } else {
+            (w, h)
+        }
+    };
+    let mut rgba = vec![0u8; w * h * 4];
+
+    for (v0, v1, v2) in triangles.into_iter().take(MAX_SHADING_TRIANGLES) {
         let c0 = color_of(&v0.color);
         let c1 = color_of(&v1.color);
         let c2 = color_of(&v2.color);
@@ -195,7 +234,7 @@ pub fn rasterize_shading_mesh(
     }
 
     let ctm = placement_ctm(&bounds, base_ctm);
-    Some((ctm, size, size, rgba))
+    Some((ctm, w as u32, h as u32, rgba))
 }
 
 fn placement_ctm(bounds: &[f64; 4], base_ctm: &Mat) -> Mat {
@@ -246,9 +285,12 @@ fn parse_type4(
     let mut guard = 0usize;
     while br.remaining_bits() >= (bps_flag + 2 * bps_coord + ncomp as u32 * bps_comp) as usize {
         guard += 1;
-        if guard > 2_000_000 { break; }
+        if guard > 2_000_000 || tris.len() >= MAX_SHADING_TRIANGLES { break; }
         let flag = br.read(bps_flag).unwrap_or(0);
         let v = match read_vertex(&mut br, bps_coord, bps_comp, ncomp, decode) { Some(v) => v, None => break };
+        // Each vertex's data occupies a whole number of bytes; trailing padding
+        // bits in the last byte are ignored (ISO 32000-1 8.7.4.5.5).
+        br.align();
         match flag {
             0 => {
                 // Start (or continue accumulating) a new independent triangle: its
@@ -298,14 +340,17 @@ fn parse_type5(
     let mut verts = Vec::new();
     while let Some(v) = read_vertex(&mut br, bps_coord, bps_comp, ncomp, decode) {
         verts.push(v);
-        if verts.len() > 4_000_000 {
+        if verts.len() >= MAX_SHADING_TRIANGLES {
             break;
         }
     }
     let rows = verts.len() / vpr;
     let mut tris = Vec::new();
-    for r in 0..rows.saturating_sub(1) {
+    'rows: for r in 0..rows.saturating_sub(1) {
         for c in 0..vpr - 1 {
+            if tris.len() >= MAX_SHADING_TRIANGLES {
+                break 'rows;
+            }
             let i00 = r * vpr + c;
             let i01 = r * vpr + c + 1;
             let i10 = (r + 1) * vpr + c;
@@ -369,7 +414,7 @@ fn parse_type6_7(
     };
 
     loop {
-        if patches >= MAX_SHADING_PATCHES {
+        if patches >= MAX_SHADING_PATCHES || tris.len() >= MAX_SHADING_TRIANGLES {
             break;
         }
         if br.remaining_bits() < bps_flag as usize {
@@ -449,6 +494,10 @@ fn parse_type6_7(
             cols.push(c2.unwrap());
             cols.push(c3.unwrap());
         }
+
+        // Each patch's data occupies a whole number of bytes; trailing padding
+        // bits in the last byte are ignored (ISO 32000-1 8.7.4.5.7).
+        br.align();
 
         // Corners of the boundary loop: p1=pts[0], p4=pts[3], p7=pts[6], p10=pts[9].
         let e_left = [pts[0], pts[1], pts[2], pts[3]]; // C00 -> C01
@@ -593,15 +642,22 @@ fn fill_tri(
     let bw = bounds[2] - bounds[0];
     let bh = bounds[3] - bounds[1];
     let to_px = |x: f64| (x - bounds[0]) / bw * w as f64;
-    let to_py = |y: f64| (y - bounds[1]) / bh * h as f64;
+    // Raster row 0 is the TOP of the image (unit-square v=1, ISO 32000-1 8.9.5.2), so the
+    // HIGH-y edge of `bounds` maps to py 0. Mapping bounds[1] to row 0 instead mirrored
+    // every mesh shading vertically, because `placement_ctm`'s `d` is positive. Must stay
+    // consistent with the `fy` inverse below.
+    let to_py = |y: f64| (bounds[3] - y) / bh * h as f64;
     let min_x = x0.min(x1).min(x2);
     let max_x = x0.max(x1).max(x2);
     let min_y = y0.min(y1).min(y2);
     let max_y = y0.max(y1).max(y2);
     let px0 = to_px(min_x).floor().max(0.0) as i32;
     let px1 = to_px(max_x).ceil().min(w as f64) as i32;
-    let py0 = to_py(min_y).floor().max(0.0) as i32;
-    let py1 = to_py(max_y).ceil().min(h as f64) as i32;
+    // `to_py` now DECREASES with y, so the triangle's max_y gives the smaller row index.
+    // Swapping these is not cosmetic: with them the wrong way round py0 > py1 and the
+    // scanline loop below never executes, so every mesh shading would render empty.
+    let py0 = to_py(max_y).floor().max(0.0) as i32;
+    let py1 = to_py(min_y).ceil().min(h as f64) as i32;
     let denom = (y1 - y2) * (x0 - x2) + (x2 - x1) * (y0 - y2);
     if denom.abs() < 1e-12 {
         return;
@@ -609,7 +665,7 @@ fn fill_tri(
     for py in py0..py1 {
         for px in px0..px1 {
             let fx = bounds[0] + (px as f64 + 0.5) / w as f64 * bw;
-            let fy = bounds[1] + (py as f64 + 0.5) / h as f64 * bh;
+            let fy = bounds[3] - (py as f64 + 0.5) / h as f64 * bh;
             let a = ((y1 - y2) * (fx - x2) + (x2 - x1) * (fy - y2)) / denom;
             let b = ((y2 - y0) * (fx - x2) + (x0 - x2) * (fy - y2)) / denom;
             let c = 1.0 - a - b;
@@ -686,6 +742,30 @@ mod tests {
         assert_eq!(br.read(3), Some(0b101));
         assert_eq!(br.read(5), Some(0b00000));
         assert_eq!(br.read(2), Some(0b11));
+    }
+
+    // ISO 32000-1 8.7.4.5.5: each Type 4 vertex occupies a whole number of bytes
+    // and trailing padding bits are ignored. Here flag(8) + 2*coord(8) + 1*comp(4)
+    // = 28 bits, so every vertex is padded to 32. Without the per-vertex align the
+    // second and third vertices decode from the padding and yield garbage
+    // coordinates, so this pins the alignment behaviour rather than just the count.
+    #[test]
+    fn type4_pads_each_vertex_to_a_byte_boundary() {
+        // Per vertex: [flag, x, y, colour<<4 | padding].
+        let data: Vec<u8> = vec![
+            0, 0, 0, 0x00, // v0 (0,0)   colour 0/15
+            0, 255, 0, 0xF0, // v1 (255,0) colour 15/15
+            0, 0, 255, 0x80, // v2 (0,255) colour 8/15
+        ];
+        // x 0..255, y 0..255, colour 0..1 — coords map through as identity.
+        let decode = [0.0, 255.0, 0.0, 255.0, 0.0, 1.0];
+        let tris = parse_type4(&data, 8, 8, 4, 1, &decode);
+        assert_eq!(tris.len(), 1, "three flag-0 vertices form exactly one triangle");
+        let (v0, v1, v2) = &tris[0];
+        assert_eq!((v0.x, v0.y), (0.0, 0.0));
+        assert_eq!((v1.x, v1.y), (255.0, 0.0));
+        assert_eq!((v2.x, v2.y), (0.0, 255.0));
+        assert!((v1.color[0] - 1.0).abs() < 1e-9, "v1 colour is the full 4-bit range");
     }
 
     // A Type 7 tensor patch whose interior control points are displaced must

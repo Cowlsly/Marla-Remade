@@ -92,14 +92,48 @@ pub fn filter_specs_from_dict(doc: &Document, dict: &Dictionary) -> Vec<(FilterK
     let filter_objs: Vec<Object> = match dict.get(b"Filter").ok().and_then(|o| deref(doc, o)) {
         Some(Object::Name(name)) => vec![Object::Name(name.clone())],
         Some(Object::Array(arr)) => arr.clone(),
-        _ => vec![],
+        // §8.9.7 Table 93 abbreviates /Filter to /F in an INLINE image dictionary, and
+        // inline images are the only dictionaries that reach here without a /Filter.
+        // In a regular stream dictionary /F is a file specification instead (§7.3.8.2),
+        // which is a string or a dictionary — so only the two shapes a filter can
+        // actually take are accepted, and a file spec is still ignored.
+        _ => match dict.get(b"F").ok().and_then(|o| deref(doc, o)) {
+            Some(Object::Name(name)) => vec![Object::Name(name.clone())],
+            Some(Object::Array(arr)) => arr.clone(),
+            _ => vec![],
+        },
     };
-    // DecodeParms may be dict or array
+    // DecodeParms may be dict or array; /DP is its inline-image abbreviation.
     let mut decode_parms: Vec<Option<Dictionary>> = Vec::new();
-    match dict.get(b"DecodeParms").ok().and_then(|o| deref(doc, o)) {
+    let parms_obj = dict
+        .get(b"DecodeParms")
+        .ok()
+        .and_then(|o| deref(doc, o))
+        .or_else(|| dict.get(b"DP").ok().and_then(|o| deref(doc, o)));
+    match parms_obj {
         Some(Object::Dictionary(d)) => {
-            decode_parms.push(Some(d.clone()));
-            for _ in 1..filter_objs.len() { decode_parms.push(None); }
+            // §7.4 pairs a DecodeParms ARRAY with a Filter array, but producers commonly
+            // emit a single dict alongside a filter array. Attaching it to index 0 meant
+            // that for `[/ASCII85Decode /FlateDecode]` the /Predictor never reached Flate
+            // and the image came out garbled. Give it to the first filter that can use it.
+            let target = filter_objs
+                .iter()
+                .position(|f| {
+                    f.as_name()
+                        .ok()
+                        .or_else(|| deref(doc, f).and_then(|o| o.as_name().ok()))
+                        .map(|n| {
+                            matches!(
+                                normalize_filter_name(&String::from_utf8_lossy(n)),
+                                FilterKind::Flate | FilterKind::Lzw | FilterKind::Ccitt | FilterKind::Jbig2
+                            )
+                        })
+                        .unwrap_or(false)
+                })
+                .unwrap_or(0);
+            for i in 0..filter_objs.len().max(1) {
+                decode_parms.push(if i == target { Some(d.clone()) } else { None });
+            }
         }
         Some(Object::Array(arr)) => {
             for el in arr {
@@ -153,6 +187,13 @@ pub fn decode_ascii85(data: &[u8]) -> Result<Vec<u8>, String> {
     let mut buffer: u32 = 0;
     let mut count = 0usize;
     let mut i = 0;
+    // Skip the PostScript "<~" opening delimiter. §7.4.3 only specifies the "~>" EOD, but
+    // producers following the PostScript convention emit the opener too, and '<' falls
+    // inside the valid '!'..'u' digit range so it would otherwise be decoded as data and
+    // shift every subsequent group.
+    if data.starts_with(b"<~") {
+        i = 2;
+    }
     while i < data.len() {
         let b = data[i]; i+=1;
         if b == b'~' {
@@ -166,12 +207,23 @@ pub fn decode_ascii85(data: &[u8]) -> Result<Vec<u8>, String> {
         }
         if b.is_ascii_whitespace() { continue; }
         if !(b'!'..=b'u').contains(&b) { break; }
-        buffer = buffer.checked_mul(85).ok_or("mul overflow")? + (b - b'!') as u32;
+        // checked_add matters as well as checked_mul: "s8W-" reaches exactly u32::MAX/85*85,
+        // so the following digit overflows the add. Release builds have no overflow checks,
+        // so this wrapped silently in production and panicked in tests.
+        buffer = buffer
+            .checked_mul(85)
+            .and_then(|v| v.checked_add((b - b'!') as u32))
+            .ok_or("group overflows u32")?;
         count+=1;
         if count==5 { out.extend_from_slice(&buffer.to_be_bytes()); buffer=0; count=0; }
     }
     if count>0 {
-        for _ in count..5 { buffer = buffer.checked_mul(85).ok_or("mul overflow")? + 84; }
+        for _ in count..5 {
+            buffer = buffer
+                .checked_mul(85)
+                .and_then(|v| v.checked_add(84))
+                .ok_or("group overflows u32")?;
+        }
         let bytes = buffer.to_be_bytes();
         out.extend_from_slice(&bytes[..count-1]);
     }
@@ -241,7 +293,12 @@ fn lzw_decode_std(data: &[u8], early_change: bool) -> Option<Vec<u8>> {
     };
 
     loop {
-        let code = read_code(&mut bit_buf, &mut bits_in_buf, data, &mut data_pos, code_bits)?;
+        let Some(code) = read_code(&mut bit_buf, &mut bits_in_buf, data, &mut data_pos, code_bits)
+        else {
+            // Stream ended without an EOD (257). Many producers omit it; returning None
+            // here discarded a fully-decoded stream and blanked the page.
+            break;
+        };
         if code == CLEAR {
             dict.truncate(258);
             code_bits = 9;
@@ -253,23 +310,30 @@ fn lzw_decode_std(data: &[u8], early_change: bool) -> Option<Vec<u8>> {
             dict[code as usize].clone()
         } else if code as usize == dict.len() {
             // KwKwK case
-            let p = prev.as_ref()?;
-            let mut e = p.clone();
-            e.push(p[0]);
-            e
+            match prev.as_ref() {
+                Some(p) if !p.is_empty() => {
+                    let mut e = p.clone();
+                    e.push(p[0]);
+                    e
+                }
+                _ => break,
+            }
         } else {
-            return None;
+            // Corrupt code: keep everything decoded so far rather than losing the stream.
+            break;
         };
         out.extend_from_slice(&entry);
         if let Some(p) = prev.take() {
             if dict.len() < 4096 {
-                let mut new_entry = p;
-                new_entry.push(entry[0]);
-                dict.push(new_entry);
-                // EarlyChange bumps code size one entry early per PDF spec
-                let threshold = if early_change { (1usize << code_bits) - 1 } else { 1usize << code_bits };
-                if dict.len() >= threshold && code_bits < 12 {
-                    code_bits += 1;
+                if let Some(&first) = entry.first() {
+                    let mut new_entry = p;
+                    new_entry.push(first);
+                    dict.push(new_entry);
+                    // EarlyChange bumps code size one entry early per PDF spec
+                    let threshold = if early_change { (1usize << code_bits) - 1 } else { 1usize << code_bits };
+                    if dict.len() >= threshold && code_bits < 12 {
+                        code_bits += 1;
+                    }
                 }
             }
         }
@@ -278,15 +342,47 @@ fn lzw_decode_std(data: &[u8], early_change: bool) -> Option<Vec<u8>> {
     Some(out)
 }
 
+/// Maximum bytes we will inflate from one stream. §7.4.4 places no limit on the
+/// expansion ratio, so a few-KB stream can inflate to gigabytes and OOM-kill the
+/// app; `MAX_PDF_BYTES` bounds only the compressed input.
+const MAX_DECODED_BYTES: u64 = 256 * 1024 * 1024;
+
 pub fn decode_flate(data: &[u8]) -> Option<Vec<u8>> {
-    use flate2::read::{ZlibDecoder, DeflateDecoder};
+    use flate2::read::{DeflateDecoder, ZlibDecoder};
     use std::io::Read;
-    let mut output = Vec::new();
-    let mut z = ZlibDecoder::new(data);
-    if z.read_to_end(&mut output).is_ok() { return Some(output); }
-    let mut out2 = Vec::new();
-    let mut d = DeflateDecoder::new(data);
-    if d.read_to_end(&mut out2).is_ok() { return Some(out2); }
+    // `read_to_end` appends as it inflates, so on a corrupt or truncated stream the
+    // buffer already holds every byte that did inflate. Truncated streams are common
+    // in the wild and discarding the partial output turns a mostly-fine page blank.
+    let inflate = |bytes: &[u8], zlib: bool| -> Option<Vec<u8>> {
+        let mut out = Vec::new();
+        let res = if zlib {
+            ZlibDecoder::new(bytes)
+                .take(MAX_DECODED_BYTES)
+                .read_to_end(&mut out)
+        } else {
+            DeflateDecoder::new(bytes)
+                .take(MAX_DECODED_BYTES)
+                .read_to_end(&mut out)
+        };
+        match res {
+            Ok(_) => Some(out),
+            Err(_) if !out.is_empty() => Some(out),
+            Err(_) => None,
+        }
+    };
+    if let Some(out) = inflate(data, true) {
+        return Some(out);
+    }
+    // Some producers omit the two-byte zlib header and emit raw deflate.
+    if let Some(out) = inflate(data, false) {
+        return Some(out);
+    }
+    // A single stray byte before the zlib header is another known producer bug.
+    if data.len() > 1 {
+        if let Some(out) = inflate(&data[1..], true) {
+            return Some(out);
+        }
+    }
     None
 }
 
@@ -415,19 +511,14 @@ pub fn decode_stream_chain(mut data: Vec<u8>, specs: &[(FilterKind, Option<Dicti
                 // LZW supports the same PNG/TIFF predictors as Flate.
                 data = apply_predictor(data, parms.as_ref(), doc);
             }
-            FilterKind::Ccitt => {
-                // Need width/height from parms? Use parse helper
-                let ccitt_parms = parse_ccitt_params(doc, parms.as_ref());
-                // Columns may be known; if not, fallback to 1728 default; but we need to output packed bits
-                // We return packed bits as bytes (still 1-bit per pixel). Caller will unpack.
-                // For chain decode, we treat w as columns, h as rows if known else estimate.
-                let w = ccitt_parms.columns.max(1);
-                let h = ccitt_parms.rows.max(1);
-                if let Some(d)=decode_ccitt(&data, w, h, &ccitt_parms) { data=d; } else { return None; }
-            }
-            FilterKind::Dct | FilterKind::Jpx | FilterKind::Jbig2 => {
-                // Stop chain for DCT/JPX/JBIG2 - they are not decoded via chain here (handled specially in image extraction)
-                // Keep data as is
+            FilterKind::Ccitt | FilterKind::Dct | FilterKind::Jpx | FilterKind::Jbig2 => {
+                // Image codecs are always the LAST filter (§7.4) and are decoded by the
+                // image layer, which is the only place that knows the real /Width and
+                // /Height. Decoding CCITT here as well made the image layer re-decode the
+                // resulting 1-bpc raster as if it were a fresh G3/G4 codestream, and forced
+                // this code to guess the row count from `data.len()*8/columns` — which
+                // measures COMPRESSED bits and so under-counts rows by the compression
+                // ratio. Content streams never use these filters.
             }
             FilterKind::Crypt => {
                 // Stream decryption already happens at document load (decrypt.rs),
@@ -457,20 +548,76 @@ fn apply_predictor(data: Vec<u8>, parms: Option<&Dictionary>, doc: &Document) ->
     if pred <= 1.0 {
         return data;
     }
-    let cols = dict.get(b"Columns").ok().and_then(num).unwrap_or(1.0) as usize;
-    let colors = dict.get(b"Colors").ok().and_then(num).unwrap_or(1.0) as usize;
-    let bpc = dict.get(b"BitsPerComponent").ok().and_then(num).unwrap_or(8.0) as usize;
-    let bpp = (colors * bpc / 8).max(1);
+    let get = |key: &[u8], default: f64| -> f64 {
+        dict.get(key)
+            .ok()
+            .and_then(num)
+            .or_else(|| dict.get(key).ok().and_then(|o| deref(doc, o).and_then(num)))
+            .unwrap_or(default)
+    };
+    // Clamp before any multiplication: `as usize` saturates a huge or negative float to
+    // usize::MAX / 0, and `colors * bpc` / `bpp * cols` would then overflow (silently in
+    // release, since overflow-checks are off).
+    let cols = (get(b"Columns", 1.0).max(0.0) as usize).clamp(1, 1 << 24);
+    let colors = (get(b"Colors", 1.0).max(0.0) as usize).clamp(1, 32);
+    let bpc = match get(b"BitsPerComponent", 8.0) as i64 {
+        1 => 1,
+        2 => 2,
+        4 => 4,
+        16 => 16,
+        _ => 8,
+    };
     if (10.0..=15.0).contains(&pred) {
-        if let Ok(decoded) = lopdf::filters::png::decode_frame(data.as_slice(), bpp, cols) {
-            return decoded;
-        }
-        data
+        apply_png_predictor(data, cols, colors, bpc)
     } else if pred == 2.0 {
         apply_tiff_predictor2(data, cols, colors, bpc)
     } else {
         data
     }
+}
+
+/// Undo a PNG predictor (§7.4.4.4). Each row is prefixed with a filter-type byte.
+///
+/// `lopdf::filters::png::decode_frame` cannot be used: it derives the row length as
+/// `bytes_per_pixel * pixels_per_row`, but the spec requires
+/// `ceil(Columns * Colors * BitsPerComponent / 8)`. Those agree only when
+/// `BitsPerComponent` is 8 or 16, so every bilevel and 2/4-bit image got an over-long
+/// row, `read_exact` failed, and the caller returned the data with the per-row filter
+/// bytes still embedded. It also aborted the whole frame on a short final row.
+///
+/// The per-row arithmetic itself (Sub/Up/Avg/Paeth in wrapping u8 math) is correct in
+/// lopdf, so `decode_row` is reused.
+fn apply_png_predictor(data: Vec<u8>, cols: usize, colors: usize, bpc: usize) -> Vec<u8> {
+    use lopdf::filters::png::{decode_row, FilterType};
+    // Byte offset of the "left" sample. PNG defines this as ceil(bits per pixel / 8),
+    // minimum 1, so sub-byte pixel depths filter on adjacent bytes.
+    let bpp = (colors * bpc).div_ceil(8).max(1);
+    let row_bytes = (cols * colors * bpc).div_ceil(8);
+    if row_bytes == 0 {
+        return data;
+    }
+    let mut out = Vec::with_capacity(data.len());
+    // §7.4.4.4: the row above the first is treated as all zeros.
+    let mut prev = vec![0u8; row_bytes];
+    let mut row = vec![0u8; row_bytes];
+    let mut pos = 0usize;
+    while pos < data.len() {
+        let Ok(filter) = FilterType::try_from(data[pos]) else {
+            // Not a predictor byte: stop and keep the rows decoded so far.
+            break;
+        };
+        pos += 1;
+        let end = (pos + row_bytes).min(data.len());
+        let got = end - pos;
+        row[..got].copy_from_slice(&data[pos..end]);
+        // Zero-fill a truncated final row instead of discarding the entire frame.
+        row[got..].fill(0);
+        pos = end;
+        decode_row(filter, bpp, &prev, &mut row);
+        out.extend_from_slice(&row);
+        std::mem::swap(&mut prev, &mut row);
+    }
+    out
 }
 
 /// TIFF Predictor 2: horizontal differencing. Reverses the left-difference for
@@ -595,5 +742,128 @@ mod tests {
         let encoded = vec![0xEBu8];
         let out = apply_tiff_predictor2(encoded, 8, 1, 1);
         assert_eq!(out, vec![0b10110010]);
+    }
+
+    #[test] fn png_predictor_rgb_8bpc_sub() {
+        // 2 rows, 2 columns, 3 colors, 8bpc => row_bytes 6, bpp 3.
+        // Filter 1 (Sub) row0: [10,20,30, 5,5,5] -> [10,20,30, 15,25,35]
+        // Filter 2 (Up)  row1: [1,1,1, 1,1,1]    -> previous row + 1
+        let data = vec![1, 10, 20, 30, 5, 5, 5, 2, 1, 1, 1, 1, 1, 1];
+        let out = apply_png_predictor(data, 2, 3, 8);
+        assert_eq!(out, vec![10, 20, 30, 15, 25, 35, 11, 21, 31, 16, 26, 36]);
+    }
+
+    #[test] fn png_predictor_1bpc_row_length() {
+        // 1 color, 1bpc, 17 columns => ceil(17/8) = 3 bytes per row, NOT 17.
+        // Using `bpp * columns` (lopdf's decode_frame) would demand 17 bytes and fail.
+        // Two rows, filter 0 (None), so the payload passes through untouched.
+        let data = vec![0, 0xAA, 0xBB, 0x80, 0, 0x11, 0x22, 0x00];
+        let out = apply_png_predictor(data, 17, 1, 1);
+        assert_eq!(out, vec![0xAA, 0xBB, 0x80, 0x11, 0x22, 0x00]);
+    }
+
+    #[test] fn png_predictor_keeps_truncated_final_row() {
+        // row_bytes 3; the second row supplies only 2 of its 3 bytes. The first row must
+        // survive rather than the whole frame being discarded.
+        let data = vec![0, 1, 2, 3, 0, 4, 5];
+        let out = apply_png_predictor(data, 3, 1, 8);
+        assert_eq!(out.len(), 6);
+        assert_eq!(&out[..3], &[1, 2, 3]);
+        assert_eq!(&out[3..], &[4, 5, 0]);
+    }
+
+    #[test] fn flate_returns_partial_output_when_truncated() {
+        use flate2::write::ZlibEncoder;
+        use std::io::Write;
+        let payload: Vec<u8> = (0..4096u32).map(|i| (i % 251) as u8).collect();
+        let mut e = ZlibEncoder::new(Vec::new(), flate2::Compression::default());
+        e.write_all(&payload).expect("encode");
+        let full = e.finish().expect("finish");
+        // Lop off the tail: the stream is now corrupt but most of it still inflates.
+        let truncated = &full[..full.len() - 8];
+        let out = decode_flate(truncated).expect("partial output, not None");
+        assert!(!out.is_empty(), "partial inflate must not be discarded");
+        assert_eq!(out, payload[..out.len()], "partial output must be a valid prefix");
+    }
+
+    #[test] fn ascii85_overflow_is_an_error_not_a_panic() {
+        // "s8W-" is exactly u32::MAX/85*85, so the next digit overflows the ADD.
+        assert!(decode_ascii85(b"s8W-\"~>").is_err());
+        // The maximal legal group must still decode.
+        assert_eq!(decode_ascii85(b"s8W-!~>").unwrap(), vec![0xFF, 0xFF, 0xFF, 0xFF]);
+    }
+
+    #[test] fn ascii85_skips_postscript_opener() {
+        assert_eq!(decode_ascii85(b"<~z~>").unwrap(), vec![0, 0, 0, 0]);
+    }
+
+    #[test] fn lzw_truncated_stream_keeps_decoded_prefix() {
+        // 'A' 'B' with no EOD code: 9-bit codes 65, 66 then the stream just stops.
+        // 0 0100 0001 0 0100 0010 -> 0x20, 0x90, 0x88 (trailing bits are padding).
+        let out = decode_lzw(&[0x20, 0x90, 0x88], true).expect("partial output");
+        assert_eq!(&out[..2], b"AB");
+    }
+
+    #[test] fn ccitt_is_left_encoded_for_the_image_layer() {
+        // decode_stream_chain must NOT decode CCITT: the image layer owns it because only
+        // it knows the real /Width and /Height.
+        let doc = Document::new();
+        let specs = vec![(FilterKind::Ccitt, None)];
+        let raw = vec![0x26, 0xA0, 0x00, 0x11];
+        let out = decode_stream_chain(raw.clone(), &specs, &doc).expect("passthrough");
+        assert_eq!(out, raw, "CCITT bytes must reach the image layer untouched");
+    }
+
+    #[test] fn inline_image_f_abbreviation_is_a_filter() {
+        // §8.9.7 Table 93: an inline image spells /Filter as /F and /DecodeParms as /DP.
+        // Without this the filter chain came back empty and the still-ENCODED bytes were
+        // used as image samples.
+        let doc = Document::new();
+        let mut dict = Dictionary::new();
+        dict.set("W", Object::Integer(4));
+        dict.set("H", Object::Integer(4));
+        dict.set("F", Object::Name(b"AHx".to_vec()));
+        let specs = filter_specs_from_dict(&doc, &dict);
+        assert_eq!(specs.len(), 1);
+        assert_eq!(specs[0].0, FilterKind::AsciiHex);
+
+        // /DP carries the parameters under the same abbreviation scheme.
+        let mut dict = Dictionary::new();
+        dict.set("F", Object::Name(b"Fl".to_vec()));
+        let mut dp = Dictionary::new();
+        dp.set("Predictor", Object::Integer(12));
+        dp.set("Columns", Object::Integer(4));
+        dict.set("DP", Object::Dictionary(dp));
+        let specs = filter_specs_from_dict(&doc, &dict);
+        assert_eq!(specs[0].0, FilterKind::Flate);
+        let parms = specs[0].1.as_ref().expect("/DP must reach the Flate filter");
+        assert_eq!(parms.get(b"Predictor").unwrap(), &Object::Integer(12));
+    }
+
+    #[test] fn stream_f_file_specification_is_not_treated_as_a_filter() {
+        // In a regular STREAM dictionary /F is a file specification (§7.3.8.2), not a
+        // filter. Only the Name/Array shapes a filter can have may be accepted, or an
+        // external-file reference would be misread as a filter name.
+        let doc = Document::new();
+        let mut dict = Dictionary::new();
+        dict.set("F", Object::String(b"/tmp/data.bin".to_vec(), lopdf::StringFormat::Literal));
+        assert!(filter_specs_from_dict(&doc, &dict).is_empty());
+
+        let mut dict = Dictionary::new();
+        let mut fs = Dictionary::new();
+        fs.set("Type", Object::Name(b"Filespec".to_vec()));
+        dict.set("F", Object::Dictionary(fs));
+        assert!(filter_specs_from_dict(&doc, &dict).is_empty());
+    }
+
+    #[test] fn explicit_filter_still_wins_over_f() {
+        // /F is only consulted when /Filter is absent, so no existing behaviour changes.
+        let doc = Document::new();
+        let mut dict = Dictionary::new();
+        dict.set("Filter", Object::Name(b"FlateDecode".to_vec()));
+        dict.set("F", Object::Name(b"AHx".to_vec()));
+        let specs = filter_specs_from_dict(&doc, &dict);
+        assert_eq!(specs.len(), 1);
+        assert_eq!(specs[0].0, FilterKind::Flate);
     }
 }

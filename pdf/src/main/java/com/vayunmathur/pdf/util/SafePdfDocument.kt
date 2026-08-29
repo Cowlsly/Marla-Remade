@@ -19,25 +19,49 @@ class SafePdfDocument private constructor(
     private val handle: Long,
     val pageCount: Int,
 ) {
-    // Bounded LRU to avoid OOM; P0 fix #2 critical: cachedPixels budget drift on auto-eviction
-    private var cachedPixels: Long = 0L
+    // Bounded LRU to avoid OOM. Accounted in BYTES via [pageWeightBytes] — see the note on
+    // [MAX_CACHED_BYTES] for why counting only bitmap pixels was blind to the pages that
+    // actually cause the OOM. Every add/subtract goes through the one helper, because the
+    // original budget-drift bug came from four hand-duplicated copies of the arithmetic.
+    private var cachedBytes: Long = 0L
+    /**
+     * Every page dimension ever decoded, keyed by page index. Deliberately NOT evicted with
+     * [cache]: it is two floats per page, and the placeholder shown before a page is decoded
+     * needs its true aspect ratio. Sizing an undecoded page as letter-portrait and then
+     * resizing it once the real dimensions arrive changes the item's height mid-scroll, which
+     * moves everything below it — very visible in a document with a landscape insert, or when
+     * scrolling back to a page the LRU has dropped.
+     */
+    private val pageSizes = java.util.concurrent.ConcurrentHashMap<Int, FloatArray>()
+
+    // Evicting a page must NOT recycle its bitmaps: the same SafePdfPage instance is
+    // still referenced by whatever composable is drawing it, and Canvas.drawBitmap
+    // throws "Cannot draw recycled bitmaps" from the draw phase. Dropping the last
+    // reference is enough — the GC reclaims the pixels.
     private val cache: MutableMap<Int, SafePdfPage> = object : LinkedHashMap<Int, SafePdfPage>(16, 0.75f, true) {
         override fun removeEldestEntry(eldest: MutableMap.MutableEntry<Int, SafePdfPage>?): Boolean {
             if (size <= MAX_CACHED_PAGES) return false
-            // P0 fix #2 critical: previously recycled eldest bitmap but never subtracted cachedPixels, permanent drift
-            eldest?.value?.let { page ->
-                page.primitives.forEach { prim ->
-                    if (prim is PdfPrimitive.Image) {
-                        val b = prim.bitmap
-                        if (b != null) {
-                            cachedPixels = (cachedPixels - b.width.toLong() * b.height.toLong()).coerceAtLeast(0L)
-                        }
-                        runCatching { prim.bitmap?.recycle() }
-                    }
-                }
-            }
+            eldest?.value?.let { cachedBytes = (cachedBytes - pageWeightBytes(it)).coerceAtLeast(0L) }
             return true
         }
+    }
+
+    /**
+     * Rough retained size of [page] in bytes. Decoded bitmaps are exact (ARGB_8888, four bytes
+     * per pixel); everything else is charged a flat [PRIMITIVE_WEIGHT_BYTES] estimate, which is
+     * deliberately an order-of-magnitude figure rather than a measurement — the point is to
+     * bound the primitive COUNT, not to predict the heap precisely.
+     */
+    private fun pageWeightBytes(page: SafePdfPage): Long {
+        var bytes = 0L
+        for (prim in page.primitives) {
+            bytes += PRIMITIVE_WEIGHT_BYTES
+            if (prim is PdfPrimitive.Image) {
+                val b = prim.bitmap
+                if (b != null) bytes += b.width.toLong() * b.height.toLong() * 4L
+            }
+        }
+        return bytes
     }
 
     /** Decode page [index] (0-based), or `null` if the native render fails. */
@@ -47,27 +71,26 @@ class SafePdfDocument private constructor(
         // side throws a RuntimeException on an uncaught panic (see the
         // catch_unwind boundary in jni_bindings.rs), and a corrupt wire buffer
         // could throw during parse. Degrade either to a skipped (null) page.
-        val bytes = runCatching { PdfNative.renderPage(handle, index) }.getOrNull()
-            ?: return@withContext null
-        val page = runCatching { SafePdfParser.parse(bytes) }.getOrNull()
-            ?: return@withContext null
-        synchronized(cache) {
-            // Budget-based eviction in addition to count-based
-            var pixels = page.primitives.sumOf { prim ->
-                if (prim is PdfPrimitive.Image) {
-                    prim.bitmap?.let { it.width.toLong() * it.height.toLong() } ?: 0L
-                } else 0L
+        val bytes = runCatching { PdfNative.renderPage(handle, index) }
+            .onFailure { android.util.Log.w(TAG, "native renderPage threw for page $index", it) }
+            .getOrNull()
+        if (bytes == null) {
+            android.util.Log.w(TAG, "native renderPage returned no data for page $index")
+            return@withContext null
+        }
+        val page = runCatching { SafePdfParser.parse(bytes) }
+            .onFailure {
+                android.util.Log.w(TAG, "wire parse failed for page $index (${bytes.size} bytes)", it)
             }
-            cachedPixels += pixels
-            while (cachedPixels > MAX_CACHED_PIXELS && cache.isNotEmpty()) {
+            .getOrNull()
+            ?: return@withContext null
+        pageSizes[index] = floatArrayOf(page.width, page.height)
+        synchronized(cache) {
+            cachedBytes += pageWeightBytes(page)
+            while (cachedBytes > MAX_CACHED_BYTES && cache.isNotEmpty()) {
                 val eldest = cache.entries.iterator().next()
                 cache.remove(eldest.key)?.let { evicted ->
-                    evicted.primitives.forEach { p ->
-                        if (p is PdfPrimitive.Image) {
-                            cachedPixels -= p.bitmap?.let { b -> b.width.toLong() * b.height.toLong() } ?: 0L
-                            runCatching { p.bitmap?.recycle() }
-                        }
-                    }
+                    cachedBytes = (cachedBytes - pageWeightBytes(evicted)).coerceAtLeast(0L)
                 }
             }
             cache[index] = page
@@ -75,29 +98,26 @@ class SafePdfDocument private constructor(
         page
     }
 
+    /**
+     * Width/height ratio of page [index] if it has been decoded at least once, else `null`.
+     * Lets the viewer lay out a not-yet-decoded page at its real height instead of guessing.
+     */
+    fun knownAspectRatio(index: Int): Float? =
+        pageSizes[index]?.takeIf { it[0] > 0f && it[1] > 0f }?.let { it[0] / it[1] }
+
     /** Release native resources. Idempotent-safe to call once. */
     fun close() {
         synchronized(cache) {
-            cache.values.forEach { page ->
-                page.primitives.forEach { prim ->
-                    if (prim is PdfPrimitive.Image) runCatching { prim.bitmap?.recycle() }
-                }
-            }
             cache.clear()
-            cachedPixels = 0L
+            cachedBytes = 0L
         }
         PdfNative.closeDocument(handle)
     }
 
     private fun invalidate(index: Int) {
         synchronized(cache) {
-            cache.remove(index)?.let { page ->
-                page.primitives.forEach { prim ->
-                    if (prim is PdfPrimitive.Image) {
-                        cachedPixels -= prim.bitmap?.let { b -> b.width.toLong() * b.height.toLong() } ?: 0L
-                        runCatching { prim.bitmap?.recycle() }
-                    }
-                }
+            cache.remove(index)?.let {
+                cachedBytes = (cachedBytes - pageWeightBytes(it)).coerceAtLeast(0L)
             }
         }
     }
@@ -240,12 +260,12 @@ class SafePdfDocument private constructor(
 
     /** Serialize with streams compressed + unused objects pruned - wrapper for saveCompressed native */
     suspend fun saveCompressed(): ByteArray? = withContext(Dispatchers.IO) {
-        PdfNative.saveCompressed(handle).also { synchronized(cache) { cache.clear(); cachedPixels = 0L } }
+        PdfNative.saveCompressed(handle).also { synchronized(cache) { cache.clear(); cachedBytes = 0L } }
     }
 
     /** Flatten annotations into page content - wrapper for flattenDocument native */
     suspend fun flattenDocument(): Boolean = withContext(Dispatchers.IO) {
-        PdfNative.flattenDocument(handle).also { synchronized(cache) { cache.clear(); cachedPixels = 0L } }
+        PdfNative.flattenDocument(handle).also { synchronized(cache) { cache.clear(); cachedBytes = 0L } }
     }
 
     /** Extract page [index] into standalone one-page PDF bytes */
@@ -267,7 +287,7 @@ class SafePdfDocument private constructor(
 
     /** Permanently remove content under redaction annotations. */
     suspend fun applyRedactions(): Boolean = withContext(Dispatchers.IO) {
-        PdfNative.applyRedactions(handle).also { synchronized(cache) { cache.clear(); cachedPixels = 0L } }
+        PdfNative.applyRedactions(handle).also { synchronized(cache) { cache.clear(); cachedBytes = 0L } }
     }
 
     /** Whether any redaction annotations exist (to show the Apply-redactions action). */
@@ -304,8 +324,32 @@ class SafePdfDocument private constructor(
         withContext(Dispatchers.IO) { PdfNative.saveEncrypted(handle, userPw, ownerPw) }
 
     companion object {
+        private const val TAG = "SafePdfDocument"
         private const val MAX_CACHED_PAGES = 12
-        private const val MAX_CACHED_PIXELS = 64 * 1024 * 1024L // ~64 MP aggregate budget
+        /**
+         * Rough per-primitive retained cost, in bytes. `FillPath` holds `List<List<Offset>>`
+         * and `Offset` boxes inside a List, so a four-point fill is already ~176 bytes once
+         * the object, both lists and the boxed points are counted; a short `Text` is similar.
+         * An order-of-magnitude estimate, not a measurement.
+         */
+        private const val PRIMITIVE_WEIGHT_BYTES = 128L
+        /**
+         * Aggregate retained budget for [cache], in BYTES.
+         *
+         * This used to count only decoded-bitmap PIXELS, which was blind in both directions.
+         * Bitmaps are four bytes per pixel, so a nominal "64 MP" cap actually permitted ~256 MB
+         * — more than the whole heap on most devices, so it never fired. Worse, a vector page
+         * contributed ZERO, so a document of dense drawings could hold twelve 300k-primitive
+         * pages (~450 MB of Kotlin objects) with the budget reading zero and
+         * [MAX_CACHED_PAGES] as the only bound. That is the more likely OOM of the two, and it
+         * got three times worse when `MAX_CONTENT_OPS` was raised, making Rust's 300k
+         * `MAX_PRIMITIVES` reachable where a page previously topped out near 100k.
+         *
+         * Evicting a page that is currently on screen is harmless: the composable holds its own
+         * reference to the decoded page and `produceState` does not re-run, so eviction costs at
+         * most a re-render if that page is requested again. The budget can therefore be tight.
+         */
+        private const val MAX_CACHED_BYTES = 96L * 1024 * 1024
         /**
          * Open [uri] as a safe PDF, or return `null` when the native lib is
          * unavailable, the bytes can't be read, or parsing fails. Encrypted PDFs

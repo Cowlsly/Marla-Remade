@@ -32,6 +32,33 @@ pub(crate) fn appearance_matrix(rect: [f64; 4], bbox: [f64; 4], matrix: Mat) -> 
     mat_mul(&matrix, &fit)
 }
 
+/// Whether an annotation should be painted on screen. Shared by the renderer and
+/// by `flatten_document`, which must not bake in anything invisible.
+///
+/// Per §12.5.3 Table 165 the `/F` flags are tested by VALUE: Hidden is bit
+/// position 2 (value 2), NoView is bit position 6 (value 32). Also honors
+/// optional content (§8.11.2) and skips `/Popup`, whose appearance is shown only
+/// via its parent's open state (§12.5.6.14).
+pub(crate) fn annot_visible_on_screen(doc: &Document, dict: &lopdf::Dictionary) -> bool {
+    let flags = dict
+        .get(b"F")
+        .ok()
+        .and_then(|o| deref(doc, o).or(Some(o)))
+        .and_then(num)
+        .unwrap_or(0.0) as i64;
+    if flags & 0b10 != 0 || flags & 0b10_0000 != 0 {
+        return false;
+    }
+    if dict.get(b"OC").ok().map(|oc| crate::oc_object_hidden(doc, oc)).unwrap_or(false) {
+        return false;
+    }
+    dict.get(b"Subtype")
+        .ok()
+        .and_then(|o| deref(doc, o).or(Some(o)))
+        .and_then(|o| o.as_name().ok())
+        != Some(b"Popup")
+}
+
 /// Render each visible page annotation's normal appearance (`/AP /N`) into
 /// primitives, mapping the appearance BBox into the annotation Rect, then
 /// through `base` (page rotation / origin) into displayed space.
@@ -51,18 +78,7 @@ pub(crate) fn render_annotations(doc: &Document, page_id: ObjectId, base: &Mat, 
             Some(d) => d,
             None => continue,
         };
-        // Skip Hidden (bit 2) and NoView (bit 6) annotations.
-        let flags = dict.get(b"F").ok().and_then(num).unwrap_or(0.0) as i64;
-        if flags & 0b10 != 0 || flags & 0b10_0000 != 0 {
-            continue;
-        }
-        // Skip annotations on an optional-content group that is turned OFF.
-        if dict.get(b"OC").ok().map(|oc| crate::oc_object_hidden(doc, oc)).unwrap_or(false) {
-            continue;
-        }
-        // Popup annotations are only shown when their parent is open; don't paint
-        // them inline on the page.
-        if dict.get(b"Subtype").ok().and_then(|o| o.as_name().ok()) == Some(b"Popup") {
+        if !annot_visible_on_screen(doc, dict) {
             continue;
         }
         render_annotation(doc, dict, base, prims);
@@ -89,14 +105,25 @@ pub(crate) fn render_annotation(doc: &Document, dict: &lopdf::Dictionary, base: 
     let normal = match ap.get(b"N").ok().and_then(|o| deref(doc, o)) {
         Some(Object::Stream(s)) => s,
         Some(Object::Dictionary(states)) => {
-            // The appearance sub-state is selected by /AS. When /AS is missing or
-            // doesn't match, fall back to the "Off" state (a button's default) —
-            // NOT an arbitrary first entry, which is nondeterministic (HashMap order)
-            // and can render an unchecked box as checked.
             let as_name = dict.get(b"AS").ok().and_then(|o| o.as_name().ok());
-            let picked = as_name
-                .and_then(|n| states.get(n).ok())
-                .or_else(|| states.get(b"Off").ok());
+            let picked = match as_name {
+                // /AS present: it selects the state. If it names a state that is
+                // absent, fall back to "Off" (a button's default) and otherwise
+                // draw nothing — NOT an arbitrary entry, which is
+                // nondeterministic and would render an unchecked box as checked.
+                Some(n) => states.get(n).ok().or_else(|| states.get(b"Off").ok()),
+                // /AS absent is malformed (§12.5.5, Table 168 requires it when /N
+                // is a subdictionary). Prefer "Off"; failing that, a single entry
+                // is unambiguous, so use the real appearance rather than
+                // synthesizing a crude one over the top of it.
+                None => states.get(b"Off").ok().or_else(|| {
+                    if states.len() == 1 {
+                        states.iter().next().map(|(_, v)| v)
+                    } else {
+                        None
+                    }
+                }),
+            };
             match picked.and_then(|o| deref(doc, o)) {
                 Some(Object::Stream(s)) => s,
                 _ => {
@@ -111,12 +138,12 @@ pub(crate) fn render_annotation(doc: &Document, dict: &lopdf::Dictionary, base: 
         }
     };
 
-    let bbox = normal
+    let bbox_raw = normal
         .dict
         .get(b"BBox")
         .ok()
-        .and_then(|o| read_rect(doc, o))
-        .unwrap_or([0.0, 0.0, 1.0, 1.0]);
+        .and_then(|o| read_rect(doc, o));
+    let bbox = bbox_raw.unwrap_or([0.0, 0.0, 1.0, 1.0]);
     let matrix = normal
         .dict
         .get(b"Matrix")
@@ -131,32 +158,74 @@ pub(crate) fn render_annotation(doc: &Document, dict: &lopdf::Dictionary, base: 
         .and_then(|o| o.as_dict().ok())
         .cloned();
 
-    let bytes = stream_data_with_doc(doc, normal);
-    let ops = match Content::decode(&bytes) {
-        Ok(c) => c.operations,
-        Err(_) => return,
-    };
+    let ops = crate::content::stream_operations(doc, normal);
+    if ops.is_empty() {
+        return;
+    }
+
+    let ctm = mat_mul(&appearance_matrix(rect, bbox, matrix), base);
+
+    // §8.10.2: a form XObject's /BBox "shall be used to clip" its contents, and
+    // §12.5.5 defines an appearance stream as a form XObject. Without this an
+    // appearance paints outside its own Rect. Clip to the /Matrix-transformed
+    // BBox QUAD rather than the axis-aligned box §12.5.5 derives for the /Rect
+    // fit — the latter is too loose and lets a rotated appearance spill. The
+    // same `ctm` is reused for the clip and the content, so the form's /Matrix
+    // (already folded into it by appearance_matrix) cannot be applied twice.
+    // A degenerate BBox is skipped: a collapsed quad would swallow the whole
+    // annotation, turning a spill into a vanish.
+    let clip = bbox_raw
+        .map(normalize_rect)
+        .filter(|b| b[2] - b[0] > 0.0 && b[3] - b[1] > 0.0);
+    if let Some(b) = clip {
+        let pts: Vec<(f32, f32)> = [(b[0], b[1]), (b[2], b[1]), (b[2], b[3]), (b[0], b[3])]
+            .iter()
+            .map(|&(x, y)| {
+                let (dx, dy) = transform(&ctm, x, y);
+                (dx as f32, dy as f32)
+            })
+            .collect();
+        let mut path_ops = vec![PathOp::Move(pts[0].0, pts[0].1)];
+        path_ops.extend(pts[1..].iter().map(|&(x, y)| PathOp::Line(x, y)));
+        path_ops.push(PathOp::Close);
+        prims.push(Prim::ClipPush { even_odd: false, pts, path_ops: Some(path_ops) });
+    }
 
     let gs = GraphicsState {
-        ctm: mat_mul(&appearance_matrix(rect, bbox, matrix), base),
+        ctm,
         ..Default::default()
     };
     let start = prims.len();
     interpret_content(doc, &ops, res.as_ref(), gs, prims, 1, false);
 
     // Honor the annotation's constant opacity (/CA) over its rendered prims.
-    let ca = dict.get(b"CA").ok().and_then(num).unwrap_or(1.0);
+    let ca = dict.get(b"CA").ok().and_then(|o| deref(doc, o).or(Some(o))).and_then(num).unwrap_or(1.0);
     if ca < 1.0 {
         for p in prims[start..].iter_mut() {
             scale_prim_alpha(p, ca);
         }
     }
+    // Unconditional pop (mirrors the `Do` arm): interpret_content always returns
+    // with a balanced clip depth, so this keeps the canvas clip stack balanced
+    // even if the content hit the primitive cap.
+    if clip.is_some() {
+        prims.push(Prim::ClipPop);
+    }
 }
 
 /// Read an annotation color array (`/C`, `/IC`) as ARGB, or `None` when the
 /// array is empty (meaning "no color" / transparent) or absent.
-fn markup_color(dict: &lopdf::Dictionary, key: &[u8]) -> Option<u32> {
-    let arr = dict.get(key).ok()?.as_array().ok()?;
+///
+/// The array is dereferenced: §7.3.10 lets any object be indirect, and an
+/// indirect `/C` previously read as "no colour", silently substituting the
+/// default instead of the author's.
+fn markup_color(doc: &Document, dict: &lopdf::Dictionary, key: &[u8]) -> Option<u32> {
+    let arr = dict
+        .get(key)
+        .ok()
+        .and_then(|o| deref(doc, o).or(Some(o)))?
+        .as_array()
+        .ok()?;
     let c: Vec<f64> = arr.iter().filter_map(num).collect();
     match c.len() {
         1 => Some(gray_to_argb(c[0])),
@@ -200,9 +269,19 @@ fn annot_border_dash(doc: &Document, dict: &lopdf::Dictionary) -> Vec<f64> {
     Vec::new()
 }
 
-/// Synthesize a basic appearance for common annotation types that lack an `/AP`
-/// stream, emitting primitives directly (Square/Circle/Line/Ink and the text
-/// markup types via `/QuadPoints`). Unknown types are skipped.
+/// Synthesize a basic appearance for annotation types that lack an `/AP` stream.
+///
+/// Only shapes the file actually specifies are drawn: Square/Circle from `/Rect`,
+/// Line from `/L` (with `/LE` endings), Ink from `/InkList`, Polygon/PolyLine
+/// from `/Vertices`, the text markup types from `/QuadPoints`, Caret as an
+/// insertion wedge and Stamp as its `/Name` wording in a box.
+///
+/// Everything else — Widget, Link, FileAttachment, Sound, Movie, Screen, and any
+/// of the above missing its defining geometry — draws NOTHING. A crude wrong
+/// shape is worse than an absent one: a bare `/Rect` outline is
+/// indistinguishable from a Square annotation and asserts a geometry the file
+/// never gave. In particular Link must never draw chrome of its own (§12.5.6.5
+/// leaves the border to `/Border`, honoured only inside a real `/AP`).
 pub(crate) fn synthesize_annotation_appearance(
     doc: &Document,
     dict: &lopdf::Dictionary,
@@ -214,9 +293,15 @@ pub(crate) fn synthesize_annotation_appearance(
         Some(s) => s.to_vec(),
         None => return,
     };
-    let ca = dict.get(b"CA").ok().and_then(num).unwrap_or(1.0).clamp(0.0, 1.0);
-    let stroke = markup_color(dict, b"C");
-    let fill = markup_color(dict, b"IC");
+    let ca = dict
+        .get(b"CA")
+        .ok()
+        .and_then(|o| deref(doc, o).or(Some(o)))
+        .and_then(num)
+        .unwrap_or(1.0)
+        .clamp(0.0, 1.0);
+    let stroke = markup_color(doc, dict, b"C");
+    let fill = markup_color(doc, dict, b"IC");
     let bw = annot_border_width(doc, dict);
     let dev = |x: f64, y: f64| -> (f64, f64) { transform(base, x, y) };
     // Device half-width for strokes (approx via base scale).
@@ -271,12 +356,34 @@ pub(crate) fn synthesize_annotation_appearance(
             let l_arr: Option<Vec<f64>> = dict.get(b"L").ok().and_then(|o| deref(doc, o)).and_then(|o| o.as_array().ok()).map(|a| a.iter().filter_map(num).collect());
             if let Some(n) = l_arr {
                 if n.len() >= 4 {
-                    let seg = vec![dev(n[0],n[1]), dev(n[2],n[3])];
+                    let (p0, p1) = ((n[0], n[1]), (n[2], n[3]));
+                    let seg = vec![dev(p0.0, p0.1), dev(p1.0, p1.1)];
                     let mut sgs = gs.clone(); sgs.stroke = stroke.unwrap_or(0xFF00_0000);
                     let d = annot_border_dash(doc, dict);
                     if !d.is_empty() { sgs.dash = d; }
-                    // Line ending styles omitted — render as straight segment
                     emit_stroke(prims, std::slice::from_ref(&seg), &sgs);
+                    // §12.5.6.7: /LE is [startStyle endStyle] and each ending
+                    // points OUTWARD along the line, so the start ending's
+                    // direction is p1 -> p0 and the end ending's is p0 -> p1.
+                    let (dx, dy) = (p1.0 - p0.0, p1.1 - p0.1);
+                    let len = (dx * dx + dy * dy).sqrt();
+                    if len > 1e-6 {
+                        let u = (dx / len, dy / len);
+                        let le: Vec<Vec<u8>> = dict
+                            .get(b"LE")
+                            .ok()
+                            .and_then(|o| deref(doc, o))
+                            .and_then(|o| o.as_array().ok())
+                            .map(|a| a.iter().filter_map(|o| o.as_name().ok().map(|n| n.to_vec())).collect())
+                            .unwrap_or_default();
+                        let le_size = (bw.max(1.0) * 4.0).clamp(4.0, 24.0);
+                        if let Some(s) = le.first() {
+                            emit_line_ending(prims, base, p0, (-u.0, -u.1), s, le_size, &sgs, fill, ca);
+                        }
+                        if let Some(s) = le.get(1) {
+                            emit_line_ending(prims, base, p1, u, s, le_size, &sgs, fill, ca);
+                        }
+                    }
                 }
             }
         }
@@ -294,23 +401,25 @@ pub(crate) fn synthesize_annotation_appearance(
         }
         b"Highlight" => {
             let color = stroke.unwrap_or(0xFFFF_FF00); // default yellow
-            if !quads.is_empty() && prims.len() + quads.len() < MAX_PRIMITIVES {
-                // Precise quad fill per QuadPoints instead of bbox rect
-                for q in &quads {
-                    let poly: Vec<(f64,f64)> = q.iter().map(|&(x,y)| dev(x,y)).collect();
-                    if poly.len() >= 4 {
-                        emit_fill(prims, std::slice::from_ref(&poly), apply_alpha_to_argb(color, ca), false, 1.0, BlendMode::Multiply);
-                    }
-                }
-            } else if quads.is_empty() {
+            if quads.is_empty() {
                 let poly = vec![dev(rect[0],rect[1]), dev(rect[2],rect[1]), dev(rect[2],rect[3]), dev(rect[0],rect[3])];
                 emit_fill(prims, std::slice::from_ref(&poly), apply_alpha_to_argb(color, ca), false, 1.0, BlendMode::Multiply);
             } else {
+                // §12.5.6.10 orders the vertices UL, UR, LL, LR — a "Z", not a
+                // ring — so traversing them in file order self-intersects into a
+                // bow-tie. Reorder to UL, UR, LR, LL. Kept as a quad rather than
+                // its bbox so rotated/skewed text quads stay correct.
+                //
+                // Over the primitive cap the loop simply stops. The previous
+                // fallback swapped to axis-aligned bbox rects instead, which both
+                // emitted the same number of primitives it was trying to avoid
+                // AND drew the wrong shape for rotated text.
                 for q in &quads {
-                    let poly: Vec<(f64,f64)> = q.iter().map(|&(x,y)| dev(x,y)).collect();
-                    let bx = bbox_of(&poly);
-                    let rectp = vec![(bx[0],bx[1]),(bx[2],bx[1]),(bx[2],bx[3]),(bx[0],bx[3])];
-                    emit_fill(prims, std::slice::from_ref(&rectp), apply_alpha_to_argb(color, ca), false, 1.0, BlendMode::Multiply);
+                    if prims.len() >= MAX_PRIMITIVES {
+                        break;
+                    }
+                    let poly: Vec<(f64,f64)> = [q[0], q[1], q[3], q[2]].iter().map(|&(x,y)| dev(x,y)).collect();
+                    emit_fill(prims, std::slice::from_ref(&poly), apply_alpha_to_argb(color, ca), false, 1.0, BlendMode::Multiply);
                 }
             }
         }
@@ -319,61 +428,112 @@ pub(crate) fn synthesize_annotation_appearance(
             let mut sgs = gs.clone(); sgs.stroke = color;
             let d = annot_border_dash(doc, dict);
             if !d.is_empty() { sgs.dash = d; }
-            if subtype == b"Squiggly" {
-                // Zig-zag approximate underline
-                for q in &quads {
-                    let poly: Vec<(f64,f64)> = q.iter().map(|&(x,y)| dev(x,y)).collect();
-                    let bx = bbox_of(&poly);
-                    let base_y = bx[1];
-                    let amp = (bx[3] - bx[1]) * 0.08;
-                    let step = (bx[2] - bx[0]) / 8.0;
-                    let mut zig: Vec<(f64,f64)> = Vec::new();
-                    for i in 0..=8 {
-                        let x = bx[0] + i as f64 * step;
-                        let y = if i % 2 == 0 { base_y } else { base_y + amp };
-                        zig.push((x, y));
-                    }
-                    if zig.len() >= 2 { emit_stroke(prims, std::slice::from_ref(&zig), &sgs); }
-                }
-            } else {
+            // §12.5.6.10 quad order is UL, UR, LL, LR. Work along the quad's own
+            // edges in PAGE space and map each point through `base`, instead of
+            // taking the device-space bbox: the bbox is axis-aligned, so on a
+            // rotated page (or over rotated text) it drew a horizontal rule
+            // across the glyphs rather than a rule following the baseline.
+            if subtype != b"Squiggly" {
                 sgs.line_width = (bw.max(1.0)) / scale.max(1e-6); // ~1px device
-                for q in &quads {
-                    let poly: Vec<(f64,f64)> = q.iter().map(|&(x,y)| dev(x,y)).collect();
-                    let bx = bbox_of(&poly);
-                    let y = if subtype == b"StrikeOut" { (bx[1]+bx[3])/2.0 } else { bx[1] + (bx[3]-bx[1]) * 0.10 };
-                    let seg = vec![(bx[0], y), (bx[2], y)];
+            }
+            // Fraction of the quad height at which the rule sits, measured from
+            // the bottom edge towards the top.
+            let t = if subtype == b"StrikeOut" { 0.5 } else { 0.10 };
+            for q in &quads {
+                if prims.len() >= MAX_PRIMITIVES {
+                    break;
+                }
+                let (ul, ur, ll, lr) = (q[0], q[1], q[2], q[3]);
+                // Baseline-parallel start/end, lifted off the bottom edge.
+                let a = (ll.0 + (ul.0 - ll.0) * t, ll.1 + (ul.1 - ll.1) * t);
+                let b = (lr.0 + (ur.0 - lr.0) * t, lr.1 + (ur.1 - lr.1) * t);
+                if subtype == b"Squiggly" {
+                    // Zig-zag between the rule line and a line 8% of the quad
+                    // height above it, so the wave follows the text direction.
+                    let up = ((ul.0 - ll.0) * 0.08, (ul.1 - ll.1) * 0.08);
+                    let mut zig: Vec<(f64, f64)> = Vec::with_capacity(9);
+                    for i in 0..=8 {
+                        let f = i as f64 / 8.0;
+                        let (x, y) = (a.0 + (b.0 - a.0) * f, a.1 + (b.1 - a.1) * f);
+                        let (x, y) = if i % 2 == 0 { (x, y) } else { (x + up.0, y + up.1) };
+                        zig.push(dev(x, y));
+                    }
+                    emit_stroke(prims, std::slice::from_ref(&zig), &sgs);
+                } else {
+                    let seg = vec![dev(a.0, a.1), dev(b.0, b.1)];
                     emit_stroke(prims, std::slice::from_ref(&seg), &sgs);
                 }
             }
         }
-        b"Polygon" | b"PolyLine" | b"Caret" | b"Stamp" | b"FileAttachment" => {
-            // Best-effort synthesis for these subtypes via vertices or rect
+        b"Polygon" | b"PolyLine" => {
+            // §12.5.6.9: the shape IS /Vertices. Without it there is no shape, so
+            // draw nothing rather than the /Rect outline the old code fell back
+            // to — a rectangle is indistinguishable from a Square annotation and
+            // claims a geometry the file never gave.
             if let Some(Object::Array(verts)) = dict.get(b"Vertices").ok().and_then(|o| deref(doc, o)) {
                 let n: Vec<f64> = verts.iter().filter_map(num).collect();
                 let pts: Vec<(f64,f64)> = n.chunks_exact(2).map(|c| dev(c[0], c[1])).collect();
                 if pts.len() >= 2 {
                     let closed = subtype == b"Polygon";
+                    // /IC is the interior colour and only a closed Polygon has an
+                    // interior; on a PolyLine it colours the line endings, so it
+                    // must not become the stroke colour (§12.5.6.9).
                     if closed {
                         if let Some(f) = fill {
                             emit_fill(prims, std::slice::from_ref(&pts), apply_alpha_to_argb(f, ca), false, 1.0, BlendMode::Normal);
                         }
                     }
-                    if let Some(s) = stroke.or(fill) {
+                    if let Some(s) = stroke {
                         let mut ring = pts.clone();
                         if closed { ring.push(pts[0]); }
                         let mut sgs = gs.clone(); sgs.stroke = s;
+                        let d = annot_border_dash(doc, dict);
+                        if !d.is_empty() { sgs.dash = d; }
                         emit_stroke(prims, std::slice::from_ref(&ring), &sgs);
                     }
                 }
-            } else {
-                // Fallback to rect box
-                let poly = vec![dev(rect[0],rect[1]), dev(rect[2],rect[1]), dev(rect[2],rect[3]), dev(rect[0],rect[3])];
-                if let Some(f) = fill { emit_fill(prims, std::slice::from_ref(&poly), apply_alpha_to_argb(f, ca), false, 1.0, BlendMode::Normal); }
-                if let Some(s) = stroke {
-                    let mut ring = poly.clone(); ring.push(poly[0]);
-                    let mut sgs = gs.clone(); sgs.stroke = s;
-                    emit_stroke(prims, std::slice::from_ref(&ring), &sgs);
-                }
+            }
+        }
+        b"Caret" => {
+            // §12.5.6.11: a caret marks a text insertion point. Synthesize the
+            // upward wedge, which says "inserted here"; the old /Rect outline was
+            // indistinguishable from a Square annotation.
+            let r = normalize_rect(rect);
+            if r[2] - r[0] > 0.0 && r[3] - r[1] > 0.0 {
+                let tri = vec![dev(r[0], r[1]), dev((r[0] + r[2]) / 2.0, r[3]), dev(r[2], r[1])];
+                let col = stroke.unwrap_or(0xFF00_0000);
+                emit_fill(prims, std::slice::from_ref(&tri), apply_alpha_to_argb(col, ca), false, 1.0, BlendMode::Normal);
+            }
+        }
+        b"Stamp" => {
+            // §12.5.6.12: /Name selects a standard stamp whose artwork we do not
+            // ship. Drawing the stamp's own wording inside its border conveys
+            // what the stamp says. With no /Name there is nothing defensible to
+            // draw, so draw nothing — the old /Rect outline read as a Square.
+            let label = dict
+                .get(b"Name")
+                .ok()
+                .and_then(|o| deref(doc, o).or(Some(o)))
+                .and_then(|o| o.as_name().ok())
+                .map(stamp_label)
+                .unwrap_or_default();
+            let r = normalize_rect(rect);
+            let (rw, rh) = (r[2] - r[0], r[3] - r[1]);
+            if !label.is_empty() && rw > 0.0 && rh > 0.0 {
+                let col = stroke.unwrap_or(0xFFFF_0000); // Acrobat's stamps are red
+                let poly = vec![dev(r[0], r[1]), dev(r[2], r[1]), dev(r[2], r[3]), dev(r[0], r[3])];
+                let mut ring = poly.clone(); ring.push(poly[0]);
+                let mut sgs = gs.clone(); sgs.stroke = col;
+                emit_stroke(prims, std::slice::from_ref(&ring), &sgs);
+                // `emit_annot_text` advances 0.5em per character, so size the
+                // text to fit the box on both axes.
+                let n = label.chars().count().max(1) as f64;
+                let size = (rh * 0.55).min(rw * 0.85 / (0.5 * n)).max(1.0);
+                let (px, py) = dev(
+                    r[0] + (rw - n * size * 0.5).max(0.0) / 2.0,
+                    r[1] + (rh - size) / 2.0,
+                );
+                emit_annot_text(prims, px as f32, py as f32, (size * scale) as f32, apply_alpha_to_argb(col, ca), &label);
             }
         }
         b"FreeText" => {
@@ -410,9 +570,20 @@ pub(crate) fn synthesize_annotation_appearance(
             emit_stroke(prims, std::slice::from_ref(&ring), &sgs);
         }
         b"Redact" => {
-            // Show redaction box outline so user knows where to apply
+            // §12.5.6.24: a redaction is not applied until apply_redactions runs,
+            // so before that the annotation only MARKS the region. Outline it in
+            // /C (default red) and fill only if /IC is present — a wash over the
+            // region would obscure the very text the user needs to read.
             let poly = vec![dev(rect[0],rect[1]), dev(rect[2],rect[1]), dev(rect[2],rect[3]), dev(rect[0],rect[3])];
-            emit_fill(prims, std::slice::from_ref(&poly), apply_alpha_to_argb(0x66000000, ca), false, 1.0, BlendMode::Normal);
+            if let Some(f) = fill {
+                emit_fill(prims, std::slice::from_ref(&poly), apply_alpha_to_argb(f, ca), false, 1.0, BlendMode::Normal);
+            }
+            let mut ring = poly.clone(); ring.push(poly[0]);
+            let mut sgs = gs.clone();
+            sgs.stroke = stroke.unwrap_or(0xFFFF_0000);
+            let d = annot_border_dash(doc, dict);
+            if !d.is_empty() { sgs.dash = d; }
+            emit_stroke(prims, std::slice::from_ref(&ring), &sgs);
         }
         _ => {}
     }
@@ -437,13 +608,119 @@ fn emit_annot_text(prims: &mut Vec<Prim>, x: f32, y: f32, size: f32, argb: u32, 
     });
 }
 
-/// Device-space bounding box [x0,y0,x1,y1] of a polygon.
-fn bbox_of(poly: &[(f64,f64)]) -> [f64;4] {
-    let mut b = [f64::INFINITY, f64::INFINITY, f64::NEG_INFINITY, f64::NEG_INFINITY];
-    for &(x,y) in poly {
-        b[0]=b[0].min(x); b[1]=b[1].min(y); b[2]=b[2].max(x); b[3]=b[3].max(y);
+/// Paint one `/LE` line ending (§12.5.6.7 Table 176) at page-space point `tip`,
+/// where `dir` is the unit vector pointing along the line TOWARDS `tip` so that
+/// arrowheads point outward. `size` is the ending's page-space extent and
+/// `interior` is `/IC`, which §12.5.6.7 defines as the fill for line endings.
+/// `/None` and any unrecognised name draw nothing.
+#[allow(clippy::too_many_arguments)]
+fn emit_line_ending(
+    prims: &mut Vec<Prim>,
+    base: &Mat,
+    tip: (f64, f64),
+    dir: (f64, f64),
+    style: &[u8],
+    size: f64,
+    sgs: &GraphicsState,
+    interior: Option<u32>,
+    ca: f64,
+) {
+    let n = (-dir.1, dir.0);
+    let mut closed: Option<Vec<(f64, f64)>> = None;
+    let mut open: Vec<(f64, f64)> = Vec::new();
+    match style {
+        b"OpenArrow" | b"ROpenArrow" | b"ClosedArrow" | b"RClosedArrow" => {
+            // Reversed forms point back along the line instead of outward.
+            let s = if style == b"ROpenArrow" || style == b"RClosedArrow" { -size } else { size };
+            let hw = size * 0.577; // 30-degree half-angle
+            let a = (tip.0 - dir.0 * s + n.0 * hw, tip.1 - dir.1 * s + n.1 * hw);
+            let b = (tip.0 - dir.0 * s - n.0 * hw, tip.1 - dir.1 * s - n.1 * hw);
+            if style == b"OpenArrow" || style == b"ROpenArrow" {
+                open = vec![a, tip, b];
+            } else {
+                closed = Some(vec![tip, a, b]);
+            }
+        }
+        b"Square" => {
+            let h = size * 0.5;
+            closed = Some(vec![
+                (tip.0 - dir.0 * h - n.0 * h, tip.1 - dir.1 * h - n.1 * h),
+                (tip.0 + dir.0 * h - n.0 * h, tip.1 + dir.1 * h - n.1 * h),
+                (tip.0 + dir.0 * h + n.0 * h, tip.1 + dir.1 * h + n.1 * h),
+                (tip.0 - dir.0 * h + n.0 * h, tip.1 - dir.1 * h + n.1 * h),
+            ]);
+        }
+        b"Diamond" => {
+            let h = size * 0.6;
+            closed = Some(vec![
+                (tip.0 - dir.0 * h, tip.1 - dir.1 * h),
+                (tip.0 - n.0 * h, tip.1 - n.1 * h),
+                (tip.0 + dir.0 * h, tip.1 + dir.1 * h),
+                (tip.0 + n.0 * h, tip.1 + n.1 * h),
+            ]);
+        }
+        b"Circle" => {
+            let r = size * 0.5;
+            closed = Some(
+                (0..24)
+                    .map(|i| {
+                        let t = i as f64 / 24.0 * std::f64::consts::TAU;
+                        (tip.0 + r * t.cos(), tip.1 + r * t.sin())
+                    })
+                    .collect(),
+            );
+        }
+        b"Butt" => {
+            let h = size * 0.5;
+            open = vec![
+                (tip.0 - n.0 * h, tip.1 - n.1 * h),
+                (tip.0 + n.0 * h, tip.1 + n.1 * h),
+            ];
+        }
+        b"Slash" => {
+            // A short line at 60 degrees counter-clockwise from the line itself.
+            let (c, s) = (std::f64::consts::FRAC_PI_3.cos(), std::f64::consts::FRAC_PI_3.sin());
+            let u = (dir.0 * c - dir.1 * s, dir.0 * s + dir.1 * c);
+            let h = size * 0.5;
+            open = vec![
+                (tip.0 - u.0 * h, tip.1 - u.1 * h),
+                (tip.0 + u.0 * h, tip.1 + u.1 * h),
+            ];
+        }
+        _ => return,
     }
-    b
+    // The line's dash pattern applies to the line, not to its endings.
+    let mut g = sgs.clone();
+    g.dash = Vec::new();
+    if let Some(shape) = closed {
+        let pts: Vec<(f64, f64)> = shape.iter().map(|&(x, y)| transform(base, x, y)).collect();
+        if let Some(f) = interior {
+            emit_fill(prims, std::slice::from_ref(&pts), apply_alpha_to_argb(f, ca), false, 1.0, BlendMode::Normal);
+        }
+        let mut ring = pts.clone();
+        ring.push(pts[0]);
+        emit_stroke(prims, std::slice::from_ref(&ring), &g);
+    }
+    if !open.is_empty() {
+        let pts: Vec<(f64, f64)> = open.iter().map(|&(x, y)| transform(base, x, y)).collect();
+        emit_stroke(prims, std::slice::from_ref(&pts), &g);
+    }
+}
+
+/// Split a standard stamp `/Name` (§12.5.6.12 Table 181 names them in CamelCase,
+/// e.g. `ForPublicRelease`) into the upper-case wording the stamp displays.
+fn stamp_label(name: &[u8]) -> String {
+    let raw = String::from_utf8_lossy(name);
+    let mut out = String::with_capacity(raw.len() + 4);
+    let mut prev_lower = false;
+    for c in raw.chars() {
+        if c.is_ascii_uppercase() && prev_lower {
+            out.push(' ');
+        }
+        prev_lower = c.is_ascii_lowercase() || c.is_ascii_digit();
+        out.push(c.to_ascii_uppercase());
+    }
+    out
 }
 
 // ---------------------------------------------------------------------------
@@ -523,7 +800,10 @@ pub(crate) fn decode_pdf_text(bytes: &[u8]) -> String {
         let units: Vec<u16> = bytes[2..].chunks(2).map(|c| (c[0] as u16) | ((*c.get(1).unwrap_or(&0) as u16) << 8)).collect();
         String::from_utf16_lossy(&units)
     } else {
-        // PDFDocEncoding vs Latin-1 difference mainly 0x80-0x9F, but mapping via win_ansi приближает
+        // Not a UTF-16 string, so treat the bytes as Latin-1. PDFDocEncoding
+        // (§7.9.2.2) differs from Latin-1 only in 0x18-0x1F and 0x80-0x9F, so
+        // this is an approximation: a true PDFDocEncoding table would map those
+        // ranges, and WinAnsiEncoding would map 0x80-0x9F differently again.
         bytes.iter().map(|&b| b as char).collect()
     }
 }
@@ -542,9 +822,52 @@ pub(crate) fn helvetica_resources() -> Dictionary {
     res
 }
 
+/// Display-orientation size of a raw-page rect, plus the appearance `/Matrix`
+/// that maps a form drawn in that orientation back into raw page space.
+///
+/// Text-bearing appearances (FreeText, callouts, underlines, field values) must
+/// be laid out the way the reader sees them, but `/Rect` is in raw page space, so
+/// on a rotated page the two orientations differ and content comes out sideways.
+/// `appearance_matrix` (§12.5.5) already supplies translation and scale by
+/// fitting the transformed BBox onto `/Rect`, so `/Matrix` only has to carry the
+/// rotation — it is the inverse of the page base matrix's linear part.
+///
+/// Purely geometric appearances (Square/Circle/Ink/Polygon/Highlight) are defined
+/// by their own coordinates and correctly rotate with the page, so they must NOT
+/// use this. At `/Rotate 0` this is a strict no-op.
+pub(crate) fn display_orientation(rotation: i64, w: f64, h: f64) -> (f64, f64, Mat) {
+    match rotation {
+        90 => (h, w, [0.0, 1.0, -1.0, 0.0, 0.0, 0.0]),
+        180 => (w, h, [-1.0, 0.0, 0.0, -1.0, 0.0, 0.0]),
+        270 => (h, w, [0.0, -1.0, 1.0, 0.0, 0.0, 0.0]),
+        _ => (w, h, IDENTITY),
+    }
+}
+
+/// `display_orientation` for the page at `page_index`.
+pub(crate) fn page_display_orientation(doc: &Document, page_index: i32, w: f64, h: f64) -> (f64, f64, Mat) {
+    let rot = nth_page_id(doc, page_index)
+        .map(|pid| page_rotation(doc, pid))
+        .unwrap_or(0);
+    display_orientation(rot, w, h)
+}
+
 /// Build a Form XObject appearance stream with the given BBox size, content and
 /// resources, returning its object id.
 pub(crate) fn make_appearance(doc: &mut Document, w: f64, h: f64, content: Vec<u8>, res: Dictionary) -> ObjectId {
+    make_appearance_oriented(doc, w, h, content, res, IDENTITY)
+}
+
+/// `make_appearance` plus a `/Matrix`, for appearances that must stay upright on
+/// a rotated page (see `display_orientation`).
+pub(crate) fn make_appearance_oriented(
+    doc: &mut Document,
+    w: f64,
+    h: f64,
+    content: Vec<u8>,
+    res: Dictionary,
+    matrix: Mat,
+) -> ObjectId {
     let mut d = Dictionary::new();
     d.set("Type", name_obj("XObject"));
     d.set("Subtype", name_obj("Form"));
@@ -553,6 +876,12 @@ pub(crate) fn make_appearance(doc: &mut Document, w: f64, h: f64, content: Vec<u
         "BBox",
         Object::Array(vec![0.into(), 0.into(), w.into(), h.into()]),
     );
+    if matrix != IDENTITY {
+        d.set(
+            "Matrix",
+            Object::Array(matrix.iter().map(|v| Object::Real(*v as f32)).collect()),
+        );
+    }
     d.set("Resources", Object::Dictionary(res));
     doc.add_object(Stream::new(d, content))
 }
@@ -618,12 +947,13 @@ pub(crate) fn add_free_text(
     size: f64,
     text: &str,
 ) -> Option<i64> {
-    let mut reg = registry().lock().unwrap();
+    let mut reg = registry().lock().unwrap_or_else(|e| e.into_inner());
     let doc = reg.get_mut(&handle)?;
     let r = page_rect(doc, page_index, rect);
-    let (w, h) = (r[2] - r[0], r[3] - r[1]);
+    // Text must read upright regardless of /Rotate.
+    let (w, h, apm) = page_display_orientation(doc, page_index, r[2] - r[0], r[3] - r[1]);
     let content = free_text_content(w, h, text, argb, size);
-    let ap_id = make_appearance(doc, w, h, content, helvetica_resources());
+    let ap_id = make_appearance_oriented(doc, w, h, content, helvetica_resources(), apm);
     let (cr, cg, cb) = argb_rgb(argb);
 
     let mut annot = Dictionary::new();
@@ -641,7 +971,7 @@ pub(crate) fn add_free_text(
 }
 
 pub(crate) fn add_highlight(handle: i64, page_index: i32, rect: [f64; 4], argb: u32) -> Option<i64> {
-    let mut reg = registry().lock().unwrap();
+    let mut reg = registry().lock().unwrap_or_else(|e| e.into_inner());
     let doc = reg.get_mut(&handle)?;
     let r = page_rect(doc, page_index, rect);
     let (w, h) = (r[2] - r[0], r[3] - r[1]);
@@ -678,10 +1008,12 @@ pub(crate) fn add_highlight(handle: i64, page_index: i32, rect: [f64; 4], argb: 
 
 /// Add a text-markup annotation over `rect`. kind: 0 Underline, 1 StrikeOut, 2 Squiggly.
 pub(crate) fn add_text_markup(handle: i64, page_index: i32, rect: [f64; 4], argb: u32, kind: i32) -> Option<i64> {
-    let mut reg = registry().lock().unwrap();
+    let mut reg = registry().lock().unwrap_or_else(|e| e.into_inner());
     let doc = reg.get_mut(&handle)?;
     let r = page_rect(doc, page_index, rect);
-    let (w, h) = (r[2] - r[0], r[3] - r[1]);
+    // The underline/strikeout position is relative to the text's reading
+    // orientation, so it must be laid out in display orientation.
+    let (w, h, apm) = page_display_orientation(doc, page_index, r[2] - r[0], r[3] - r[1]);
     let (cr, cg, cb) = argb_rgb(argb);
     let lw = (h * 0.06).clamp(0.8, 3.0);
     let content = match kind {
@@ -712,7 +1044,7 @@ pub(crate) fn add_text_markup(handle: i64, page_index: i32, rect: [f64; 4], argb
         }
     }
     .into_bytes();
-    let ap_id = make_appearance(doc, w, h, content, Dictionary::new());
+    let ap_id = make_appearance_oriented(doc, w, h, content, Dictionary::new(), apm);
     let subtype = match kind {
         1 => "StrikeOut",
         2 => "Squiggly",
@@ -736,7 +1068,7 @@ pub(crate) fn add_text_markup(handle: i64, page_index: i32, rect: [f64; 4], argb
 
 /// Add a sticky-note (Text) annotation at editor point (x,y) with `text`.
 pub(crate) fn add_note(handle: i64, page_index: i32, x: f64, y: f64, argb: u32, text: &str) -> Option<i64> {
-    let mut reg = registry().lock().unwrap();
+    let mut reg = registry().lock().unwrap_or_else(|e| e.into_inner());
     let doc = reg.get_mut(&handle)?;
     let binv = page_base_inverse(doc, page_index);
     let (px, py) = transform(&binv, x, y);
@@ -749,7 +1081,14 @@ pub(crate) fn add_note(handle: i64, page_index: i32, x: f64, y: f64, argb: u32, 
         h = s - 2.0,
     )
     .into_bytes();
-    let ap_id = make_appearance(doc, s, s, content, Dictionary::new());
+    // The icon's text bars read left-to-right, so like the other text-bearing
+    // appearances it is laid out in display orientation and rotated back by
+    // /Matrix; the rect is square, so only the content orientation changes.
+    let rot = nth_page_id(doc, page_index)
+        .map(|pid| page_rotation(doc, pid))
+        .unwrap_or(0);
+    let (_, _, apm) = display_orientation(rot, s, s);
+    let ap_id = make_appearance_oriented(doc, s, s, content, Dictionary::new(), apm);
     let mut annot = Dictionary::new();
     annot.set("Type", name_obj("Annot"));
     annot.set("Subtype", name_obj("Text"));
@@ -762,6 +1101,13 @@ pub(crate) fn add_note(handle: i64, page_index: i32, x: f64, y: f64, argb: u32, 
 
 /// Add a FreeText callout: a leader line from anchor (ax,ay) to a text box near
 /// (bx,by), all in editor coordinates.
+///
+/// The whole callout — leader, box and text — is laid out in DISPLAY space and
+/// carried back into raw page space by the appearance `/Matrix`, the same
+/// mechanism `add_free_text` uses (see `display_orientation`). Laying it out in
+/// raw page space instead, as this did, put the text and the box sideways
+/// relative to the visible content on a `/Rotate 90` or `270` page, and mirrored
+/// the leader's knee on `180`.
 pub(crate) fn add_callout(
     handle: i64,
     page_index: i32,
@@ -773,25 +1119,29 @@ pub(crate) fn add_callout(
     size: f64,
     text: &str,
 ) -> Option<i64> {
-    let mut reg = registry().lock().unwrap();
+    let mut reg = registry().lock().unwrap_or_else(|e| e.into_inner());
     let doc = reg.get_mut(&handle)?;
-    let binv = page_base_inverse(doc, page_index);
-    let (pax, pay) = transform(&binv, ax, ay);
-    let (pbx, pby) = transform(&binv, bx, by);
     let bw = 160.0;
     let bh = (size * 1.6).max(24.0);
-    let (box_x0, box_y1) = (pbx, pby);
-    let box_y0 = pby - bh;
-    let box_x1 = pbx + bw;
-    let minx = pax.min(box_x0);
-    let miny = pay.min(box_y0);
-    let maxx = pax.max(box_x1);
-    let maxy = pay.max(box_y1);
-    let r = [minx, miny, maxx, maxy];
+    // Editor coordinates are already display space, so the box is built there.
+    let (box_x0, box_y1) = (bx, by);
+    let box_y0 = by - bh;
+    let box_x1 = bx + bw;
+    let minx = ax.min(box_x0);
+    let miny = ay.min(box_y0);
+    let maxx = ax.max(box_x1);
+    let maxy = ay.max(box_y1);
     let (w, h) = (maxx - minx, maxy - miny);
+    // /Rect is in raw page space; the display-space bounding box maps to it under
+    // the page base matrix, which for every /Rotate is axis-aligned.
+    let r = page_rect(doc, page_index, [minx, miny, maxx, maxy]);
+    let rot = nth_page_id(doc, page_index)
+        .map(|pid| page_rotation(doc, pid))
+        .unwrap_or(0);
+    let (_, _, apm) = display_orientation(rot, w, h);
     let (cr, cg, cb) = argb_rgb(argb);
-    let lax = pax - minx;
-    let lay = pay - miny;
+    let lax = ax - minx;
+    let lay = ay - miny;
     let lx0 = box_x0 - minx;
     let ly0 = box_y0 - miny;
     let lx1 = box_x1 - minx;
@@ -811,7 +1161,7 @@ pub(crate) fn add_callout(
         ty = ly1 - size - 2.0,
         t = escape_pdf_literal(text),
     ));
-    let ap_id = make_appearance(doc, w, h, c.into_bytes(), helvetica_resources());
+    let ap_id = make_appearance_oriented(doc, w, h, c.into_bytes(), helvetica_resources(), apm);
     let mut annot = Dictionary::new();
     annot.set("Type", name_obj("Annot"));
     annot.set("Subtype", name_obj("FreeText"));
@@ -830,7 +1180,7 @@ pub(crate) fn add_callout(
 /// Add a redaction annotation: an opaque black filled rectangle marked so that
 /// `apply_redactions` can permanently remove the content beneath it.
 pub(crate) fn add_redaction(handle: i64, page_index: i32, rect: [f64; 4]) -> Option<i64> {
-    let mut reg = registry().lock().unwrap();
+    let mut reg = registry().lock().unwrap_or_else(|e| e.into_inner());
     let doc = reg.get_mut(&handle)?;
     let r = page_rect(doc, page_index, rect);
     let (w, h) = (r[2] - r[0], r[3] - r[1]);
@@ -856,7 +1206,7 @@ pub(crate) fn add_square(
     line_width: f64,
     fill: bool,
 ) -> Option<i64> {
-    let mut reg = registry().lock().unwrap();
+    let mut reg = registry().lock().unwrap_or_else(|e| e.into_inner());
     let doc = reg.get_mut(&handle)?;
     let r = page_rect(doc, page_index, rect);
     let (w, h) = (r[2] - r[0], r[3] - r[1]);
@@ -894,7 +1244,7 @@ pub(crate) fn add_circle(
     line_width: f64,
     fill: bool,
 ) -> Option<i64> {
-    let mut reg = registry().lock().unwrap();
+    let mut reg = registry().lock().unwrap_or_else(|e| e.into_inner());
     let doc = reg.get_mut(&handle)?;
     let r = page_rect(doc, page_index, rect);
     let (w, h) = (r[2] - r[0], r[3] - r[1]);
@@ -987,7 +1337,7 @@ pub(crate) fn add_poly(
     if points.len() < 4 {
         return None;
     }
-    let mut reg = registry().lock().unwrap();
+    let mut reg = registry().lock().unwrap_or_else(|e| e.into_inner());
     let doc = reg.get_mut(&handle)?;
     let converted = page_points(doc, page_index, points);
     let points = converted.as_slice();
@@ -1069,7 +1419,7 @@ pub(crate) fn add_ink(
     if points.len() < 4 {
         return None;
     }
-    let mut reg = registry().lock().unwrap();
+    let mut reg = registry().lock().unwrap_or_else(|e| e.into_inner());
     let doc = reg.get_mut(&handle)?;
     let converted = page_points(doc, page_index, points);
     let points = converted.as_slice();
@@ -1137,10 +1487,11 @@ pub(crate) fn add_stamp(
     img_h: u32,
     jpeg: &[u8],
 ) -> Option<i64> {
-    let mut reg = registry().lock().unwrap();
+    let mut reg = registry().lock().unwrap_or_else(|e| e.into_inner());
     let doc = reg.get_mut(&handle)?;
     let r = page_rect(doc, page_index, rect);
-    let (w, h) = (r[2] - r[0], r[3] - r[1]);
+    // A stamp image must appear upright to the reader, not rotated with the page.
+    let (w, h, apm) = page_display_orientation(doc, page_index, r[2] - r[0], r[3] - r[1]);
 
     let mut img_dict = Dictionary::new();
     img_dict.set("Type", name_obj("XObject"));
@@ -1157,7 +1508,7 @@ pub(crate) fn add_stamp(
     let mut res = Dictionary::new();
     res.set("XObject", Object::Dictionary(xobj));
     let content = format!("q {w} 0 0 {h} 0 0 cm /Im0 Do Q").into_bytes();
-    let ap_id = make_appearance(doc, w, h, content, res);
+    let ap_id = make_appearance_oriented(doc, w, h, content, res, apm);
 
     let mut annot = Dictionary::new();
     annot.set("Type", name_obj("Annot"));
@@ -1167,7 +1518,7 @@ pub(crate) fn add_stamp(
 }
 
 pub(crate) fn update_annotation_rect(handle: i64, page_index: i32, annot_id: i64, rect: [f64; 4]) -> bool {
-    let mut reg = registry().lock().unwrap();
+    let mut reg = registry().lock().unwrap_or_else(|e| e.into_inner());
     let doc = match reg.get_mut(&handle) {
         Some(d) => d,
         None => return false,
@@ -1183,7 +1534,7 @@ pub(crate) fn update_annotation_rect(handle: i64, page_index: i32, annot_id: i64
 }
 
 pub(crate) fn update_free_text(handle: i64, annot_id: i64, text: &str) -> bool {
-    let mut reg = registry().lock().unwrap();
+    let mut reg = registry().lock().unwrap_or_else(|e| e.into_inner());
     let doc = match reg.get_mut(&handle) {
         Some(d) => d,
         None => return false,
@@ -1272,7 +1623,7 @@ pub(crate) fn remove_annot_ref(doc: &mut Document, page_id: ObjectId, id: Object
 }
 
 pub(crate) fn delete_annotation(handle: i64, page_index: i32, annot_id: i64) -> bool {
-    let mut reg = registry().lock().unwrap();
+    let mut reg = registry().lock().unwrap_or_else(|e| e.into_inner());
     let doc = match reg.get_mut(&handle) {
         Some(d) => d,
         None => return false,
@@ -1290,7 +1641,7 @@ pub(crate) fn delete_annotation(handle: i64, page_index: i32, annot_id: i64) -> 
 /// Detach an annotation (remove its page reference) but keep the object, so it
 /// can be re-attached for undo/redo.
 pub(crate) fn detach_annotation(handle: i64, page_index: i32, annot_id: i64) -> bool {
-    let mut reg = registry().lock().unwrap();
+    let mut reg = registry().lock().unwrap_or_else(|e| e.into_inner());
     let doc = match reg.get_mut(&handle) {
         Some(d) => d,
         None => return false,
@@ -1305,7 +1656,7 @@ pub(crate) fn detach_annotation(handle: i64, page_index: i32, annot_id: i64) -> 
 
 /// Re-attach a previously detached annotation to its page.
 pub(crate) fn reattach_annotation(handle: i64, page_index: i32, annot_id: i64) -> bool {
-    let mut reg = registry().lock().unwrap();
+    let mut reg = registry().lock().unwrap_or_else(|e| e.into_inner());
     let doc = match reg.get_mut(&handle) {
         Some(d) => d,
         None => return false,
@@ -1335,7 +1686,7 @@ pub(crate) fn offset_flat(arr: &mut [Object], dx: f64, dy: f64) {
 /// Duplicate an annotation, shifting its geometry by (dx, dy) page-space units.
 /// The copy shares the (immutable) appearance stream. Returns the new id, or 0.
 pub(crate) fn duplicate_annotation(handle: i64, page_index: i32, annot_id: i64, dx: f64, dy: f64) -> i64 {
-    let mut reg = registry().lock().unwrap();
+    let mut reg = registry().lock().unwrap_or_else(|e| e.into_inner());
     let doc = match reg.get_mut(&handle) {
         Some(d) => d,
         None => return 0,
@@ -1425,7 +1776,7 @@ pub(crate) fn annot_color(doc: &Document, dict: &Dictionary) -> u32 {
 }
 
 pub(crate) fn list_annotations(handle: i64, page_index: i32) -> Option<Vec<u8>> {
-    let reg = registry().lock().unwrap();
+    let reg = registry().lock().unwrap_or_else(|e| e.into_inner());
     let doc = reg.get(&handle)?;
     let page_id = nth_page_id(doc, page_index)?;
     let base = page_base_matrix(doc, page_id);
@@ -1485,4 +1836,199 @@ pub(crate) fn list_annotations(handle: i64, page_index: i32) -> Option<Vec<u8>> 
         buf.extend_from_slice(&b[..len]);
     }
     Some(buf)
+}
+
+#[cfg(test)]
+mod synthesis_tests {
+    use super::stamp_label;
+    use crate::*;
+
+    fn annot(subtype: &str) -> Dictionary {
+        let mut d = Dictionary::new();
+        d.set("Type", name_obj("Annot"));
+        d.set("Subtype", name_obj(subtype));
+        d
+    }
+
+    /// Synthesize with an identity base matrix so device space == page space.
+    fn synth(dict: &Dictionary, rect: [f64; 4]) -> Vec<Prim> {
+        let doc = Document::with_version("1.7");
+        let mut prims = Vec::new();
+        synthesize_annotation_appearance(&doc, dict, rect, &IDENTITY, &mut prims);
+        prims
+    }
+
+    /// `Prim` has no `Debug`, so failures report the primitive kinds instead.
+    fn kinds(prims: &[Prim]) -> Vec<&'static str> {
+        prims
+            .iter()
+            .map(|p| match p {
+                Prim::Text { .. } => "Text",
+                Prim::Fill { .. } => "Fill",
+                Prim::Stroke { .. } => "Stroke",
+                _ => "other",
+            })
+            .collect()
+    }
+
+    fn only_stroke(prims: &[Prim]) -> Vec<(f32, f32)> {
+        let mut found = None;
+        for p in prims {
+            if let Prim::Stroke { pts, .. } = p {
+                assert!(found.is_none(), "expected exactly one stroke, got {:?}", kinds(prims));
+                found = Some(pts.clone());
+            }
+        }
+        found.expect("no stroke emitted")
+    }
+
+    /// §12.5.6.10 quad order is UL, UR, LL, LR. The rule must be built from the
+    /// quad's own edges: taking the DEVICE-SPACE BBOX instead collapses a rotated
+    /// quad to an axis-aligned box, so an underline under vertical text was drawn
+    /// as a short horizontal stroke across the glyphs instead of a long vertical
+    /// one alongside them. Same class of bug as the round-1 Highlight bow-tie.
+    #[test]
+    fn text_markup_rules_follow_the_quad_not_its_bbox() {
+        // A quad whose reading direction (UL -> UR) runs along +Y: vertical text.
+        let quad = [0.0, 0.0, 0.0, 100.0, 20.0, 0.0, 20.0, 100.0];
+        for subtype in ["Underline", "StrikeOut"] {
+            let mut d = annot(subtype);
+            d.set("QuadPoints", Object::Array(quad.iter().map(|v| (*v).into()).collect()));
+            let pts = only_stroke(&synth(&d, [0.0, 0.0, 20.0, 100.0]));
+            assert_eq!(pts.len(), 2, "{subtype}");
+            let (dx, dy) = ((pts[1].0 - pts[0].0).abs(), (pts[1].1 - pts[0].1).abs());
+            assert!(dx < 0.01, "{subtype}: rule is not parallel to the text (dx={dx})");
+            assert!((dy - 100.0).abs() < 0.01, "{subtype}: rule spans {dy}, not the quad's 100");
+        }
+        // StrikeOut bisects the quad; Underline sits near the bottom edge, which
+        // for this quad is the x=20 side.
+        let mut d = annot("StrikeOut");
+        d.set("QuadPoints", Object::Array(quad.iter().map(|v| (*v).into()).collect()));
+        assert!((only_stroke(&synth(&d, [0.0, 0.0, 20.0, 100.0]))[0].0 - 10.0).abs() < 0.01);
+        let mut d = annot("Underline");
+        d.set("QuadPoints", Object::Array(quad.iter().map(|v| (*v).into()).collect()));
+        assert!((only_stroke(&synth(&d, [0.0, 0.0, 20.0, 100.0]))[0].0 - 18.0).abs() < 0.01);
+    }
+
+    /// A crude wrong shape is worse than an absent one: these subtypes used to
+    /// fall back to stroking the `/Rect`, which is indistinguishable from a Square
+    /// annotation and asserts a geometry the file never supplied.
+    #[test]
+    fn subtypes_without_their_defining_geometry_draw_nothing() {
+        let rect = [0.0, 0.0, 60.0, 40.0];
+        for subtype in ["Polygon", "PolyLine", "FileAttachment", "Sound", "Movie", "Screen", "Link", "Widget"] {
+            let mut d = annot(subtype);
+            d.set("C", Object::Array(vec![1.into(), 0.into(), 0.into()]));
+            let prims = synth(&d, rect);
+            assert!(prims.is_empty(), "{subtype} drew {:?}", kinds(&prims));
+        }
+        // A Stamp with no /Name has no wording to show, so it draws nothing too.
+        assert!(synth(&annot("Stamp"), rect).is_empty());
+    }
+
+    /// A Caret is an insertion mark (§12.5.6.11) and a Stamp says something
+    /// (§12.5.6.12) — both get a synthesis that carries their meaning.
+    #[test]
+    fn caret_and_named_stamp_synthesize_something_meaningful() {
+        let rect = [0.0, 0.0, 60.0, 40.0];
+        let caret = synth(&annot("Caret"), rect);
+        assert!(
+            matches!(caret.as_slice(), [Prim::Fill { contours, .. }] if contours[0].len() == 3),
+            "caret should be a filled triangle, got {:?}",
+            kinds(&caret)
+        );
+
+        let mut d = annot("Stamp");
+        d.set("Name", name_obj("ForPublicRelease"));
+        let prims = synth(&d, rect);
+        let text: Vec<&String> = prims
+            .iter()
+            .filter_map(|p| if let Prim::Text { text, .. } = p { Some(text) } else { None })
+            .collect();
+        assert_eq!(text, vec!["FOR PUBLIC RELEASE"], "got {:?}", kinds(&prims));
+    }
+
+    /// §12.5.5 fits the /Matrix-transformed /BBox onto /Rect. The rotated-page
+    /// appearances (`add_free_text`, `add_callout`, `add_note`, `add_stamp`,
+    /// generated field appearances) rely on that fit coming out as a pure
+    /// translation: they author a `dw`x`dh` box in DISPLAY orientation and let
+    /// `/Matrix` rotate it back, so if the transformed BBox did not match the raw
+    /// `/Rect` the content would be squashed instead of rotated.
+    #[test]
+    fn oriented_appearance_fits_its_rect_without_scaling() {
+        let (dw, dh) = (160.0_f64, 40.0_f64);
+        for rot in [0i64, 90, 180, 270] {
+            let (_, _, apm) = display_orientation(rot, dw, dh);
+            // The raw /Rect a caller stores: display dims swap for quarter turns.
+            let rect = match rot {
+                90 | 270 => [10.0, 20.0, 10.0 + dh, 20.0 + dw],
+                _ => [10.0, 20.0, 10.0 + dw, 20.0 + dh],
+            };
+            let m = appearance_matrix(rect, [0.0, 0.0, dw, dh], apm);
+            let sx = (m[0] * m[0] + m[1] * m[1]).sqrt();
+            let sy = (m[2] * m[2] + m[3] * m[3]).sqrt();
+            assert!(
+                (sx - 1.0).abs() < 1e-9 && (sy - 1.0).abs() < 1e-9,
+                "rot={rot}: appearance scaled by ({sx},{sy}) instead of only rotated"
+            );
+            for (x, y) in [(0.0, 0.0), (dw, 0.0), (dw, dh), (0.0, dh)] {
+                let (px, py) = transform(&m, x, y);
+                assert!(
+                    px >= rect[0] - 1e-6 && px <= rect[2] + 1e-6
+                        && py >= rect[1] - 1e-6 && py <= rect[3] + 1e-6,
+                    "rot={rot}: BBox corner ({px},{py}) fell outside {rect:?}"
+                );
+            }
+        }
+        // /Rotate 0 must be a strict no-op.
+        assert_eq!(display_orientation(0, dw, dh), (dw, dh, IDENTITY));
+    }
+
+    #[test]
+    fn stamp_names_split_into_words() {
+        assert_eq!(stamp_label(b"Approved"), "APPROVED");
+        assert_eq!(stamp_label(b"NotForPublicRelease"), "NOT FOR PUBLIC RELEASE");
+        assert_eq!(stamp_label(b"TopSecret"), "TOP SECRET");
+        assert_eq!(stamp_label(b""), "");
+    }
+
+    /// §12.5.6.7: `/LE` line endings. `/None` and unrecognised names must add
+    /// nothing to the bare segment; an arrow adds exactly one more subpath.
+    #[test]
+    fn line_endings_are_painted_and_unknown_ones_are_ignored() {
+        let strokes = |le: Option<Vec<&str>>| -> usize {
+            let mut d = annot("Line");
+            d.set("L", Object::Array(vec![0.into(), 0.into(), 100.into(), 0.into()]));
+            if let Some(le) = le {
+                d.set("LE", Object::Array(le.iter().map(|s| name_obj(s)).collect()));
+            }
+            synth(&d, [0.0, -10.0, 100.0, 10.0])
+                .iter()
+                .filter(|p| matches!(p, Prim::Stroke { .. }))
+                .count()
+        };
+        assert_eq!(strokes(None), 1, "no /LE: just the segment");
+        assert_eq!(strokes(Some(vec!["None", "None"])), 1, "/None draws nothing");
+        assert_eq!(strokes(Some(vec!["Wat", "Nope"])), 1, "unknown names draw nothing");
+        assert_eq!(strokes(Some(vec!["None", "OpenArrow"])), 2, "one arrowhead");
+        assert_eq!(strokes(Some(vec!["ClosedArrow", "ClosedArrow"])), 3, "two heads");
+    }
+
+    /// §7.3.10 lets any object be indirect. An indirect `/C` used to read as "no
+    /// colour", silently substituting the default for the author's.
+    #[test]
+    fn an_indirect_colour_is_dereferenced() {
+        let mut doc = Document::with_version("1.7");
+        let cid = doc.add_object(Object::Array(vec![1.into(), 0.into(), 0.into()]));
+        let mut d = annot("Underline");
+        d.set("C", Object::Reference(cid));
+        d.set("QuadPoints", Object::Array(vec![0.into(), 10.into(), 100.into(), 10.into(), 0.into(), 0.into(), 100.into(), 0.into()]));
+        let mut prims = Vec::new();
+        synthesize_annotation_appearance(&doc, &d, [0.0, 0.0, 100.0, 10.0], &IDENTITY, &mut prims);
+        let argb = prims
+            .iter()
+            .find_map(|p| if let Prim::Stroke { argb, .. } = p { Some(*argb) } else { None })
+            .expect("no stroke");
+        assert_eq!(argb, 0xFFFF_0000, "indirect /C ignored, fell back to black");
+    }
 }

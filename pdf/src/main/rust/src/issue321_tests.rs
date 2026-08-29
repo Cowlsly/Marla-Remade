@@ -6,11 +6,25 @@
 //!
 //! The fixture PDFs are NOT committed (potential copyright). Point the harness at
 //! them with the `ISSUE321_DIR` env var, or drop them in `<repo>/issue321_pdfs/`.
-//! When the directory is absent the tests print a notice and pass, mirroring the
-//! `ISHI_PDF` skip pattern in `debug_ishi_test.rs`.
+//!
+//! IMPORTANT — a green run of this module is NOT evidence that the issue #321
+//! bugs are fixed. When the fixture directory is absent there is nothing to
+//! drive, so the harness SKIPS. It used to skip silently, which meant a passing
+//! `cargo test` read as proof of thirteen real-world documents rendering
+//! correctly when in fact not one byte of PDF had been parsed. The skip is now
+//! explicit in three ways:
+//!   * the test is named `..._skips_when_fixtures_are_absent`, so the skip is
+//!     visible in the default `cargo test` output, which shows only test names;
+//!   * it prints a banner naming every fixture that went unverified;
+//!   * `ISSUE321_REQUIRE_FIXTURES=1` turns the skip into a hard failure, for
+//!     anyone who needs the run to actually mean something.
+//! It does not fail by default, because the fixtures legitimately cannot be
+//! committed and an unconditional failure would just get muted.
 //!
 //! Run with output:
 //!   cargo test -p pdf_render issue321 -- --nocapture
+//! Require the fixtures (CI / release verification):
+//!   ISSUE321_DIR=... ISSUE321_REQUIRE_FIXTURES=1 cargo test -p pdf_render issue321
 
 #[cfg(test)]
 mod issue321 {
@@ -39,10 +53,19 @@ mod issue321 {
 
     /// Locate the fixtures directory: `ISSUE321_DIR` env override, else the repo's
     /// `issue321_pdfs/` resolved relative to this crate's manifest dir.
+    ///
+    /// `ISSUE321_DIR` pointing at something that is not a directory is a
+    /// misconfiguration, not a legitimate absence: the caller asked for the
+    /// fixtures to be used, so silently skipping would hide their typo.
     fn fixtures_dir() -> Option<PathBuf> {
         if let Ok(p) = std::env::var("ISSUE321_DIR") {
-            let pb = PathBuf::from(p);
-            return if pb.is_dir() { Some(pb) } else { None };
+            let pb = PathBuf::from(&p);
+            assert!(
+                pb.is_dir(),
+                "ISSUE321_DIR is set to {p:?} but that is not a directory - fix the \
+                 path or unset the variable; refusing to skip silently"
+            );
+            return Some(pb);
         }
         // CARGO_MANIFEST_DIR = <repo>/pdf/src/main/rust ; repo root is 4 levels up.
         let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
@@ -51,6 +74,43 @@ mod issue321 {
             .nth(4)
             .map(|root| root.join("issue321_pdfs"));
         candidate.filter(|c| c.is_dir())
+    }
+
+    /// Report an unmissable skip. Returns normally so the default run stays green
+    /// (the fixtures cannot be committed), unless `ISSUE321_REQUIRE_FIXTURES` is
+    /// set, in which case the caller has explicitly asked for proof.
+    fn report_skip(what: &str) {
+        let banner = format!(
+            "\n\
+             ############################################################\n\
+             # SKIPPED: {what}\n\
+             # No issue #321 fixture PDFs were found, so NOTHING was\n\
+             # verified here. A passing result for this test is NOT\n\
+             # evidence that any of the reported bugs are fixed.\n\
+             #\n\
+             # Unverified fixtures ({n}):\n\
+             {list}\
+             #\n\
+             # The files are not committed (copyright). To actually run:\n\
+             #   ISSUE321_DIR=<dir> cargo test issue321 -- --nocapture\n\
+             # or drop them in <repo>/issue321_pdfs/.\n\
+             # To make their absence a hard failure:\n\
+             #   ISSUE321_REQUIRE_FIXTURES=1\n\
+             #\n\
+             # Executable coverage that does NOT need these files lives in\n\
+             # src/golden_tests.rs (synthetic single-feature PDFs).\n\
+             ############################################################\n",
+            what = what,
+            n = FIXTURES.len(),
+            list = FIXTURES
+                .iter()
+                .map(|f| format!("#   - {f}.pdf\n"))
+                .collect::<String>(),
+        );
+        println!("{banner}");
+        if std::env::var_os("ISSUE321_REQUIRE_FIXTURES").is_some() {
+            panic!("ISSUE321_REQUIRE_FIXTURES is set but no fixtures were found.{banner}");
+        }
     }
 
     /// Per-page primitive tally, split by the categories relevant to the issue.
@@ -234,7 +294,10 @@ mod issue321 {
     fn issue321_fill_colors() {
         let dir = match fixtures_dir() {
             Some(d) => d,
-            None => return,
+            None => {
+                report_skip("issue321_fill_colors");
+                return;
+            }
         };
         let name = std::env::var("FILL_PDF").unwrap_or_else(|_| "colorrenderexample".to_string());
         let page_idx: usize = std::env::var("FILL_PAGE").ok().and_then(|s| s.parse().ok()).unwrap_or(0);
@@ -309,31 +372,56 @@ mod issue321 {
         }
     }
 
-    /// Drive every fixture and print a per-PDF / per-page report. This test never
-    /// fails on rendering defects itself (it is a diagnostic harness); it only
-    /// fails if the harness cannot run. Skips cleanly when fixtures are absent.
+    /// Drive every fixture and print a per-PDF / per-page report.
+    ///
+    /// The name says what a green result means when the fixtures are absent,
+    /// because the default `cargo test` output shows only test names and this
+    /// module used to be indistinguishable from real verification.
+    ///
+    /// When the fixtures ARE present this is a real test, not just a printer: a
+    /// panic inside `interpret_page` is never an acceptable outcome for any
+    /// input, so panics fail the run. Rendering *defects* (wrong colours, empty
+    /// images) are still only reported, since asserting on them needs a
+    /// reference render this harness does not have.
     #[test]
-    fn issue321_report() {
+    fn issue321_report_skips_when_fixtures_are_absent() {
         let dir = match fixtures_dir() {
             Some(d) => d,
             None => {
-                println!(
-                    "issue321 fixtures not found (set ISSUE321_DIR or add <repo>/issue321_pdfs/); \
-                     skipping."
-                );
+                report_skip("issue321_report (all 13 real-world fixtures)");
                 return;
             }
         };
         println!("issue321 fixtures dir: {}", dir.display());
 
         let mut reports = Vec::new();
+        let mut missing = Vec::new();
         for name in FIXTURES {
             let path = dir.join(format!("{}.pdf", name));
             if !path.exists() {
                 println!("\n=== {} ===  (missing file, skipped)", name);
+                missing.push(*name);
                 continue;
             }
             reports.push(process(name, &path));
+        }
+        // A directory that exists but holds none of the fixtures is a
+        // misconfiguration; skipping every single file would be the same silent
+        // vacuous pass in a different disguise.
+        assert!(
+            !reports.is_empty(),
+            "the fixtures directory {} exists but contains none of the {} expected \
+             PDFs - check the path; refusing to report a vacuous pass",
+            dir.display(),
+            FIXTURES.len()
+        );
+        if !missing.is_empty() {
+            println!(
+                "\nNOTE: {} of {} fixtures were absent and went unverified: {:?}",
+                missing.len(),
+                FIXTURES.len(),
+                missing
+            );
         }
 
         // Compact overview table at the end for quick triage.
@@ -354,5 +442,28 @@ mod issue321 {
             );
         }
         println!("==================================================");
+
+        // A panic while interpreting untrusted input is never acceptable,
+        // whatever the document does — that one is a real assertion.
+        let panicked: Vec<(&str, &Vec<usize>)> = reports
+            .iter()
+            .filter(|r| !r.panics.is_empty())
+            .map(|r| (r.name.as_str(), &r.panics))
+            .collect();
+        assert!(
+            panicked.is_empty(),
+            "interpret_page panicked; a malformed PDF must degrade, never panic: {panicked:?}"
+        );
+        let unopened: Vec<&str> = reports.iter().filter(|r| !r.opened).map(|r| r.name.as_str()).collect();
+        if !unopened.is_empty() {
+            // Every fixture opening is a round-1 acceptance criterion (that is what
+            // `doesntopenexample` is), but this harness cannot see the files in a
+            // normal run, so it is only enforced when the caller asked for proof.
+            println!("WARNING: these fixtures did not open: {unopened:?}");
+            assert!(
+                std::env::var_os("ISSUE321_REQUIRE_FIXTURES").is_none(),
+                "ISSUE321_REQUIRE_FIXTURES is set and these fixtures do not open: {unopened:?}"
+            );
+        }
     }
 }

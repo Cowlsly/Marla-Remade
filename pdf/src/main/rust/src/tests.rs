@@ -227,9 +227,14 @@ fn text_advances_by_glyph_widths() {
     assert!((xs[2] - 10.0).abs() < 1e-4, "second run 'A' x was {}", xs[2]);
 }
 
-/// Invisible text (render mode 3) advances the cursor but emits no glyphs.
+/// §9.3.6: render mode 3 paints nothing, but the glyphs must still reach the
+/// text index. The name of this test used to be `invisible_text_not_emitted`,
+/// which described the OBSOLETE contract — dropping the glyphs entirely — and is
+/// exactly why the old assertion (`prims.is_empty()`) was wrong. Renamed so a
+/// future reader does not "restore" it: a scanned page's OCR layer is drawn in
+/// mode 3, and discarding it is why such documents had no selectable text.
 #[test]
-fn invisible_text_not_emitted() {
+fn mode3_text_emits_no_ink_but_stays_searchable() {
     let doc = Document::with_version("1.5");
     let fi = FontInfo {
         two_byte: false,
@@ -261,7 +266,37 @@ fn invisible_text_not_emitted() {
     let mut prims = Vec::new();
     let adv = show_string(&doc, &mut prims, &gs, &fonts, &IDENTITY, b"hidden", 0);
     assert!(adv > 0.0);
-    assert!(prims.is_empty(), "mode-3 text should not be drawn");
+    // Tr 3 paints nothing (§9.3.6), but the glyphs must still reach the text index:
+    // a scanned page's OCR layer is drawn in mode 3, and dropping it is why such
+    // documents had no selectable or searchable text. So a Text record IS expected
+    // here — what must hold is that it carries nothing paintable.
+    //
+    // Two independent mechanisms keep it invisible, and the assertion below pins
+    // the Rust half of both: the record declares Tr 3, and its colour is fully
+    // transparent. On the Kotlin side it is the render-mode guard
+    // (`if (rm != 3 && rm != 7)`, SafePdfViewerScreen.kt:2885) that suppresses the
+    // paint — mode 3 never reaches the fill/stroke calls at all. The `rm == 1 ||
+    // rm == 5` test at :2855 is a different mechanism (it suppresses the FILL for
+    // stroke-only modes) and does not apply to mode 3.
+    let non_conforming = prims
+        .iter()
+        .filter(|p| !matches!(p, Prim::Text { render_mode: 3, argb: 0, .. }))
+        .count();
+    assert_eq!(
+        non_conforming,
+        0,
+        "mode-3 must emit only non-painting, fully transparent Text records; \
+         {non_conforming} of {} prims violate that",
+        prims.len()
+    );
+    let recovered: String = prims
+        .iter()
+        .filter_map(|p| match p {
+            Prim::Text { text, .. } => Some(text.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(recovered, "hidden", "mode-3 text must be recoverable for search");
 }
 
 /// A Type 3 glyph whose CharProc fills a rectangle must emit Fill prims.
@@ -308,6 +343,161 @@ fn type3_glyph_emits_prims() {
     assert!(adv > 0.0, "advance should be positive");
     let fills = prims.iter().filter(|p| matches!(p, Prim::Fill { .. })).count();
     assert!(fills >= 1, "type3 glyph should emit at least one Fill prim");
+}
+
+/// Type 3 render mode 3 must paint nothing yet still emit the non-painting Text
+/// record — a scan's OCR layer can be set in a Type 3 font (item 3).
+#[test]
+fn type3_mode3_emits_invisible_text_only() {
+    let mut doc = Document::with_version("1.5");
+    let proc_content = Content {
+        operations: vec![
+            Operation::new("re", vec![0.into(), 0.into(), 700.into(), 700.into()]),
+            Operation::new("f", vec![]),
+        ],
+    };
+    let proc_data = proc_content.encode().unwrap();
+    let proc_id = doc.add_object(Stream::new(dictionary! {}, proc_data));
+    let char_procs = doc.add_object(dictionary! { "a" => proc_id });
+    let encoding = doc.add_object(dictionary! {
+        "Type" => "Encoding",
+        "Differences" => vec![65.into(), "a".into()],
+    });
+    let font = dictionary! {
+        "Type" => "Font",
+        "Subtype" => "Type3",
+        "FontMatrix" => vec![0.001.into(), 0.into(), 0.into(), 0.001.into(), 0.into(), 0.into()],
+        "FontBBox" => vec![0.into(), 0.into(), 750.into(), 750.into()],
+        "CharProcs" => char_procs,
+        "Encoding" => encoding,
+        "FirstChar" => 65,
+        "LastChar" => 65,
+        "Widths" => vec![700.into()],
+        "Resources" => dictionary! {},
+    };
+    let mut fonts = HashMap::new();
+    fonts.insert(b"F1".to_vec(), font_info(&doc, &font));
+    let gs = GraphicsState {
+        font_key: b"F1".to_vec(),
+        font_size: 12.0,
+        render_mode: 3,
+        ..Default::default()
+    };
+    let mut prims = Vec::new();
+    let adv = show_string(&doc, &mut prims, &gs, &fonts, &IDENTITY, b"A", 0);
+    assert!(adv > 0.0, "mode 3 still advances the pen");
+    // The CharProc must not be interpreted: no ink of any kind.
+    let non_conforming = prims
+        .iter()
+        .filter(|p| !matches!(p, Prim::Text { render_mode: 3, argb: 0, .. }))
+        .count();
+    assert_eq!(
+        non_conforming, 0,
+        "Type 3 mode 3 must emit only non-painting transparent Text; \
+         {non_conforming} of {} prims violate that",
+        prims.len()
+    );
+    let texts: Vec<&str> = prims
+        .iter()
+        .filter_map(|p| match p {
+            Prim::Text { text, .. } => Some(text.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert!(
+        !texts.is_empty() && texts.iter().all(|t| !t.is_empty()),
+        "Type 3 mode 3 glyph must still reach the text index"
+    );
+}
+
+/// The no-font-metrics fallback path must also carry mode-3 text (item 3).
+#[test]
+fn no_metrics_mode3_emits_invisible_text() {
+    let doc = Document::with_version("1.5");
+    let fonts: HashMap<Vec<u8>, FontInfo> = HashMap::new();
+    let gs = GraphicsState {
+        font_key: b"Missing".to_vec(),
+        font_size: 10.0,
+        render_mode: 3,
+        ..Default::default()
+    };
+    let mut prims = Vec::new();
+    let adv = show_string(&doc, &mut prims, &gs, &fonts, &IDENTITY, b"ocr", 0);
+    assert!(adv > 0.0);
+    let non_conforming = prims
+        .iter()
+        .filter(|p| !matches!(p, Prim::Text { render_mode: 3, argb: 0, .. }))
+        .count();
+    assert_eq!(non_conforming, 0, "no-metrics mode 3 must not paint");
+    let recovered: String = prims
+        .iter()
+        .filter_map(|p| match p {
+            Prim::Text { text, .. } => Some(text.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(recovered, "ocr");
+}
+
+/// §8.7.4.1: an unclipped `sh` paints the whole page, so `interpret_page` must
+/// seed the clip extent with the page box rather than leaving the shading to fall
+/// back to a small guessed square (item 1).
+#[test]
+fn unclipped_sh_covers_page() {
+    let mut doc = Document::with_version("1.5");
+    let func_id = doc.add_object(dictionary! {
+        "FunctionType" => 2,
+        "Domain" => vec![0.into(), 1.into()],
+        "C0" => vec![1.0.into(), 0.0.into(), 0.0.into()],
+        "C1" => vec![0.0.into(), 0.0.into(), 1.0.into()],
+        "N" => 1,
+    });
+    // Axial shading, deliberately with no /BBox.
+    let sh_id = doc.add_object(dictionary! {
+        "ShadingType" => 2,
+        "ColorSpace" => "DeviceRGB",
+        "Coords" => vec![0.into(), 0.into(), 400.into(), 0.into()],
+        "Extend" => vec![Object::Boolean(true), Object::Boolean(true)],
+        "Function" => func_id,
+    });
+    let content = Content {
+        operations: vec![Operation::new("sh", vec![Object::Name(b"Sh0".to_vec())])],
+    };
+    let content_id = doc.add_object(Stream::new(dictionary! {}, content.encode().unwrap()));
+    let pages_id = doc.new_object_id();
+    let page_id = doc.add_object(dictionary! {
+        "Type" => "Page",
+        "Parent" => pages_id,
+        "MediaBox" => vec![0.into(), 0.into(), 400.into(), 500.into()],
+        "Contents" => content_id,
+        "Resources" => dictionary! { "Shading" => dictionary! { "Sh0" => sh_id } },
+    });
+    doc.objects.insert(
+        pages_id,
+        Object::Dictionary(dictionary! {
+            "Type" => "Pages",
+            "Kids" => vec![page_id.into()],
+            "Count" => 1,
+        }),
+    );
+    let catalog_id = doc.add_object(dictionary! { "Type" => "Catalog", "Pages" => pages_id });
+    doc.trailer.set("Root", catalog_id);
+
+    let page = interpret_page(&doc, page_id).expect("page should interpret");
+    let ctm = page
+        .prims
+        .iter()
+        .find_map(|p| match p {
+            Prim::Image { ctm, .. } => Some(*ctm),
+            _ => None,
+        })
+        .expect("unclipped sh must emit an Image prim");
+    // The image unit square maps through `ctm`; its device width/height must span
+    // the page, not a ~100x100 patch near the origin.
+    let w = (ctm[0].abs() + ctm[2].abs()) as f64;
+    let h = (ctm[1].abs() + ctm[3].abs()) as f64;
+    assert!(w >= 399.0, "shading device width {w} should cover the 400pt page");
+    assert!(h >= 499.0, "shading device height {h} should cover the 500pt page");
 }
 
 /// Round-trip a full open -> count -> render -> close cycle via the byte API.
@@ -396,48 +586,28 @@ use crate::*;
         assert!(id.is_some() && id != Some(0), "add_square failed: {id:?}");
 
         let buf = render_page(handle, 0).expect("render");
-        // Header v2: magic, version, w,h,count =16 bytes
+        // The JNI-facing path must produce a non-empty page.
         let count = u32::from_le_bytes(buf[16..20].try_into().unwrap());
-        let mut pos = 20;
-        let mut strokes = 0;
-        for _ in 0..count {
-            let tag = buf[pos]; pos += 1;
-            match tag {
-                1 => {
-                    pos += 12; // x,y,size
-                    pos += 4; // argb
-                    let l = u16::from_le_bytes(buf[pos..pos+2].try_into().unwrap()) as usize; pos+=2;
-                    pos += l;
-                    pos += 1+4+4; // hasStroke, strokeArgb, strokeWidth
-                }
-                2 => {
-                    pos += 4; pos +=1;
-                    let n = u16::from_le_bytes(buf[pos..pos+2].try_into().unwrap()) as usize; pos+=2;
-                    pos += n*8;
-                }
-                3 => {
-                    strokes+=1;
-                    pos+=4; pos+=4;
-                    let nd = buf[pos] as usize; pos+=1;
-                    pos+= nd*4;
-                    pos+=4; // phase
-                    pos+=1; // cap
-                    pos+=1; // join
-                    pos+=4; // miter
-                    let n = u16::from_le_bytes(buf[pos..pos+2].try_into().unwrap()) as usize; pos+=2;
-                    pos+= n*8;
-                }
-                4 => {
-                    pos+=24; pos+=4; pos+=4; pos+=1;
-                    let len = u32::from_le_bytes(buf[pos..pos+4].try_into().unwrap()) as usize; pos+=4;
-                    pos+=len;
-                }
-                5 => { pos+=1; let n = u16::from_le_bytes(buf[pos..pos+2].try_into().unwrap()) as usize; pos+=2; pos+=n*8; }
-                6 => {},
-                _ => panic!("bad tag {tag}"),
-            }
-        }
-        println!("prims={count} strokes={strokes}");
+        assert!(count >= 1, "expected primitives on the page, got {count}");
+
+        // Assert on the primitives themselves rather than hand-decoding the wire
+        // buffer. The previous inline decoder duplicated the v10 layout and had
+        // drifted out of date (it omitted Stroke's v5 blend byte, Image's v9 alpha
+        // and v10 blend, Fill's v6 multi-contour count and ClipPush's v4 path ops),
+        // so it desynced and panicked with a bogus "bad tag" on any page whose prim
+        // mix changed. Wire layout is covered by wire::tests::round_trips_all_primitives.
+        let strokes = {
+            let reg = registry()
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            let doc = reg.get(&handle).expect("document still open");
+            let page_id = *doc.get_pages().get(&1).expect("one page");
+            let page = interpret_page(doc, page_id).expect("interpret");
+            page.prims
+                .iter()
+                .filter(|p| matches!(p, Prim::Stroke { .. }))
+                .count()
+        };
         assert!(strokes >= 1, "expected the annotation stroke to render, got {strokes}");
         close_document(handle);
     }
@@ -503,10 +673,15 @@ use crate::*;
         assert!(masked_fill, "the red fill must sit inside the mask bracket");
     }
 
-    /// With overprint (`/op true`) active, a fill is emitted with the Multiply
-    /// blend approximation (when no explicit blend mode is set).
+    /// Overprint (`/op true`) must NOT change how a fill is composited. Per ISO
+    /// 32000-1 8.6.7 overprint control governs how ink is applied to individual
+    /// colorants and has no effect on a device with one colorant or an additive
+    /// (RGB) device — which this rasterizer is. The previous Multiply
+    /// approximation actively broke pages, because `white MULTIPLY dst == dst`
+    /// turns the white knockout rectangles that editors emit to cover content
+    /// into no-ops, so the content underneath reappears. Do not "restore" this.
     #[test]
-    fn overprint_fill_uses_multiply() {
+    fn overprint_fill_ignored_on_rgb_device() {
         let mut doc = Document::with_version("1.7");
         let gs_id = doc.add_object(dictionary! { "op" => true });
         let content = Content { operations: vec![
@@ -534,7 +709,11 @@ use crate::*;
             Prim::Fill { blend, .. } => Some(*blend),
             _ => None,
         }).expect("a fill");
-        assert!(fill == BlendMode::Multiply, "overprint fill approximated as Multiply");
+        assert!(
+            fill == BlendMode::Normal,
+            "overprint has no effect on an additive RGB device (8.6.7); got {:?}",
+            fill as u8
+        );
     }
 
     /// Turning one radio-button widget on must clear its siblings' `/AS` to Off

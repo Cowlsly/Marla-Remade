@@ -93,6 +93,7 @@ import androidx.compose.ui.geometry.lerp
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asAndroidBitmap
 import androidx.compose.ui.graphics.Path
+import androidx.compose.ui.graphics.asAndroidPath
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.drawscope.DrawScope
 import androidx.compose.ui.graphics.TransformOrigin
@@ -1251,9 +1252,17 @@ fun PdfOutlineDrawer(
 fun SafePdfPageCanvas(
     page: SafePdfPage?,
     modifier: Modifier = Modifier,
+    placeholderRatio: Float? = null,
     overlays: @Composable BoxWithConstraintsScope.(cw: Float, ch: Float, scale: Float) -> Unit = { _, _, _ -> },
 ) {
-    val ratio = if (page != null && page.height > 0f) page.width / page.height else 612f / 792f
+    // A wrong placeholder ratio makes the item change height the moment the page decodes,
+    // which shifts every item below it. Use the page's real ratio when known (see
+    // SafePdfDocument.knownAspectRatio) and only fall back to letter-portrait when it isn't.
+    val ratio = when {
+        page != null && page.height > 0f -> page.width / page.height
+        placeholderRatio != null && placeholderRatio > 0f -> placeholderRatio
+        else -> 612f / 792f
+    }
 
     BoxWithConstraints(
         modifier
@@ -1271,7 +1280,20 @@ fun SafePdfPageCanvas(
 
         // Render the (static) page into its own graphics layer so that overlay
         // redraws while drawing/dragging don't replay every page primitive.
-        Canvas(Modifier.fillMaxSize().graphicsLayer { clip = true }) { drawSafePage(decoded) }
+        Canvas(Modifier.fillMaxSize().graphicsLayer { clip = true }) {
+            // One unrenderable primitive must not take down the frame, nor leave the live
+            // canvas holding open save/saveLayer levels — that would corrupt every sibling
+            // drawn after it. Restoring to the entry count unwinds clips, groups and
+            // soft-mask layers alike, compositing each layer in inner-to-outer order.
+            val base = drawContext.canvas.nativeCanvas.saveCount
+            try {
+                drawSafePage(decoded)
+            } catch (t: Throwable) {
+                android.util.Log.w("SafePdfViewer", "drawSafePage failed", t)
+            } finally {
+                drawContext.canvas.nativeCanvas.restoreToCount(base)
+            }
+        }
 
         val cw = constraints.maxWidth.toFloat()
         overlays(cw, constraints.maxHeight.toFloat(), cw / decoded.width)
@@ -1331,7 +1353,7 @@ private fun SafePdfPageItem(
         current?.width?.let { if (it > 0f) onPageWidth(it) }
     }
 
-    SafePdfPageCanvas(current) { cw, ch, scale ->
+    SafePdfPageCanvas(current, placeholderRatio = document.knownAspectRatio(index)) { cw, ch, scale ->
         // Non-null inside the overlay slot: SafePdfPageCanvas only invokes it once the page
         // has been decoded.
         val decoded = current!!
@@ -1551,8 +1573,23 @@ private fun buildEmbeddedGlyphs(page: SafePdfPage, ch: Float, scale: Float): Lis
         tmpPaint.textScaleX = prim.hScale.coerceIn(0.2f, 4f)
         tmpPaint.textSize = prim.size * scale
         val textStr = prim.text
-        val measuredTotal = if (textStr.isNotEmpty()) tmpPaint.measureText(textStr) else prim.size * 0.5f
-        val perGlyphMeasured = if (textStr.isNotEmpty()) measuredTotal / textStr.length else prim.size * 0.5f * scale
+        val measuredTotal = tmpPaint.measureText(textStr)
+        // A run that is PAINTED (drawText with this same paint) occupies exactly
+        // measuredTotal, so per-glyph measured widths are what put the selection rects on
+        // the pixels the user sees. A run that is NOT painted — render mode 3, the invisible
+        // OCR layer of a scanned PDF, or a glyph already drawn from its real outline — is
+        // aligned to the scan underneath instead, and only `advance` (the true device-space
+        // advance, wire v7) knows where that is. Substitute-typeface metrics have no relation
+        // to it, so rescale the run to span `advance`. Characters are still spread evenly
+        // within the run, as they were before — the fix is the run's total extent, which is
+        // where the error accumulated and grew with run length.
+        val alignToAdvance = prim.renderMode == 3 || prim.outline
+        val advanceFit = if (alignToAdvance && measuredTotal > 0f && prim.advance > 0f) {
+            prim.advance * scale / measuredTotal
+        } else {
+            1f
+        }
+        val perGlyphMeasured = measuredTotal * advanceFit / textStr.length
         var curPxPage = prim.origin.x
         for (c in textStr) {
             val px = curPxPage
@@ -2688,6 +2725,14 @@ private fun android.graphics.Paint.setBlend(blend: BlendMode) {
 }
 
 /**
+ * Cap on nested transparency-group layers. Each one is an offscreen buffer, so unlike a
+ * plain clip save it has a real memory cost. Rust bounds group depth at 32; exceeding it
+ * must never abandon the page, so the push is still accounted (its matching pop then
+ * restores the right level) and only the layer itself is skipped.
+ */
+private const val MAX_GROUP_LAYER_DEPTH = 32
+
+/**
  * Draw a page's primitives, mapping PDF page space (origin bottom-left) to the
  * canvas (origin top-left) with a uniform fit-to-width scale + Y-flip.
  */
@@ -2719,17 +2764,35 @@ internal fun DrawScope.drawSafePage(page: SafePdfPage) {
     var saveCount = 0
     val clipPath = android.graphics.Path()
     var groupSaveCount = 0
-    // Active ExtGState soft-mask brackets. Each frame tracks how many mask
-    // layers were opened at the SoftMaskContent marker so SoftMaskPop can undo
-    // exactly the content layer + mask (+ luma) layers.
-    class SoftMaskFrame(val maskType: Int) { var maskLayers = 0 }
+    // Active ExtGState soft-mask brackets.
+    class SoftMaskFrame(val maskType: Int) {
+        /** Canvas levels this bracket has opened, so SoftMaskPop restores exactly them. */
+        var levels = 0
+        /** False when the content layer could not be allocated, in which case the mask
+         *  primitives must be discarded rather than painted onto the page. */
+        var masked = true
+        /** /TR as `gain * m + bias`; identity until a SoftMaskTransfer arrives. */
+        var trGain = 1f
+        var trBias = 0f
+    }
     val softMaskStack = ArrayDeque<SoftMaskFrame>()
 
-    fun clipOffsetList(pts: List<Offset>): List<Offset> = pts.map { map(it) }
+    // Reused across primitives: drawSafePage runs on every frame at every zoom level, so a
+    // Path/Matrix/Paint per primitive is a per-frame allocation on a list that can hold
+    // hundreds of thousands of them. Canvas.drawPath/drawBitmap and saveLayer copy what they
+    // need into the display list, so reuse is safe.
+    val reusePath = Path()
+    val pathOpsPath = android.graphics.Path()
+    val imgMatrix = android.graphics.Matrix()
+    val imgSrc = FloatArray(8)
+    val imgDst = FloatArray(8)
+    val groupPaint = android.graphics.Paint()
+    val tilePaint = android.graphics.Paint()
 
     // Bezier-retentive clip path (v4) and text-clip accumulation (Tr 4-7).
     fun pathOpsToPath(ops: List<PathOp>): android.graphics.Path {
-        val p = android.graphics.Path()
+        val p = pathOpsPath
+        p.reset()
         for (op in ops) {
             when (op) {
                 is PathOp.Move -> { val o = map(Offset(op.x, op.y)); p.moveTo(o.x, o.y) }
@@ -2751,14 +2814,10 @@ internal fun DrawScope.drawSafePage(page: SafePdfPage) {
     val tmpGlyphPath = android.graphics.Path()
 
     for (prim in page.primitives) {
-        // Primitive count guard double-check (OOM avoidance if Rust guard fails)
-        if (saveCount > 64 || groupSaveCount > 32) {
-            android.util.Log.w("SafePdfViewer", "Clip/group depth guard, skipping remaining prims")
-            break
-        }
         when (prim) {
             is PdfPrimitive.FillPath -> {
-                val path = Path()
+                val path = reusePath
+                path.reset()
                 var any = false
                 for (contour in prim.contours) {
                     if (contour.size < 2) continue
@@ -2784,20 +2843,23 @@ internal fun DrawScope.drawSafePage(page: SafePdfPage) {
             }
 
             is PdfPrimitive.StrokePath -> {
-                val path = prim.points.toPath(::map) ?: continue
-                // Fix double-scale bug: Rust already scales dash by CTM avg; Kotlin should NOT re-scale by *scale again for width? Per plan 2104-2105 double-scale.
-                // We keep dash scaling by *scale for canvas space but avoid double scaling width which Rust already did.
-                // Actually width already device-scaled in Rust via CTM avg, so we should NOT multiply by scale again beyond min clamp?
-                // To preserve visual, we use prim.width directly coerceAtLeast(1f) but also consider canvas scale? We'll use prim.width * scale for stroke width only if width < threshold, else prim.width.
-                // Correct logic: width from Rust is already CTM-scaled to page space * device? For fidelity we map as width * scale (page->canvas) as before, but dash was also scaled - need to ensure dash not double-scaled.
-                // Rust: dash = gs.dash * CTM_avg_scale (device). Kotlin: dash * scale maps page->canvas. That's actually double scaling? Plan says dash scaling double-scale bug 2104-2105.
-                // Fix: dash already scaled in Rust, so we should use dash directly, not *scale. Similarly width already scaled? But width scaling via CTM is needed for page->canvas.
-                // We'll implement: width = prim.width * scale, dash = prim.dash (not multiplied) + phase = prim.dashPhase (not *scale) unless phase small.
-                val dash = prim.dash
-                val pathEffect = if (dash.size >= 2) {
+                if (prim.points.size < 2) continue
+                val path = reusePath
+                path.reset()
+                val start = map(prim.points[0])
+                path.moveTo(start.x, start.y)
+                for (i in 1 until prim.points.size) {
+                    val p = map(prim.points[i])
+                    path.lineTo(p.x, p.y)
+                }
+                // Rust emits width, dash lengths and dash phase all in page space
+                // (draw.rs scales each by the CTM), so all three take the same
+                // page->canvas factor. The miter limit is a ratio of miter length to
+                // line width (PDF 32000-1 8.4.3.5) and must NOT be scaled.
+                val pathEffect = if (prim.dash.size >= 2) {
                     androidx.compose.ui.graphics.PathEffect.dashPathEffect(
-                        dash,
-                        prim.dashPhase,
+                        FloatArray(prim.dash.size) { prim.dash[it] * scale },
+                        prim.dashPhase * scale,
                     )
                 } else {
                     null
@@ -2812,7 +2874,7 @@ internal fun DrawScope.drawSafePage(page: SafePdfPage) {
                     2 -> androidx.compose.ui.graphics.StrokeJoin.Bevel
                     else -> androidx.compose.ui.graphics.StrokeJoin.Miter
                 }
-                // Miter limit is in line-width units per spec, not device pixels — do NOT scale by canvas scale (was a bug at 2104-2105).
+                // Miter limit is in line-width units per spec, not device pixels.
                 drawPath(
                     path,
                     Color(prim.color),
@@ -2835,7 +2897,13 @@ internal fun DrawScope.drawSafePage(page: SafePdfPage) {
                 val origin = map(prim.origin)
                 val ts = (prim.size * scale).coerceAtLeast(1f)
                 val rm = prim.renderMode
-                val isStrokeOnly = prim.strokeColor != null && prim.color == prim.strokeColor
+                // Tr decides whether the fill is painted (PDF 32000-1 9.3.6). Comparing
+                // fill and stroke colour misfires for mode 2 with a single colour — the
+                // standard faux-bold — and rendered it hollow. Only suppress the fill when
+                // a stroke will actually be painted, since Rust's no-metrics path emits
+                // mode 1 with no stroke colour and must still show something.
+                val willStroke = prim.strokeColor != null && prim.strokeWidth > 0f
+                val isStrokeOnly = willStroke && (rm == 1 || rm == 5)
 
                 // v8: substitute the embedded font with a system typeface matching the
                 // generic family (sans/serif/mono) + bold/italic recovered by Rust. Rust
@@ -2863,9 +2931,10 @@ internal fun DrawScope.drawSafePage(page: SafePdfPage) {
                 glyphPathPaint.textScaleX = hs
                 glyphPathPaint.isFakeBoldText = fakeBold
 
-                // Paint the glyphs unless this is a clip-only run (Tr 7).
-                if (rm != 7) {
-                    if (prim.strokeColor != null && prim.strokeWidth > 0f) {
+                // Mode 3 paints nothing (it is how scanned PDFs carry an invisible OCR
+                // text layer) and mode 7 is clip-only.
+                if (rm != 3 && rm != 7) {
+                    if (willStroke) {
                         textStrokePaint.color = prim.strokeColor
                         textStrokePaint.textSize = ts
                         textStrokePaint.strokeWidth = (prim.strokeWidth * scale).coerceAtLeast(0.5f)
@@ -2894,9 +2963,7 @@ internal fun DrawScope.drawSafePage(page: SafePdfPage) {
             }
 
             is PdfPrimitive.Image -> {
-                val bmp = prim.bitmap ?: continue
-                // Placeholder for JBIG2 failure: instead of continue show gray box with warning per Phase 6
-                // decodeBitmap now returns placeholder gray bitmap when unknown format
+                val bmp = prim.bitmap?.takeUnless { it.isRecycled } ?: continue
                 val matrixAlpha = prim.alpha.coerceIn(0f,1f)
                 if (matrixAlpha < 1f) {
                     imagePaint.alpha = (matrixAlpha*255).toInt()
@@ -2904,6 +2971,12 @@ internal fun DrawScope.drawSafePage(page: SafePdfPage) {
                     imagePaint.alpha = 255
                 }
                 val m = prim.ctm
+                // PDF 32000-1 §8.9.5.1 Table 89: /Interpolate defaults to false, and bilevel
+                // art (stencil masks, 1-bit scans, fax) must never be smoothed — bilinear
+                // filtering turns crisp black-and-white line art into grey fringes. Rust makes
+                // the per-image decision in image_should_interpolate; honour it here instead of
+                // filtering everything.
+                imagePaint.isFilterBitmap = prim.interpolate
                 fun unitToCanvas(u: Float, v: Float): Offset {
                     val pageX = m[0] * u + m[2] * v + m[4]
                     val pageY = m[1] * u + m[3] * v + m[5]
@@ -2911,18 +2984,88 @@ internal fun DrawScope.drawSafePage(page: SafePdfPage) {
                 }
                 val bw = bmp.width.toFloat()
                 val bh = bmp.height.toFloat()
-                val src = floatArrayOf(0f, 0f, bw, 0f, bw, bh, 0f, bh)
+                imgSrc[0] = 0f; imgSrc[1] = 0f; imgSrc[2] = bw; imgSrc[3] = 0f
+                imgSrc[4] = bw; imgSrc[5] = bh; imgSrc[6] = 0f; imgSrc[7] = bh
                 val c00 = unitToCanvas(0f, 1f)
                 val c10 = unitToCanvas(1f, 1f)
                 val c11 = unitToCanvas(1f, 0f)
                 val c01 = unitToCanvas(0f, 0f)
-                val dst = floatArrayOf(c00.x, c00.y, c10.x, c10.y, c11.x, c11.y, c01.x, c01.y)
-                val mat = android.graphics.Matrix()
-                mat.setPolyToPoly(src, 0, dst, 0, 4)
+                imgDst[0] = c00.x; imgDst[1] = c00.y; imgDst[2] = c10.x; imgDst[3] = c10.y
+                imgDst[4] = c11.x; imgDst[5] = c11.y; imgDst[6] = c01.x; imgDst[7] = c01.y
+                // setPolyToPoly leaves the matrix untouched when the destination quad is
+                // degenerate (zero-area or collinear), so it must be reset first: a stale or
+                // identity matrix would paint the bitmap unscaled at the canvas origin over
+                // real content. A zero-area image is unpaintable per PDF 32000-1 8.9.5.2.
+                imgMatrix.reset()
+                if (!imgMatrix.setPolyToPoly(imgSrc, 0, imgDst, 0, 4)) continue
                 imagePaint.setBlend(prim.blend)
-                nativeCanvas.drawBitmap(bmp, mat, imagePaint)
+                nativeCanvas.drawBitmap(bmp, imgMatrix, imagePaint)
                 imagePaint.setBlend(BlendMode.Normal)
                 imagePaint.alpha = 255
+            }
+
+            is PdfPrimitive.ImageTiled -> {
+                val bmp = prim.bitmap?.takeUnless { it.isRecycled } ?: continue
+                val m = prim.ctm
+                fun cellToCanvas(u: Float, v: Float): Offset {
+                    val pageX = m[0] * u + m[2] * v + m[4]
+                    val pageY = m[1] * u + m[3] * v + m[5]
+                    return map(Offset(pageX, pageY))
+                }
+                val bw = bmp.width.toFloat()
+                val bh = bmp.height.toFloat()
+                // Same unit-square convention as Image: bitmap row 0 is the top, which is
+                // v = 1 in PDF space. This matrix maps cell bitmap pixels to the canvas, and
+                // TileMode.REPEAT then extends it along the bitmap's own axes — which under
+                // this matrix are the pattern lattice's axes, so rotation and shear come free.
+                imgSrc[0] = 0f; imgSrc[1] = 0f; imgSrc[2] = bw; imgSrc[3] = 0f
+                imgSrc[4] = bw; imgSrc[5] = bh; imgSrc[6] = 0f; imgSrc[7] = bh
+                val t00 = cellToCanvas(0f, 1f)
+                val t10 = cellToCanvas(1f, 1f)
+                val t11 = cellToCanvas(1f, 0f)
+                val t01 = cellToCanvas(0f, 0f)
+                imgDst[0] = t00.x; imgDst[1] = t00.y; imgDst[2] = t10.x; imgDst[3] = t10.y
+                imgDst[4] = t11.x; imgDst[5] = t11.y; imgDst[6] = t01.x; imgDst[7] = t01.y
+                imgMatrix.reset()
+                if (!imgMatrix.setPolyToPoly(imgSrc, 0, imgDst, 0, 4)) continue
+                if (prim.nx <= 0 || prim.ny <= 0) continue
+
+                // The shader repeats without bound, so the lattice extent only decides the
+                // region to cover. Under a rotated or sheared ctm that region is a
+                // parallelogram, not a rect, so fill the mapped quad rather than its bounds.
+                val u0 = prim.i0.toFloat()
+                val v0 = prim.j0.toFloat()
+                val u1 = u0 + prim.nx.toFloat()
+                val v1 = v0 + prim.ny.toFloat()
+                val r00 = cellToCanvas(u0, v0)
+                val r10 = cellToCanvas(u1, v0)
+                val r11 = cellToCanvas(u1, v1)
+                val r01 = cellToCanvas(u0, v1)
+                reusePath.reset()
+                reusePath.moveTo(r00.x, r00.y)
+                reusePath.lineTo(r10.x, r10.y)
+                reusePath.lineTo(r11.x, r11.y)
+                reusePath.lineTo(r01.x, r01.y)
+                reusePath.close()
+
+                val shader = runCatching {
+                    android.graphics.BitmapShader(
+                        bmp,
+                        android.graphics.Shader.TileMode.REPEAT,
+                        android.graphics.Shader.TileMode.REPEAT,
+                    ).also { it.setLocalMatrix(imgMatrix) }
+                }.onFailure {
+                    android.util.Log.w("SafePdfViewer", "tiling pattern shader failed", it)
+                }.getOrNull() ?: continue
+
+                tilePaint.reset()
+                tilePaint.isAntiAlias = true
+                tilePaint.isFilterBitmap = true
+                tilePaint.shader = shader
+                tilePaint.alpha = (prim.alpha.coerceIn(0f, 1f) * 255).toInt()
+                tilePaint.setBlend(prim.blend)
+                nativeCanvas.drawPath(reusePath.asAndroidPath(), tilePaint)
+                tilePaint.shader = null
             }
 
             is PdfPrimitive.ClipPush -> {
@@ -2937,10 +3080,11 @@ internal fun DrawScope.drawSafePage(page: SafePdfPage) {
                     nativeCanvas.clipPath(cp)
                 } else if (prim.points.size >= 3) {
                     clipPath.reset()
-                    val mapped = clipOffsetList(prim.points)
-                    clipPath.moveTo(mapped[0].x, mapped[0].y)
-                    for (i in 1 until mapped.size) {
-                        clipPath.lineTo(mapped[i].x, mapped[i].y)
+                    val p0 = map(prim.points[0])
+                    clipPath.moveTo(p0.x, p0.y)
+                    for (i in 1 until prim.points.size) {
+                        val p = map(prim.points[i])
+                        clipPath.lineTo(p.x, p.y)
                     }
                     clipPath.close()
                     clipPath.fillType = if (prim.evenOdd) android.graphics.Path.FillType.EVEN_ODD else android.graphics.Path.FillType.WINDING
@@ -2968,69 +3112,116 @@ internal fun DrawScope.drawSafePage(page: SafePdfPage) {
             }
 
             is PdfPrimitive.GroupPush -> {
-                // Transparency group with alpha + blend. Isolated groups are the
-                // default with saveLayer (a fresh backdrop-free layer); knockout
-                // groups are not directly expressible with Canvas layers and are
-                // approximated as non-knockout.
+                // Transparency group with alpha + blend, composited via an offscreen layer.
+                //
+                // KNOWN LIMITATION: neither /I (isolated) nor /K (knockout) is honoured.
+                // Canvas.saveLayer always yields an isolated, non-knockout layer. A
+                // non-isolated group would have to see the existing backdrop inside the
+                // layer so its blend mode composites against it (PDF 32000-1 11.4.5), and a
+                // knockout group needs each element composited against the group's initial
+                // backdrop rather than the running result (11.4.6). Neither is expressible
+                // with Canvas layers, so both are approximated as isolated non-knockout.
                 val alpha = prim.alpha.coerceIn(0f,1f)
                 val blend = prim.blend
-                try {
-                    val paint = android.graphics.Paint()
-                    paint.alpha = (alpha*255).toInt()
-                    if (blend != BlendMode.Normal) {
-                        paint.blendMode = blend.toAndroid()
-                    }
-                    nativeCanvas.saveLayer(null, paint)
-                    groupSaveCount++
-                    // Also track in saveCount for balanced restore? Keep separate.
-                } catch (t: Throwable) {
-                    android.util.Log.w("SafePdfViewer", "GroupPush saveLayer failed", t)
-                    nativeCanvas.save()
-                    saveCount++
+                val layered = if (groupSaveCount >= MAX_GROUP_LAYER_DEPTH) {
+                    android.util.Log.w("SafePdfViewer", "group layer depth cap reached, drawing inline")
+                    false
+                } else {
+                    runCatching {
+                        groupPaint.reset()
+                        groupPaint.alpha = (alpha*255).toInt()
+                        if (blend != BlendMode.Normal) {
+                            groupPaint.blendMode = blend.toAndroid()
+                        }
+                        nativeCanvas.saveLayer(null, groupPaint)
+                    }.onFailure {
+                        android.util.Log.w("SafePdfViewer", "GroupPush saveLayer failed", it)
+                    }.isSuccess
                 }
+                // Account a level either way, so the matching GroupPop restores this push
+                // and never a sibling clip's save.
+                if (!layered) nativeCanvas.save()
+                groupSaveCount++
             }
 
             is PdfPrimitive.GroupPop -> {
                 if (groupSaveCount > 0) {
                     nativeCanvas.restore()
                     groupSaveCount--
-                } else if (saveCount >0) {
-                    // fallback balanced if group tracking drifted
-                    nativeCanvas.restore()
-                    saveCount--
                 }
             }
 
             is PdfPrimitive.SoftMaskPush -> {
-                // Open the layer that will hold the masked content.
-                nativeCanvas.saveLayer(null, null)
-                softMaskStack.addLast(SoftMaskFrame(prim.maskType))
+                // A soft-mask layer is an offscreen buffer, exactly like a transparency-group
+                // layer, so it takes the same depth cap. Over the cap — or if the allocation
+                // fails — fall back to a plain save so the matching pop still balances, and
+                // record that the mask itself has to be discarded rather than painted.
+                val frame = SoftMaskFrame(prim.maskType)
+                val layered = softMaskStack.size < MAX_GROUP_LAYER_DEPTH &&
+                    runCatching { nativeCanvas.saveLayer(null, null) }.onFailure {
+                        android.util.Log.w("SafePdfViewer", "SoftMaskPush saveLayer failed", it)
+                    }.isSuccess
+                if (!layered) {
+                    nativeCanvas.save()
+                    frame.masked = false
+                }
+                frame.levels = 1
+                softMaskStack.addLast(frame)
+            }
+
+            is PdfPrimitive.SoftMaskTransfer -> {
+                // §11.6.5.2: the mask value passes through /TR. Folded into the matrix that
+                // already turns the mask into alpha (see SoftMaskContent), so it is free.
+                if (prim.affine) {
+                    softMaskStack.lastOrNull()?.let { it.trGain = prim.gain; it.trBias = prim.bias }
+                }
             }
 
             is PdfPrimitive.SoftMaskContent -> {
                 val frame = softMaskStack.lastOrNull()
-                if (frame != null) {
+                if (frame != null && !frame.masked) {
+                    // There is no content layer to mask into, so the mask primitives have
+                    // nowhere to go. Clip them away — letting them paint would draw the mask
+                    // itself on top of the page, which is worse than an unmasked group.
+                    nativeCanvas.save()
+                    nativeCanvas.clipRect(0f, 0f, 0f, 0f)
+                    frame.levels++
+                } else if (frame != null) {
                     // The mask layer composites onto the content layer with
                     // DST_IN, so the content is kept only where the mask has alpha.
                     val maskPaint = android.graphics.Paint()
                     maskPaint.blendMode = android.graphics.BlendMode.DST_IN
                     nativeCanvas.saveLayer(null, maskPaint)
-                    frame.maskLayers = 1
-                    // Luminosity masks: convert the mask's luminance to alpha
-                    // (RGB -> 0, A = Rec.709 luma) as the luma layer composites down.
-                    if (frame.maskType == 1) {
-                        val lumaPaint = android.graphics.Paint()
-                        val lm = android.graphics.ColorMatrix(
+                    frame.levels++
+                    // Turn the mask into alpha as its layer composites down: Rec.709 luma for
+                    // a luminosity mask, or the existing alpha, either way through /TR
+                    // (gain·m + bias). An alpha mask with an identity /TR needs no layer.
+                    val g = frame.trGain
+                    val bias = frame.trBias * 255f
+                    val lm = when {
+                        frame.maskType == 1 -> android.graphics.ColorMatrix(
                             floatArrayOf(
                                 0f, 0f, 0f, 0f, 0f,
                                 0f, 0f, 0f, 0f, 0f,
                                 0f, 0f, 0f, 0f, 0f,
-                                0.2126f, 0.7152f, 0.0722f, 0f, 0f,
+                                g * 0.2126f, g * 0.7152f, g * 0.0722f, 0f, bias,
                             )
                         )
+                        g != 1f || bias != 0f -> android.graphics.ColorMatrix(
+                            floatArrayOf(
+                                0f, 0f, 0f, 0f, 0f,
+                                0f, 0f, 0f, 0f, 0f,
+                                0f, 0f, 0f, 0f, 0f,
+                                0f, 0f, 0f, g, bias,
+                            )
+                        )
+                        else -> null
+                    }
+                    if (lm != null) {
+                        val lumaPaint = android.graphics.Paint()
                         lumaPaint.colorFilter = android.graphics.ColorMatrixColorFilter(lm)
                         nativeCanvas.saveLayer(null, lumaPaint)
-                        frame.maskLayers = 2
+                        frame.levels++
                     }
                 }
             }
@@ -3038,18 +3229,17 @@ internal fun DrawScope.drawSafePage(page: SafePdfPage) {
             is PdfPrimitive.SoftMaskPop -> {
                 val frame = softMaskStack.removeLastOrNull()
                 if (frame != null) {
-                    // Restore the mask (+luma) layers, then the content layer.
-                    repeat(frame.maskLayers) { nativeCanvas.restore() }
-                    nativeCanvas.restore()
+                    repeat(frame.levels) { nativeCanvas.restore() }
                 }
             }
         }
     }
-    // Ensure balanced restore
+    // Ensure balanced restore. NOTE: this is the normal-path drain only — it does NOT run if a
+    // primitive throws, so a caller must anchor on `nativeCanvas.saveCount` and
+    // `restoreToCount` it in a finally. Both callers do: SafePdfPageCanvas and CutGlueScreen.
     while (softMaskStack.isNotEmpty()) {
         val frame = softMaskStack.removeLast()
-        repeat(frame.maskLayers) { nativeCanvas.restore() }
-        nativeCanvas.restore()
+        repeat(frame.levels) { nativeCanvas.restore() }
     }
     while (groupSaveCount > 0) {
         nativeCanvas.restore()
@@ -3059,18 +3249,6 @@ internal fun DrawScope.drawSafePage(page: SafePdfPage) {
         nativeCanvas.restore()
         saveCount--
     }
-}
-
-private inline fun List<Offset>.toPath(map: (Offset) -> Offset): Path? {
-    if (size < 2) return null
-    val path = Path()
-    val first = map(this[0])
-    path.moveTo(first.x, first.y)
-    for (i in 1 until size) {
-        val p = map(this[i])
-        path.lineTo(p.x, p.y)
-    }
-    return path
 }
 
 private class JpegImage(val bytes: ByteArray, val width: Int, val height: Int)

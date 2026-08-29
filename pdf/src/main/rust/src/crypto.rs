@@ -59,7 +59,11 @@ fn pad_pw(pw: &[u8]) -> [u8; 32] {
 }
 
 /// Algorithm 2: the file encryption key from the user password.
-pub fn compute_key(pw: &[u8], o: &[u8], p: i32, id0: &[u8], n: usize, rev: u8) -> Vec<u8> {
+///
+/// `encrypt_metadata` is the `/EncryptMetadata` flag (default true). When it is false and
+/// `rev >= 4`, step (f) requires four 0xFF bytes to be added to the hash; omitting them
+/// derives the wrong key, so a CORRECT password is rejected as wrong.
+pub fn compute_key(pw: &[u8], o: &[u8], p: i32, id0: &[u8], n: usize, rev: u8, encrypt_metadata: bool) -> Vec<u8> {
     let mut input = Vec::new();
     input.extend_from_slice(&pad_pw(pw));
     let mut o32 = [0u8; 32];
@@ -68,6 +72,9 @@ pub fn compute_key(pw: &[u8], o: &[u8], p: i32, id0: &[u8], n: usize, rev: u8) -
     input.extend_from_slice(&o32);
     input.extend_from_slice(&(p as u32).to_le_bytes());
     input.extend_from_slice(id0);
+    if rev >= 4 && !encrypt_metadata {
+        input.extend_from_slice(&[0xFF; 4]);
+    }
     let mut hash = md5(&input);
     if rev >= 3 {
         for _ in 0..50 {
@@ -134,8 +141,9 @@ pub fn authenticate(
     id0: &[u8],
     n: usize,
     rev: u8,
+    encrypt_metadata: bool,
 ) -> Option<Vec<u8>> {
-    let key = compute_key(pw, o, p, id0, n, rev);
+    let key = compute_key(pw, o, p, id0, n, rev, encrypt_metadata);
     let computed = compute_u(&key, id0, rev);
     let cmp_len = if rev == 2 { 32 } else { 16 };
     if computed.len() >= cmp_len && u.len() >= cmp_len && computed[..cmp_len] == u[..cmp_len] {
@@ -156,6 +164,7 @@ pub fn authenticate_owner_fallback(
     id0: &[u8],
     n: usize,
     rev: u8,
+    encrypt_metadata: bool,
 ) -> Option<Vec<u8>> {
     // Derive owner key from owner pw
     let mut hash = md5(&pad_pw(pw));
@@ -184,14 +193,14 @@ pub fn authenticate_owner_fallback(
     // PDF pad is fixed 32-byte constant; if user_pad tail matches PAD tail, trim.
     // Simple heuristic: if candidate_pw length 32 and ends with PAD char not printable, still use it as-is for compute_key.
     // authenticate will compute key and check U.
-    let key_candidate = compute_key(&candidate_pw, o, p, id0, n, rev);
+    let key_candidate = compute_key(&candidate_pw, o, p, id0, n, rev, encrypt_metadata);
     let computed = compute_u(&key_candidate, id0, rev);
     let cmp_len = if rev == 2 { 32 } else { 16 };
     if computed.len() >= cmp_len && u.len() >= cmp_len && computed[..cmp_len] == u[..cmp_len] {
         return Some(key_candidate);
     }
     // Also try using owner pw directly as user pw (owner may equal user)
-    authenticate(pw, o, u, p, id0, n, rev)
+    authenticate(pw, o, u, p, id0, n, rev, encrypt_metadata)
 }
 
 /// AES-256-CBC encrypt without padding, IV = zeros (used to build /UE and /OE).
@@ -421,11 +430,12 @@ mod tests {
         let n = 16;
         let rev = 3u8;
         let o = compute_o(b"owner", b"", n, rev);
-        let key = compute_key(b"", &o, p, id0, n, rev);
+        let key = compute_key(b"", &o, p, id0, n, rev, true);
         let u = compute_u(&key, id0, rev);
-        let got = authenticate(b"", &o, &u, p, id0, n, rev).expect("empty user pw authenticates");
+        let got =
+            authenticate(b"", &o, &u, p, id0, n, rev, true).expect("empty user pw authenticates");
         assert_eq!(got, key);
-        assert!(authenticate(b"wrong", &o, &u, p, id0, n, rev).is_none());
+        assert!(authenticate(b"wrong", &o, &u, p, id0, n, rev, true).is_none());
     }
 
     #[test]

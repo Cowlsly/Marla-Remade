@@ -121,6 +121,7 @@ fn build_courier() -> HashMap<String, f64> {
 // ---------------------------------------------------------------------------
 
 static HELVETICA: &[(&str, u16)] = &[
+    ("Euro", 556),
     ("space", 278), ("exclam", 278), ("quotedbl", 355), ("numbersign", 556),
     ("dollar", 556), ("percent", 889), ("ampersand", 667), ("quotesingle", 191),
     ("quoteright", 222), ("parenleft", 333), ("parenright", 333), ("asterisk", 389),
@@ -181,6 +182,7 @@ static HELVETICA: &[(&str, u16)] = &[
 ];
 
 static HELVETICA_BOLD: &[(&str, u16)] = &[
+    ("Euro", 556),
     ("space", 278), ("exclam", 333), ("quotedbl", 474), ("numbersign", 556),
     ("dollar", 556), ("percent", 889), ("ampersand", 722), ("quotesingle", 238),
     ("quoteright", 278), ("parenleft", 333), ("parenright", 333), ("asterisk", 389),
@@ -240,6 +242,7 @@ static HELVETICA_BOLD: &[(&str, u16)] = &[
 ];
 
 static TIMES_ROMAN: &[(&str, u16)] = &[
+    ("Euro", 500),
     ("space", 250), ("exclam", 333), ("quotedbl", 408), ("numbersign", 500),
     ("dollar", 500), ("percent", 833), ("ampersand", 778), ("quotesingle", 180),
     ("quoteright", 333), ("parenleft", 333), ("parenright", 333), ("asterisk", 500),
@@ -299,6 +302,7 @@ static TIMES_ROMAN: &[(&str, u16)] = &[
 ];
 
 static TIMES_BOLD: &[(&str, u16)] = &[
+    ("Euro", 500),
     ("space", 250), ("exclam", 333), ("quotedbl", 555), ("numbersign", 500),
     ("dollar", 500), ("percent", 1000), ("ampersand", 833), ("quotesingle", 278),
     ("quoteright", 333), ("parenleft", 333), ("parenright", 333), ("asterisk", 500),
@@ -358,6 +362,7 @@ static TIMES_BOLD: &[(&str, u16)] = &[
 ];
 
 static TIMES_ITALIC: &[(&str, u16)] = &[
+    ("Euro", 500),
     ("space", 250), ("exclam", 333), ("quotedbl", 420), ("numbersign", 500),
     ("dollar", 500), ("percent", 833), ("ampersand", 778), ("quotesingle", 214),
     ("quoteright", 333), ("parenleft", 333), ("parenright", 333), ("asterisk", 500),
@@ -417,6 +422,7 @@ static TIMES_ITALIC: &[(&str, u16)] = &[
 ];
 
 static TIMES_BOLD_ITALIC: &[(&str, u16)] = &[
+    ("Euro", 500),
     ("space", 250), ("exclam", 389), ("quotedbl", 555), ("numbersign", 500),
     ("dollar", 500), ("percent", 833), ("ampersand", 778), ("quotesingle", 278),
     ("quoteright", 333), ("parenleft", 333), ("parenright", 333), ("asterisk", 500),

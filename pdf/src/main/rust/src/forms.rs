@@ -12,6 +12,209 @@ pub(crate) fn field_attr<'a>(doc: &'a Document, mut id: ObjectId, key: &[u8]) ->
     None
 }
 
+/// The terminal field a widget belongs to: the nearest dictionary at or above it
+/// carrying `/FT` (§12.7.3.1). `/V`, `/I`, `/Ff`, `/Q` and `/MaxLen` are keys of
+/// THAT field, so writing them on the clicked widget (when the widget is a
+/// separate `/Kids` entry) leaves every sibling widget stale, and writing them on
+/// a grouping ancestor above the terminal field puts them out of reach. Bounded
+/// so a malformed cyclic `/Parent` chain terminates; falls back to the widget
+/// itself when nothing in the chain declares `/FT`.
+pub(crate) fn terminal_field_id(doc: &Document, id: ObjectId) -> ObjectId {
+    let mut cur = id;
+    for _ in 0..16 {
+        let dict = match doc.get_dictionary(cur) {
+            Ok(d) => d,
+            Err(_) => break,
+        };
+        if dict.get(b"FT").is_ok() {
+            return cur;
+        }
+        match dict.get(b"Parent").ok().and_then(|o| o.as_reference().ok()) {
+            Some(p) if p != cur => cur = p,
+            _ => break,
+        }
+    }
+    id
+}
+
+/// The interactive form dictionary (`/Root /AcroForm`).
+fn acroform(doc: &Document) -> Option<&Dictionary> {
+    doc.catalog()
+        .ok()?
+        .get(b"AcroForm")
+        .ok()
+        .and_then(|o| deref(doc, o))
+        .and_then(|o| o.as_dict().ok())
+}
+
+/// The pieces of a `/DA` default appearance string that a generated field
+/// appearance needs (§12.7.3.3: "a sequence of valid page-content graphics or
+/// text state operators ... defining such properties as the field's text size
+/// and colour").
+pub(crate) struct DefaultAppearance {
+    /// Resource name given to `Tf`, without the leading slash. `None` when the
+    /// string names no font or names one we refuse to trust.
+    pub font: Option<Vec<u8>>,
+    /// Size given to `Tf`. ZERO is not "invisible": §12.7.4.3 makes it mean
+    /// AUTO-SIZE to fit the field, so callers must substitute their own size.
+    pub size: f64,
+    /// Fill colour from `g` / `rg` / `k`, defaulting to black as the previous
+    /// hardcoded `0 0 0 rg` did.
+    pub argb: u32,
+}
+
+impl Default for DefaultAppearance {
+    fn default() -> Self {
+        DefaultAppearance { font: None, size: 0.0, argb: 0xFF00_0000 }
+    }
+}
+
+/// Whether a `/DA` font name is safe to interpolate into a generated content
+/// stream. The name is written straight into `/<name> <size> Tf`, so anything
+/// outside the regular-character set could close the operand and inject
+/// operators (§7.3.5 restricts names to regular characters anyway).
+fn safe_resource_name(n: &[u8]) -> bool {
+    !n.is_empty()
+        && n.len() <= 127
+        && n.iter().all(|c| c.is_ascii_alphanumeric() || matches!(c, b'_' | b'.' | b'+' | b'-'))
+}
+
+/// Parse the font name, size and fill colour out of a `/DA` string.
+///
+/// Only the fill-colour operators are read: a generated field appearance paints
+/// glyphs in text render mode 0, which uses the fill colour, so `G`/`RG`/`K`
+/// would have no effect. Later operators win, matching content-stream semantics.
+pub(crate) fn parse_da(da: &[u8]) -> DefaultAppearance {
+    let s = String::from_utf8_lossy(da);
+    let toks: Vec<&str> = s.split_whitespace().collect();
+    let mut out = DefaultAppearance::default();
+    let n = |t: &str| t.parse::<f64>().ok().filter(|v| v.is_finite());
+    for (i, t) in toks.iter().enumerate() {
+        match *t {
+            "Tf" if i >= 2 => {
+                if let Some(v) = n(toks[i - 1]) {
+                    // Clamped rather than rejected: a negative size is malformed,
+                    // and an absurd one would only produce a huge clipped glyph.
+                    out.size = v.clamp(0.0, 1000.0);
+                }
+                out.font = toks[i - 2]
+                    .strip_prefix('/')
+                    .map(|f| f.as_bytes())
+                    .filter(|f| safe_resource_name(f))
+                    .map(|f| f.to_vec());
+            }
+            "g" if i >= 1 => {
+                if let Some(v) = n(toks[i - 1]) {
+                    out.argb = gray_to_argb(v.clamp(0.0, 1.0));
+                }
+            }
+            "rg" if i >= 3 => {
+                if let (Some(r), Some(g), Some(b)) = (n(toks[i - 3]), n(toks[i - 2]), n(toks[i - 1])) {
+                    out.argb = rgb_to_argb(r.clamp(0.0, 1.0), g.clamp(0.0, 1.0), b.clamp(0.0, 1.0));
+                }
+            }
+            "k" if i >= 4 => {
+                if let (Some(c), Some(m), Some(y), Some(k)) =
+                    (n(toks[i - 4]), n(toks[i - 3]), n(toks[i - 2]), n(toks[i - 1]))
+                {
+                    out.argb = cmyk_to_argb(
+                        c.clamp(0.0, 1.0), m.clamp(0.0, 1.0), y.clamp(0.0, 1.0), k.clamp(0.0, 1.0),
+                    );
+                }
+            }
+            _ => {}
+        }
+    }
+    out
+}
+
+/// A widget's effective `/DA`: the field's own (inheritable through `/Parent`),
+/// else the document-wide AcroForm default (§12.7.2 Table 218).
+pub(crate) fn field_da(doc: &Document, id: ObjectId) -> DefaultAppearance {
+    let own = field_attr(doc, id, b"DA")
+        .and_then(|o| deref(doc, o).or(Some(o)))
+        .and_then(|o| o.as_str().ok());
+    if let Some(s) = own {
+        return parse_da(s);
+    }
+    acroform(doc)
+        .and_then(|af| af.get(b"DA").ok())
+        .and_then(|o| deref(doc, o).or(Some(o)))
+        .and_then(|o| o.as_str().ok())
+        .map(parse_da)
+        .unwrap_or_default()
+}
+
+/// Resources for a generated field appearance, plus the resource name to write
+/// into `Tf`. Resolves a `/DA` font name against the AcroForm `/DR /Font`
+/// dictionary (§12.7.3.3) and falls back to the Helvetica substitute otherwise.
+///
+/// A font is adopted only when the generated content can actually address it.
+/// The value is written as a plain literal string, so a composite (`Type0`) font
+/// — addressed by multi-byte CIDs — would render it as garbage, and a font with
+/// a `/Differences` or symbolic encoding would remap the bytes to unrelated
+/// glyphs. Both are strictly worse than the substitute, so in those cases the
+/// substitute is kept and only the `/DA` size and colour are honoured.
+fn da_font_resources(doc: &Document, name: Option<&[u8]>) -> (Dictionary, Vec<u8>) {
+    let fallback = (helvetica_resources(), b"F1".to_vec());
+    let name = match name {
+        Some(n) if safe_resource_name(n) => n,
+        _ => return fallback,
+    };
+    let entry = acroform(doc)
+        .and_then(|af| af.get(b"DR").ok())
+        .and_then(|o| deref(doc, o))
+        .and_then(|o| o.as_dict().ok())
+        .and_then(|dr| dr.get(b"Font").ok())
+        .and_then(|o| deref(doc, o))
+        .and_then(|o| o.as_dict().ok())
+        .and_then(|fonts| fonts.get(name).ok());
+    let entry = match entry {
+        Some(e) => e,
+        None => return fallback,
+    };
+    let font = match deref(doc, entry).and_then(|o| o.as_dict().ok()) {
+        Some(d) => d,
+        None => return fallback,
+    };
+    let simple = matches!(
+        font.get(b"Subtype").ok().and_then(|o| o.as_name().ok()),
+        Some(b"Type1") | Some(b"TrueType") | Some(b"MMType1")
+    );
+    if !simple || !latin_text_encoding(doc, font) {
+        return fallback;
+    }
+    let mut res = helvetica_resources();
+    if let Ok(Object::Dictionary(fonts)) = res.get_mut(b"Font") {
+        fonts.set(name.to_vec(), entry.clone());
+    }
+    (res, name.to_vec())
+}
+
+/// Whether a simple font's `/Encoding` maps single Latin-1-ish bytes to the
+/// glyphs they name, so a literal string written from `decode_pdf_text` output
+/// lands on the right glyphs. Absent (the font's built-in encoding) counts,
+/// since for the standard text faces that is StandardEncoding.
+fn latin_text_encoding(doc: &Document, font: &Dictionary) -> bool {
+    const OK: [&[u8]; 3] = [b"WinAnsiEncoding", b"MacRomanEncoding", b"StandardEncoding"];
+    let enc = match font.get(b"Encoding").ok().and_then(|o| deref(doc, o).or(Some(o))) {
+        None => return true,
+        Some(e) => e,
+    };
+    match enc {
+        Object::Name(n) => OK.contains(&n.as_slice()),
+        Object::Dictionary(d) => {
+            d.get(b"Differences").is_err()
+                && d.get(b"BaseEncoding")
+                    .ok()
+                    .and_then(|o| o.as_name().ok())
+                    .map(|n| OK.contains(&n))
+                    .unwrap_or(true)
+        }
+        _ => false,
+    }
+}
+
 /// Resolve a GoTo destination to a 0-based page index, or -1.
 pub(crate) fn resolve_dest_page(doc: &Document, d: &Object, page_of: &HashMap<ObjectId, i32>) -> i32 {
     let d = deref(doc, d).unwrap_or(d);
@@ -28,7 +231,7 @@ pub(crate) fn resolve_dest_page(doc: &Document, d: &Object, page_of: &HashMap<Ob
 /// Serialize link annotations for a page: rect (displayed space), destination
 /// page (-1 if none), and URI (empty if none).
 pub(crate) fn list_links(handle: i64, page_index: i32) -> Option<Vec<u8>> {
-    let reg = registry().lock().unwrap();
+    let reg = registry().lock().unwrap_or_else(|e| e.into_inner());
     let doc = reg.get(&handle)?;
     let page_id = nth_page_id(doc, page_index)?;
     let base = page_base_matrix(doc, page_id);
@@ -214,10 +417,15 @@ pub(crate) fn list_form_fields(handle: i64, page_index: i32) -> Option<Vec<u8>> 
                 })
                 .unwrap_or_default();
             let checked = if type_code == 1 {
-                let as_state = dict.get(b"AS").ok().and_then(|o| o.as_name().ok());
-                let on = as_state.map(|s| s != b"Off").unwrap_or(false)
-                    || (!value.is_empty() && value != "Off");
-                on as u8
+                // §12.5.5: /AS names which of /AP /N's states this WIDGET paints,
+                // so it is the per-widget truth. /V is the FIELD's value, shared
+                // by every kid of a radio group — using it as a fallback for a
+                // widget that has /AS = /Off reported every button in the group as
+                // selected. Only fall back to /V when the widget has no /AS.
+                match dict.get(b"AS").ok().and_then(|o| o.as_name().ok()) {
+                    Some(s) => (s != b"Off") as u8,
+                    None => (!value.is_empty() && value != "Off") as u8,
+                }
             } else {
                 0
             };
@@ -261,38 +469,50 @@ pub(crate) fn set_need_appearances(doc: &mut Document) {
 
 /// Build the content stream for a text field's `/N` appearance, honoring
 /// alignment (`/Q`: 0 left, 1 center, 2 right), multiline (line-wrapped) and
-/// comb (one glyph per `/MaxLen` cell) fields. Widths are approximated with
-/// Helvetica's ~0.5em average since exact metrics aren't needed for a legible
-/// generated appearance.
+/// comb (one glyph per `/MaxLen` cell) fields, and the font, size and colour the
+/// caller resolved from `/DA`. Widths are approximated with Helvetica's ~0.5em
+/// average since exact metrics aren't needed for a legible generated appearance.
+#[allow(clippy::too_many_arguments)]
 fn build_text_appearance(
     value: &str,
     w: f64,
     h: f64,
     size: f64,
+    font: &[u8],
+    argb: u32,
     quadding: i64,
     multiline: bool,
     comb: bool,
     max_len: usize,
 ) -> Vec<u8> {
     let char_w = size * 0.5;
+    let (r, g, b) = argb_rgb(argb);
     let mut body = String::new();
-    body.push_str("q 0 0 0 rg BT /F1 ");
-    body.push_str(&format!("{size} Tf "));
+    body.push_str(&format!(
+        "q {r:.3} {g:.3} {b:.3} rg BT /{} {size:.3} Tf ",
+        String::from_utf8_lossy(font)
+    ));
 
     if comb && max_len > 0 {
-        // One glyph per cell, centered in each cell.
+        // One glyph per cell, centered in each cell. The vertical offset has to
+        // be repeated on every `Tm`: `Tm` REPLACES the text matrix rather than
+        // concatenating (§9.4.2), so setting the baseline once up front and then
+        // issuing per-cell `Tm`s dropped every glyph to y=0, sitting the row on
+        // the bottom edge of the box with its descenders clipped.
         let cell_w = w / max_len as f64;
         let base_y = (h - size) / 2.0;
-        body.push_str(&format!("1 0 0 1 0 {base_y:.2} Tm "));
         for (i, ch) in value.chars().take(max_len).enumerate() {
             let cx = i as f64 * cell_w + (cell_w - char_w) / 2.0;
             body.push_str(&format!(
-                "1 0 0 1 {cx:.2} 0 Tm ({}) Tj ",
+                "1 0 0 1 {cx:.2} {base_y:.2} Tm ({}) Tj ",
                 escape_pdf_literal(&ch.to_string())
             ));
         }
     } else if multiline {
-        // Split on explicit newlines and greedily wrap to the box width.
+        // Split on explicit newlines and greedily wrap to the box width. CRLF is
+        // normalized first: splitting on both characters turns each "\r\n" into
+        // an extra empty line, double-spacing the whole field.
+        let value = value.replace("\r\n", "\n");
         let leading = size * 1.15;
         let max_chars = ((w - 4.0) / char_w).floor().max(1.0) as usize;
         let mut lines: Vec<String> = Vec::new();
@@ -305,7 +525,7 @@ fn build_text_appearance(
             for word in raw.split(' ') {
                 if cur.is_empty() {
                     cur = word.to_string();
-                } else if cur.len() + 1 + word.len() <= max_chars {
+                } else if cur.chars().count() + 1 + word.chars().count() <= max_chars {
                     cur.push(' ');
                     cur.push_str(word);
                 } else {
@@ -350,30 +570,27 @@ fn aligned_x(line: &str, w: f64, char_w: f64, quadding: i64) -> f64 {
     }
 }
 
+/// The font size for a generated field appearance: the `/DA` size, or — when
+/// that is ZERO, which §12.7.4.3 defines as auto-size-to-fit and NOT as
+/// invisible — a size derived from the field height.
+fn field_font_size(da_size: f64, h: f64) -> f64 {
+    if da_size > 0.0 {
+        da_size
+    } else {
+        (h - 4.0).clamp(6.0, 14.0)
+    }
+}
+
 pub(crate) fn set_text_field(handle: i64, widget_id: i64, value: &str) -> bool {
-    // Fix #11 medium: widget not parent — walk Parent chain to root field to set V on parent so all widgets reflect
     let mut reg = registry().lock().unwrap_or_else(|e| e.into_inner());
     let doc = match reg.get_mut(&handle) {
         Some(d) => d,
         None => return false,
     };
     let id = decode_id(widget_id);
-    // Find root field by walking Parent chain
-    let mut root_id = id;
-    for _ in 0..16 {
-        let parent_opt = doc.get_dictionary(root_id).ok().and_then(|d| d.get(b"Parent").ok()).and_then(|o| o.as_reference().ok());
-        if let Some(p) = parent_opt {
-            root_id = p;
-        } else {
-            break;
-        }
-    }
-    let rect = doc
-        .get_dictionary(id)
-        .ok()
-        .and_then(|d| d.get(b"Rect").ok())
-        .and_then(|o| read_rect(doc, o))
-        .map(normalize_rect);
+    // /V is a field key, so it belongs on the terminal field; setting it on the
+    // clicked widget leaves every other widget of the field stale.
+    let root_id = terminal_field_id(doc, id);
     // Field flags / alignment / comb length (Q may be inherited from AcroForm).
     let dict_ro = doc.get_dictionary(root_id).ok().or_else(|| doc.get_dictionary(id).ok());
     let flags = dict_ro
@@ -390,46 +607,76 @@ pub(crate) fn set_text_field(handle: i64, widget_id: i64, value: &str) -> bool {
         .and_then(|d| d.get(b"MaxLen").ok())
         .and_then(num)
         .unwrap_or(0.0) as usize;
+    // §12.7.3.3: /DA carries the field's font, size and colour. Resolved once for
+    // the field, since /DA is a field key shared by all its widgets.
+    let da = field_da(doc, id);
+    let (da_res, da_font) = da_font_resources(doc, da.font.as_deref());
 
-    let ap_id = rect.map(|r| {
-        let (w, h) = (r[2] - r[0], r[3] - r[1]);
-        let size = (h - 4.0).clamp(6.0, 14.0);
-        let content = build_text_appearance(value, w, h, size, quadding, multiline, comb, max_len);
-        make_appearance(doc, w, h, content, helvetica_resources())
-    });
+    // A field may have several /Kids widgets, all displaying the same value
+    // (§12.7.3.1), so regenerate an appearance for EACH from its own /Rect —
+    // updating only the clicked widget leaves the field stale everywhere else it
+    // appears. Rects are collected first so the mutable borrow for
+    // make_appearance does not overlap the reads.
+    let widget_ids: Vec<ObjectId> = doc
+        .get_dictionary(root_id)
+        .ok()
+        .and_then(|d| d.get(b"Kids").ok())
+        .and_then(|o| deref(doc, o))
+        .and_then(|o| o.as_array().ok())
+        .map(|kids| kids.iter().filter_map(|k| k.as_reference().ok()).collect::<Vec<_>>())
+        .filter(|v: &Vec<ObjectId>| !v.is_empty())
+        .unwrap_or_else(|| vec![id]);
+    let widget_rects: Vec<(ObjectId, [f64; 4])> = widget_ids
+        .iter()
+        .filter_map(|wid| {
+            doc.get_dictionary(*wid)
+                .ok()
+                .and_then(|d| d.get(b"Rect").ok())
+                .and_then(|o| read_rect(doc, o))
+                .map(|r| (*wid, normalize_rect(r)))
+        })
+        .collect();
+    let mut aps: Vec<(ObjectId, ObjectId)> = Vec::with_capacity(widget_rects.len());
+    for (wid, r) in widget_rects {
+        // Field text must read upright, so lay the appearance out in the display
+        // orientation of the page the widget sits on (§12.5.2 /P). Widgets of one
+        // field can be on pages with different /Rotate, hence the per-widget
+        // lookup; absent /P we assume no rotation, matching previous behaviour.
+        let rot = doc
+            .get_dictionary(wid)
+            .ok()
+            .and_then(|d| d.get(b"P").ok())
+            .and_then(|o| o.as_reference().ok())
+            .map(|pid| page_rotation(doc, pid))
+            .unwrap_or(0);
+        let (w, h, apm) = display_orientation(rot, r[2] - r[0], r[3] - r[1]);
+        let size = field_font_size(da.size, h);
+        let content = build_text_appearance(value, w, h, size, &da_font, da.argb, quadding, multiline, comb, max_len);
+        aps.push((wid, make_appearance_oriented(doc, w, h, content, da_res.clone(), apm)));
+    }
 
-    // Set V on root field so all kids reflect
+    // /V is a field attribute, so it belongs on the root; the widgets carry only
+    // the regenerated appearance.
     let set_root = if let Ok(dict) = doc.get_dictionary_mut(root_id) {
         dict.set("V", Object::string_literal(value));
         true
     } else { false };
-    let set_widget = if root_id != id {
-        if let Ok(dict) = doc.get_dictionary_mut(id) {
-            dict.set("V", Object::string_literal(value));
-            if let Some(ap_id) = ap_id {
-                let mut ap = Dictionary::new();
-                ap.set("N", Object::Reference(ap_id));
-                dict.set("AP", Object::Dictionary(ap));
-            }
-            true
-        } else { false }
-    } else {
-        if let Ok(dict) = doc.get_dictionary_mut(root_id) {
-            if let Some(ap_id) = ap_id {
-                let mut ap = Dictionary::new();
-                ap.set("N", Object::Reference(ap_id));
-                dict.set("AP", Object::Dictionary(ap));
-            }
-            true
-        } else { false }
-    };
+    let mut set_widget = false;
+    for (wid, ap_id) in aps {
+        if let Ok(dict) = doc.get_dictionary_mut(wid) {
+            let mut ap = Dictionary::new();
+            ap.set("N", Object::Reference(ap_id));
+            dict.set("AP", Object::Dictionary(ap));
+            set_widget = true;
+        }
+    }
     if !set_root && !set_widget { return false; }
     set_need_appearances(doc);
     true
 }
 
 pub(crate) fn set_checkbox(handle: i64, widget_id: i64, on: bool) -> bool {
-    let mut reg = registry().lock().unwrap();
+    let mut reg = registry().lock().unwrap_or_else(|e| e.into_inner());
     let doc = match reg.get_mut(&handle) {
         Some(d) => d,
         None => return false,
@@ -453,100 +700,140 @@ pub(crate) fn set_checkbox(handle: i64, widget_id: i64, on: bool) -> bool {
         })
         .unwrap_or_else(|| b"Yes".to_vec());
 
-    // Radio buttons: the widget belongs to a parent field with several kid
+    // Radio buttons: the widget belongs to a terminal field with several kid
     // widgets that must be mutually exclusive. Setting one on clears the others
-    // and records the chosen export value on the parent /V.
-    let parent = doc.get_dictionary(id).ok()
-        .and_then(|d| d.get(b"Parent").ok())
-        .and_then(|o| o.as_reference().ok());
-    let sibling_ids: Vec<ObjectId> = parent
-        .and_then(|pid| doc.get_dictionary(pid).ok())
-        .and_then(|pd| pd.get(b"Kids").ok())
-        .and_then(|o| deref(doc, o))
-        .and_then(|o| o.as_array().ok())
-        .map(|kids| kids.iter().filter_map(|k| k.as_reference().ok()).collect())
-        .unwrap_or_default();
+    // and records the chosen export value on the field's /V.
+    let field_id = terminal_field_id(doc, id);
+    let sibling_ids: Vec<ObjectId> = if field_id == id {
+        Vec::new()
+    } else {
+        doc.get_dictionary(field_id)
+            .ok()
+            .and_then(|pd| pd.get(b"Kids").ok())
+            .and_then(|o| deref(doc, o))
+            .and_then(|o| o.as_array().ok())
+            .map(|kids| kids.iter().filter_map(|k| k.as_reference().ok()).collect())
+            .unwrap_or_default()
+    };
 
-    if let Some(pid) = parent {
-        if sibling_ids.len() > 1 {
-            // Radio group: set each kid's /AS, and the parent /V.
-            for kid in &sibling_ids {
-                let state = if *kid == id && on { on_state.clone() } else { b"Off".to_vec() };
-                if let Ok(kd) = doc.get_dictionary_mut(*kid) {
-                    kd.set("AS", Object::Name(state));
-                }
+    if sibling_ids.len() > 1 {
+        // Radio group: set each kid's /AS, and the field's /V.
+        for kid in &sibling_ids {
+            let state = if *kid == id && on { on_state.clone() } else { b"Off".to_vec() };
+            if let Ok(kd) = doc.get_dictionary_mut(*kid) {
+                kd.set("AS", Object::Name(state));
             }
-            if let Ok(pd) = doc.get_dictionary_mut(pid) {
-                if on { pd.set("V", Object::Name(on_state.clone())); }
-                else { pd.set("V", Object::Name(b"Off".to_vec())); }
-            }
-            return true;
         }
+        if let Ok(pd) = doc.get_dictionary_mut(field_id) {
+            let v = if on { on_state } else { b"Off".to_vec() };
+            pd.set("V", Object::Name(v));
+        }
+        return true;
     }
 
+    // Single widget. /AS selects which of /AP /N's states paints (§12.5.5) and
+    // lives on the widget; /V is the field's value. The two are the same
+    // dictionary for a merged field+widget, and different when the widget is a
+    // lone /Kids entry — where the old code wrote /V onto the widget, leaving the
+    // field itself unset and the checkbox reading as unchecked on reload.
     let state = if on { on_state } else { b"Off".to_vec() };
+    let mut updated = false;
     if let Ok(dict) = doc.get_dictionary_mut(id) {
         dict.set("AS", Object::Name(state.clone()));
-        dict.set("V", Object::Name(state));
-        true
-    } else {
-        false
+        updated = true;
     }
+    if let Ok(dict) = doc.get_dictionary_mut(field_id) {
+        dict.set("V", Object::Name(state));
+        updated = true;
+    }
+    updated
 }
 
-/// Set a Choice (`/Ch`) field's value: records `/V`, the matching `/Opt` index
-/// in `/I`, and builds a single-line text appearance showing the selection.
+/// Set a Choice (`/Ch`) field's value: records `/V` and the matching `/Opt` index
+/// in `/I` on the field, and builds a single-line appearance showing the
+/// selection on the widget.
+///
+/// `value` is what the user saw, i.e. the DISPLAY string. §12.7.4.4 makes an
+/// `/Opt` entry either a plain string (display == export) or a `[export display]`
+/// pair, and `/V` must hold the EXPORT value; writing the display string there
+/// submits the wrong data and stops matching `/Opt` on reload.
 pub(crate) fn set_choice_field(handle: i64, widget_id: i64, value: &str) -> bool {
-    let mut reg = registry().lock().unwrap();
+    let mut reg = registry().lock().unwrap_or_else(|e| e.into_inner());
     let doc = match reg.get_mut(&handle) {
         Some(d) => d,
         None => return false,
     };
     let id = decode_id(widget_id);
+    let root_id = terminal_field_id(doc, id);
     let rect = doc
         .get_dictionary(id)
         .ok()
         .and_then(|d| d.get(b"Rect").ok())
         .and_then(|o| read_rect(doc, o))
         .map(normalize_rect);
-    // Find the option index whose export/display value matches `value`.
-    let opt_index = field_attr(doc, id, b"Opt")
+    // Find the option matching `value` by display OR export string, and take its
+    // export value for /V.
+    let mut opt_index = None;
+    let mut export = value.to_string();
+    if let Some(opts) = field_attr(doc, id, b"Opt")
         .and_then(|o| deref(doc, o))
         .and_then(|o| o.as_array().ok())
-        .and_then(|opts| {
-            opts.iter().position(|o| {
-                let disp = match deref(doc, o).unwrap_or(o) {
-                    Object::String(s, _) => String::from_utf8_lossy(s).into_owned(),
-                    Object::Array(pair) => pair.last()
-                        .and_then(|d| d.as_str().ok())
-                        .map(|s| String::from_utf8_lossy(s).into_owned())
-                        .unwrap_or_default(),
-                    _ => String::new(),
-                };
-                disp == value
-            })
-        });
+    {
+        let text = |o: &Object| match deref(doc, o).unwrap_or(o) {
+            Object::String(s, _) => decode_pdf_text(s),
+            _ => String::new(),
+        };
+        for (i, o) in opts.iter().enumerate() {
+            let (exp, disp) = match deref(doc, o).unwrap_or(o) {
+                Object::Array(pair) if pair.len() >= 2 => (text(&pair[0]), text(&pair[1])),
+                other => {
+                    let s = text(other);
+                    (s.clone(), s)
+                }
+            };
+            if disp == value || exp == value {
+                opt_index = Some(i);
+                export = exp;
+                break;
+            }
+        }
+    }
 
+    let da = field_da(doc, id);
+    let (da_res, da_font) = da_font_resources(doc, da.font.as_deref());
     let ap_id = rect.map(|r| {
-        let (w, h) = (r[2] - r[0], r[3] - r[1]);
-        let size = (h - 4.0).clamp(6.0, 14.0);
-        let content = build_text_appearance(value, w, h, size, 0, false, false, 0);
-        make_appearance(doc, w, h, content, helvetica_resources())
+        // Same display-orientation handling as set_text_field (§12.5.2 /P).
+        let rot = doc
+            .get_dictionary(id)
+            .ok()
+            .and_then(|d| d.get(b"P").ok())
+            .and_then(|o| o.as_reference().ok())
+            .map(|pid| page_rotation(doc, pid))
+            .unwrap_or(0);
+        let (w, h, apm) = display_orientation(rot, r[2] - r[0], r[3] - r[1]);
+        let size = field_font_size(da.size, h);
+        // The widget shows the display string, not the export value.
+        let content = build_text_appearance(value, w, h, size, &da_font, da.argb, 0, false, false, 0);
+        make_appearance_oriented(doc, w, h, content, da_res, apm)
     });
 
-    if let Ok(dict) = doc.get_dictionary_mut(id) {
-        dict.set("V", Object::string_literal(value));
+    // /V and /I are field keys (§12.7.3.1) and belong on the root; only /AP is
+    // per-widget.
+    if let Ok(dict) = doc.get_dictionary_mut(root_id) {
+        dict.set("V", Object::string_literal(export));
         match opt_index {
             Some(i) => { dict.set("I", Object::Array(vec![Object::Integer(i as i64)])); }
             None => { dict.remove(b"I"); }
         }
-        if let Some(ap_id) = ap_id {
+    } else {
+        return false;
+    }
+    if let Some(ap_id) = ap_id {
+        if let Ok(dict) = doc.get_dictionary_mut(id) {
             let mut ap = Dictionary::new();
             ap.set("N", Object::Reference(ap_id));
             dict.set("AP", Object::Dictionary(ap));
         }
-    } else {
-        return false;
     }
     set_need_appearances(doc);
     true
@@ -555,7 +842,7 @@ pub(crate) fn set_choice_field(handle: i64, widget_id: i64, value: &str) -> bool
 /// Extract the document's visible text (from rendered text primitives), one
 /// blank line between pages.
 pub(crate) fn document_text(handle: i64) -> Option<String> {
-    let reg = registry().lock().unwrap();
+    let reg = registry().lock().unwrap_or_else(|e| e.into_inner());
     let doc = reg.get(&handle)?;
     let mut out = String::new();
     for (_num, page_id) in doc.get_pages() {
@@ -635,6 +922,23 @@ pub(crate) fn search_name_tree(
     name: &[u8],
     visited: &mut std::collections::HashSet<ObjectId>,
 ) -> Option<Vec<Object>> {
+    search_name_tree_at(doc, node, name, visited, 0)
+}
+
+/// `visited` alone bounds the number of nodes but not the DEPTH: a name tree
+/// that is one long chain of single-kid nodes recurses once per node, so a
+/// malformed file could exhaust the (small) JNI thread stack. §7.9.6 name trees
+/// are balanced, so a real one is never deep.
+fn search_name_tree_at(
+    doc: &Document,
+    node: &lopdf::Dictionary,
+    name: &[u8],
+    visited: &mut std::collections::HashSet<ObjectId>,
+    depth: u32,
+) -> Option<Vec<Object>> {
+    if depth > 64 {
+        return None;
+    }
     if let Some(Object::Array(names)) = node.get(b"Names").ok().and_then(|o| deref(doc, o)) {
         let mut i = 0;
         while i + 1 < names.len() {
@@ -651,7 +955,7 @@ pub(crate) fn search_name_tree(
                     continue;
                 }
                 if let Ok(child) = doc.get_dictionary(id) {
-                    if let Some(r) = search_name_tree(doc, child, name, visited) {
+                    if let Some(r) = search_name_tree_at(doc, child, name, visited, depth + 1) {
                         return Some(r);
                     }
                 }
@@ -662,6 +966,11 @@ pub(crate) fn search_name_tree(
 }
 
 /// Walk the outline linked-list/tree collecting `(level, pageIndex, title)`.
+///
+/// `visited` makes a circular `/Next` or `/First` terminate, and `out.len()` caps
+/// the total. `level` additionally caps the RECURSION DEPTH: `visited` bounds the
+/// node count but not the nesting, so a chain of thousands of single-child
+/// entries would recurse once per entry and could exhaust a JNI thread's stack.
 pub(crate) fn walk_outline(
     doc: &Document,
     start: Option<ObjectId>,
@@ -670,6 +979,9 @@ pub(crate) fn walk_outline(
     visited: &mut std::collections::HashSet<ObjectId>,
     out: &mut Vec<(u16, i32, String)>,
 ) {
+    if level > 64 {
+        return;
+    }
     let mut cur = start;
     while let Some(id) = cur {
         if !visited.insert(id) || out.len() > 5000 {
@@ -712,7 +1024,7 @@ pub(crate) fn walk_outline(
 /// Serialized document outline: u32 count, then per entry
 /// `u16 level, i32 pageIndex, u16 titleLen, [utf8]`.
 pub(crate) fn list_outline(handle: i64) -> Option<Vec<u8>> {
-    let reg = registry().lock().unwrap();
+    let reg = registry().lock().unwrap_or_else(|e| e.into_inner());
     let doc = reg.get(&handle)?;
     let outlines_id = doc
         .catalog()
@@ -744,6 +1056,156 @@ pub(crate) fn list_outline(handle: i64) -> Option<Vec<u8>> {
         buf.extend_from_slice(&b[..len]);
     }
     Some(buf)
+}
+
+#[cfg(test)]
+mod da_tests {
+    use super::{build_text_appearance, field_font_size};
+    use crate::*;
+
+    fn body(da: &[u8], h: f64) -> String {
+        let d = parse_da(da);
+        let font = d.font.clone().unwrap_or_else(|| b"F1".to_vec());
+        let size = field_font_size(d.size, h);
+        String::from_utf8(build_text_appearance(
+            "Ab", 100.0, h, size, &font, d.argb, 0, false, false, 0,
+        ))
+        .expect("utf8")
+    }
+
+    /// §12.7.4.3: a font size of ZERO in `/DA` means AUTO-SIZE to fit, NOT zero.
+    /// Reading the size straight out of `/DA` renders every such field as
+    /// INVISIBLE text, which is strictly worse than ignoring `/DA` altogether, so
+    /// size 0 must fall through to the height-derived size.
+    #[test]
+    fn zero_da_size_means_auto_not_invisible() {
+        assert_eq!(parse_da(b"/Helv 0 Tf 0 g").size, 0.0, "0 is reported verbatim");
+        assert_eq!(field_font_size(0.0, 24.0), 14.0);
+        assert_eq!(field_font_size(0.0, 4.0), 6.0, "clamped up, never zero");
+        assert_eq!(field_font_size(0.0, 200.0), 14.0, "clamped down");
+        assert_eq!(field_font_size(9.5, 24.0), 9.5, "an explicit size wins");
+        for h in [1.0, 4.0, 12.0, 24.0, 1000.0] {
+            assert!(field_font_size(0.0, h) >= 6.0, "auto size collapsed at h={h}");
+        }
+        let c = body(b"/Helv 0 Tf 0 g", 24.0);
+        assert!(c.contains("/Helv 14.000 Tf"), "auto-sized appearance was: {c}");
+    }
+
+    /// §12.7.3.3: `/DA` defines the field's font, size and colour. The generator
+    /// hardcoded `0 0 0 rg /F1`, so a filled field came out in the wrong font,
+    /// size and colour compared with Acrobat.
+    #[test]
+    fn da_font_size_and_colour_reach_the_content_stream() {
+        let c = body(b"/Helv 11 Tf 1 0 0 rg", 24.0);
+        assert!(c.contains("1.000 0.000 0.000 rg"), "colour: {c}");
+        assert!(c.contains("/Helv 11.000 Tf"), "font and size: {c}");
+        assert_eq!(parse_da(b"0.5 g").argb, gray_to_argb(0.5));
+        assert_eq!(parse_da(b"0 0 1 0 k").argb, cmyk_to_argb(0.0, 0.0, 1.0, 0.0));
+        assert_eq!(parse_da(b"1 0 0 rg 0 g").argb, gray_to_argb(0.0), "later wins");
+        // No colour operator keeps the black the generator used to hardcode.
+        assert_eq!(parse_da(b"/Helv 12 Tf").argb, 0xFF00_0000);
+    }
+
+    /// The font name is interpolated straight into `/<name> <size> Tf`, so a name
+    /// carrying delimiters could close the operand and inject operators. §7.3.5
+    /// restricts names to regular characters, so anything else falls back to the
+    /// substitute.
+    #[test]
+    fn da_font_name_cannot_inject_operators() {
+        for bad in [&b"/F1) Tj 0 0 1 rg ( 12 Tf"[..], &b"/(evil 12 Tf"[..], &b"/ 12 Tf"[..]] {
+            assert!(
+                parse_da(bad).font.is_none(),
+                "accepted unsafe name from {:?}",
+                String::from_utf8_lossy(bad)
+            );
+        }
+        assert_eq!(parse_da(b"/Helv-Bold.1+2 12 Tf").font.as_deref(), Some(&b"Helv-Bold.1+2"[..]));
+        // A malformed size must not become a negative or non-finite Tf operand.
+        assert_eq!(parse_da(b"/Helv -5 Tf").size, 0.0, "negative falls to the auto path");
+        assert_eq!(parse_da(b"/Helv nope Tf").size, 0.0);
+    }
+
+    /// A comb field lays out one `Tm` per cell, and `Tm` REPLACES the text matrix
+    /// (§9.4.2) rather than concatenating it — so the vertical offset must be
+    /// repeated on every one. Setting it once up front dropped the whole row to
+    /// y=0, sitting the characters on the bottom edge with descenders clipped.
+    #[test]
+    fn comb_cells_keep_their_vertical_offset() {
+        let c = String::from_utf8(build_text_appearance(
+            "AB", 100.0, 20.0, 12.0, b"F1", 0xFF00_0000, 0, false, true, 5,
+        ))
+        .expect("utf8");
+        // (20 - 12) / 2 == 4 for every cell.
+        assert_eq!(c.matches("4.00 Tm").count(), 2, "both cells centered: {c}");
+        assert!(!c.contains(" 0.00 Tm"), "a cell fell to the bottom edge: {c}");
+    }
+
+    /// Splitting on both `\r` and `\n` turns each CRLF into an extra empty line,
+    /// double-spacing a multiline field.
+    #[test]
+    fn multiline_crlf_does_not_double_space() {
+        let c = String::from_utf8(build_text_appearance(
+            "one\r\ntwo", 200.0, 60.0, 10.0, b"F1", 0xFF00_0000, 0, true, false, 0,
+        ))
+        .expect("utf8");
+        assert_eq!(c.matches("Tj").count(), 2, "expected exactly two lines: {c}");
+    }
+
+    /// A document with one AcroForm `/DR /Font /Fx` entry.
+    fn doc_with_dr_font(font: Dictionary) -> Document {
+        let mut doc = Document::with_version("1.7");
+        let fid = doc.add_object(font);
+        let acro = doc.add_object(dictionary! {
+            "DR" => dictionary! { "Font" => dictionary! { "Fx" => fid } },
+        });
+        let pages = doc.add_object(dictionary! { "Type" => "Pages", "Kids" => Object::Array(vec![]), "Count" => 0 });
+        let cat = doc.add_object(dictionary! { "Type" => "Catalog", "Pages" => pages, "AcroForm" => acro });
+        doc.trailer.set("Root", cat);
+        doc
+    }
+
+    /// §12.7.3.3 resolves the `/DA` font name against `/DR`. It is only safe to
+    /// adopt when the generated content — a plain literal string — can address it:
+    /// a composite (Type0) font takes multi-byte CIDs and a `/Differences` or
+    /// symbolic encoding remaps the bytes, both of which render the value as
+    /// garbage. Those must keep the Helvetica substitute, which is legible.
+    #[test]
+    fn only_safely_addressable_dr_fonts_are_adopted() {
+        let adopted = |font: Dictionary| {
+            let doc = doc_with_dr_font(font);
+            super::da_font_resources(&doc, Some(b"Fx")).1 == b"Fx".to_vec()
+        };
+        assert!(adopted(dictionary! { "Type" => "Font", "Subtype" => "Type1", "BaseFont" => "Times-Roman" }));
+        assert!(adopted(
+            dictionary! { "Type" => "Font", "Subtype" => "TrueType", "Encoding" => "WinAnsiEncoding" }
+        ));
+        assert!(
+            !adopted(dictionary! { "Type" => "Font", "Subtype" => "Type0", "Encoding" => "Identity-H" }),
+            "a composite font would render the value as multi-byte garbage"
+        );
+        assert!(
+            !adopted(dictionary! {
+                "Type" => "Font", "Subtype" => "Type1",
+                "Encoding" => dictionary! { "Differences" => Object::Array(vec![]) },
+            }),
+            "a /Differences encoding remaps the bytes to unrelated glyphs"
+        );
+        assert!(
+            !adopted(dictionary! { "Type" => "Font", "Subtype" => "Type1", "Encoding" => "Identity-H" }),
+            "an unrecognised encoding is not assumed to be Latin text"
+        );
+
+        // A name that /DR does not define, and no name at all, both fall back.
+        let doc = doc_with_dr_font(dictionary! { "Type" => "Font", "Subtype" => "Type1" });
+        assert_eq!(super::da_font_resources(&doc, Some(b"Nope")).1, b"F1".to_vec());
+        assert_eq!(super::da_font_resources(&doc, None).1, b"F1".to_vec());
+        // When adopted, the font must actually be in the appearance's resources,
+        // or the Tf name would not resolve and nothing would paint.
+        let (res, name) = super::da_font_resources(&doc, Some(b"Fx"));
+        let fonts = res.get(b"Font").and_then(|o| o.as_dict()).expect("/Font");
+        assert!(fonts.get(&name).is_ok(), "adopted font missing from resources");
+        assert!(fonts.get(b"F1").is_ok(), "substitute must stay available");
+    }
 }
 
 // ---------------------------------------------------------------------------
