@@ -15,7 +15,7 @@ use std::path::{Path, PathBuf};
 
 use modelrunner::nets::{
     mobilefacenet, ppocr_det, ppocr_rec, scrfd, selfie, supertonic_duration, supertonic_sampler,
-    supertonic_text, supertonic_vocoder, tinyclip, u2netp,
+    supertonic_text, supertonic_vocoder, tinyclip, u2netp, whisper,
 };
 use modelrunner::post::ctc;
 use modelrunner::weights::{graph, Weights};
@@ -211,6 +211,81 @@ fn the_shipped_tinyclip_asset_embeds_a_token_on_the_host() {
         .filter(|&c| (twice[c * 2] - twice[c * 2 + 1]).abs() > 1e-4)
         .count();
     assert!(moved > tinyclip::WIDTH as usize / 2, "only {moved} channels differ between positions");
+}
+
+#[test]
+fn the_shipped_whisper_asset_builds_both_passes() {
+    // Both passes against the real 363-tensor file, which is what checks the converter's emission
+    // order against `nets::whisper`'s layout constants: `Builder::weight` asks for every tensor by
+    // index *and* dimensions, so a transposed projection, a position table emitted the wrong way
+    // round, or the two passes disagreeing about which cross-attention projection belongs to which
+    // fails here rather than on device.
+    let weights = load("speech/src/main/assets/whisper-base/whisper_base.maml", graph::WHISPER);
+    assert_eq!(weights.len(), whisper::TENSORS);
+
+    let encode = whisper::build(&weights, whisper::Mode::Encode)
+        .expect("the shipped asset matches nets::whisper's encoder");
+    // The hidden states, then twelve cross-attention caches in layer order.
+    assert_eq!(encode.outputs.len(), 1 + whisper::DECODER_LAYERS * 2);
+    for binding in &encode.outputs {
+        assert_eq!(
+            binding.shape,
+            modelrunner::nets::Shape::new(whisper::D_MODEL, 1, whisper::SOURCE_POSITIONS)
+        );
+    }
+
+    // Step 0 has no self-attention cache; every later step's grows by one. The plan is rebuilt per
+    // step, so every length in a transcript has to lower.
+    for cache_len in [0u32, 1, 4, 63, whisper::MAX_POSITIONS - 1] {
+        let step = whisper::build(&weights, whisper::Mode::DecodeStep { cache_len })
+            .unwrap_or_else(|e| panic!("at cache {cache_len}: {e}"));
+        assert_eq!(
+            step.outputs[0].shape,
+            modelrunner::nets::Shape::new(whisper::VOCAB, 1, 1),
+            "at cache {cache_len}"
+        );
+    }
+}
+
+#[test]
+fn the_shipped_whisper_asset_embeds_a_token_on_the_host() {
+    // The host gather, against the real file: the tied embedding is int8 with a per-row scale and
+    // the decoder position table is fp16, and `embed_positions` is the only reader of the table. What
+    // is pinned here is the property that has no fixture — the same token at two positions must
+    // differ by exactly the two position rows' difference, which fails if `past` is applied wrongly.
+    let weights = load("speech/src/main/assets/whisper-base/whisper_base.maml", graph::WHISPER);
+    let table = weights.offsets();
+    let reader = modelrunner::weights::Reader::new(&table, &weights);
+
+    // `<|startoftranscript|>`, `<|en|>`, `<|transcribe|>`, `<|notimestamps|>` — the real prompt.
+    let prompt = [50_258u32, 50_259, 50_359, 50_363];
+    let out = whisper::embed_positions(reader, &prompt, 0).expect("the gather succeeds");
+    assert_eq!(out.len(), whisper::D_MODEL as usize * prompt.len());
+    assert!(out.iter().any(|&v| v != 0.0), "the gather produced zeros");
+
+    // Channel-major: `out[c * len + t]`. A position-major layout would put one token's 512 values
+    // contiguously instead, so this also pins the transpose.
+    let at_zero = whisper::embed_positions(reader, &[50_258], 0).expect("the gather succeeds");
+    let at_one = whisper::embed_positions(reader, &[50_258], 1).expect("the gather succeeds");
+    let moved = (0..whisper::D_MODEL as usize)
+        .filter(|&c| (at_zero[c] - at_one[c]).abs() > 1e-4)
+        .count();
+    assert!(moved > whisper::D_MODEL as usize / 2, "only {moved} channels move with the position");
+    // And position 0 of the four-token gather must be exactly the single-token gather at 0.
+    for channel in 0..whisper::D_MODEL as usize {
+        let from_block = out[channel * prompt.len()];
+        assert!(
+            (from_block - at_zero[channel]).abs() < 1e-6,
+            "channel {channel}: {from_block} against {}",
+            at_zero[channel]
+        );
+    }
+
+    // Past the 448-position table is refused rather than clamped: a transcript that ran over would
+    // otherwise wrap onto position 0 and start repeating.
+    let error = whisper::embed_positions(reader, &[50_258], whisper::MAX_POSITIONS)
+        .expect_err("past the table");
+    assert!(error.contains("past the model"), "{error}");
 }
 
 #[test]

@@ -71,6 +71,14 @@ PROBE = {
     # produce. `ClipEmbedder.l2Normalize` does the normalisation on the host either way.
     "tinyclip": "/visual_projection/MatMul_output_0",
     "tinyclip_text": "/text_projection/MatMul_output_0",
+    # whisper's encoder, against the bundled int8 export it replaces. Its own output, which is the
+    # `[1500, 512]` hidden states the decoder cross-attends over — so the conv stem's stride, the
+    # position add and all six 1500-position attentions are inside it.
+    #
+    # Both sides are int8 here, quantised differently, so the "fp16 weights alone" bar below measures
+    # nothing useful for this graph: there is no fp32 ONNX for whisper. What a low correlation would
+    # mean is a structural error, which is what this is for.
+    "whisper": None,
 }
 
 # Graphs whose input is a latent rather than an image, and how wide it is. One that is a
@@ -88,6 +96,10 @@ SUBGRAPH = {
 TINYCLIP_IMAGE = 224
 TINYCLIP_SOT = 49_406
 TINYCLIP_EOT = 49_407
+
+# whisper's fixed mel window: 80 bins over 3000 frames, which is 30 seconds at a 160-sample hop.
+WHISPER_MELS = 80
+WHISPER_FRAMES = 3000
 
 
 def ramp_image(channels, height, width):
@@ -269,6 +281,12 @@ def main():
             "input_ids": ids,
             "attention_mask": np.ones_like(ids),
         }
+    elif args.graph == "whisper":
+        # The log-mel window, `[1, 80, 3000]`. A ramp rather than real audio: what matters is that
+        # both sides read identical bytes, and `WhisperFeatures` is tested against HuggingFace
+        # separately by `WhisperFeaturesTest`.
+        x = ramp_image(1, WHISPER_MELS, WHISPER_FRAMES).reshape(1, WHISPER_MELS, WHISPER_FRAMES)
+        feed = {"input_features": x}
     else:
         height = 48 if args.graph == "ppocr_rec" else args.width
         x = ramp_image(3, height, args.width)
@@ -304,6 +322,10 @@ def main():
     if args.graph == "ppocr_rec":
         # `[1, T, 838]` against the runtime's class-major `[838, T]`.
         want = np.ascontiguousarray(reference.T).flatten()
+    if args.graph == "whisper":
+        # `[1500, 512]` against the runtime's channel-major `[512, 1500]`.
+        want = np.ascontiguousarray(reference.T).flatten()
+        quantised = np.ascontiguousarray(np.squeeze(quantised).T).flatten()
 
     def report(label, a, b):
         d = np.abs(a - b)

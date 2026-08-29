@@ -43,6 +43,7 @@ pub mod supertonic_text;
 pub mod supertonic_vocoder;
 pub mod tinyclip;
 pub mod u2netp;
+pub mod whisper;
 
 /// A `1 x c x h x w` fp16 tensor. Batch is always 1; neither net is ever batched.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

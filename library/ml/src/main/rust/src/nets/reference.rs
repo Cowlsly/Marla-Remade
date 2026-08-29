@@ -1204,7 +1204,7 @@ fn uniform(state: &mut u32) -> f32 {
 mod tests {
     use super::super::{
         embed_lanes, mobilefacenet, ppocr_det, ppocr_rec, scrfd, selfie, supertonic_duration, supertonic_sampler,
-        supertonic_text, supertonic_vocoder, tinyclip, u2netp, Act, Builder, EMBED_LANE,
+        supertonic_text, supertonic_vocoder, tinyclip, u2netp, whisper, Act, Builder, EMBED_LANE,
     };
     use super::*;
 
@@ -3036,6 +3036,20 @@ mod tests {
             let emb = outputs.first().expect("the conditioning output");
             write(&dir.join("reference.f32"), emb);
             println!("supertonic_ttl at {width} chars: wrote {} values", emb.len());
+            return;
+        }
+        if graph == "whisper" {
+            let path = std::env::var("PARITY_MAML").expect("PARITY_MAML");
+            let bytes = std::fs::read(&path).unwrap_or_else(|e| panic!("{path}: {e}"));
+            let weights = crate::weights::Weights::parse(&bytes, crate::weights::graph::WHISPER)
+                .expect("the whisper asset parses");
+            let plan = whisper::build(&weights, whisper::Mode::Encode).expect("the encoder builds");
+            let outputs = run_multi(&plan, weights.data(), &[&input]).expect("the encoder runs");
+            // Output 0 is the hidden states; the twelve cross-attention caches follow and are not
+            // what the export's own output is.
+            let hidden = outputs.first().expect("the hidden states");
+            write(&dir.join("reference.f32"), hidden);
+            println!("whisper encoder: wrote {} values", hidden.len());
             return;
         }
         if graph == "tinyclip" || graph == "tinyclip_text" {
