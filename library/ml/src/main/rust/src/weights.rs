@@ -76,6 +76,11 @@ pub mod graph {
     /// input table, the decoder's input table and the logits kernel, and two files would upload
     /// 125 MiB of it twice.
     pub const SMALL100: u32 = 15;
+    /// TinyCLIP-ViT-8M/16 Text-3M, both towers in one file. See [`crate::nets::tinyclip`].
+    ///
+    /// One graph rather than two because the towers share a file and a [`Weights`] upload, even
+    /// though they share no weights: `Mode::Image` and `Mode::Text` are two plans over one net.
+    pub const TINYCLIP: u32 = 16;
 }
 
 /// One tensor's entry in the table: where it is and what shape it is.

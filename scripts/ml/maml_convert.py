@@ -43,6 +43,11 @@ One graph does not come from an ONNX export at all. SMaLL-100 is read from its P
 `.safetensors` and quantised to int8 here, because the only ONNX exports that exist for it are
 already int8 and quantised per *tensor*; see [`CHECKPOINTS`] for why that is not usable.
 
+One graph is an ONNX export whose tensor table is nevertheless **derived from architecture
+constants and read by name**, rather than walked topologically. TinyCLIP is two towers in one
+graph, interleaved, and its projections are anonymous `onnx::MatMul_NNNN` initializers, so a
+topological walk would emit an order no one could read. See [`ARCHITECTURES`].
+
     ./scripts/ml/maml_convert.py --check model.onnx --graph u2netp
     ./scripts/ml/maml_convert.py model.onnx --graph u2netp -o out.maml
     ./scripts/ml/maml_convert.py model.onnx --graph u2netp --print-layers
@@ -128,6 +133,8 @@ GRAPHS = {
     "supertonic_ve": 14,
     # Read from a PyTorch checkpoint rather than an ONNX graph; see [`CHECKPOINTS`].
     "small100": 15,
+    # An ONNX graph read by name rather than walked; see [`ARCHITECTURES`].
+    "tinyclip": 16,
 }
 
 # SHA-256 over the ordered layer table (see `layer_table_digest`). Regenerate with
@@ -144,6 +151,7 @@ EXPECTED_DIGEST = {
     "supertonic_ttl": "92d0fa8ae73d4a8a223c77fb4230e390df580744014a3fcf3211ab72a988c020",
     "supertonic_ve": "48ab5789e8839507ff93e099dc0f61940f25da9ba6201651784f6e68598199e2",
     "small100": "c9f05f2fb686aa53137ca06b521baf6d7a00f32cfb4ea42bd14a5c3e7cf6c086",
+    "tinyclip": "7557b2725b52ea04bd18b12e089320b9dd419cd3f7344c0e3d32888d61c24fa7",
 }
 
 # Graphs that are one **module** of a larger export, keyed by the node-name prefix that
@@ -213,6 +221,62 @@ EXPECTED_OPS = {
     "mobilefacenet": {
         "Conv": 49, "PRelu": 34, "Add": 12, "BatchNormalization": 1, "Flatten": 1,
         "Gemm": 1,
+    },
+    # Two towers in one graph. `MatMul` 107 is the 80 weighted projections plus the 26 attention
+    # products and the one `logit_scale` product; `Erf` 13 is the 13 layers' GELU; `Softmax` 13 is
+    # their attention, and the causal mask the text tower's three need is a `-3.4e38` constant
+    # added to the score map, not an op. `ArgMax` 1 is the end-of-text search this runtime does on
+    # the host. Counted rather than transcribed: `python -c` over the graph produced these.
+    "tinyclip": {
+        "Add": 186, "ArgMax": 1, "Cast": 5, "Concat": 27, "ConstantOfShape": 1, "Conv": 1,
+        "Div": 44, "Equal": 4, "Erf": 13, "Expand": 3, "Flatten": 1, "Gather": 20, "Less": 1,
+        "MatMul": 107, "Mul": 73, "Pow": 33, "Range": 2, "ReduceMean": 58, "ReduceSum": 2,
+        "Reshape": 113, "Shape": 12, "Slice": 3, "Softmax": 13, "Sqrt": 29, "Squeeze": 1,
+        "Sub": 31, "Transpose": 68, "Unsqueeze": 20, "Where": 5,
+    },
+}
+
+# ONNX graphs whose tensor table is **derived from these constants and read by name**, rather than
+# produced by the topological walk in [`collect_layers`].
+#
+# One entry, TinyCLIP. Three things make the walk unusable for it:
+#
+# * It is **two towers in one graph**, and the export interleaves them - text layer 0, vision layer
+#   0, text layer 1, and so on. A topological order is therefore an order no reader could check
+#   against `nets::tinyclip`, and `Mode::Image` and `Mode::Text` would each read a stride through
+#   the table.
+# * Every projection is a bare `MatMul` against an **anonymous** `onnx::MatMul_NNNN` initializer.
+#   There is nothing in the initializer's name to say which layer or which projection it is. The
+#   *node* names are fully structured (`/vision_model/encoder/layers.3/mlp/fc1/MatMul`), so this
+#   reads the weight through the node, which is also what makes the inventory check below possible.
+# * `MatMul` is `x @ W` with a **`[in, out]`** weight, and this runtime indexes a kernel as
+#   `[out, in, kh, kw]`. Every attention projection here is square 256 x 256, so reading one
+#   convention as the other yields a tensor of exactly the right shape holding exactly the wrong
+#   numbers. `fc1` is `[256, 1024]` and `fc2` is `[1024, 256]`, so the shape assertions in
+#   [`check_architecture`] are what make that loud.
+#
+# The `Conv` is the one exception and needs **no** transpose: ONNX `Conv` is already
+# `[M, C, kH, kW]`, which is this runtime's own layout.
+#
+# What is checked is the **exact named-parameter inventory** derived from these constants, as
+# [`CHECKPOINTS`] gets, *plus* the op counts in [`EXPECTED_OPS`] that only an ONNX graph can give.
+# There is no [`GEOMETRY`] entry: this export has three inputs and four outputs and is dynamically
+# shaped throughout, so there is no single boundary shape to compare against.
+ARCHITECTURES = {
+    "tinyclip": {
+        # `hidden_size`, shared by both towers, and `num_attention_heads` 4, so `head_dim` is 64
+        # and `Builder::attn_scores`'s own `1 / sqrt(64)` is already the model's 0.125 scale.
+        "width": 256,
+        "heads": 4,
+        "ffn": 1024,
+        "vision_layers": 10,
+        "text_layers": 3,
+        # 16 x 16 patches over 224 x 224 is a 14 x 14 grid, so 196 patches plus the class token.
+        "patch": 16,
+        "grid": 14,
+        "vocab": 49_408,
+        "context": 77,
+        "projection": 512,
     },
 }
 
@@ -582,7 +646,7 @@ def check_graph(model, graph_id_name):
     prefix = MODULES.get(graph_id_name)
     nodes = [n for n in graph.node if prefix is None or n.name.startswith(prefix)]
 
-    if prefix is None:
+    if prefix is None and graph_id_name in GEOMETRY:
         want = GEOMETRY[graph_id_name]
         names = [i.name for i in graph.input]
         if names != [want["input"]]:
@@ -700,6 +764,45 @@ def check_checkpoint(shapes, graph_id_name):
         )
 
 
+class Fidelity:
+    """The worst per-tensor cosine between an fp32 weight and the `int8 * scale` a device reads.
+
+    The only check that looks at the *numbers* a quantisation produces. It is not a check that the
+    forward pass is right — a transposed read agrees with itself perfectly, which is why
+    [`check_checkpoint`] and [`check_architecture`] assert shapes — and it is not a check that the
+    model is accurate, which `scripts/ml/onnx_parity.py` is for. It is the one thing that catches a
+    layer whose distribution int8 cannot represent, before it ships.
+    """
+
+    def __init__(self):
+        self.seen = []
+
+    def quantise(self, name, weight):
+        """`(int8, scale)` for `weight`, recording how well the pair reproduces it."""
+        kernel, scale = quantise_per_channel(weight)
+        back = kernel.astype(np.float32).reshape(weight.shape[0], -1) * scale[:, None]
+        flat = np.ascontiguousarray(weight, dtype=np.float32).reshape(weight.shape[0], -1)
+        cosine = float(
+            np.dot(flat.ravel(), back.ravel())
+            / max(np.linalg.norm(flat) * np.linalg.norm(back), 1e-30)
+        )
+        self.seen.append((cosine, name))
+        return kernel, scale
+
+    def report(self):
+        """Print the worst three, and refuse the file if any is under [`MIN_INT8_COSINE`]."""
+        self.seen.sort()
+        for cosine, name in self.seen[:3]:
+            if cosine < MIN_INT8_COSINE:
+                raise SystemExit(
+                    f"{name}: int8 * scale correlates {cosine:.6f} with the fp32 weight, under"
+                    f" {MIN_INT8_COSINE}.\nQuantising this layer costs too much; exclude it and"
+                    " store it fp16 instead."
+                )
+        worst = ", ".join(f"{name} {cosine:.6f}" for cosine, name in self.seen[:3])
+        print(f"int8 fidelity over {len(self.seen)} tensors, worst three: {worst}")
+
+
 def collect_small100(get, spec):
     """SMaLL-100's checkpoint as the ordered tensor table `nets::small100` indexes.
 
@@ -736,18 +839,7 @@ def collect_small100(get, spec):
     # the device will read. This is the only check that the quantisation itself is usable; the
     # shape assertions in [`check_checkpoint`] are what catch a transpose, since a cosine is
     # computed against whatever was read and a transposed read agrees with itself perfectly.
-    fidelity = []
-
-    def quantise(name, weight):
-        kernel, scale = quantise_per_channel(weight)
-        back = kernel.astype(np.float32).reshape(weight.shape[0], -1) * scale[:, None]
-        flat = weight.reshape(weight.shape[0], -1)
-        cosine = float(
-            np.dot(flat.ravel(), back.ravel())
-            / max(np.linalg.norm(flat) * np.linalg.norm(back), 1e-30)
-        )
-        fidelity.append((cosine, name))
-        return kernel, scale
+    fidelity = Fidelity()
 
     def emit(op, name, key, added):
         layers.append(Layer(len(layers), op, name, key, len(tensors) - added, added))
@@ -757,7 +849,7 @@ def collect_small100(get, spec):
         weight = get(f"{name}.weight")
         bias = get(f"{name}.bias")
         outputs, inputs = weight.shape
-        kernel, scale = quantise(name, weight.reshape(outputs, inputs, 1, 1))
+        kernel, scale = fidelity.quantise(name, weight.reshape(outputs, inputs, 1, 1))
         tensors.extend([kernel, scale, bias])
         emit(
             "Linear8",
@@ -783,7 +875,7 @@ def collect_small100(get, spec):
         lo = part * step
         rows = embedding[lo : lo + step]
         name = f"model.shared.weight[{lo}:{lo + step}]"
-        kernel, scale = quantise(name, rows.reshape(step, width, 1, 1))
+        kernel, scale = fidelity.quantise(name, rows.reshape(step, width, 1, 1))
         # `Builder::conv_int8` reads a bias after the scale, and a tied head has none. Zeros are
         # exact, and recording it in the key means a checkpoint that grows one is not mistaken for
         # this table.
@@ -814,16 +906,260 @@ def collect_small100(get, spec):
             linear(f"{at}.fc2")
         layer_norm(f"model.{side}.layer_norm")
 
-    fidelity.sort()
-    for cosine, name in fidelity[:3]:
-        if cosine < MIN_INT8_COSINE:
-            raise SystemExit(
-                f"{name}: int8 * scale correlates {cosine:.6f} with the fp32 weight, under"
-                f" {MIN_INT8_COSINE}.\nQuantising this layer costs too much; exclude it and store"
-                " it fp16 instead."
+    fidelity.report()
+    return layers, tensors
+
+
+# The vision position table, after TinyCLIP's export constant-folds it: `position_ids` is a
+# constant, so the `Gather` that reads the table folds away and its `[1, 197, 256]` result is the
+# initializer. There is no `vision_model.embeddings.position_embedding.weight` to read.
+#
+# Named here because it is the one parameter whose key is an internal tensor name rather than a
+# module path, and both [`tinyclip_inventory`] and [`collect_tinyclip`] have to agree about it.
+VISION_POSITIONS_FOLDED = "/vision_model/embeddings/position_embedding/Gather_output_0"
+
+
+def tinyclip_inventory(spec):
+    """What TinyCLIP's export must hold, as two dicts keyed the two ways the graph names things.
+
+    Returned rather than transcribed: a list of 250 names would be checked against itself.
+
+    * `parameters` is `{initializer name: dims}` for everything the export names — the norms, the
+      biases, the patch kernel, both embedding tables and the class token.
+    * `projections` is `{MatMul node name: dims}` for the 80 anonymous weights. Keyed by node
+      because the initializer names carry no information; see [`ARCHITECTURES`].
+
+    `dims` for a projection is ONNX's own **`[in, out]`**, so this dict is also the statement that
+    catches a transposed read: `fc1` at `[256, 1024]` and `fc2` at `[1024, 256]` cannot both be
+    satisfied by a checkpoint whose linears are stored the other way round.
+    """
+    width, ffn, projection = spec["width"], spec["ffn"], spec["projection"]
+    parameters = {
+        "vision_model.embeddings.patch_embedding.weight": [
+            width, 3, spec["patch"], spec["patch"],
+        ],
+        "vision_model.embeddings.class_embedding": [width],
+        VISION_POSITIONS_FOLDED: [1, spec["grid"] ** 2 + 1, width],
+        "vision_model.pre_layrnorm.weight": [width],
+        "vision_model.pre_layrnorm.bias": [width],
+        "vision_model.post_layernorm.weight": [width],
+        "vision_model.post_layernorm.bias": [width],
+        "text_model.embeddings.token_embedding.weight": [spec["vocab"], width],
+        "text_model.embeddings.position_embedding.weight": [spec["context"], width],
+        "text_model.final_layer_norm.weight": [width],
+        "text_model.final_layer_norm.bias": [width],
+    }
+    projections = {
+        "/visual_projection/MatMul": [width, projection],
+        "/text_projection/MatMul": [width, projection],
+    }
+    for tower, count in (("vision", spec["vision_layers"]), ("text", spec["text_layers"])):
+        for index in range(count):
+            at = f"{tower}_model.encoder.layers.{index}"
+            node = f"/{tower}_model/encoder/layers.{index}"
+            for norm in ("layer_norm1", "layer_norm2"):
+                parameters[f"{at}.{norm}.weight"] = [width]
+                parameters[f"{at}.{norm}.bias"] = [width]
+            for name in ("q_proj", "k_proj", "v_proj", "out_proj"):
+                parameters[f"{at}.self_attn.{name}.bias"] = [width]
+                projections[f"{node}/self_attn/{name}/MatMul"] = [width, width]
+            parameters[f"{at}.mlp.fc1.bias"] = [ffn]
+            parameters[f"{at}.mlp.fc2.bias"] = [width]
+            projections[f"{node}/mlp/fc1/MatMul"] = [width, ffn]
+            projections[f"{node}/mlp/fc2/MatMul"] = [ffn, width]
+    return parameters, projections
+
+
+def check_architecture(model, graph_id_name, spec):
+    """Refuse an ONNX export that is not the architecture `nets/<graph>.rs` hardcodes.
+
+    The counterpart of [`check_checkpoint`], and the same argument: a wrong shape here is a wrong
+    forward pass rather than a load failure, so it is asserted before anything is written. The op
+    counts in [`EXPECTED_OPS`] are checked as well, by [`check_graph`] — this is the stricter of
+    the two, because it fails on a renamed or resized parameter as well as on a missing one.
+
+    `spec` is passed rather than looked up, as [`collect_tinyclip`]'s is, so the two cannot be
+    given different ones.
+    """
+    parameters, projections = tinyclip_inventory(spec)
+    inits = {i.name: list(i.dims) for i in model.graph.initializer}
+    nodes = {n.name: n for n in model.graph.node}
+
+    lines = []
+    for name, want in sorted(parameters.items()):
+        got = inits.get(name)
+        if got != want:
+            lines.append(f"  {name}: {got} against {want}")
+    for node_name, want in sorted(projections.items()):
+        node = nodes.get(node_name)
+        if node is None:
+            lines.append(f"  {node_name}: no such node")
+            continue
+        held = [x for x in node.input if x in inits]
+        if len(held) != 1 or inits[held[0]] != want:
+            lines.append(f"  {node_name}: {[inits.get(h) for h in held]} against {want}")
+    if lines:
+        raise SystemExit(
+            f"{graph_id_name}: the export is not the architecture "
+            f"nets/{graph_id_name}.rs\nhardcodes. A wrong shape here is a wrong forward pass, "
+            "not a load failure:\n" + "\n".join(lines[:12])
+        )
+    print(
+        f"{len(parameters)} named parameters and {len(projections)} projections match the "
+        f"{graph_id_name} architecture"
+    )
+
+
+def collect_tinyclip(model, spec):
+    """TinyCLIP's export as the ordered tensor table `nets::tinyclip` indexes.
+
+    Order is the contract, and it is forward order **per tower**, vision first:
+
+        the patch kernel, the class token, the vision positions, `pre_layrnorm`
+        each vision layer, then `post_layernorm`, then `visual_projection`
+        the token embedding, the text positions
+        each text layer, then `final_layer_norm`, then `text_projection`
+
+    The export interleaves the two towers; this does not. See [`ARCHITECTURES`].
+
+    # What is transposed, and what is not
+
+    * A **`MatMul`** weight is `[in, out]` and becomes `[out, in, 1, 1]`, so every projection is
+      the `1 x 1` convolution `Builder::conv_int8` already computes.
+    * The **`Conv`** patch kernel is `[M, C, kH, kW]` already, which is this runtime's own layout,
+      so it is emitted **verbatim**. The `[256, 3, 16, 16]` assertion in [`check_architecture`] is
+      what says so; a transpose here would be a plausible-looking embedding.
+    * The two **position tables** are `[positions, width]` and the vision one becomes
+      `[width, 1, positions]`, because it is added to a sequence the device holds channel-major.
+      The text one is **not** transposed: the host reads it, gathers the token rows and adds the
+      two in f32, exactly as `nets::small100::embed_positions` does, so it never reaches a shader.
+
+    # What has no bias, and what gets a synthesised one
+
+    The patch embedding and both projections have none — `bias=False` on all three in
+    `CLIPModel`. The shaders always add one, so each gets zeros, which is exact and is recorded in
+    the digest key so an export that grows a bias is not read as this table.
+    """
+    width = spec["width"]
+    inits = {i.name: i for i in model.graph.initializer}
+    nodes = {n.name: n for n in model.graph.node}
+    layers = []
+    tensors = []
+    fidelity = Fidelity()
+
+    def array(name):
+        return numpy_helper.to_array(inits[name]).astype(np.float32)
+
+    def emit(op, name, key, added):
+        layers.append(Layer(len(layers), op, name, key, len(tensors) - added, added))
+
+    def matmul_weight(node_name):
+        """The `[in, out]` initializer a projection's `MatMul` reads, by **node** name."""
+        held = [x for x in nodes[node_name].input if x in inits]
+        return numpy_helper.to_array(inits[held[0]]).astype(np.float32)
+
+    def projection(node_name, name):
+        """A `MatMul` as an int8 `[out, in, 1, 1]` kernel, its per-output scale and a zero bias."""
+        weight = matmul_weight(node_name)
+        inputs, outputs = weight.shape
+        kernel, scale = fidelity.quantise(name, weight.T.reshape(outputs, inputs, 1, 1))
+        tensors.extend([kernel, scale, np.zeros(outputs, dtype=np.float32)])
+        emit(
+            "Linear8",
+            name,
+            f"Linear8 w={list(kernel.shape)} scale={[outputs]} b={[outputs]} "
+            "zp=0 dtype=int8 b0=synthesised",
+            3,
+        )
+
+    def linear(node_name, bias_name, name):
+        """[`projection`] with the export's own bias, which every layer projection has."""
+        weight = matmul_weight(node_name)
+        bias = array(bias_name)
+        inputs, outputs = weight.shape
+        kernel, scale = fidelity.quantise(name, weight.T.reshape(outputs, inputs, 1, 1))
+        tensors.extend([kernel, scale, bias])
+        emit(
+            "Linear8",
+            name,
+            f"Linear8 w={list(kernel.shape)} scale={[outputs]} b={list(bias.shape)} "
+            "zp=0 dtype=int8",
+            3,
+        )
+
+    def layer_norm(name):
+        gamma = array(f"{name}.weight")
+        beta = array(f"{name}.bias")
+        tensors.extend([gamma, beta])
+        emit("LayerNorm", name, f"LayerNorm g={list(gamma.shape)} b={list(beta.shape)}", 2)
+
+    def constant(name, values):
+        tensors.append(values)
+        emit("Constant", name, f"Constant t={list(values.shape)}", 1)
+
+    def encoder_layer(tower, index):
+        at = f"{tower}_model.encoder.layers.{index}"
+        node = f"/{tower}_model/encoder/layers.{index}"
+        # Pre-norm, as `CLIPEncoderLayer` is: the norm comes before the sublayer it feeds and the
+        # residual skips both. Emitting in forward order is what lets the Rust walk the table.
+        layer_norm(f"{at}.layer_norm1")
+        for name in ("q_proj", "k_proj", "v_proj", "out_proj"):
+            linear(
+                f"{node}/self_attn/{name}/MatMul",
+                f"{at}.self_attn.{name}.bias",
+                f"{at}.self_attn.{name}",
             )
-    worst = ", ".join(f"{name} {cosine:.6f}" for cosine, name in fidelity[:3])
-    print(f"int8 fidelity over {len(fidelity)} tensors, worst three: {worst}")
+        layer_norm(f"{at}.layer_norm2")
+        linear(f"{node}/mlp/fc1/MatMul", f"{at}.mlp.fc1.bias", f"{at}.mlp.fc1")
+        linear(f"{node}/mlp/fc2/MatMul", f"{at}.mlp.fc2.bias", f"{at}.mlp.fc2")
+
+    # --- the vision tower ---
+    patch = "vision_model.embeddings.patch_embedding.weight"
+    kernel, scale = fidelity.quantise(patch, array(patch))
+    tensors.extend([kernel, scale, np.zeros(width, dtype=np.float32)])
+    emit(
+        "Conv8",
+        patch,
+        f"Conv8 w={list(kernel.shape)} scale={[width]} b={[width]} "
+        f"k={[spec['patch'], spec['patch']]} s={[spec['patch'], spec['patch']]} "
+        "p=[0, 0, 0, 0] zp=0 dtype=int8 b0=synthesised",
+        3,
+    )
+    # `[width]` as the `[width, 1, 1]` a `Kind::Constant` wants: one position, every channel.
+    token = array("vision_model.embeddings.class_embedding").reshape(width, 1, 1)
+    constant("vision_model.embeddings.class_embedding", token)
+    positions = np.squeeze(array(VISION_POSITIONS_FOLDED))
+    constant(VISION_POSITIONS_FOLDED, positions.T.reshape(width, 1, positions.shape[0]).copy())
+    layer_norm("vision_model.pre_layrnorm")
+    for index in range(spec["vision_layers"]):
+        encoder_layer("vision", index)
+    layer_norm("vision_model.post_layernorm")
+    projection("/visual_projection/MatMul", "visual_projection")
+
+    # --- the text tower ---
+    table = "text_model.embeddings.token_embedding.weight"
+    rows = array(table)
+    # Per **row**, which is per token: the host gathers one row and dequantises it by that row's
+    # own scale, so this is the same shape of table `collect_small100`'s tied embedding is. The
+    # export's own int8 file quantises it per *tensor* with a zero point of 226, which is neither
+    # representable by `conv_int8.comp` nor recoverable by requantising.
+    kernel, scale = fidelity.quantise(table, rows.reshape(rows.shape[0], rows.shape[1], 1, 1))
+    tensors.extend([kernel, scale])
+    emit(
+        "Embed8",
+        table,
+        f"Embed8 t={list(kernel.shape)} scale={[rows.shape[0]]} zp=0 dtype=int8",
+        2,
+    )
+    # Not transposed: the host reads this one. See the docstring.
+    text_positions = array("text_model.embeddings.position_embedding.weight")
+    constant("text_model.embeddings.position_embedding.weight", text_positions)
+    for index in range(spec["text_layers"]):
+        encoder_layer("text", index)
+    layer_norm("text_model.final_layer_norm")
+    projection("/text_projection/MatMul", "text_projection")
+
+    fidelity.report()
     return layers, tensors
 
 
@@ -945,6 +1281,11 @@ def main():
         get, shapes = open_checkpoint(args.model)
         check_checkpoint(shapes, args.graph)
         layers, tensors = collect_small100(get, CHECKPOINTS[args.graph])
+    elif args.graph in ARCHITECTURES:
+        model = onnx.load(args.model)
+        check_graph(model, args.graph)
+        check_architecture(model, args.graph, ARCHITECTURES[args.graph])
+        layers, tensors = collect_tinyclip(model, ARCHITECTURES[args.graph])
     else:
         model = onnx.load(args.model)
         check_graph(model, args.graph)
