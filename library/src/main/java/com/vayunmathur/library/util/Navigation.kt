@@ -1,11 +1,18 @@
 package com.vayunmathur.library.util
 
+import androidx.compose.animation.AnimatedVisibilityScope
+import androidx.compose.animation.BoundsTransform
 import androidx.compose.animation.ContentTransform
-import androidx.compose.animation.core.FastOutLinearInEasing
-import androidx.compose.animation.core.LinearOutSlowInEasing
-import androidx.compose.animation.core.tween
+import androidx.compose.animation.ExperimentalSharedTransitionApi
+import androidx.compose.animation.SharedTransitionLayout
+import androidx.compose.animation.SharedTransitionScope
+import androidx.compose.animation.core.FiniteAnimationSpec
+import androidx.compose.animation.core.Spring
+import androidx.compose.animation.core.spring
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
+import androidx.compose.animation.scaleIn
+import androidx.compose.animation.scaleOut
 import androidx.compose.animation.slideInHorizontally
 import androidx.compose.animation.slideOutHorizontally
 import androidx.compose.animation.togetherWith
@@ -37,14 +44,18 @@ import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.staticCompositionLocalOf
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.takeOrElse
+import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewmodel.compose.LocalViewModelStoreOwner
 import androidx.lifecycle.viewmodel.compose.viewModel
 import androidx.navigation3.runtime.NavEntry
 import androidx.navigation3.scene.DialogSceneStrategy
+import androidx.navigation3.scene.Scene
+import androidx.navigation3.ui.LocalNavAnimatedContentScope
 import androidx.navigation3.ui.NavDisplay
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.asSharedFlow
@@ -122,42 +133,271 @@ class EntryProviderScope<T: NavKey>(val obj: T) {
     inline fun <reified E: T> entry(metadata: Map<String, Any> = emptyMap(), crossinline content: @Composable (E) -> Unit) {
         if(obj is E) {
             result = NavEntry(obj, metadata = metadata) {
-                content(obj)
+                // Republished as a nullable local so screens can ask for a shared element without
+                // depending on nav3, and so the same screen still renders outside a NavDisplay.
+                CompositionLocalProvider(
+                    LocalEntryAnimatedScope provides LocalNavAnimatedContentScope.current
+                ) {
+                    content(obj)
+                }
             }
         }
     }
 }
 
-// App-wide nav transitions. nav3's default is a slow crossfade, which makes
-// every screen change feel sluggish. These keep the motion short: a fade that
-// is a touch slower in than out for a clean handoff, plus a very light slide so
-// the direction of travel reads without the jank of a full-width slide. Defined
-// once here because MainNavigation owns the only NavDisplay, so this is app-wide.
-private const val NavEnterMillis = 180
-private const val NavExitMillis = 130
+/**
+ * How a destination arrives and leaves.
+ *
+ * nav3's default is a slow crossfade for everything, and the app-wide slide that replaced it was no
+ * better at saying *where* the user went: opening a photo, switching a tab and descending into
+ * settings are different journeys that were all animated identically.
+ *
+ * Apps choose per destination with the `*Page()` helpers rather than by building transitions
+ * themselves - nav3 and compose-animation are `implementation` dependencies of this module, so an
+ * app module cannot name a [ContentTransform] even if it wanted to.
+ */
+enum class NavMotion {
+    /** Descending a hierarchy - a list to its detail, a screen to its settings. */
+    Detail,
 
-// Forward (push): new screen fades/slides in from the right, old drifts left.
-private val NavPush: ContentTransform =
-    (fadeIn(tween(NavEnterMillis, easing = LinearOutSlowInEasing)) +
-        slideInHorizontally(tween(NavEnterMillis, easing = LinearOutSlowInEasing)) { it / 12 })
-        .togetherWith(
-            fadeOut(tween(NavExitMillis, easing = FastOutLinearInEasing)) +
-                slideOutHorizontally(tween(NavExitMillis, easing = FastOutLinearInEasing)) { -it / 12 }
+    /** Content opening out of the thing that was tapped. */
+    Zoom,
+
+    /** Immersive content taking over the window - a viewer, a player, a game board. */
+    Fullscreen,
+
+    /** Moving between peers - bottom-bar destinations, tabs. */
+    Sibling,
+
+    /**
+     * A component on the previous screen morphs into its counterpart on this one, via
+     * [sharedContainer] or [sharedContent].
+     *
+     * The screen itself only crossfades. That is the whole point: if the destination also slid or
+     * scaled, the morphing element would be travelling towards a target that is itself still
+     * moving, and the two animations visibly fight. Pairing a morph with [Zoom] looks broken.
+     */
+    Morph,
+}
+
+private const val NavMotionKey = "com.vayunmathur.library.util.navMotion"
+
+/** [NavMotion.Detail], the default, so this only needs stating for contrast with its siblings. */
+fun DetailPage(): Map<String, Any> = mapOf(NavMotionKey to NavMotion.Detail)
+
+/**
+ * [NavMotion.Zoom]: grows out of the tapped item rather than sliding in from the side, which would
+ * imply the destination was always over to the right instead of somewhere the user just pointed at.
+ */
+fun ZoomPage(): Map<String, Any> = mapOf(NavMotionKey to NavMotion.Zoom)
+
+/**
+ * [NavMotion.Fullscreen]: no horizontal travel at all. Sliding a full-bleed media surface in from
+ * the side draws attention to the edges of a frame meant to be the whole screen, and on a dark
+ * viewer it reads as a flicker.
+ */
+fun FullscreenPage(): Map<String, Any> = mapOf(NavMotionKey to NavMotion.Fullscreen)
+
+/**
+ * [NavMotion.Sibling]: deliberately directionless. Peers have no hierarchy, and apps here switch
+ * tabs with `backStack.reset(...)`, which nav3 sees as a forward push - so the hierarchical slide
+ * would send a tab in from the right even when the user moved *left* along the bar.
+ */
+fun SiblingPage(): Map<String, Any> = mapOf(NavMotionKey to NavMotion.Sibling)
+
+/**
+ * [NavMotion.Morph]: crossfades the screen so that a [sharedContainer] or [sharedContent] element is
+ * the only thing that appears to move.
+ *
+ * Use this, never [ZoomPage], on a destination that morphs a component out of the previous screen.
+ */
+fun MorphPage(): Map<String, Any> = mapOf(NavMotionKey to NavMotion.Morph)
+
+/** The motion the destination asked for, defaulting to [NavMotion.Detail]. */
+private fun Scene<*>.navMotion(): NavMotion =
+    entries.lastOrNull()?.metadata?.get(NavMotionKey) as? NavMotion ?: NavMotion.Detail
+
+/**
+ * Which screen edge the back gesture started from, mirroring `BackEventCompat.EDGE_LEFT`. A plain
+ * Int because androidx.activity is not a dependency of this module.
+ */
+private const val EdgeLeft = 0
+
+/**
+ * The transitions, built from [MaterialTheme]'s expressive motion scheme.
+ *
+ * Springs rather than tweens, because a spring is interruptible from wherever it currently is -
+ * which is what a half-completed back gesture or a fast double tap actually needs. Spatial specs
+ * carry position and size, effects specs carry alpha; mixing the two up is what makes a fade look
+ * like it lags the movement it belongs to.
+ */
+private class NavTransitions(
+    val offset: FiniteAnimationSpec<IntOffset>,
+    val scale: FiniteAnimationSpec<Float>,
+    val alpha: FiniteAnimationSpec<Float>,
+) {
+    fun push(motion: NavMotion): ContentTransform = when (motion) {
+        NavMotion.Detail -> slide(enterFrom = 1, exitTo = -1)
+        NavMotion.Zoom -> zoom(enterFrom = 0.92f, exitTo = 1.04f)
+        NavMotion.Fullscreen -> immersiveIn()
+        NavMotion.Sibling, NavMotion.Morph -> crossFade()
+    }
+
+    fun pop(motion: NavMotion): ContentTransform = when (motion) {
+        NavMotion.Detail -> slide(enterFrom = -1, exitTo = 1)
+        NavMotion.Zoom -> zoom(enterFrom = 1.04f, exitTo = 0.92f)
+        NavMotion.Fullscreen -> immersiveOut()
+        NavMotion.Sibling, NavMotion.Morph -> crossFade()
+    }
+
+    /**
+     * Predictive back: the screen being dismissed shrinks and slides *towards the edge the finger
+     * came from*, revealing the screen behind it.
+     *
+     * The edge is the whole point, and was previously discarded - so a swipe from the right
+     * animated identically to one from the left, and the motion fought the gesture half the time.
+     * Everything here is a plain scale, translate or fade so it still reads correctly at any
+     * fraction: the user can stop half way and change their mind.
+     */
+    fun predictivePop(motion: NavMotion, swipeEdge: Int): ContentTransform {
+        // A morph has to stay a crossfade even under the gesture, or the element is chasing a target
+        // that the predictive scale is still moving.
+        if (motion == NavMotion.Sibling || motion == NavMotion.Morph) return crossFade()
+        val towardsFinger = if (swipeEdge == EdgeLeft) 1 else -1
+        return (fadeIn(alpha) + scaleIn(scale, initialScale = 0.96f)).togetherWith(
+            fadeOut(alpha) +
+                scaleOut(scale, targetScale = 0.90f) +
+                slideOutHorizontally(offset) { towardsFinger * it / 8 }
+        )
+    }
+
+    private fun slide(enterFrom: Int, exitTo: Int): ContentTransform =
+        (fadeIn(alpha) + slideInHorizontally(offset) { enterFrom * it / 12 }).togetherWith(
+            fadeOut(alpha) + slideOutHorizontally(offset) { exitTo * it / 12 }
         )
 
-// Back (pop): symmetric reverse - previous screen comes in from the left.
-private val NavPop: ContentTransform =
-    (fadeIn(tween(NavEnterMillis, easing = LinearOutSlowInEasing)) +
-        slideInHorizontally(tween(NavEnterMillis, easing = LinearOutSlowInEasing)) { -it / 12 })
-        .togetherWith(
-            fadeOut(tween(NavExitMillis, easing = FastOutLinearInEasing)) +
-                slideOutHorizontally(tween(NavExitMillis, easing = FastOutLinearInEasing)) { it / 12 }
+    private fun zoom(enterFrom: Float, exitTo: Float): ContentTransform =
+        (fadeIn(alpha) + scaleIn(scale, initialScale = enterFrom)).togetherWith(
+            fadeOut(alpha) + scaleOut(scale, targetScale = exitTo)
         )
 
-// Predictive back gesture: a plain quick fade so it tracks the finger immediately.
-private val NavPredictivePop: ContentTransform =
-    fadeIn(tween(NavEnterMillis, easing = LinearOutSlowInEasing))
-        .togetherWith(fadeOut(tween(NavExitMillis, easing = FastOutLinearInEasing)))
+    private fun immersiveIn(): ContentTransform =
+        (fadeIn(alpha) + scaleIn(scale, initialScale = 0.97f)).togetherWith(fadeOut(alpha))
+
+    private fun immersiveOut(): ContentTransform =
+        fadeIn(alpha).togetherWith(fadeOut(alpha) + scaleOut(scale, targetScale = 0.97f))
+
+    private fun crossFade(): ContentTransform = fadeIn(alpha).togetherWith(fadeOut(alpha))
+}
+
+@Composable
+private fun rememberNavTransitions(): NavTransitions {
+    val scheme = MaterialTheme.motionScheme
+    // Keyed on the scheme, not the specs: the spec factories hand back a fresh object each call, so
+    // keying on those would rebuild this on every recomposition.
+    return remember(scheme) {
+        NavTransitions(
+            offset = scheme.defaultSpatialSpec(),
+            scale = scheme.defaultSpatialSpec(),
+            alpha = scheme.defaultEffectsSpec(),
+        )
+    }
+}
+
+/**
+ * How a morphing element travels between its two positions.
+ *
+ * Deliberately *not* from the motion scheme. Every expressive spatial spring is underdamped on
+ * purpose - the default is damping 0.8 at stiffness 380, and the fast one 0.6 - which gives a short
+ * slide a pleasant overshoot. A bounds morph is a different case: the element crosses most of the
+ * screen and changes size, so an overshoot means it visibly flies past its target and rubber-bands
+ * back. Same stiffness as the expressive default, critically damped.
+ */
+private val NavMorphBounds: FiniteAnimationSpec<Rect> =
+    spring(dampingRatio = Spring.DampingRatioNoBouncy, stiffness = 380f)
+
+private val NavMorphBoundsTransform = BoundsTransform { _, _ -> NavMorphBounds }
+
+/**
+ * The crossfade between the two contents inside a morphing container.
+ *
+ * Faster than the bounds travel on purpose: the old content should be gone well before the container
+ * finishes resizing, or both are legible at once and the item appears to contain two things.
+ */
+private val NavMorphContentFade: FiniteAnimationSpec<Float> =
+    spring(dampingRatio = Spring.DampingRatioNoBouncy, stiffness = 1600f)
+
+/**
+ * The scopes [sharedContainer] and [sharedContent] need to morph a component across a destination
+ * change.
+ *
+ * Nullable and defaulting to null rather than erroring, because a screen rendered outside a
+ * [NavDisplay] - a `@Preview`, a screenshot test, an Activity hosting one page directly - is a
+ * legitimate caller that should simply not animate rather than crash.
+ */
+private val LocalSharedTransitionScope = staticCompositionLocalOf<SharedTransitionScope?> { null }
+
+/** Internal because [EntryProviderScope.entry] is a public inline function and has to reach it. */
+@PublishedApi
+internal val LocalEntryAnimatedScope = staticCompositionLocalOf<AnimatedVisibilityScope?> { null }
+
+/**
+ * Morphs this component into the component carrying the same [key] on the destination: the bounds
+ * travel and resize while the two different contents crossfade inside them.
+ *
+ * This is the Material container transform, and it is meant for the *whole* item - put it on the
+ * list row and on the block that row opens. Morphing one child in isolation, an avatar out of a row,
+ * reads worse than no morph at all: everything around it cuts while one thing glides.
+ *
+ * Content is remeasured to the animating bounds rather than scaled, so text reflows at each size
+ * instead of stretching. That costs a relayout per frame, which is affordable for one item and would
+ * not be for a whole list.
+ *
+ * Pair with [MorphPage] on the destination, or the screen transition animates too and the two fight.
+ *
+ * A key must be unique *within* a screen and equal *across* the two. Watch for an item rendered
+ * twice - a favourite shown both in a favourites section and again in the main list is one component
+ * with two origins, and the morph has no way to choose. Key only one of them.
+ *
+ * No-ops outside a [MainNavigation], so previews and screenshot tests are unaffected.
+ */
+@OptIn(ExperimentalSharedTransitionApi::class)
+@Composable
+fun Modifier.sharedContainer(key: Any): Modifier {
+    val shared = LocalSharedTransitionScope.current ?: return this
+    val animated = LocalEntryAnimatedScope.current ?: return this
+    return with(shared) {
+        this@sharedContainer.sharedBounds(
+            rememberSharedContentState(key),
+            animated,
+            enter = fadeIn(NavMorphContentFade),
+            exit = fadeOut(NavMorphContentFade),
+            boundsTransform = NavMorphBoundsTransform,
+            resizeMode = SharedTransitionScope.ResizeMode.RemeasureToBounds,
+        )
+    }
+}
+
+/**
+ * A single leaf that keeps its identity through a [sharedContainer] morph - typically the photo or
+ * icon, whose pixels are the same on both screens.
+ *
+ * Nest inside a [sharedContainer] rather than using alone: on its own it produces exactly the
+ * one-thing-glides effect that [sharedContainer] exists to avoid.
+ */
+@OptIn(ExperimentalSharedTransitionApi::class)
+@Composable
+fun Modifier.sharedContent(key: Any): Modifier {
+    val shared = LocalSharedTransitionScope.current ?: return this
+    val animated = LocalEntryAnimatedScope.current ?: return this
+    return with(shared) {
+        this@sharedContent.sharedElement(
+            rememberSharedContentState(key),
+            animated,
+            boundsTransform = NavMorphBoundsTransform,
+        )
+    }
+}
 
 /**
  * Single owner of the IME (keyboard) inset for every screen it hosts: it applies
@@ -169,7 +409,7 @@ private val NavPredictivePop: ContentTransform =
  * activity window has to show through - the launcher needs the wallpaper visible, and an
  * opaque scaffold paints over it.
  */
-@OptIn(ExperimentalMaterial3AdaptiveApi::class)
+@OptIn(ExperimentalMaterial3AdaptiveApi::class, ExperimentalSharedTransitionApi::class)
 @Composable
 fun <T: NavKey> MainNavigation(
     backStack: NavBackStack<T>,
@@ -180,6 +420,7 @@ fun <T: NavKey> MainNavigation(
     val sceneStrategy: ListDetailSceneStrategy<T> = rememberListDetailSceneStrategy()
     val resultRegistry = remember { NavResultRegistry() }
     val snackbarHostState = remember { SnackbarHostState() }
+    val transitions = rememberNavTransitions()
 
     val resolvedContainerColor = containerColor.takeOrElse { MaterialTheme.colorScheme.background }
 
@@ -219,24 +460,37 @@ fun <T: NavKey> MainNavigation(
             LocalNavResultRegistry provides resultRegistry,
             LocalSnackbarHostState provides snackbarHostState
         ) {
-            NavDisplay(
-                // consumeWindowInsets before imePadding: when a bottom bar is
-                // present it has already shifted itself up, and that shows up
-                // in paddingValues. Without consuming it the content would be
-                // pushed up by the keyboard twice.
-                modifier = Modifier
-                    .padding(paddingValues)
-                    .consumeWindowInsets(paddingValues)
-                    .imePadding(),
-                sceneStrategies = listOf(DialogSceneStrategy(), sceneStrategy),
-                transitionSpec = { NavPush },
-                popTransitionSpec = { NavPop },
-                predictivePopTransitionSpec = { NavPredictivePop },
-                backStack = backStack.backStack, entryProvider = {
-                    EntryProviderScope(it).apply {
-                        entryProvider()
-                    }.result!!
-                })
+            // Lets a component morph into its counterpart on the next screen instead of the two
+            // screens merely swapping underneath it. See sharedContainer.
+            SharedTransitionLayout {
+                CompositionLocalProvider(
+                    LocalSharedTransitionScope provides this@SharedTransitionLayout
+                ) {
+                    NavDisplay(
+                        // consumeWindowInsets before imePadding: when a bottom bar is
+                        // present it has already shifted itself up, and that shows up
+                        // in paddingValues. Without consuming it the content would be
+                        // pushed up by the keyboard twice.
+                        modifier = Modifier
+                            .padding(paddingValues)
+                            .consumeWindowInsets(paddingValues)
+                            .imePadding(),
+                        sceneStrategies = listOf(DialogSceneStrategy(), sceneStrategy),
+                        // The destination decides: the motion is read off the entry the user is
+                        // arriving at when pushing, and off the one they are leaving when popping,
+                        // so a route animates the same way in both directions.
+                        transitionSpec = { transitions.push(targetState.navMotion()) },
+                        popTransitionSpec = { transitions.pop(initialState.navMotion()) },
+                        predictivePopTransitionSpec = { swipeEdge ->
+                            transitions.predictivePop(initialState.navMotion(), swipeEdge)
+                        },
+                        backStack = backStack.backStack, entryProvider = {
+                            EntryProviderScope(it).apply {
+                                entryProvider()
+                            }.result!!
+                        })
+                }
+            }
         }
     }
 }
