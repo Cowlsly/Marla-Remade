@@ -18,6 +18,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.Shape
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.TextStyle
@@ -59,6 +60,8 @@ fun ContactAvatar(
     decodePhoto: ((String) -> Bitmap?)?,
     modifier: Modifier = Modifier,
     initialsStyle: TextStyle = MaterialTheme.typography.bodyLarge,
+    /** Overridable so a caller can morph it - see the press feedback on a contact row. */
+    shape: Shape = CircleShape,
 ) {
     val photoBase64 = contact.photo?.photo
     val avatarBitmap by produceState<Bitmap?>(initialValue = null, key1 = photoBase64) {
@@ -66,17 +69,17 @@ fun ContactAvatar(
             withContext(Dispatchers.IO) { decodePhoto?.invoke(photoBase64) }
         } else null
     }
-    Box(modifier.clip(CircleShape), contentAlignment = Alignment.Center) {
+    Box(modifier.clip(shape), contentAlignment = Alignment.Center) {
         val bmp = avatarBitmap
         if (bmp != null) {
             Image(
                 bitmap = bmp.asImageBitmap(),
                 contentDescription = stringResource(R.string.contact_photo_description, contact.name.value),
-                modifier = Modifier.fillMaxSize().clip(CircleShape)
+                modifier = Modifier.fillMaxSize().clip(shape)
             )
         } else {
             Box(
-                Modifier.fillMaxSize().background(getAvatarColor(contact.id), CircleShape),
+                Modifier.fillMaxSize().background(getAvatarColor(contact.id), shape),
                 contentAlignment = Alignment.Center
             ) {
                 Text(

@@ -388,7 +388,7 @@ fun Navigation(viewModel: ContactViewModel, initialRoute: Route? = null, onExit:
             )
         }
 
-        entry<Route.ContactDetail>(metadata = ListDetailPage()) { key ->
+        entry<Route.ContactDetail>(metadata = ListDetailPage() + MorphPage()) { key ->
             ContactDetailsPage(
                 viewModel = viewModel,
                 contactId = key.contactId,
@@ -402,7 +402,7 @@ fun Navigation(viewModel: ContactViewModel, initialRoute: Route? = null, onExit:
                 showBackButton = true
             )
         }
-        entry<Route.EditContact>(metadata = ListDetailPage()) { key ->
+        entry<Route.EditContact>(metadata = ListDetailPage() + MorphPage()) { key ->
             EditContactPage(backStack, viewModel, key, onExit = { goBack() })
         }
 

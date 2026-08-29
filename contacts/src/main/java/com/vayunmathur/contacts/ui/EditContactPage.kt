@@ -14,7 +14,7 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ColumnScope
-import androidx.compose.foundation.layout.FlowRow
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxHeight
@@ -37,8 +37,8 @@ import com.vayunmathur.library.ui.ExperimentalMaterial3Api
 import com.vayunmathur.library.ui.FilledTonalButton
 import com.vayunmathur.library.ui.FormDetailGroup
 import com.vayunmathur.library.ui.IconButton
-import com.vayunmathur.library.ui.InputChip
 import com.vayunmathur.library.ui.LabeledTextField
+import com.vayunmathur.library.ui.MultiCategoryPicker
 import com.vayunmathur.library.ui.MaterialTheme
 import com.vayunmathur.library.ui.OutlinedTextField
 import com.vayunmathur.library.ui.DetailScaffold
@@ -96,6 +96,8 @@ import com.vayunmathur.library.ui.IconRemoveCircle
 import com.vayunmathur.library.ui.appBarScrollBehavior
 import com.vayunmathur.library.util.NavBackStack
 import com.vayunmathur.library.util.ResultEffect
+import com.vayunmathur.library.util.sharedContainer
+import com.vayunmathur.library.util.sharedContent
 import kotlinx.datetime.LocalDate
 import kotlin.io.encoding.Base64
 
@@ -200,7 +202,8 @@ fun EditContactPage(backStack: NavBackStack<Route>, viewModel: ContactViewModel,
                 },
                 removePhoto = {
                     viewModel.updateEditDraft { it.copy(photo = null) }
-                }
+                },
+                sharedKey = editRoute.contactId,
             )
             Spacer(Modifier.height(24.dp))
 
@@ -208,6 +211,22 @@ fun EditContactPage(backStack: NavBackStack<Route>, viewModel: ContactViewModel,
             // Plain Column rather than FormSection: DetailScaffold already insets its content
             // horizontally, and the section's own padding on top of that made the name fields
             // narrower than every field below them.
+            // One key per name part, so each piece of the header lands in the field that owns it.
+            // Null for a new contact, which has no header to come from. Spelled out rather than built
+            // by a helper because a local function cannot be @Composable.
+            val id = editRoute.contactId
+            val firstNameMod = if (id == null) Modifier.fillMaxWidth()
+            else Modifier.sharedContainer("contact-firstname-$id").fillMaxWidth()
+            val middleNameMod = if (id == null) Modifier.fillMaxWidth()
+            else Modifier.sharedContainer("contact-middlename-$id").fillMaxWidth()
+            val lastNameMod = if (id == null) Modifier.fillMaxWidth()
+            else Modifier.sharedContainer("contact-lastname-$id").fillMaxWidth()
+            val nicknameMod = if (id == null) Modifier.fillMaxWidth()
+            else Modifier.sharedContainer("contact-nickname-$id").fillMaxWidth()
+            val companyMod = if (id == null) Modifier.fillMaxWidth()
+            else Modifier.sharedContainer("contact-company-$id").fillMaxWidth()
+            val prefixKey = id?.let { "contact-nameprefix-$it" }
+            val suffixKey = id?.let { "contact-namesuffix-$it" }
             Column(
                 modifier = Modifier.fillMaxWidth(),
                 verticalArrangement = Arrangement.spacedBy(12.dp),
@@ -216,8 +235,9 @@ fun EditContactPage(backStack: NavBackStack<Route>, viewModel: ContactViewModel,
                     value = currentDraft.firstName,
                     onValueChange = { v -> viewModel.updateEditDraft { it.copy(firstName = v) } },
                     label = stringResource(R.string.first_name),
+                    modifier = firstNameMod,
                     leadingIcon = {
-                        NamePrefixChooser(currentDraft.namePrefix) { v ->
+                        NamePrefixChooser(currentDraft.namePrefix, prefixKey) { v ->
                             viewModel.updateEditDraft { it.copy(namePrefix = v) }
                         }
                     },
@@ -226,13 +246,15 @@ fun EditContactPage(backStack: NavBackStack<Route>, viewModel: ContactViewModel,
                     value = currentDraft.middleName,
                     onValueChange = { v -> viewModel.updateEditDraft { it.copy(middleName = v) } },
                     label = stringResource(R.string.middle_name),
+                    modifier = middleNameMod,
                 )
                 LabeledTextField(
                     value = currentDraft.lastName,
                     onValueChange = { v -> viewModel.updateEditDraft { it.copy(lastName = v) } },
                     label = stringResource(R.string.last_name),
+                    modifier = lastNameMod,
                     trailingIcon = {
-                        NameSuffixChooser(currentDraft.nameSuffix) { v ->
+                        NameSuffixChooser(currentDraft.nameSuffix, suffixKey) { v ->
                             viewModel.updateEditDraft { it.copy(nameSuffix = v) }
                         }
                     },
@@ -241,36 +263,41 @@ fun EditContactPage(backStack: NavBackStack<Route>, viewModel: ContactViewModel,
                     value = currentDraft.nickname,
                     onValueChange = { v -> viewModel.updateEditDraft { it.copy(nickname = v) } },
                     label = stringResource(R.string.nickname),
+                    modifier = nicknameMod,
                 )
                 LabeledTextField(
                     value = currentDraft.company,
                     onValueChange = { v -> viewModel.updateEditDraft { it.copy(company = v) } },
                     label = stringResource(R.string.company),
+                    modifier = companyMod,
                 )
             }
 
-            // Group memberships (placed near identity fields)
-            val allGroups by viewModel.groups.collectAsStateWithLifecycle()
-            val draftGroupIds = currentDraft.groupMemberships.map { it.groupId }.toSet()
-            val memberGroups = allGroups.filter { it.id in draftGroupIds && it.name.trim().isNotEmpty() }
-            val availableGroups = allGroups.filter { it.id !in draftGroupIds && it.name.trim().isNotEmpty() }
-
-            GroupMembershipSection(
-                memberGroups = memberGroups,
-                availableGroups = availableGroups,
-                onAddGroup = { groupId ->
-                    viewModel.updateEditDraft { it.copy(
-                        groupMemberships = it.groupMemberships + GroupMembership(0, groupId)
-                    )}
-                },
-                onRemoveGroup = { groupId ->
-                    viewModel.updateEditDraft { it.copy(
-                        groupMemberships = it.groupMemberships.filter { gm -> gm.groupId != groupId }
-                    )}
+            // A contact always offers a mobile number and a home email, even when blank, so there is
+            // always somewhere obvious to put the two values almost every contact has. Seeded here
+            // rather than in the draft so it also applies to contacts saved before this existed.
+            val mobileIndex = currentDraft.phoneNumbers.indexOfFirst { it.type == CDKPhone.TYPE_MOBILE }
+            val homeEmailIndex = currentDraft.emails.indexOfFirst { it.type == CDKEmail.TYPE_HOME }
+            LaunchedEffect(mobileIndex, homeEmailIndex) {
+                if (mobileIndex < 0) {
+                    viewModel.updateEditDraft {
+                        it.copy(
+                            phoneNumbers = it.phoneNumbers +
+                                ContactDetail.default<PhoneNumber>().withType(CDKPhone.TYPE_MOBILE)
+                        )
+                    }
                 }
-            )
-            Spacer(Modifier.height(16.dp))
+                if (homeEmailIndex < 0) {
+                    viewModel.updateEditDraft {
+                        it.copy(
+                            emails = it.emails +
+                                ContactDetail.default<Email>().withType(CDKEmail.TYPE_HOME)
+                        )
+                    }
+                }
+            }
 
+            Spacer(Modifier.height(16.dp))
             val phoneCtx = LocalContext.current
             FormDetailGroup(
                 items = currentDraft.phoneNumbers,
@@ -292,6 +319,10 @@ fun EditContactPage(backStack: NavBackStack<Route>, viewModel: ContactViewModel,
                 customPlaceholder = stringResource(R.string.enter_custom_label),
                 leadingIcon = { item -> Text(getCountryFlagEmoji(item.value)) },
                 addIcon = { IconCall() },
+                // Pairs each field with the read-only row on the detail page. A row the user has just
+                // added has no id yet and no counterpart, so it is left unkeyed.
+                sharedKey = { it.id.takeIf { id -> id > 0 }?.let { id -> "contact-phone-$id" } },
+                isMandatory = { it == mobileIndex },
             )
             Spacer(Modifier.height(8.dp))
 
@@ -315,24 +346,10 @@ fun EditContactPage(backStack: NavBackStack<Route>, viewModel: ContactViewModel,
                 customLabelText = stringResource(R.string.custom_label),
                 customPlaceholder = stringResource(R.string.enter_custom_label),
                 addIcon = { IconMail() },
+                sharedKey = { it.id.takeIf { id -> id > 0 }?.let { id -> "contact-email-$id" } },
+                isMandatory = { it == homeEmailIndex },
             )
-
             Spacer(Modifier.height(16.dp))
-
-            Birthday(backStack, currentDraft.birthday) { v ->
-                viewModel.updateEditDraft { it.copy(birthday = v) }
-            }
-
-            DateDetailsSection(
-                backStack = backStack,
-                details = currentDraft.dates,
-                onDetailsChange = { list -> viewModel.updateEditDraft { it.copy(dates = list) } },
-                icon = { IconEvent() },
-                options = listOf(CDKEvent.TYPE_ANNIVERSARY, CDKEvent.TYPE_OTHER, CDKEvent.TYPE_CUSTOM)
-            )
-
-            Spacer(Modifier.height(12.dp))
-
             val addressCtx = LocalContext.current
             FormDetailGroup(
                 items = currentDraft.addresses,
@@ -353,9 +370,18 @@ fun EditContactPage(backStack: NavBackStack<Route>, viewModel: ContactViewModel,
                 customPlaceholder = stringResource(R.string.enter_custom_label),
                 addIcon = { IconLocationOn() },
             )
-
+            Spacer(Modifier.height(12.dp))
+            Birthday(backStack, currentDraft.birthday) { v ->
+                viewModel.updateEditDraft { it.copy(birthday = v) }
+            }
+            DateDetailsSection(
+                backStack = backStack,
+                details = currentDraft.dates,
+                onDetailsChange = { list -> viewModel.updateEditDraft { it.copy(dates = list) } },
+                icon = { IconEvent() },
+                options = listOf(CDKEvent.TYPE_ANNIVERSARY, CDKEvent.TYPE_OTHER, CDKEvent.TYPE_CUSTOM)
+            )
             Spacer(Modifier.height(16.dp))
-
             Text(
                 text = stringResource(R.string.note),
                 style = MaterialTheme.typography.labelMedium,
@@ -371,6 +397,31 @@ fun EditContactPage(backStack: NavBackStack<Route>, viewModel: ContactViewModel,
                     .border(1.dp, MaterialTheme.colorScheme.outline, RoundedCornerShape(8.dp))
                     .padding(12.dp),
             )
+            Spacer(Modifier.height(16.dp))
+
+            // Last, to match the detail page. Anything on both pages is in the same order on both, so
+            // a value does not have to be hunted for after the morph, and nothing has to travel past
+            // the whole form to reach its counterpart.
+            val allGroups by viewModel.groups.collectAsStateWithLifecycle()
+            val draftGroupIds = currentDraft.groupMemberships.map { it.groupId }.toSet()
+            val memberGroups = allGroups.filter { it.id in draftGroupIds && it.name.trim().isNotEmpty() }
+            val availableGroups = allGroups.filter { it.id !in draftGroupIds && it.name.trim().isNotEmpty() }
+            GroupMembershipSection(
+                memberGroups = memberGroups,
+                availableGroups = availableGroups,
+                onAddGroup = { groupId ->
+                    viewModel.updateEditDraft { it.copy(
+                        groupMemberships = it.groupMemberships + GroupMembership(0, groupId)
+                    )}
+                },
+                onRemoveGroup = { groupId ->
+                    viewModel.updateEditDraft { it.copy(
+                        groupMemberships = it.groupMemberships.filter { gm -> gm.groupId != groupId }
+                    )}
+                },
+                sharedId = editRoute.contactId,
+            )
+            Spacer(Modifier.height(16.dp))
 
             Spacer(Modifier.height(16.dp))
         }
@@ -454,25 +505,28 @@ private fun getCountryFlagEmoji(phoneNumber: String): String {
 /**
  * The prefix/suffix picker that sits inside the first/last name fields.
  *
- * A chip rather than a bare [TextButton]: it shares the field's background otherwise, so
- * there was nothing to show it is a separate value and not part of the name being typed.
- * [placeholder] is shown while nothing is chosen, since an empty chip reads as a stray icon.
+ * Formatted like the type picker on a phone or email row - a borderless button with its current value
+ * and a caret - because that is what it is: a small enumerated choice attached to a field. It used to
+ * be an [AssistChip], which read as a tappable object floating in the field rather than as part of it.
+ * [placeholder] is shown while nothing is chosen, since an empty label reads as a stray caret.
  */
 @Composable
 private fun NameAffixChooser(
     value: String,
     placeholder: String,
     options: List<String>,
+    sharedKey: Any?,
     onValueChange: (String) -> Unit,
 ) {
     var expanded by remember { mutableStateOf(false) }
     val none = stringResource(R.string.name_affix_none)
-    Box {
-        AssistChip(
-            onClick = { expanded = true },
-            label = { Text(value.ifEmpty { placeholder }) },
-            trailingIcon = { IconArrowDropDown() },
-        )
+    Box(
+        if (sharedKey == null) Modifier else Modifier.sharedContainer(sharedKey)
+    ) {
+        TextButton(onClick = { expanded = true }) {
+            Text(value.ifEmpty { placeholder })
+            IconArrowDropDown()
+        }
         DropdownMenu(expanded, { expanded = false }) {
             // The clear option is listed by its localized name but stores an empty affix, so
             // the contact does not end up with the word "None" as its title.
@@ -487,21 +541,23 @@ private fun NameAffixChooser(
 }
 
 @Composable
-fun NamePrefixChooser(namePrefix: String, onNamePrefixChange: (String) -> Unit) {
+fun NamePrefixChooser(namePrefix: String, sharedKey: Any? = null, onNamePrefixChange: (String) -> Unit) {
     NameAffixChooser(
         value = namePrefix,
         placeholder = stringResource(R.string.name_prefix),
         options = stringArrayResource(R.array.name_prefixes).toList(),
+        sharedKey = sharedKey,
         onValueChange = onNamePrefixChange,
     )
 }
 
 @Composable
-fun NameSuffixChooser(nameSuffix: String, onNameSuffixChange: (String) -> Unit) {
+fun NameSuffixChooser(nameSuffix: String, sharedKey: Any? = null, onNameSuffixChange: (String) -> Unit) {
     NameAffixChooser(
         value = nameSuffix,
         placeholder = stringResource(R.string.name_suffix),
         options = stringArrayResource(R.array.name_suffixes).toList(),
+        sharedKey = sharedKey,
         onValueChange = onNameSuffixChange,
     )
 }
@@ -528,13 +584,17 @@ private fun Birthday(
             singleLine = true,
             modifier = Modifier.fillMaxWidth(),
             trailingIcon = {
-                IconButton(onClick = { setBirthday(null) }) {
-                    IconRemoveCircle()
+                // There is only ever one birthday, so the row cannot be removed. The button clears the
+                // value instead, and is absent while there is nothing to clear.
+                if (birthday != null) {
+                    IconButton(onClick = { setBirthday(null) }) {
+                        IconRemoveCircle()
+                    }
                 }
             }
         )
         // The field is read-only and opens the picker, so the whole row is the tap target -
-        // except the trailing remove button, which needs its own clicks to reach it.
+        // except the trailing clear button, which needs its own clicks to reach it.
         Row(Modifier.matchParentSize()) {
             Box(
                 Modifier
@@ -542,7 +602,9 @@ private fun Birthday(
                     .fillMaxHeight()
                     .clickable { backStack.add(Route.EventDatePickerDialog("birthday", birthday)) }
             )
-            Spacer(Modifier.width(RemoveButtonWidth))
+            // Only reserved when the button is actually there, or the right edge of an empty field
+            // would not open the picker.
+            if (birthday != null) Spacer(Modifier.width(RemoveButtonWidth))
         }
     }
 
@@ -641,69 +703,23 @@ private fun ColumnScope.GroupMembershipSection(
     memberGroups: List<ContactGroup>,
     availableGroups: List<ContactGroup>,
     onAddGroup: (Long) -> Unit,
-    onRemoveGroup: (Long) -> Unit
+    onRemoveGroup: (Long) -> Unit,
+    sharedId: Long? = null,
 ) {
     if (memberGroups.isEmpty() && availableGroups.isEmpty()) return
 
-    Row(
-        verticalAlignment = Alignment.CenterVertically,
-        modifier = Modifier.fillMaxWidth()
-    ) {
-        IconGroup(
-            tint = MaterialTheme.colorScheme.onSurfaceVariant,
-            modifier = Modifier.size(20.dp)
-        )
-        Spacer(Modifier.width(8.dp))
-        Text(
-            stringResource(R.string.groups),
-            style = MaterialTheme.typography.labelLarge,
-            color = MaterialTheme.colorScheme.onSurfaceVariant
-        )
-    }
-    Spacer(Modifier.height(8.dp))
-
-    FlowRow(
-        horizontalArrangement = Arrangement.spacedBy(8.dp),
-        verticalArrangement = Arrangement.spacedBy(8.dp),
-        modifier = Modifier.fillMaxWidth()
-    ) {
-        memberGroups.forEach { group ->
-            InputChip(
-                selected = false,
-                onClick = { onRemoveGroup(group.id) },
-                label = { Text(group.name) },
-                trailingIcon = {
-                    IconRemoveCircle(modifier = Modifier.size(18.dp))
-                }
-            )
-        }
-    }
-
-    if (availableGroups.isNotEmpty()) {
-        Spacer(Modifier.height(4.dp))
-        var expanded by remember { mutableStateOf(false) }
-        Box {
-            FilledTonalButton(
-                onClick = { expanded = true },
-                modifier = Modifier.fillMaxWidth()
-            ) {
-                IconGroup()
-                Spacer(Modifier.width(8.dp))
-                Text(stringResource(R.string.add_to_group))
-            }
-            DropdownMenu(expanded = expanded, onDismissRequest = { expanded = false }) {
-                availableGroups.forEach { group ->
-                    DropdownMenuItem(
-                        text = { Text(group.name) },
-                        onClick = {
-                            onAddGroup(group.id)
-                            expanded = false
-                        }
-                    )
-                }
-            }
-        }
-    }
+    MultiCategoryPicker(
+        label = stringResource(R.string.groups),
+        selected = memberGroups,
+        available = availableGroups,
+        itemLabel = { it.name },
+        onAdd = { onAddGroup(it.id) },
+        onRemove = { onRemoveGroup(it.id) },
+        chipModifier = { group ->
+            if (sharedId == null) Modifier
+            else Modifier.sharedContainer("contact-group-$sharedId-${group.id}")
+        },
+    )
 }
 
 @Composable
@@ -712,11 +728,23 @@ private fun AddPictureSection(
     viewModel: ContactViewModel,
     onClick: () -> Unit,
     removePhoto: () -> Unit,
+    /**
+     * Contact id when editing an existing contact, pairing this photo with the avatar on the detail
+     * page so the image carries through. Null for a new contact, which has nothing to morph from.
+     */
+    sharedKey: Any? = null,
 ) {
-    Column(horizontalAlignment = Alignment.CenterHorizontally, modifier = Modifier.clickable(onClick = onClick)) {
+    Column(
+        horizontalAlignment = Alignment.CenterHorizontally,
+        modifier = Modifier.clickable(onClick = onClick),
+    ) {
         Box(
             modifier = Modifier
                 .size(120.dp)
+                .then(
+                    if (sharedKey == null) Modifier
+                    else Modifier.sharedContent("contact-avatar-$sharedKey")
+                )
                 .clip(CircleShape)
                 .background(MaterialTheme.colorScheme.secondaryContainer),
             contentAlignment = Alignment.Center

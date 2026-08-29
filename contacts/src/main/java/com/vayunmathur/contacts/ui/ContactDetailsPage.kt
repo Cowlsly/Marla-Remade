@@ -43,9 +43,16 @@ import com.vayunmathur.library.ui.DetailLazyColumn
 import com.vayunmathur.library.ui.IconButton
 import com.vayunmathur.library.ui.MaterialTheme
 import com.vayunmathur.library.ui.Surface
+import com.vayunmathur.library.util.exitDownward
+import com.vayunmathur.library.util.sharedContainer
+import com.vayunmathur.library.util.sharedContent
 import com.vayunmathur.library.ui.Text
-import androidx.compose.runtime.Composable
 import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.compose.animation.core.animateDpAsState
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.getValue
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.compose.runtime.getValue
@@ -55,6 +62,9 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
+import androidx.compose.foundation.layout.FlowRow
+import androidx.compose.foundation.layout.offset
+import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
@@ -64,6 +74,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
 import androidx.core.content.FileProvider
@@ -106,6 +117,7 @@ import com.vayunmathur.library.ui.ringtonePickerResult
 import com.vayunmathur.library.ui.ringtoneTitle
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.filterNotNull
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -159,6 +171,7 @@ fun ContactDetailsPage(
     val groups by viewModel.groups.collectAsStateWithLifecycle()
 
     val scope = rememberCoroutineScope()
+
     val shareContactLabel = stringResource(R.string.share_contact)
     val ringtonePickerTitle = stringResource(R.string.select_ringtone)
     val ringtoneLauncher = rememberLauncherForActivityResult(
@@ -219,6 +232,14 @@ fun ContactDetailsScreen(
 
     val scope = rememberCoroutineScope()
 
+    // Only what is on screen when the page arrives should stagger in. A section further down is
+    // composed because the user scrolled to it, and delaying that would just feel like lag.
+    var arriving by remember { mutableStateOf(true) }
+    LaunchedEffect(Unit) {
+        delay(StaggerWindowMillis)
+        arriving = false
+    }
+
     DetailLazyColumn(
         title = "",
         onNavigateBack = if (showBackButton) actions::closeContact else null,
@@ -245,21 +266,28 @@ fun ContactDetailsScreen(
     ) {
 
             item {
+                // Not staggered: this is where the container transform from the list row lands, and a
+                // second entrance animation on top of the morph is what made it look broken before.
                 ProfileHeader(contact, actions::decodePhoto)
             }
 
             item {
-                ActionButtonsRow(
-                    details.phoneNumbers.firstOrNull()?.number,
-                    details.emails.firstOrNull()?.address,
-                    platforms,
-                    state.isGoogleMeetInstalled
-                )
+                Box(Modifier.staggered(index = 0, arriving = arriving)) {
+                    ActionButtonsRow(
+                        details.phoneNumbers.firstOrNull()?.number,
+                        details.emails.firstOrNull()?.address,
+                        platforms,
+                        state.isGoogleMeetInstalled
+                    )
+                }
             }
 
             if (details.phoneNumbers.isNotEmpty()) {
                 item {
-                    Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                    Column(
+                        modifier = Modifier.staggered(index = 1, arriving = arriving),
+                        verticalArrangement = Arrangement.spacedBy(2.dp),
+                    ) {
                         details.phoneNumbers.forEachIndexed { index, phone ->
                             var showCallDropdown by remember(phone.id) { mutableStateOf(false) }
                             var showSmsDropdown by remember(phone.id) { mutableStateOf(false) }
@@ -302,6 +330,7 @@ fun ContactDetailsScreen(
                                     )
                                 },
                                 shape = groupShape(index, details.phoneNumbers.size),
+                                modifier = Modifier.sharedContainer("contact-phone-${phone.id}"),
                             )
                         }
                     }
@@ -309,7 +338,10 @@ fun ContactDetailsScreen(
             }
             if (details.emails.isNotEmpty()) {
                 item {
-                    Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                    Column(
+                        modifier = Modifier.staggered(index = 2, arriving = arriving),
+                        verticalArrangement = Arrangement.spacedBy(2.dp),
+                    ) {
                         details.emails.forEachIndexed { index, email ->
                             DetailItem(
                                 icon = { IconMail() },
@@ -319,6 +351,7 @@ fun ContactDetailsScreen(
                                     ExternalIntents.sendEmail(context, email.address)
                                 },
                                 shape = groupShape(index, details.emails.size),
+                                modifier = Modifier.sharedContainer("contact-email-${email.id}"),
                             )
                         }
                     }
@@ -422,6 +455,9 @@ fun ContactDetailsScreen(
                                     data = group.name,
                                     label = stringResource(R.string.groups),
                                     shape = groupShape(index, contactGroups.size),
+                                    modifier = Modifier.sharedContainer(
+                                        "contact-group-${contact.id}-${group.id}"
+                                    ),
                                 )
                             }
                         }
@@ -437,36 +473,116 @@ fun ContactDetailsScreen(
                         data = ringtoneTitle(context, contact.customRingtone),
                         label = stringResource(R.string.ringtone),
                         onClick = { actions.pickRingtone(contact) },
+                        // The groups block above this one grows downwards as it morphs into the editor,
+                        // travelling straight over this row. Fading in place would leave it half-legible
+                        // underneath; moving with the traveller gets it out of the way.
+                        modifier = Modifier.exitDownward(),
                     )
                 }
             }
         }
 }
 
+/**
+ * How long after the page appears a section still counts as "arriving".
+ *
+ * Comfortably longer than the last stagger step plus its spring, so nothing is cut off, but short
+ * enough that a section the user scrolls down to is composed past the window and simply appears.
+ */
+private const val StaggerWindowMillis = 400L
+private const val StaggerStepMillis = 45L
+
+/**
+ * A short rise-and-fade so the page reads as assembling under the header rather than appearing all at
+ * once. [index] is the section's position in that sequence.
+ *
+ * [arriving] is captured on first composition, not observed: a section composed after the entrance
+ * window has been scrolled to, and should be visible immediately rather than animate.
+ */
+@Composable
+private fun Modifier.staggered(index: Int, arriving: Boolean): Modifier {
+    var shown by remember { mutableStateOf(!arriving) }
+    LaunchedEffect(Unit) {
+        if (!shown) {
+            delay(index * StaggerStepMillis)
+            shown = true
+        }
+    }
+    val motion = MaterialTheme.motionScheme
+    val lift by animateDpAsState(if (shown) 0.dp else 12.dp, motion.defaultSpatialSpec())
+    val fade by animateFloatAsState(if (shown) 1f else 0f, motion.defaultEffectsSpec())
+    return this.offset(y = lift).alpha(fade)
+}
+
 @Composable
 fun ProfileHeader(contact: Contact, decodePhoto: ((String) -> Bitmap?)? = null) {
     Column(
         horizontalAlignment = androidx.compose.ui.Alignment.CenterHorizontally,
-        modifier = Modifier.fillMaxWidth().padding(vertical = 16.dp)
+        // No whole-block shared key. The avatar, each name part and the company pair up individually
+        // with their counterparts in the list row and in the editor, and a container morph on top of
+        // those would drag the same content to a second destination at the same time.
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(vertical = 16.dp)
     ) {
         ContactAvatar(
             contact = contact,
             decodePhoto = decodePhoto,
-            modifier = Modifier.size(100.dp),
+            modifier = Modifier
+                .size(100.dp)
+                .sharedContent("contact-avatar-${contact.id}"),
             initialsStyle = MaterialTheme.typography.headlineLarge,
         )
 
         Spacer(modifier = Modifier.size(16.dp))
 
-        Text(
-            text = contactDisplayName(contact),
-            style = MaterialTheme.typography.headlineMedium,
-            fontWeight = FontWeight.SemiBold
+        // Composed from the structured name rather than the joined display name, so that each part can
+        // travel to the field that owns it when this page morphs into the editor. A single Text could
+        // only ever land in one of them.
+        val name = contact.name
+        val parts = listOfNotNull(
+            name.namePrefix.takeIf { it.isNotBlank() }?.let { "nameprefix" to it },
+            name.firstName.takeIf { it.isNotBlank() }?.let { "firstname" to it },
+            name.middleName.takeIf { it.isNotBlank() }?.let { "middlename" to it },
+            name.lastName.takeIf { it.isNotBlank() }?.let { "lastname" to it },
+            name.nameSuffix.takeIf { it.isNotBlank() }?.let { "namesuffix" to it },
         )
+        FlowRow(
+            // Full width so the arrangement always has room to centre within. Without it the row
+            // shrinks to its content and relies on the parent Column to centre it, which silently
+            // stops working once a name is wide enough to fill the width - the point at which each
+            // wrapped line needs centring most.
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(
+                6.dp,
+                androidx.compose.ui.Alignment.CenterHorizontally,
+            ),
+            verticalArrangement = Arrangement.spacedBy(2.dp),
+        ) {
+            parts.forEach { (slot, text) ->
+                Text(
+                    text = text,
+                    style = MaterialTheme.typography.headlineMedium,
+                    fontWeight = FontWeight.SemiBold,
+                    textAlign = TextAlign.Center,
+                    modifier = Modifier.sharedContainer("contact-$slot-${contact.id}"),
+                )
+            }
+        }
+        if (contact.nickname.nickname.isNotBlank()) {
+            Text(
+                text = contact.nickname.nickname,
+                style = MaterialTheme.typography.titleMedium,
+                textAlign = TextAlign.Center,
+                modifier = Modifier.sharedContainer("contact-nickname-${contact.id}"),
+            )
+        }
         Text(
             text = contact.org.company,
             style = MaterialTheme.typography.bodyLarge,
-            fontWeight = FontWeight.SemiBold
+            fontWeight = FontWeight.SemiBold,
+            textAlign = TextAlign.Center,
+            modifier = Modifier.sharedContainer("contact-company-${contact.id}")
         )
     }
 }
@@ -687,14 +803,14 @@ fun DetailItem(
     dropdownContent: (@Composable () -> Unit)? = null,
     trailingDropdownContent: (@Composable () -> Unit)? = null,
     shape: androidx.compose.ui.graphics.Shape = RoundedCornerShape(16.dp),
+    modifier: Modifier = Modifier,
 ) {
     val clipboard = LocalClipboard.current
     val scope = rememberCoroutineScope()
-
     Surface(
         shape = shape,
         color = MaterialTheme.colorScheme.surfaceVariant,
-        modifier = Modifier
+        modifier = modifier
             .fillMaxWidth()
             .combinedClickable(
                 onClick = onClick ?: { },
