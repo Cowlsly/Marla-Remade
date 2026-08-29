@@ -6,15 +6,19 @@ import androidx.compose.animation.ContentTransform
 import androidx.compose.animation.ExperimentalSharedTransitionApi
 import androidx.compose.animation.SharedTransitionLayout
 import androidx.compose.animation.SharedTransitionScope
+import androidx.compose.animation.core.CubicBezierEasing
 import androidx.compose.animation.core.FiniteAnimationSpec
+import androidx.compose.animation.core.LinearEasing
 import androidx.compose.animation.core.Spring
 import androidx.compose.animation.core.spring
+import androidx.compose.animation.core.tween
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.scaleIn
 import androidx.compose.animation.scaleOut
 import androidx.compose.animation.slideInHorizontally
 import androidx.compose.animation.slideOutHorizontally
+import androidx.compose.animation.slideOutVertically
 import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.consumeWindowInsets
@@ -34,6 +38,7 @@ import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.SnackbarResult
 import androidx.compose.material3.Text
 import androidx.compose.material3.adaptive.ExperimentalMaterial3AdaptiveApi
+import androidx.compose.material3.adaptive.currentWindowAdaptiveInfo
 import androidx.compose.material3.adaptive.navigation3.ListDetailSceneStrategy
 import androidx.compose.material3.adaptive.navigation3.rememberListDetailSceneStrategy
 import androidx.compose.runtime.Composable
@@ -57,6 +62,7 @@ import androidx.navigation3.scene.DialogSceneStrategy
 import androidx.navigation3.scene.Scene
 import androidx.navigation3.ui.LocalNavAnimatedContentScope
 import androidx.navigation3.ui.NavDisplay
+import androidx.window.core.layout.WindowSizeClass
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.asSharedFlow
 
@@ -307,14 +313,22 @@ private fun rememberNavTransitions(): NavTransitions {
 /**
  * How a morphing element travels between its two positions.
  *
- * Deliberately *not* from the motion scheme. Every expressive spatial spring is underdamped on
- * purpose - the default is damping 0.8 at stiffness 380, and the fast one 0.6 - which gives a short
- * slide a pleasant overshoot. A bounds morph is a different case: the element crosses most of the
- * screen and changes size, so an overshoot means it visibly flies past its target and rubber-bands
- * back. Same stiffness as the expressive default, critically damped.
+ * A tween rather than a spring, and that is not a style choice. Predictive back drives the transition
+ * by gesture *fraction*, seeking it back and forth as the finger moves, and only duration-based specs
+ * can be seeked. A spring has no notion of "40% of the way through", so under the gesture the element
+ * would sit still and then snap into place on release.
+ *
+ * Also not from the motion scheme, whose spatial springs are all deliberately underdamped (0.8 by
+ * default, 0.6 for fast). An overshoot on a bounds morph means the element visibly flies past its
+ * target and rubber-bands back, which is far more obvious across a long travel than on a short slide.
  */
+private const val NavMorphMillis = 350
+
+/** M3's emphasized curve: slow start, quick middle, gentle settle. */
+private val NavMorphEasing = CubicBezierEasing(0.2f, 0f, 0f, 1f)
+
 private val NavMorphBounds: FiniteAnimationSpec<Rect> =
-    spring(dampingRatio = Spring.DampingRatioNoBouncy, stiffness = 380f)
+    tween(NavMorphMillis, easing = NavMorphEasing)
 
 private val NavMorphBoundsTransform = BoundsTransform { _, _ -> NavMorphBounds }
 
@@ -322,10 +336,11 @@ private val NavMorphBoundsTransform = BoundsTransform { _, _ -> NavMorphBounds }
  * The crossfade between the two contents inside a morphing container.
  *
  * Faster than the bounds travel on purpose: the old content should be gone well before the container
- * finishes resizing, or both are legible at once and the item appears to contain two things.
+ * finishes resizing, or both are legible at once and the item appears to contain two things. Linear,
+ * and duration-based for the same seekability reason as the bounds above.
  */
 private val NavMorphContentFade: FiniteAnimationSpec<Float> =
-    spring(dampingRatio = Spring.DampingRatioNoBouncy, stiffness = 1600f)
+    tween(NavMorphMillis / 2, easing = LinearEasing)
 
 /**
  * The scopes [sharedContainer] and [sharedContent] need to morph a component across a destination
@@ -336,6 +351,16 @@ private val NavMorphContentFade: FiniteAnimationSpec<Float> =
  * legitimate caller that should simply not animate rather than crash.
  */
 private val LocalSharedTransitionScope = staticCompositionLocalOf<SharedTransitionScope?> { null }
+
+/**
+ * True when the host is showing more than one pane side by side.
+ *
+ * A morph is then meaningless and actively broken: on a two-pane layout the list and the detail are
+ * composed *at the same time*, so the row and the header the row would morph into are both on screen.
+ * There is no transition to animate, and two live shared elements holding one key cannot be matched.
+ * [sharedContainer] and [sharedContent] step aside rather than produce that.
+ */
+private val LocalNavMultiPane = staticCompositionLocalOf { false }
 
 /** Internal because [EntryProviderScope.entry] is a public inline function and has to reach it. */
 @PublishedApi
@@ -364,6 +389,7 @@ internal val LocalEntryAnimatedScope = staticCompositionLocalOf<AnimatedVisibili
 @OptIn(ExperimentalSharedTransitionApi::class)
 @Composable
 fun Modifier.sharedContainer(key: Any): Modifier {
+    if (LocalNavMultiPane.current) return this
     val shared = LocalSharedTransitionScope.current ?: return this
     val animated = LocalEntryAnimatedScope.current ?: return this
     return with(shared) {
@@ -388,6 +414,7 @@ fun Modifier.sharedContainer(key: Any): Modifier {
 @OptIn(ExperimentalSharedTransitionApi::class)
 @Composable
 fun Modifier.sharedContent(key: Any): Modifier {
+    if (LocalNavMultiPane.current) return this
     val shared = LocalSharedTransitionScope.current ?: return this
     val animated = LocalEntryAnimatedScope.current ?: return this
     return with(shared) {
@@ -421,6 +448,10 @@ fun <T: NavKey> MainNavigation(
     val resultRegistry = remember { NavResultRegistry() }
     val snackbarHostState = remember { SnackbarHostState() }
     val transitions = rememberNavTransitions()
+
+    // Matches the width at which the list-detail strategy starts showing two panes at once.
+    val multiPane = currentWindowAdaptiveInfo().windowSizeClass
+        .isWidthAtLeastBreakpoint(WindowSizeClass.WIDTH_DP_MEDIUM_LOWER_BOUND)
 
     val resolvedContainerColor = containerColor.takeOrElse { MaterialTheme.colorScheme.background }
 
@@ -464,7 +495,8 @@ fun <T: NavKey> MainNavigation(
             // screens merely swapping underneath it. See sharedContainer.
             SharedTransitionLayout {
                 CompositionLocalProvider(
-                    LocalSharedTransitionScope provides this@SharedTransitionLayout
+                    LocalSharedTransitionScope provides this@SharedTransitionLayout,
+                    LocalNavMultiPane provides multiPane,
                 ) {
                     NavDisplay(
                         // consumeWindowInsets before imePadding: when a bottom bar is
@@ -520,6 +552,33 @@ fun <T: NavKey> rememberNavBackStack(vararg elements: T): NavBackStack<T> {
         @Suppress("UNCHECKED_CAST")
         (retained.stack as? NavBackStack<T>)
             ?: NavBackStack(elements).also { retained.stack = it }
+    }
+}
+
+/**
+ * Sends just this element down and out of the window as the screen leaves, instead of fading in place.
+ *
+ * Narrow tool, and deliberately not the default for a morph. Use it only where something above this
+ * element travels *downwards over it* during the transition: a fading element still occupies its space
+ * for the whole fade, so the traveller crosses over something half-legible. Moving it in the same
+ * direction as the traveller clears the path.
+ *
+ * Everywhere else this is wrong. Vertical movement reads as the screen falling apart, and applying it
+ * broadly costs the calm of a plain crossfade for no gain - which is why it is opt-in per element.
+ *
+ * No-ops outside a [MainNavigation].
+ */
+@Composable
+fun Modifier.exitDownward(): Modifier {
+    val scope = LocalEntryAnimatedScope.current ?: return this
+    val motion = MaterialTheme.motionScheme
+    val offset = motion.defaultSpatialSpec<IntOffset>()
+    val alpha = motion.defaultEffectsSpec<Float>()
+    return with(scope) {
+        this@exitDownward.animateEnterExit(
+            enter = fadeIn(alpha),
+            exit = fadeOut(alpha) + slideOutVertically(offset) { it },
+        )
     }
 }
 
