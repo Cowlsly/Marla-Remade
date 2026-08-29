@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Fetch SMaLL-100's int8 ONNX export and build the two files `:translate` downloads.
+"""Fetch SMaLL-100's checkpoint and build the two files `:translate` downloads.
 
 # Why this exists
 
@@ -14,30 +14,40 @@ It is not folded into `fetch_and_convert.sh` because these are **runtime downloa
 assets: the output goes to a build directory and then to the mirror, so there is nothing for that
 script's in-repo digest table to compare against.
 
+# Two repos, and why the fp32 one
+
+`alirezamsh/small100` is the model, MIT-licensed, and supplies the weights and both tokenizer
+inputs. `casawolice/small100-onnx` supplies only `lang_tokens.json`, so the 100 `__xx__` ids are
+read rather than transcribed a second time - `Small100Model.LANG_ORDER` already transcribes the
+codes. Its `sentencepiece.bpe.model` and `vocab.json` are byte-identical to the fp32 repo's, which
+is how the two are known to be the same checkpoint.
+
+That repo also has an int8 ONNX export, and it is **not** used. It quantises per tensor rather
+than per output channel, and it carries the tied 131M-parameter embedding three times, which is
+why its deployment set is 609 MB against the 318 MiB this produces. See `CHECKPOINTS` in
+`scripts/ml/maml_convert.py`.
+
 # The pins, and what each one catches
 
 * **File SHA-256**, below. Catches an upstream re-export at the same revision, or a truncated
   download. `sentencepiece.bpe.model`'s digest is the one already pinned in `Small100Model.kt`,
   which is the only thread connecting the mirror's blobs to a named upstream repo.
-* **The layer table digest** `maml_convert.EXPECTED_DIGEST` pins. Catches an export whose
-  *structure* moved, which is what would make the hardcoded Rust forward pass in
-  `nets::small100` read the right shapes holding the wrong numbers.
+* **The parameter inventory** `maml_convert.check_checkpoint` asserts - every name and every
+  shape. Catches a checkpoint whose *structure* moved, which is what would make the hardcoded
+  Rust forward pass in `nets::small100` read the right shapes holding the wrong numbers. It is
+  also what catches a transposed projection.
+* **The layer table digest** `maml_convert.EXPECTED_DIGEST` pins, over the emitted order.
 * **`config.json`**, which is fetched and checked but not converted, because the architecture
   constants below are transcribed from it and `nets::small100` hardcodes them.
 
-None of the three checks the numbers. `scripts/ml/onnx_parity.py` does.
-
-# The export is already int8
-
-Upstream ran `onnxruntime.quantization.quantize_dynamic(weight_type=QInt8)`, so every `MatMul`
-is a `MatMulInteger` and the 131M-parameter embedding `Gather` is int8 too. That is the whole
-reason this port is worth doing: ncnn could not quantise the embedding, which is why the model on
-the mirror is 1.14 GB. See `scripts/ml/maml_convert.py` for what the converter does with it.
+The int8 fidelity gate in `maml_convert.collect_small100` is the only one of these that looks at
+the numbers, and it only compares the quantisation against the weight it came from.
+`scripts/ml/onnx_parity.py` is what compares the forward pass.
 
 Usage:
 
     python scripts/ml/fetch_small100.py                 # verify digests, build the two files
-    python scripts/ml/fetch_small100.py --work DIR      # keep the ONNX somewhere specific
+    python scripts/ml/fetch_small100.py --work DIR      # keep the checkpoint somewhere specific
     python scripts/ml/fetch_small100.py --print-digests # after an intentional upstream bump
 """
 
@@ -49,12 +59,16 @@ import subprocess
 import sys
 import tempfile
 
-REPO = "casawolice/small100-onnx"
+REPO = "alirezamsh/small100"
 
 # Pinned to a commit rather than to `main`, for the reason `fetch_and_convert.sh` gives: the
 # digests below would catch a silent upstream change anyway, but a pinned revision tells you the
 # upstream *revision* that moved rather than just that some bytes differ.
-REVISION = "5c2c73ac70bee9c58f5a7ac5e84a36bee25db8ee"
+REVISION = "8ab680e26a596d2e3d2d2d17ae0f68df1037328c"
+
+# Only `lang_tokens.json` comes from here. See the module docstring.
+LANG_REPO = "casawolice/small100-onnx"
+LANG_REVISION = "5c2c73ac70bee9c58f5a7ac5e84a36bee25db8ee"
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(os.path.dirname(HERE))
@@ -64,8 +78,7 @@ ROOT = os.path.dirname(os.path.dirname(HERE))
 # `build/` is already gitignored.
 OUT = os.path.join(ROOT, "build", "small100")
 
-ENCODER = "onnx/encoder_model.onnx"
-DECODER = "onnx/decoder_model_merged.onnx"
+CHECKPOINT = "model.safetensors"
 
 # The three files the tokenizer table is built from. `vocab.json` decides ids because it is the
 # fairseq order; the `.bpe.model` supplies merge ranks; `lang_tokens.json` supplies the 100
@@ -75,19 +88,18 @@ VOCAB = "vocab.json"
 LANGS = "lang_tokens.json"
 CONFIG = "config.json"
 
-# SHA-256 of every file this reads, at REVISION. Not the whole repo: the sample code,
-# `tokenizer.json` and the 3.7 MB `added_tokens.json` are not fetched, so pinning them would pin
-# something never downloaded.
+# SHA-256 of every file this reads, at the pinned revisions. Not the whole repo: the 1.86 GB
+# `model.onnx` and the 1.33 GB `pytorch_model.bin` say the same thing as the checkpoint below, so
+# pinning them would pin something never downloaded.
 DIGESTS = {
-    ENCODER: "a130f553106646e56c1908094074f354353c45d86b3e8d222b037784035e6dcd",
-    DECODER: "f966ce4f1f484c2307dc007ef0beadc3a1651220c1ff9b33ea8dddbce468a4b0",
+    CHECKPOINT: "dd3b845a36ea4ed90437fd0b9b477e30c21f144d3658679fd5c945e3c96b0fbc",
     SPM: "d8f7c76ed2a5e0822be39f0a4f95a55eb19c78f4593ce609e2edbc2aea4d380a",
     VOCAB: "b6e77e474aeea8f441363aca7614317c06381f3eacfe10fb9856d5081d1074cc",
-    LANGS: "c638e65941c57577fff6321d5be72b2b25afc39fde7d6a48adecd2e44b504ddf",
-    CONFIG: "4ba2f8f7c5ec286bdb2088ac3b8d0ca3b8b19eb4f107c7c3a44205ba15873bb2",
+    CONFIG: "26fd3989cea6037d432c480f5181d05c088a613394d0361edc6605a6a1058715",
 }
-
-WANTED = list(DIGESTS)
+LANG_DIGESTS = {
+    LANGS: "c638e65941c57577fff6321d5be72b2b25afc39fde7d6a48adecd2e44b504ddf",
+}
 
 # Transcribed from the pinned `config.json`, and asserted against it below rather than trusted.
 # `Small100Model.kt` claimed "36 enc + 13 dec" layers, which were ncnn's fused counts and do not
@@ -141,7 +153,7 @@ def check_architecture(path):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    parser.add_argument("--work", help="where to keep the ONNX (default: a temp directory)")
+    parser.add_argument("--work", help="where to keep the checkpoint (default: a temp directory)")
     parser.add_argument("-o", "--out", default=OUT, help="where to write the two files")
     parser.add_argument(
         "--print-digests",
@@ -155,26 +167,36 @@ def main():
     except ImportError:
         raise SystemExit("needs huggingface_hub: python -m pip install huggingface_hub")
 
-    work = args.work or os.path.join(tempfile.gettempdir(), "small100-onnx")
+    work = args.work or os.path.join(tempfile.gettempdir(), "small100")
     local = snapshot_download(
-        repo_id=REPO, revision=REVISION, allow_patterns=WANTED, local_dir=work
+        repo_id=REPO, revision=REVISION, allow_patterns=list(DIGESTS), local_dir=work
+    )
+    langs = snapshot_download(
+        repo_id=LANG_REPO,
+        revision=LANG_REVISION,
+        allow_patterns=list(LANG_DIGESTS),
+        local_dir=work + "-langs",
     )
     print(f"{REPO}@{REVISION[:12]} in {local}")
+    print(f"{LANG_REPO}@{LANG_REVISION[:12]} in {langs}")
 
+    found = [(local, DIGESTS), (langs, LANG_DIGESTS)]
     if args.print_digests:
-        for name in WANTED:
-            print(f'    {name}: "{sha256(os.path.join(local, name))}",')
+        for root, pins in found:
+            for name in pins:
+                print(f'    {name}: "{sha256(os.path.join(root, name))}",')
         return 0
 
-    for name, expected in DIGESTS.items():
-        got = sha256(os.path.join(local, name))
-        if got != expected:
-            raise SystemExit(
-                f"{name}\n  sha256 {got}\n  pinned {expected}\n"
-                "The upstream export changed. Re-read it, check the Rust forward pass still\n"
-                "matches, then re-pin with --print-digests."
-            )
-    print(f"{len(DIGESTS)} upstream digests match")
+    for root, pins in found:
+        for name, expected in pins.items():
+            got = sha256(os.path.join(root, name))
+            if got != expected:
+                raise SystemExit(
+                    f"{name}\n  sha256 {got}\n  pinned {expected}\n"
+                    "The upstream export changed. Re-read it, check the Rust forward pass still\n"
+                    "matches, then re-pin with --print-digests."
+                )
+    print(f"{len(DIGESTS) + len(LANG_DIGESTS)} upstream digests match")
     check_architecture(os.path.join(local, CONFIG))
 
     os.makedirs(args.out, exist_ok=True)
@@ -183,8 +205,14 @@ def main():
         "small100_tokenizer.py",
         "--spm", os.path.join(local, SPM),
         "--vocab", os.path.join(local, VOCAB),
-        "--langs", os.path.join(local, LANGS),
+        "--langs", os.path.join(langs, LANGS),
         "-o", tokenizer,
+    )
+    convert(
+        "maml_convert.py",
+        os.path.join(local, CHECKPOINT),
+        "--graph", "small100",
+        "-o", os.path.join(args.out, "small100.maml"),
     )
 
     print(f"\n{args.out}")

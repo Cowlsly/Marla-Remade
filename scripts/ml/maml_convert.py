@@ -39,14 +39,20 @@ byte layout). ONNX tensor layout is preserved verbatim — `[M, C/group, kH, kW]
 `Conv`, `[C, M/group, kH, kW]` for `ConvTranspose` — so nothing here has to agree
 with the shaders about a transpose.
 
+One graph does not come from an ONNX export at all. SMaLL-100 is read from its PyTorch
+`.safetensors` and quantised to int8 here, because the only ONNX exports that exist for it are
+already int8 and quantised per *tensor*; see [`CHECKPOINTS`] for why that is not usable.
+
     ./scripts/ml/maml_convert.py --check model.onnx --graph u2netp
     ./scripts/ml/maml_convert.py model.onnx --graph u2netp -o out.maml
     ./scripts/ml/maml_convert.py model.onnx --graph u2netp --print-layers
+    ./scripts/ml/maml_convert.py model.safetensors --graph small100 -o out.maml
 """
 
 import argparse
 import hashlib
 import math
+import os
 import struct
 import sys
 
@@ -64,7 +70,7 @@ from onnx import numpy_helper, shape_inference
 #     4   4   u32 format version
 #     8   4   u32 graph id — the runtime rejects a file built for another net
 #    12   4   u32 tensor count
-#    16  32   source ONNX SHA-256, so a shipped asset traces to its upstream
+#    16  32   source SHA-256 of the ONNX or checkpoint, so a shipped asset traces upstream
 #    48   4   u32 offset of the data section
 #    52   4   u32 length of the data section
 #    56   8   reserved, zero
@@ -97,6 +103,11 @@ ALIGNMENT = 16
 
 SPEC = __doc__
 
+# The floor for `cosine(fp32 weight, int8 * scale)` per tensor. Supertonic's text encoder was
+# reverted to fp16 at 0.99212 while its sampler shipped at 0.99997, so this is set where a layer
+# that quantises this badly is worth looking at rather than shipping.
+MIN_INT8_COSINE = 0.999
+
 # Graph ids. Shared with `library/ml/src/main/rust/src/weights.rs`; changing one
 # without the other is what the id exists to catch.
 GRAPHS = {
@@ -115,6 +126,8 @@ GRAPHS = {
     "supertonic_dp": 12,
     "supertonic_ttl": 13,
     "supertonic_ve": 14,
+    # Read from a PyTorch checkpoint rather than an ONNX graph; see [`CHECKPOINTS`].
+    "small100": 15,
 }
 
 # SHA-256 over the ordered layer table (see `layer_table_digest`). Regenerate with
@@ -130,6 +143,7 @@ EXPECTED_DIGEST = {
     "supertonic_dp": "d9a548e1f1ed908a3b0ad27ab543dd7521858f9110b426edb1ed64ba1f1a13e4",
     "supertonic_ttl": "92d0fa8ae73d4a8a223c77fb4230e390df580744014a3fcf3211ab72a988c020",
     "supertonic_ve": "48ab5789e8839507ff93e099dc0f61940f25da9ba6201651784f6e68598199e2",
+    "small100": "c9f05f2fb686aa53137ca06b521baf6d7a00f32cfb4ea42bd14a5c3e7cf6c086",
 }
 
 # Graphs that are one **module** of a larger export, keyed by the node-name prefix that
@@ -199,6 +213,43 @@ EXPECTED_OPS = {
     "mobilefacenet": {
         "Conv": 49, "PRelu": 34, "Add": 12, "BatchNormalization": 1, "Flatten": 1,
         "Gemm": 1,
+    },
+}
+
+# Graphs read from a **PyTorch checkpoint** rather than an ONNX graph, keyed by graph id name.
+#
+# Every other net here converts from a frozen ONNX export, and for good reason: the graph records
+# the shapes and the op inventory, so `check_graph` can refuse an export whose structure moved
+# without anyone transcribing anything. A checkpoint has neither. It is used anyway for SMaLL-100,
+# because the only ONNX exports that exist for it are already int8:
+#
+# * `casawolice/small100-onnx` quantises **per tensor**, not per output channel. Its embedding's
+#   row absmax spans 0.258 to 1.740, so one scale for the whole table costs a factor of four in
+#   resolution against the per-row scale `quantise_per_channel` produces, and up to 6.7x on the
+#   quietest rows. That resolution cannot be recovered by requantising: it is already gone.
+# * It carries the 131M-parameter embedding **three times** - `embed_tokens.weight` in the
+#   encoder, `model.shared.weight` in the decoder and a separately quantised `[1024, 128112]`
+#   `lm_head` - which is why that deployment set is 609 MB rather than 333 MB. In the checkpoint
+#   the weight is tied and appears exactly once, so the tied head costs nothing.
+# * Its two embedding copies are **uint8 with a zero point of 159**. `conv_point_int8.comp`
+#   computes `scale[o] * sum(int8_w * in)` and has nowhere to put a zero point.
+#
+# What is checked instead is the **exact parameter inventory** - every name and every shape,
+# derived from the constants below rather than listed - which is a stricter guard than the op
+# counts an ONNX graph gets, because it fails on a renamed or resized parameter as well as on a
+# missing one. The layer table digest still covers the order.
+CHECKPOINTS = {
+    "small100": {
+        "d_model": 1024,
+        "encoder_layers": 12,
+        "decoder_layers": 3,
+        "ffn": 4096,
+        "vocab": 128_112,
+        # The tied embedding is 125.1 MiB of int8, and `maxStorageBufferRange`'s guaranteed
+        # minimum is 128 MiB. Emitting it as two tensors over disjoint class ranges keeps every
+        # binding comfortably under that floor and gives `nets::small100` its two logits ops for
+        # free; 128,112 is 2 x 64,056, so the halves are equal and no range is padded.
+        "head_splits": 2,
     },
 }
 
@@ -570,80 +621,218 @@ def check_graph(model, graph_id_name):
         raise SystemExit(f"op counts differ: got {only_got}, expected {only_want}")
 
 
-def quantised_linear(node, held, array, following_bias):
-    """An int8 `MatMulInteger` as a `1 x 1` convolution, plus its scale and bias.
+def open_checkpoint(path):
+    """`(name -> ndarray, {name: shape})` for a `.safetensors` file, read one tensor at a time.
 
-    Returns `(tensors, key)` or `None` if this is not one of the shapes we lower.
+    Lazily, because the checkpoint is 1.33 GB of fp32 and every tensor is quantised to int8 or
+    rounded to fp16 the moment it is read - so holding the whole thing costs 1.3 GB of resident
+    host memory for nothing.
+    """
+    try:
+        from safetensors import safe_open
+    except ImportError:
+        raise SystemExit("needs safetensors: python -m pip install safetensors")
+    handle = safe_open(path, framework="np")
+    shapes = {name: list(handle.get_slice(name).get_shape()) for name in handle.keys()}
+    return handle.get_tensor, shapes
+
+
+def small100_inventory(spec):
+    """`{name: shape}` the checkpoint must hold exactly, derived from [`CHECKPOINTS`].
+
+    Derived rather than transcribed: a list of 275 names would be checked against itself.
+    """
+    d, ffn = spec["d_model"], spec["ffn"]
+    want = {"model.shared.weight": [spec["vocab"], d]}
+    for side, count in (("encoder", spec["encoder_layers"]), ("decoder", spec["decoder_layers"])):
+        want[f"model.{side}.layer_norm.weight"] = [d]
+        want[f"model.{side}.layer_norm.bias"] = [d]
+        for index in range(count):
+            at = f"model.{side}.layers.{index}"
+            attentions = ["self_attn"] + (["encoder_attn"] if side == "decoder" else [])
+            for attention in attentions:
+                want[f"{at}.{attention}_layer_norm.weight"] = [d]
+                want[f"{at}.{attention}_layer_norm.bias"] = [d]
+                for projection in ("q_proj", "k_proj", "v_proj", "out_proj"):
+                    want[f"{at}.{attention}.{projection}.weight"] = [d, d]
+                    want[f"{at}.{attention}.{projection}.bias"] = [d]
+            want[f"{at}.final_layer_norm.weight"] = [d]
+            want[f"{at}.final_layer_norm.bias"] = [d]
+            want[f"{at}.fc1.weight"] = [ffn, d]
+            want[f"{at}.fc1.bias"] = [ffn]
+            want[f"{at}.fc2.weight"] = [d, ffn]
+            want[f"{at}.fc2.bias"] = [d]
+    return want
+
+
+def check_checkpoint(shapes, graph_id_name):
+    """Refuse a checkpoint that is not the architecture the Rust forward pass hardcodes.
 
     # The transpose that would otherwise be silent
 
-    ONNX `MatMul` computes `x @ W`, so its weight is **`[in, out]`**. This runtime indexes a
-    kernel as `[out, in, kh, kw]`. SMaLL-100's attention projections are all 1024 x 1024, so a
-    missed transpose would produce a tensor of exactly the right shape holding exactly the
-    wrong numbers, and the parameter-count check every other net leans on would pass. `fc1` is
-    `[1024, 4096]`, which is the one that would fail loudly - so the transpose is asserted
-    against a non-square layer in the tests rather than trusted here.
+    A `torch.nn.Linear`'s weight is **`[out, in]`**, and this runtime indexes a kernel as
+    `[out, in, kh, kw]`, so a projection needs a reshape and no transpose. ONNX `MatMul` is the
+    other way round - `x @ W` with a `[in, out]` weight - and every attention projection here is
+    square 1024 x 1024, so reading one convention as the other yields a tensor of exactly the
+    right shape holding exactly the wrong numbers, and a parameter count that still adds up.
 
-    # What the export carries, and what is dropped
-
-    Read from `casawolice/small100-onnx` rather than assumed:
-
-    * The weight zero point is a **per-column vector and every entry is 0**, so the quantisation
-      is symmetric and a value is `int8 * scale`. A non-zero one is refused rather than ignored.
-    * The weight scale is **per output column** - a `[1024, 4096]` weight carries a `[4096]`
-      scale. It still multiplies the finished accumulator rather than every tap, so
-      `conv_int8.comp` costs the same as the fp16 path; it just indexes the scale by output
-      channel. A scalar is accepted too, broadcast to one per column, so a per-tensor quantiser
-      also converts.
-    * The *activation* scale and zero point come from a `DynamicQuantizeLinear` at runtime.
-      Both are dropped: activations stay fp16 here, which is simpler than reproducing dynamic
-      quantisation and strictly more accurate, and costs nothing because the weights are what
-      take the space.
+    `fc1` is `[4096, 1024]` and `fc2` is `[1024, 4096]`, so the shape check below is what makes
+    that mistake loud: a transposed checkpoint fails on those four numbers before anything is
+    written. That is the whole reason this asserts shapes rather than just names.
     """
-    if node.op_type != "MatMulInteger" or len(node.input) < 4:
-        return None
-    weight_name, zero_name = node.input[1], node.input[3]
-    if not held(weight_name) or not held(zero_name):
-        return None
-    weight = array(weight_name)
-    if weight.dtype != np.int8 or weight.ndim != 2:
-        return None
-    zero = np.array(array(zero_name)).flatten()
-    if np.any(zero != 0):
+    want = small100_inventory(CHECKPOINTS[graph_id_name])
+    missing = sorted(set(want) - set(shapes))
+    extra = sorted(set(shapes) - set(want))
+    shared = sorted(set(want) & set(shapes))
+    wrong = {n: (shapes[n], want[n]) for n in shared if shapes[n] != want[n]}
+    if missing or extra or wrong:
+        lines = []
+        if missing:
+            lines.append(f"  absent: {missing[:6]}{' ...' if len(missing) > 6 else ''}")
+        if extra:
+            lines.append(f"  unexpected: {extra[:6]}{' ...' if len(extra) > 6 else ''}")
+        for name, (got, expect) in list(wrong.items())[:6]:
+            lines.append(f"  {name}: {got} against {expect}")
         raise SystemExit(
-            f"{node.output[0]}: weight zero point {zero[zero != 0][:4].tolist()} is not 0, so "
-            "the quantisation is not symmetric and `conv_int8.comp` would be wrong"
+            f"{graph_id_name}: the checkpoint is not the architecture nets/{graph_id_name}.rs\n"
+            "hardcodes. A wrong shape here is a wrong forward pass, not a load failure:\n"
+            + "\n".join(lines)
         )
-    scale_name = weight_name.removesuffix("_quantized") + "_scale"
-    if not held(scale_name):
-        raise SystemExit(f"{node.output[0]}: no {scale_name} beside its weight")
-    scale = np.array(array(scale_name)).flatten()
-    inputs, outputs = weight.shape
-    if scale.size == 1:
-        # A per-tensor quantiser. Broadcast rather than special-case it, so the `.maml` layout is
-        # the same either way and the shader has one path.
-        scale = np.repeat(scale, outputs)
-    if scale.size != outputs:
-        raise SystemExit(
-            f"{node.output[0]}: a {scale.size}-element scale for {outputs} output columns; "
-            "`conv_int8.comp` reads one per output channel"
+
+
+def collect_small100(get, spec):
+    """SMaLL-100's checkpoint as the ordered tensor table `nets::small100` indexes.
+
+    Order is the contract, and it is:
+
+        the tied embedding, as `head_splits` disjoint class ranges
+        each encoder layer, in forward order
+        the encoder's final layer norm
+        each decoder layer, in forward order
+        the decoder's final layer norm
+
+    The **tied embedding comes first and appears once**, because it has two roles and neither
+    wants a second copy. `nets::small100` gathers row `t` of it on the host to build the encoder
+    and decoder inputs - the rows are contiguous, and each carries its own scale, which is exactly
+    what a per-output-channel quantiser produces - and binds the same tensors as the kernel of the
+    logits projection. Splitting it by class range is what keeps that binding under
+    `maxStorageBufferRange`; see [`CHECKPOINTS`].
+
+    # What is folded, and what is not
+
+    * `sqrt(d_model)` is **not** folded into the embedding here, unlike the fp16 `Gather` arm in
+      [`collect_layers`]. The host gather applies it while it is still fp32, which is one rounding
+      fewer than scaling an int8 code by its scale and then by `sqrt(1024)`.
+    * The attention query scale is **not** folded into `q_proj`. M2M-100 scales the query by
+      `head_dim ** -0.5` and `head_dim` is 64, which is the `1 / sqrt(head_dim)` `attn_scores`
+      already applies. Folding it would apply it twice.
+    * Sinusoidal positions are not in the checkpoint and are not emitted. They are static, so
+      `nets::small100` computes them and adds them to the gathered rows in fp32, which also
+      removes the `pos_weights.f32.bin` the ncnn build had to download.
+    """
+    layers = []
+    tensors = []
+    # Worst per-tensor cosine between the fp32 weight and `int8 * scale`, which is the numbers
+    # the device will read. This is the only check that the quantisation itself is usable; the
+    # shape assertions in [`check_checkpoint`] are what catch a transpose, since a cosine is
+    # computed against whatever was read and a transposed read agrees with itself perfectly.
+    fidelity = []
+
+    def quantise(name, weight):
+        kernel, scale = quantise_per_channel(weight)
+        back = kernel.astype(np.float32).reshape(weight.shape[0], -1) * scale[:, None]
+        flat = weight.reshape(weight.shape[0], -1)
+        cosine = float(
+            np.dot(flat.ravel(), back.ravel())
+            / max(np.linalg.norm(flat) * np.linalg.norm(back), 1e-30)
         )
-    # `[in, out]` to `[out, in, 1, 1]`.
-    kernel = np.ascontiguousarray(weight.T).reshape(outputs, inputs, 1, 1)
-    bias = following_bias(node, outputs)
-    key = (
-        f"MatMulInteger w={list(kernel.shape)} scale={[outputs]} b={[outputs]} "
-        f"zp=0 dtype=int8"
-    )
-    return [kernel, scale.astype(np.float32), bias], key
+        fidelity.append((cosine, name))
+        return kernel, scale
+
+    def emit(op, name, key, added):
+        layers.append(Layer(len(layers), op, name, key, len(tensors) - added, added))
+
+    def linear(name):
+        """An int8 kernel as `[out, in, 1, 1]`, its per-output-channel scale, and its bias."""
+        weight = get(f"{name}.weight")
+        bias = get(f"{name}.bias")
+        outputs, inputs = weight.shape
+        kernel, scale = quantise(name, weight.reshape(outputs, inputs, 1, 1))
+        tensors.extend([kernel, scale, bias])
+        emit(
+            "Linear8",
+            name,
+            f"Linear8 w={list(kernel.shape)} scale={[outputs]} b={list(bias.shape)} "
+            "zp=0 dtype=int8",
+            3,
+        )
+
+    def layer_norm(name):
+        gamma = get(f"{name}.weight")
+        beta = get(f"{name}.bias")
+        tensors.extend([gamma, beta])
+        emit("LayerNorm", name, f"LayerNorm g={list(gamma.shape)} b={list(beta.shape)}", 2)
+
+    embedding = get("model.shared.weight")
+    splits = spec["head_splits"]
+    classes, width = embedding.shape
+    if classes % splits:
+        raise SystemExit(f"{classes} classes do not divide into {splits} equal ranges")
+    step = classes // splits
+    for part in range(splits):
+        lo = part * step
+        rows = embedding[lo : lo + step]
+        name = f"model.shared.weight[{lo}:{lo + step}]"
+        kernel, scale = quantise(name, rows.reshape(step, width, 1, 1))
+        # `Builder::conv_int8` reads a bias after the scale, and a tied head has none. Zeros are
+        # exact, and recording it in the key means a checkpoint that grows one is not mistaken for
+        # this table.
+        tensors.extend([kernel, scale, np.zeros(step, dtype=np.float32)])
+        emit(
+            "Head",
+            name,
+            f"Head w={list(kernel.shape)} scale={[step]} b={[step]} "
+            f"classes={lo}..{lo + step} zp=0 dtype=int8 b0=synthesised",
+            3,
+        )
+
+    for side, count in (("encoder", spec["encoder_layers"]), ("decoder", spec["decoder_layers"])):
+        for index in range(count):
+            at = f"model.{side}.layers.{index}"
+            # Pre-norm, as `M2M100EncoderLayer` and `M2M100DecoderLayer` are: the norm comes
+            # before the sublayer it feeds and the residual skips both. Emitting in forward order
+            # is what lets the Rust walk the table without an index table.
+            layer_norm(f"{at}.self_attn_layer_norm")
+            for projection in ("q_proj", "k_proj", "v_proj", "out_proj"):
+                linear(f"{at}.self_attn.{projection}")
+            if side == "decoder":
+                layer_norm(f"{at}.encoder_attn_layer_norm")
+                for projection in ("q_proj", "k_proj", "v_proj", "out_proj"):
+                    linear(f"{at}.encoder_attn.{projection}")
+            layer_norm(f"{at}.final_layer_norm")
+            linear(f"{at}.fc1")
+            linear(f"{at}.fc2")
+        layer_norm(f"model.{side}.layer_norm")
+
+    fidelity.sort()
+    for cosine, name in fidelity[:3]:
+        if cosine < MIN_INT8_COSINE:
+            raise SystemExit(
+                f"{name}: int8 * scale correlates {cosine:.6f} with the fp32 weight, under"
+                f" {MIN_INT8_COSINE}.\nQuantising this layer costs too much; exclude it and store"
+                " it fp16 instead."
+            )
+    worst = ", ".join(f"{name} {cosine:.6f}" for cosine, name in fidelity[:3])
+    print(f"int8 fidelity over {len(fidelity)} tensors, worst three: {worst}")
+    return layers, tensors
 
 
 def quantise_per_channel(kernel):
     """An fp32 kernel as `(int8, scale)`, symmetric and absmax, one scale per output channel.
 
-    The counterpart of [`quantised_linear`], which only ever *validated* an export that had
-    already been quantised by onnxruntime. Supertonic's exports are fp32, so quantising them is
-    something this script has to do rather than read off.
+    Every int8 tensor in this tree goes through here. Nothing reads a pre-quantised export:
+    Supertonic's are fp32, and SMaLL-100's only int8 export quantises per tensor, which throws
+    away the resolution this recovers - see [`CHECKPOINTS`].
 
     # Symmetric, with no zero point
 
@@ -738,7 +927,7 @@ def build(layers, tensors, graph_id, onnx_sha256):
 
 def main():
     parser = argparse.ArgumentParser(description=SPEC.splitlines()[0])
-    parser.add_argument("onnx")
+    parser.add_argument("model", help="an ONNX export, or a .safetensors for a CHECKPOINTS graph")
     parser.add_argument("--graph", required=True, choices=sorted(GRAPHS))
     parser.add_argument("-o", "--out", help="where to write the .maml")
     parser.add_argument("--check", action="store_true", help="validate only")
@@ -746,13 +935,20 @@ def main():
     parser.add_argument("--print-digest", action="store_true")
     args = parser.parse_args()
 
-    with open(args.onnx, "rb") as f:
-        raw = f.read()
-    onnx_sha256 = hashlib.sha256(raw).digest()
+    source_sha256 = hashlib.sha256()
+    with open(args.model, "rb") as f:
+        for block in iter(lambda: f.read(1 << 20), b""):
+            source_sha256.update(block)
+    source_size = os.path.getsize(args.model)
 
-    model = onnx.load(args.onnx)
-    check_graph(model, args.graph)
-    layers, tensors = collect_layers(model, MODULES.get(args.graph))
+    if args.graph in CHECKPOINTS:
+        get, shapes = open_checkpoint(args.model)
+        check_checkpoint(shapes, args.graph)
+        layers, tensors = collect_small100(get, CHECKPOINTS[args.graph])
+    else:
+        model = onnx.load(args.model)
+        check_graph(model, args.graph)
+        layers, tensors = collect_layers(model, MODULES.get(args.graph))
 
     digest = layer_table_digest(layers)
     if args.print_digest:
@@ -775,13 +971,13 @@ def main():
         for layer in layers:
             print(f"{layer.index:4d} t{layer.first_tensor:<4d} {layer.key()}  # {layer.name}")
 
-    blob, count = build(layers, tensors, GRAPHS[args.graph], onnx_sha256)
+    blob, count = build(layers, tensors, GRAPHS[args.graph], source_sha256.digest())
     if args.out:
         with open(args.out, "wb") as f:
             f.write(blob)
     print(
         f"{args.graph}: {count} layers, {len(tensors)} tensors, "
-        f"{len(blob)} bytes ({len(raw)} fp32 in)"
+        f"{len(blob)} bytes ({source_size} fp32 in)"
     )
 
 

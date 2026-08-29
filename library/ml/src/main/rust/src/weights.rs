@@ -70,6 +70,12 @@ pub mod graph {
     pub const SUPERTONIC_TTL: u32 = 13;
     /// Supertonic 3's flow-matching sampler. See [`crate::nets::supertonic_sampler`].
     pub const SUPERTONIC_VE: u32 = 14;
+    /// SMaLL-100 translation, encoder and decoder in one file. See [`crate::nets::small100`].
+    ///
+    /// One graph rather than two because the 128,112-row embedding is **tied**: it is the encoder's
+    /// input table, the decoder's input table and the logits kernel, and two files would upload
+    /// 125 MiB of it twice.
+    pub const SMALL100: u32 = 15;
 }
 
 /// One tensor's entry in the table: where it is and what shape it is.
