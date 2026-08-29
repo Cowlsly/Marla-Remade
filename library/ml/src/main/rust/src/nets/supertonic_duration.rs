@@ -101,8 +101,28 @@ const EPSILON: f32 = 1e-5;
 ///
 /// The embedding table (1), six blocks of eight (48), two attention layers of eighteen (36),
 /// `proj_out` (2, the second a synthesised zero bias), the head's first `Gemm` (2), its PReLU
-/// slope (1) and its second `Gemm` (2).
-pub const TENSORS: usize = 92;
+/// slope (1) and its second `Gemm` (2) — 92 at fp16 — plus one per quantised convolution for its
+/// scale. See [`INT8_CONVS`].
+pub const TENSORS: usize = 92 + INT8_CONVS;
+
+/// Convolutions read as int8 rather than fp16, each carrying a third tensor for its scale.
+///
+/// Every ungrouped `1 x 1` in the blocks and the attention layers: two per block (`pwconv1` and
+/// `pwconv2`) and six per attention layer (q, k, v, the output projection and the two
+/// feed-forward projections).
+///
+/// Three of this net's `1 x 1`s are **not** here, and each for a reason the runtime enforces rather
+/// than a judgement call:
+///
+/// * `proj_out` is strided by the whole sequence, and the tiled int8 shader is stride-1 only.
+/// * the head's first `Gemm` carries [`Act::PRelu`], whose per-channel slope wants the same push
+///   offset the dequantisation scale occupies — `Builder::conv_int8` refuses it.
+/// * the head's second `Gemm` is 128 to 1, so quantising it would save 128 bytes while putting the
+///   single value this net exists to produce through a coarser weight.
+///
+/// That leaves 34% of the parameters quantised. The cap is the embedding table, which is 61% of
+/// this net on its own and has no int8 path — `embed.comp` is fp16 only.
+pub const INT8_CONVS: usize = BLOCKS * 2 + ATTN_LAYERS * 6;
 
 /// Latent frames for an utterance of `seconds`, which is what the sampler and the vocoder are
 /// built for.
@@ -135,6 +155,18 @@ impl Layers {
         index
     }
 
+    /// An int8 kernel, its per-output-channel scale, and the bias after that.
+    ///
+    /// Three rather than two, which is why quantising a convolution shifts every later index. The
+    /// order is the one `Builder::conv_int8` reads and `supertonic_fold.py` writes; getting it
+    /// wrong puts an fp16 tensor where the kernel should be, and `WeightSource::shaped_words`
+    /// refuses that rather than reading it as bytes.
+    fn take3(&mut self) -> usize {
+        let index = self.next;
+        self.next += 3;
+        index
+    }
+
     /// A lone tensor: the embedding table, a relative position table, a PReLU slope.
     fn take_one(&mut self) -> usize {
         let index = self.next;
@@ -146,6 +178,11 @@ impl Layers {
 /// A `1 x 1` convolution, which every projection and both head `Gemm`s are.
 fn point(b: &mut Builder, l: &mut Layers, x: Id, out: u32, act: Act) -> Id {
     b.conv(x, l.take(), out, (1, 1), (1, 1), (1, 1), (0, 0, 0, 0), 1, act)
+}
+
+/// [`point`] with an int8 kernel. See [`INT8_CONVS`] for which convolutions get one.
+fn point_int8(b: &mut Builder, l: &mut Layers, x: Id, out: u32, act: Act) -> Id {
+    b.conv_int8(x, l.take3(), out, (1, 1), (1, 1), (1, 1), (0, 0, 0, 0), 1, act)
 }
 
 /// The depthwise convolution along the sequence, padded symmetrically so the length holds.
@@ -193,29 +230,29 @@ pub fn build(weights: &dyn WeightSource, chars: u32) -> Result<Plan, String> {
     for _ in 0..BLOCKS {
         let along = depthwise(b, l, x);
         let normed = b.layer_norm(along, l.take(), EPSILON);
-        let widened = point(b, l, normed, INNER, Act::Gelu);
+        let widened = point_int8(b, l, normed, INNER, Act::Gelu);
         // `pwconv2` carries the block's layer scale, folded in by the converter.
-        let narrowed = point(b, l, widened, D_MODEL, Act::None);
+        let narrowed = point_int8(b, l, widened, D_MODEL, Act::None);
         x = b.add(x, narrowed);
     }
     // The attention encoder is skipped around as a whole, not just per layer.
     let convnext = x;
 
     for _ in 0..ATTN_LAYERS {
-        let q = point(b, l, x, D_MODEL, Act::None);
-        let k = point(b, l, x, D_MODEL, Act::None);
-        let v = point(b, l, x, D_MODEL, Act::None);
+        let q = point_int8(b, l, x, D_MODEL, Act::None);
+        let k = point_int8(b, l, x, D_MODEL, Act::None);
+        let v = point_int8(b, l, x, D_MODEL, Act::None);
         let scores = b.attn_scores_relative(q, k, HEADS, l.take_one(), OFFSETS);
         let probs = b.softmax(scores);
         let mixed = b.attn_apply_relative(probs, v, HEADS, l.take_one(), OFFSETS);
-        let attended = point(b, l, mixed, D_MODEL, Act::None);
+        let attended = point_int8(b, l, mixed, D_MODEL, Act::None);
         // Post-norm: the residual is added first and normalised after.
         let residual = b.add(x, attended);
         x = b.layer_norm(residual, l.take(), EPSILON);
 
         // Both feed-forward convolutions are 1x1 here, so neither has a border.
-        let inner = point(b, l, x, INNER, Act::Relu);
-        let projected = point(b, l, inner, D_MODEL, Act::None);
+        let inner = point_int8(b, l, x, INNER, Act::Relu);
+        let projected = point_int8(b, l, inner, D_MODEL, Act::None);
         let residual = b.add(x, projected);
         x = b.layer_norm(residual, l.take(), EPSILON);
     }
@@ -276,12 +313,13 @@ mod tests {
 
     #[test]
     fn the_tensor_table_matches_the_export() {
-        // The export's initializers total 864,706 parameters. Three differences, each derived
+        // The export's initializers total 864,706 parameters. Four differences, each derived
         // rather than guessed:
         //
         //   - the six `[1, 64, 1]` layer scales fold into their `pwconv2`:        -384
         //   - `proj_out` has no bias in the export, so a zero one is synthesised:  +64
         //   - the head PReLU's single shared slope is widened to one per channel: +127
+        //   - each quantised convolution gains an `[out]` dequantisation scale:  +3072
         //
         // `sentence_token` is not a difference: its 64 values move from a standalone tensor
         // into the embedding table's last row, so the total is unchanged either way.
@@ -292,9 +330,15 @@ mod tests {
             .iter()
             .map(|(_, dims)| dims.iter().map(|&d| d as u64).product::<u64>())
             .sum();
-        assert_eq!(total, 864_706 - 384 + 64 + 127);
+        // The scales, spelled out per shape so a miscount is visible rather than absorbed:
+        // `pwconv1` and both feed-forwards' first stage are `INNER` wide, everything else
+        // `D_MODEL`.
+        let scales = (BLOCKS as u64) * (INNER + D_MODEL) as u64
+            + (ATTN_LAYERS as u64) * (4 * D_MODEL + INNER + D_MODEL) as u64;
+        assert_eq!(scales, 3072);
+        assert_eq!(total, 864_706 - 384 + 64 + 127 + scales);
         // And spelled out, so a reordering that preserved the sum would still be caught.
-        assert_eq!(total, 864_513);
+        assert_eq!(total, 867_585);
     }
 
     #[test]
@@ -407,9 +451,11 @@ mod tests {
             }
         }
         // Per block a depthwise and two 1x1s; per attention layer q/k/v/o and two
-        // feed-forward 1x1s; then `proj_out` and the head's two `Gemm`s.
+        // feed-forward 1x1s; then `proj_out` and the head's two `Gemm`s. All but the depthwise
+        // ones, `proj_out` and the head are quantised - see `INT8_CONVS`.
         let convolutions = BLOCKS * 3 + ATTN_LAYERS * 6 + 3;
-        assert_eq!(counts.get("Conv"), Some(&convolutions), "{counts:?}");
+        assert_eq!(counts.get("Conv"), Some(&(convolutions - INT8_CONVS)), "{counts:?}");
+        assert_eq!(counts.get("ConvInt8"), Some(&INT8_CONVS), "{counts:?}");
         assert_eq!(counts.get("Embed"), Some(&1), "{counts:?}");
         assert_eq!(counts.get("AttnScoresRelative"), Some(&ATTN_LAYERS), "{counts:?}");
         assert_eq!(counts.get("AttnApplyRelative"), Some(&ATTN_LAYERS), "{counts:?}");
@@ -422,7 +468,7 @@ mod tests {
         // sentence. A `GlobalAvgPool` here would be the wrong model producing a plausible
         // number.
         assert_eq!(counts.get("GlobalAvgPool"), None, "{counts:?}");
-        assert_eq!(counts.len(), 7, "{counts:?}");
+        assert_eq!(counts.len(), 8, "{counts:?}");
     }
 
     #[test]

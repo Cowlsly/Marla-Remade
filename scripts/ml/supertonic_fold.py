@@ -442,11 +442,15 @@ class Table:
             beta,
         )
 
-    def convnext(self, at, channels, inner, dilation):
+    def convnext(self, at, channels, inner, dilation, int8=False):
         """One ConvNeXt block: depthwise, norm, widening 1x1, narrowing 1x1 with the gamma.
 
         Symmetric padding, `2 * dilation` each side. The vocoder's is causal instead, and that
         difference cost real debugging time once already.
+
+        `int8` quantises the two `1 x 1`s and not the depthwise one, which is the only split the
+        shaders allow: `conv_int8.comp` zero-pads where this block replicates, and a 5-tap depthwise
+        has a border to get wrong where a `1 x 1` has none.
         """
         each = dilation * 4 // 2
         self.conv(
@@ -457,25 +461,35 @@ class Table:
             group=channels,
         )
         self.layer_norm(f"{at}.norm.norm")
-        self.conv(f"{at}.pwconv1", inner)
+        self.conv(f"{at}.pwconv1", inner, int8=int8)
         # The block's gamma rides on `pwconv2`, which is a 1x1 and so has no border.
-        self.conv(f"{at}.pwconv2", channels, fold_scale=self.at(f"{at}.gamma").reshape(-1))
+        self.conv(
+            f"{at}.pwconv2",
+            channels,
+            fold_scale=self.at(f"{at}.gamma").reshape(-1),
+            int8=int8,
+        )
 
-    def relative_attention(self, at, layer, channels, inner, head_dim):
-        """One post-norm relative-attention layer, in the order the export declares it."""
+    def relative_attention(self, at, layer, channels, inner, head_dim, int8=False):
+        """One post-norm relative-attention layer, in the order the export declares it.
+
+        `int8` quantises all six convolutions - every one is an ungrouped `1 x 1`. The two relative
+        position tables stay fp16: they are read by `attn_scores_relative.comp` rather than by a
+        convolution, and there is no int8 path through it.
+        """
         attn = f"{at}.attn_layers.{layer}"
         for projection in ("conv_q", "conv_k", "conv_v"):
-            self.conv(f"{attn}.{projection}", channels)
+            self.conv(f"{attn}.{projection}", channels, int8=int8)
         # `[1, 9, head_dim]` in the export; the Rust reads `[offsets, head_dim]`.
         for table_name in ("emb_rel_k", "emb_rel_v"):
             relative = self.at(f"{attn}.{table_name}").reshape(9, -1)
             if relative.shape[1] != head_dim:
                 raise SystemExit(f"{attn}.{table_name} is {list(relative.shape)}, not [9, {head_dim}]")
             self.add("RelPos", f"{attn}.{table_name}", f"RelPos t={list(relative.shape)}", relative)
-        self.conv(f"{attn}.conv_o", channels)
+        self.conv(f"{attn}.conv_o", channels, int8=int8)
         self.layer_norm(f"{at}.norm_layers_1.{layer}.norm")
-        self.conv(f"{at}.ffn_layers.{layer}.conv_1", inner)
-        self.conv(f"{at}.ffn_layers.{layer}.conv_2", channels)
+        self.conv(f"{at}.ffn_layers.{layer}.conv_1", inner, int8=int8)
+        self.conv(f"{at}.ffn_layers.{layer}.conv_2", channels, int8=int8)
         self.layer_norm(f"{at}.norm_layers_2.{layer}.norm")
 
 
@@ -502,9 +516,11 @@ def collect_duration(graph):
     )
 
     for block in range(DP_BLOCKS):
-        table.convnext(f"{DP_PREFIX}.convnext.convnext.{block}", DP_CHANNELS, DP_INNER, 1)
+        table.convnext(f"{DP_PREFIX}.convnext.convnext.{block}", DP_CHANNELS, DP_INNER, 1, int8=True)
     for layer in range(DP_ATTN_LAYERS):
-        table.relative_attention(f"{DP_PREFIX}.attn_encoder", layer, DP_CHANNELS, DP_INNER, 32)
+        table.relative_attention(
+            f"{DP_PREFIX}.attn_encoder", layer, DP_CHANNELS, DP_INNER, 32, int8=True
+        )
 
     # `proj_out` has no bias in the export; the Rust reads a pair for every convolution.
     table.conv(f"{DP_PREFIX}.proj_out.net", DP_CHANNELS, synthesise_bias=True)
