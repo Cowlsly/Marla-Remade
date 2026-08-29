@@ -135,6 +135,8 @@ GRAPHS = {
     "small100": 15,
     # An ONNX graph read by name rather than walked; see [`ARCHITECTURES`].
     "tinyclip": 16,
+    # Read from a PyTorch checkpoint rather than an ONNX graph; see [`CHECKPOINTS`].
+    "whisper": 17,
 }
 
 # SHA-256 over the ordered layer table (see `layer_table_digest`). Regenerate with
@@ -152,6 +154,7 @@ EXPECTED_DIGEST = {
     "supertonic_ve": "48ab5789e8839507ff93e099dc0f61940f25da9ba6201651784f6e68598199e2",
     "small100": "c9f05f2fb686aa53137ca06b521baf6d7a00f32cfb4ea42bd14a5c3e7cf6c086",
     "tinyclip": "7557b2725b52ea04bd18b12e089320b9dd419cd3f7344c0e3d32888d61c24fa7",
+    "whisper": "9e2830c5ea5d443fc31eb5c4eb80fa9a3b9bbcccd3c07963256ade50963c72a2",
 }
 
 # Graphs that are one **module** of a larger export, keyed by the node-name prefix that
@@ -314,6 +317,36 @@ CHECKPOINTS = {
         # binding comfortably under that floor and gives `nets::small100` its two logits ops for
         # free; 128,112 is 2 x 64,056, so the halves are equal and no range is padded.
         "head_splits": 2,
+    },
+    # whisper-base, from `openai/whisper-base`. A checkpoint for the same reason SMaLL-100 is one:
+    # the ONNX exports that exist are already int8 and quantised per **tensor**, which is the
+    # coarseness that cost SMaLL-100's embedding a factor of four.
+    #
+    # Two things about this architecture are unlike anything else here, and both are asserted rather
+    # than assumed by [`whisper_inventory`]:
+    #
+    # * **No `k_proj.bias`.** Only `q_proj`, `v_proj` and `out_proj` carry one, in all 18 attentions.
+    #   `Builder::conv_int8` always reads a bias after the scale, so the converter synthesises a
+    #   zero and records it in the digest key — a checkpoint that grows one must not be read as this
+    #   table.
+    # * **A convolution stem.** `conv1` is `[512, 80, 3]` stride 1 and `conv2` is `[512, 512, 3]`
+    #   **stride 2**, which is what turns 3000 mel frames into 1500 encoder positions. Both are
+    #   rank-3, so they are lifted to the `1 x k` rank-4 kernel this runtime indexes.
+    #
+    # The head is **tied** to `embed_tokens`, as SMaLL-100's is, but at 51,865 x 512 it is 26.6 MB
+    # and fits one binding — so unlike SMaLL-100 it needs no class split.
+    "whisper": {
+        "d_model": 512,
+        "encoder_layers": 6,
+        "decoder_layers": 6,
+        "ffn": 2048,
+        "vocab": 51_865,
+        "mels": 80,
+        # `max_source_positions` and `max_target_positions`. The first is 3000 mel frames after
+        # `conv2`'s stride 2; the second is the decoder's learned position table.
+        "source_positions": 1500,
+        "target_positions": 448,
+        "conv_kernel": 3,
     },
 }
 
@@ -729,6 +762,65 @@ def small100_inventory(spec):
     return want
 
 
+def whisper_inventory(spec):
+    """`{name: shape}` whisper-base's checkpoint must hold exactly, derived from [`CHECKPOINTS`].
+
+    Derived rather than transcribed: a list of 245 names would be checked against itself.
+
+    Two absences are as load-bearing as the presences, so both are stated by *not* appearing:
+
+    * **`k_proj.bias` is not here**, in any of the 18 attentions. A checkpoint that grows one would
+      have 18 unexpected names and fail, rather than being read as this table with the bias ignored.
+    * **There is no `proj_out`.** The head is tied to `model.decoder.embed_tokens.weight`, which
+      therefore appears once and is emitted once.
+
+    The shapes are `torch.nn.Linear`'s **`[out, in]`**, which is a `[out, in, 1, 1]` kernel and so a
+    reshape rather than a transpose. `fc1` at `[2048, 512]` and `fc2` at `[512, 2048]` are the
+    asymmetric pair that makes a transposed checkpoint fail here rather than on the device.
+    """
+    d, ffn = spec["d_model"], spec["ffn"]
+    kernel = spec["conv_kernel"]
+    want = {
+        "model.encoder.conv1.weight": [d, spec["mels"], kernel],
+        "model.encoder.conv1.bias": [d],
+        "model.encoder.conv2.weight": [d, d, kernel],
+        "model.encoder.conv2.bias": [d],
+        # A real tensor, not computed sinusoids: whisper freezes them into the checkpoint.
+        "model.encoder.embed_positions.weight": [spec["source_positions"], d],
+        "model.decoder.embed_tokens.weight": [spec["vocab"], d],
+        # Learned, unlike the encoder's.
+        "model.decoder.embed_positions.weight": [spec["target_positions"], d],
+    }
+    for side, count in (("encoder", spec["encoder_layers"]), ("decoder", spec["decoder_layers"])):
+        want[f"model.{side}.layer_norm.weight"] = [d]
+        want[f"model.{side}.layer_norm.bias"] = [d]
+        for index in range(count):
+            at = f"model.{side}.layers.{index}"
+            attentions = ["self_attn"] + (["encoder_attn"] if side == "decoder" else [])
+            for attention in attentions:
+                want[f"{at}.{attention}_layer_norm.weight"] = [d]
+                want[f"{at}.{attention}_layer_norm.bias"] = [d]
+                for projection in ("q_proj", "k_proj", "v_proj", "out_proj"):
+                    want[f"{at}.{attention}.{projection}.weight"] = [d, d]
+                    # Every projection but the key has a bias. See the docstring.
+                    if projection != "k_proj":
+                        want[f"{at}.{attention}.{projection}.bias"] = [d]
+            want[f"{at}.final_layer_norm.weight"] = [d]
+            want[f"{at}.final_layer_norm.bias"] = [d]
+            want[f"{at}.fc1.weight"] = [ffn, d]
+            want[f"{at}.fc1.bias"] = [ffn]
+            want[f"{at}.fc2.weight"] = [d, ffn]
+            want[f"{at}.fc2.bias"] = [d]
+    return want
+
+
+# The inventory each checkpoint-sourced graph is checked against, and the collector that emits it.
+#
+# Two dicts rather than a key inside [`CHECKPOINTS`] because both hold functions defined below it.
+INVENTORIES = {}
+COLLECTORS = {}
+
+
 def check_checkpoint(shapes, graph_id_name):
     """Refuse a checkpoint that is not the architecture the Rust forward pass hardcodes.
 
@@ -744,7 +836,7 @@ def check_checkpoint(shapes, graph_id_name):
     that mistake loud: a transposed checkpoint fails on those four numbers before anything is
     written. That is the whole reason this asserts shapes rather than just names.
     """
-    want = small100_inventory(CHECKPOINTS[graph_id_name])
+    want = INVENTORIES[graph_id_name](CHECKPOINTS[graph_id_name])
     missing = sorted(set(want) - set(shapes))
     extra = sorted(set(shapes) - set(want))
     shared = sorted(set(want) & set(shapes))
@@ -908,6 +1000,160 @@ def collect_small100(get, spec):
 
     fidelity.report()
     return layers, tensors
+
+
+def collect_whisper(get, spec):
+    """whisper-base's checkpoint as the ordered tensor table `nets::whisper` indexes.
+
+    Order is the contract, and it is forward order per stack, encoder first:
+
+        `conv1`, `conv2`, the encoder position table, each encoder layer, the encoder's norm
+        the tied head, the decoder position table, each decoder layer, the decoder's norm
+
+    # The two convolutions
+
+    Both are rank-3 in the checkpoint and are emitted as the `1 x k` rank-4 kernel this runtime
+    indexes, which is a reshape of the same bytes. Their geometry is in the digest key rather than in
+    the Rust alone, because `conv2`'s **stride 2** is what turns 3000 mel frames into 1500 encoder
+    positions and a wrong stride gives the right rank and the wrong length.
+
+    # The absent key bias
+
+    No `k_proj` in any of the 18 attentions has one. `Builder::conv_int8` reads a bias after the
+    scale, so each gets zeros — exact, and recorded in the digest key as `b0=synthesised` so a
+    checkpoint that grows one is not silently read as this table.
+
+    # The tied head
+
+    `model.decoder.embed_tokens.weight` is emitted **once** and has two roles, as SMaLL-100's does:
+    `nets::whisper` gathers a row of it on the host to build a decode step's input, and binds the
+    same tensor as the kernel of the logits projection. At 51,865 x 512 it is 26.6 MB of int8, well
+    inside `maxStorageBufferRange`'s guaranteed 128 MiB, so unlike SMaLL-100 it needs no class split.
+
+    # What is not folded
+
+    * The attention query scale. Whisper scales the query by `head_dim ** -0.5` and `head_dim` is 64,
+      which is the `1 / sqrt(head_dim)` `attn_scores` already applies. Folding it would apply it
+      twice.
+    * `sqrt(d_model)` on the embedding. `config.json` has `scale_embedding: false`, so there is none.
+    * Both **position tables** are real tensors, and they go opposite ways. The **encoder's** is
+      added to the conv stem's output, which is a device tensor, so it is transposed to
+      `[width, 1, positions]` and emitted as a `Kind::Constant`. The **decoder's** is added to a
+      gathered embedding row on the *host*, in f32, exactly as `nets::small100::embed_positions`
+      does, so it stays `[positions, width]` and never reaches a shader.
+    """
+    layers = []
+    tensors = []
+    fidelity = Fidelity()
+
+    def emit(op, name, key, added):
+        layers.append(Layer(len(layers), op, name, key, len(tensors) - added, added))
+
+    def convolution(name, stride):
+        """A rank-3 `[out, in, k]` kernel as the `1 x k` int8 one, its scale and its bias."""
+        weight = get(f"{name}.weight")
+        bias = get(f"{name}.bias")
+        outputs, inputs, width = weight.shape
+        lifted = weight.reshape(outputs, inputs, 1, width)
+        kernel, scale = fidelity.quantise(name, lifted)
+        tensors.extend([kernel, scale, bias])
+        # ONNX orders pads as all the begins then all the ends, so a 1-D `[1, 1]` is `[0, 1, 0, 1]`.
+        # `same` padding on a kernel of 3, which is what holds the length at stride 1 and halves it
+        # at stride 2.
+        emit(
+            "Conv8",
+            name,
+            f"Conv8 w={list(kernel.shape)} scale={[outputs]} b={list(bias.shape)} "
+            f"k={[1, width]} s={[1, stride]} p={[0, 1, 0, 1]} zp=0 dtype=int8",
+            3,
+        )
+
+    def linear(name, biased=True):
+        """An int8 kernel as `[out, in, 1, 1]`, its per-output-channel scale, and its bias."""
+        weight = get(f"{name}.weight")
+        outputs, inputs = weight.shape
+        kernel, scale = fidelity.quantise(name, weight.reshape(outputs, inputs, 1, 1))
+        if biased:
+            bias = get(f"{name}.bias")
+            suffix = ""
+        else:
+            bias = np.zeros(outputs, dtype=np.float32)
+            suffix = " b0=synthesised"
+        tensors.extend([kernel, scale, bias])
+        emit(
+            "Linear8",
+            name,
+            f"Linear8 w={list(kernel.shape)} scale={[outputs]} b={list(bias.shape)} "
+            f"zp=0 dtype=int8{suffix}",
+            3,
+        )
+
+    def layer_norm(name):
+        gamma = get(f"{name}.weight")
+        beta = get(f"{name}.bias")
+        tensors.extend([gamma, beta])
+        emit("LayerNorm", name, f"LayerNorm g={list(gamma.shape)} b={list(beta.shape)}", 2)
+
+    def table(name):
+        values = get(f"{name}.weight")
+        tensors.append(values)
+        emit("Table", name, f"Table t={list(values.shape)}", 1)
+
+    def constant(name):
+        """A `[positions, width]` table as the `[width, 1, positions]` a `Kind::Constant` wants."""
+        values = get(f"{name}.weight")
+        positions, width = values.shape
+        transposed = values.T.reshape(width, 1, positions).copy()
+        tensors.append(transposed)
+        emit("Constant", name, f"Constant t={list(transposed.shape)}", 1)
+
+    def stack(side, count):
+        for index in range(count):
+            at = f"model.{side}.layers.{index}"
+            # Pre-norm, as `WhisperEncoderLayer` and `WhisperDecoderLayer` are: the norm comes before
+            # the sublayer it feeds and the residual skips both.
+            attentions = ["self_attn"] + (["encoder_attn"] if side == "decoder" else [])
+            for attention in attentions:
+                layer_norm(f"{at}.{attention}_layer_norm")
+                for projection in ("q_proj", "k_proj", "v_proj", "out_proj"):
+                    linear(f"{at}.{attention}.{projection}", biased=projection != "k_proj")
+            layer_norm(f"{at}.final_layer_norm")
+            linear(f"{at}.fc1")
+            linear(f"{at}.fc2")
+        layer_norm(f"model.{side}.layer_norm")
+
+    # --- the encoder ---
+    convolution("model.encoder.conv1", stride=1)
+    # Stride 2: 3000 mel frames become the 1500 positions the decoder cross-attends over.
+    convolution("model.encoder.conv2", stride=2)
+    # Transposed and device-resident: it is added to the conv stem's output. The decoder's table
+    # below is not, because the host adds that one.
+    constant("model.encoder.embed_positions")
+    stack("encoder", spec["encoder_layers"])
+
+    # --- the decoder ---
+    head = "model.decoder.embed_tokens"
+    rows = get(f"{head}.weight")
+    classes, width = rows.shape
+    kernel, scale = fidelity.quantise(head, rows.reshape(classes, width, 1, 1))
+    # `Builder::conv_int8` reads a bias after the scale, and a tied head has none.
+    tensors.extend([kernel, scale, np.zeros(classes, dtype=np.float32)])
+    emit(
+        "Head",
+        head,
+        f"Head w={list(kernel.shape)} scale={[classes]} b={[classes]} tied=embed_tokens "
+        "zp=0 dtype=int8 b0=synthesised",
+        3,
+    )
+    table("model.decoder.embed_positions")
+    stack("decoder", spec["decoder_layers"])
+
+    fidelity.report()
+    return layers, tensors
+
+
+INVENTORIES.update({"small100": small100_inventory, "whisper": whisper_inventory})
+COLLECTORS.update({"small100": collect_small100, "whisper": collect_whisper})
 
 
 # The vision position table, after TinyCLIP's export constant-folds it: `position_ids` is a
@@ -1280,7 +1526,7 @@ def main():
     if args.graph in CHECKPOINTS:
         get, shapes = open_checkpoint(args.model)
         check_checkpoint(shapes, args.graph)
-        layers, tensors = collect_small100(get, CHECKPOINTS[args.graph])
+        layers, tensors = COLLECTORS[args.graph](get, CHECKPOINTS[args.graph])
     elif args.graph in ARCHITECTURES:
         model = onnx.load(args.model)
         check_graph(model, args.graph)

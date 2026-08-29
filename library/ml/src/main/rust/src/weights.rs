@@ -81,6 +81,12 @@ pub mod graph {
     /// One graph rather than two because the towers share a file and a [`super::Weights`] upload,
     /// even though they share no weights: `Mode::Image` and `Mode::Text` are two plans over one net.
     pub const TINYCLIP: u32 = 16;
+    /// whisper-base speech recognition, encoder and decoder in one file. See
+    /// [`crate::nets::whisper`].
+    ///
+    /// One graph rather than two because the 51,865-row embedding is **tied**: it is the decoder's
+    /// input table and the logits kernel, so two files would upload 26.6 MB of it twice.
+    pub const WHISPER: u32 = 17;
 }
 
 /// One tensor's entry in the table: where it is and what shape it is.
