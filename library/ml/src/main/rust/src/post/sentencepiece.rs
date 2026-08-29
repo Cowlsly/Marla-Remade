@@ -294,11 +294,10 @@ mod tests {
 
     /// The real vocabulary, against ids taken from `sentencepiece` itself.
     ///
-    /// Ignored because the table is a runtime download rather than a checked-in asset, like the
-    /// parity probes in `nets::reference`. Run it with
-    /// `SMALL100_TOKENIZER=<path> cargo test -p modelrunner --lib -- --ignored real_vocabulary`.
+    /// Skipped rather than ignored: the table is a runtime download rather than a checked-in
+    /// asset, so `SMALL100_TOKENIZER` is how you point at one. `scripts/ml/fetch_small100.py`
+    /// builds it, and prints the command.
     #[test]
-    #[ignore = "needs SMALL100_TOKENIZER pointing at a converted tokenizer.bin"]
     fn the_real_vocabulary_agrees_with_sentencepiece() {
         let Ok(path) = std::env::var("SMALL100_TOKENIZER") else {
             return;
