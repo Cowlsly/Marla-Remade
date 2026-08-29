@@ -51,9 +51,15 @@
 //! adb shell /data/local/tmp/mr_test --ignored vulkan::parity
 //! ```
 //!
-//! The fixtures above need no assets and so run anywhere. The two that read a shipped `.maml` find
-//! nothing under `/data/local/tmp` and return, so push `speech/src/main/assets/supertonic` beside
-//! the binary if those are wanted too.
+//! The fixtures above need no assets and so run anywhere. The one that reads the shipped `.maml`
+//! needs them pushed, and returns quietly when they are absent rather than failing a run that never
+//! had them:
+//!
+//! ```text
+//! adb push speech/src/main/assets/supertonic /data/local/tmp/
+//! adb shell MODELRUNNER_ASSETS=/data/local/tmp/supertonic \
+//!   /data/local/tmp/mr_test --ignored --nocapture the_shipped_supertonic
+//! ```
 //!
 //! # Tolerance
 //!
@@ -886,10 +892,10 @@ fn a_rebuilt_net_agrees_with_the_reference_at_each_shape() {
 #[test]
 #[ignore = "needs a Vulkan device and the shipped supertonic assets"]
 fn the_shipped_supertonic_nets_agree_with_the_reference_on_the_device() {
-    let Some(root) = repo() else {
+    let Some(dir) = assets() else {
         return;
     };
-    let read = |name: &str| std::fs::read(root.join("speech/src/main/assets/supertonic").join(name));
+    let read = |name: &str| std::fs::read(dir.join(name));
 
     if let Ok(bytes) = read("supertonic_ttl.maml") {
         let weights = Weights::parse(&bytes, graph::SUPERTONIC_TTL).expect("the text encoder parses");
@@ -962,11 +968,18 @@ fn report(what: &str, host: &[Vec<f32>], got: &[Vec<f32>]) {
     }
 }
 
-/// The repo root, or `None` when the assets are not checked out beside this crate.
-fn repo() -> Option<std::path::PathBuf> {
+/// Where the shipped `.maml` live: `MODELRUNNER_ASSETS` if set, else the checkout beside this crate.
+///
+/// The environment variable is what lets these run on a phone, where there is no checkout to walk
+/// up to — push `speech/src/main/assets/supertonic` to `/data/local/tmp` and point this at it.
+fn assets() -> Option<std::path::PathBuf> {
+    if let Ok(dir) = std::env::var("MODELRUNNER_ASSETS") {
+        let dir = std::path::PathBuf::from(dir);
+        return dir.is_dir().then_some(dir);
+    }
     let mut dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     while !dir.join("settings.gradle.kts").is_file() {
         dir = dir.parent()?.to_path_buf();
     }
-    Some(dir)
+    Some(dir.join("speech/src/main/assets/supertonic"))
 }
