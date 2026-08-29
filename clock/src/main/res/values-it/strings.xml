@@ -52,4 +52,5 @@
     <string name="sound">Suono</string>
     <string name="vibrate">Vibrazione</string>
     <string name="gradually_increase_volume">Aumenta gradualmente il volume</string>
+    <string name="alarm_label_hint">Nome sveglia (opzionale)</string>
 </resources>
