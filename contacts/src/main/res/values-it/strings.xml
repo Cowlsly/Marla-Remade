@@ -4,7 +4,7 @@
     <string name="contact_not_found">Contatto non trovato</string>
     <string name="name_nickname_format">%1$s (%2$s)</string>
     <string name="share_contact">Condividi contatto</string>
-    <string name="about_name">Informazioni su %1$s</string>
+    <string name="about_name">Informazioni su <xliff:g id="first_name" example="John">%1$s</xliff:g></string>
     <string name="birthday">Compleanno</string>
     <string name="note">Note</string>
     <string name="favorites">Preferiti</string>
@@ -38,8 +38,8 @@
     <string name="add_contacts_account">Aggiungi account contatti</string>
     <string name="enter_account_name">Inserisci un nome per il nuovo account locale:</string>
     <string name="account_name">Nome account</string>
-    <string name="delete_contact_title">Elimina account</string>
-    <string name="delete_contact_confirm">Sei sicuro di voler eliminare questo account? Questa operazione è irreversibile.</string>
+    <string name="delete_contact_title">Elimina contatto</string>
+    <string name="delete_contact_confirm">Sei sicuro di voler eliminare questo contatto? Questa operazione è irreversibile.</string>
     <string name="delete_contact_name_confirm">Sei sicuro di volere eliminare \"%1$s\"? Questa operazione è irreversibile.</string>
     <string name="grant_contacts_permission">Concedi autorizzazione dei contatti</string>
     <string name="select_contact_hint">Seleziona un contatto per visualizzare i dettagli</string>
@@ -58,7 +58,7 @@
         <item quantity="other">Sicuro di volere eliminare i %1$d contatti selezionati? Questa operazione è irreversibile.</item>
     </plurals>
     <string name="selected_count"><xliff:g id="count" example="3">%1$d</xliff:g> selezionati</string>
-    <string name="contact_photo_description">Foto di %1$s</string>
+    <string name="contact_photo_description">Foto di <xliff:g id="contact_name" example="John Doe">%1$s</xliff:g></string>
     <string name="show_account_labels">Mostra account del contatto</string>
     <string name="search_contacts">Cerca contatti</string>
     <string name="include_year">Inclusi anno</string>
@@ -80,4 +80,8 @@
     <plurals name="contacts_count">
         <item quantity="other">%1$d contatti</item>
     </plurals>
+    <string name="ringtone">Suoneria</string>
+    <string name="select_ringtone">Seleziona suoneria</string>
+    <string name="rename_account">Rinomina account</string>
+    <string name="delete_account">Elimina account</string>
 </resources>
