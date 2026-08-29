@@ -118,7 +118,25 @@ const EPSILON: f32 = 1e-5;
 ///
 /// The embedding table (1), six blocks of eight (48), four attention layers of eighteen (72),
 /// two style attentions of seven (14) and the final layer norm (2). The seven are `W_query`,
-/// the folded constant keys, `W_value` and `out_fc` — a pair each except the keys.
+/// the folded constant keys, `W_value` and `out_fc` - a pair each except the keys.
+///
+/// # This net stays fp16, and it was measured rather than assumed
+///
+/// Every other Supertonic net quantises its ungrouped `1 x 1`s to int8. This one was converted the
+/// same way and reverted, because the trade is bad at both ends:
+///
+/// * **It costs the most accuracy of the four.** `onnx_parity.py` against this export: fp16
+///   correlates at 0.99900 and int8 at 0.99212, below the 0.999 the other three clear comfortably.
+///   The cause is depth, not a bug - a per-tensor round trip of all 66 quantised kernels put every
+///   one at ~0.0042 worst-row relative error against the 0.00394 an absmax int8 quantiser can
+///   achieve, so no layer is pathological. Twelve sequential stages each losing 0.4% is simply what
+///   compounding looks like.
+/// * **It saves the least size.** 17.8 MB to 11.1 MB, so 6.6 MB of a 198 MB bundle. The sampler and
+///   the vocoder are 178 MB of that 198 and carry the same proportion of quantisable weight.
+///
+/// Dropping it still leaves the bundle under its target, so there is nothing to buy with the
+/// accuracy. Revisit only if a per-channel *activation* scale ever lands, which is what would stop
+/// the error compounding.
 pub const TENSORS: usize = 137;
 
 /// Hands out `.maml` tensor indices in the order the layers appear.

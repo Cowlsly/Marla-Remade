@@ -84,8 +84,36 @@ const EPSILON: f32 = 1e-5;
 /// Tensors the `.maml` must hold.
 ///
 /// `embed` (2), ten blocks of eight, `head/layer1` (2), its PReLU slope (1) and `head/layer2`
-/// (2, the second a synthesised zero bias): `2 + 80 + 2 + 1 + 2`.
-pub const TENSORS: usize = 87;
+/// (2, the second a synthesised zero bias): `2 + 80 + 2 + 1 + 2` — 87 at fp16 — plus one per
+/// quantised convolution for its scale. See [`INT8_CONVS`].
+pub const TENSORS: usize = 87 + INT8_CONVS;
+
+/// Convolutions read as int8 rather than fp16, each carrying a third tensor for its scale.
+///
+/// Each block's two `1 x 1`s and `head/layer2`. That is 87% of this net's parameters, and the three
+/// exclusions are all forced by the runtime rather than chosen:
+///
+/// * the ten **depthwise** convolutions along the sequence are grouped and causally padded, and
+///   `conv_int8.comp` neither groups a tiled kernel nor replicates a border.
+/// * **`embed`** is padded too, and it carries the input's per-channel affine folded in by
+///   `supertonic_fold.py`. That fold scales per *input* channel, a range that varies within an
+///   output row, which is exactly what a per-output-channel scale cannot absorb.
+/// * **`head/layer1`** is padded *and* carries [`Act::PRelu`], whose per-channel slope wants the
+///   push offset the dequantisation scale occupies.
+///
+/// # `head/layer2` is included, and that was checked rather than assumed
+///
+/// It writes the waveform, so unlike every other layer here its quantisation error reaches the
+/// samples with nothing downstream to average it - a reason to expect it to dominate. Measured, it
+/// does not: holding it at fp16 moves `onnx_parity.py`'s correlation from 0.99909 to 0.99917 and the
+/// worst sample error from 0.0319 to 0.0311, for 1 MB. The error is spread across the twenty block
+/// projections instead, which are 83% of the parameters, so there is no cheap subset to give up.
+///
+/// That makes the accuracy question for this net a single yes-or-no: 21 MB at 0.99909, or fp16 at
+/// 0.99999858. The correlation clears the 0.999 bar the conversion was gated on, but it implies
+/// roughly -27 dB of error against fp16's -55 dB, and whether that is audible in a vocoder is not
+/// something a correlation can answer. A device listening test is the real gate.
+pub const INT8_CONVS: usize = BLOCKS * 2 + 1;
 
 /// Hands out `.maml` tensor indices in the order the layers appear.
 struct Layers {
@@ -96,6 +124,15 @@ impl Layers {
     fn take(&mut self) -> usize {
         let index = self.next;
         self.next += 2;
+        index
+    }
+
+    /// An int8 kernel, its per-output-channel scale, and the bias after that.
+    ///
+    /// See `supertonic_duration::Layers::take3`; the order is what `Builder::conv_int8` reads.
+    fn take3(&mut self) -> usize {
+        let index = self.next;
+        self.next += 3;
         index
     }
 
@@ -187,9 +224,9 @@ pub fn build(weights: &dyn WeightSource, frames: u32) -> Result<Plan, String> {
             },
         );
         let normed = b.layer_norm(depthwise, l.take(), EPSILON);
-        let widened = point(b, l, normed, INNER, Act::Gelu);
+        let widened = point_int8(b, l, normed, INNER, Act::Gelu);
         // `pwconv2` carries the block's layer scale, folded in by the converter.
-        let narrowed = point(b, l, widened, CHANNELS, Act::None);
+        let narrowed = point_int8(b, l, widened, CHANNELS, Act::None);
         x = b.add(x, narrowed);
     }
 
@@ -203,7 +240,7 @@ pub fn build(weights: &dyn WeightSource, frames: u32) -> Result<Plan, String> {
         Along { out: INNER, kernel: 3, dilation: 1, group: 1, act: Act::PRelu(slope) },
     );
     l.take_one();
-    let samples = point(b, l, widened, SAMPLES_PER_POSITION, Act::None);
+    let samples = point_int8(b, l, widened, SAMPLES_PER_POSITION, Act::None);
 
     if l.next != TENSORS {
         return Err(format!("the forward pass claims {} tensors, not {TENSORS}", l.next));
@@ -250,9 +287,11 @@ fn along(b: &mut Builder, l: &mut Layers, x: Id, shape: Along) -> Id {
     )
 }
 
-/// A `1 x 1` convolution, which the tiled shader serves.
-fn point(b: &mut Builder, l: &mut Layers, x: Id, out: u32, act: Act) -> Id {
-    b.conv(x, l.take(), out, (1, 1), (1, 1), (1, 1), (0, 0, 0, 0), 1, act)
+/// A `1 x 1` convolution with an int8 kernel, which is every `1 x 1` in this net. See
+/// [`INT8_CONVS`], and note there is no fp16 counterpart here because nothing needs one: the
+/// convolutions that cannot be quantised are all spatial and go through [`along`].
+fn point_int8(b: &mut Builder, l: &mut Layers, x: Id, out: u32, act: Act) -> Id {
+    b.conv_int8(x, l.take3(), out, (1, 1), (1, 1), (1, 1), (0, 0, 0, 0), 1, act)
 }
 
 #[cfg(test)]
@@ -344,9 +383,13 @@ mod tests {
             .iter()
             .map(|(_, dims)| dims.iter().map(|&d| d as u64).product::<u64>())
             .sum();
-        assert_eq!(total, 25_333_249 - 2_048 + 2_048 - 1 + 512);
+        // Each quantised convolution gains an `[out]` dequantisation scale: `pwconv1` is `INNER`
+        // wide, `pwconv2` is `CHANNELS`, and `head/layer2` is its sample count.
+        let scales = (BLOCKS as u64) * (INNER + CHANNELS) as u64 + SAMPLES_PER_POSITION as u64;
+        assert_eq!(scales, 26_112);
+        assert_eq!(total, 25_333_249 - 2_048 + 2_048 - 1 + 512 + scales);
         // And spelled out, so a reordering that preserved the sum would still be caught.
-        assert_eq!(total, 25_333_760);
+        assert_eq!(total, 25_359_872);
     }
 
     #[test]
@@ -426,13 +469,16 @@ mod tests {
                 *counts.entry(super::super::tests::name_of(*kind)).or_insert(0) += 1;
             }
         }
-        // embed, ten depthwise, head/layer1, ten pwconv1, ten pwconv2, head/layer2.
-        assert_eq!(counts.get("Conv"), Some(&(1 + BLOCKS + 1 + BLOCKS * 2 + 1)), "{counts:?}");
+        // embed, ten depthwise, head/layer1, ten pwconv1, ten pwconv2, head/layer2. The two 1x1s
+        // per block and head/layer2 are quantised - see `INT8_CONVS`.
+        let convolutions = 1 + BLOCKS + 1 + BLOCKS * 2 + 1;
+        assert_eq!(counts.get("Conv"), Some(&(convolutions - INT8_CONVS)), "{counts:?}");
+        assert_eq!(counts.get("ConvInt8"), Some(&INT8_CONVS), "{counts:?}");
         assert_eq!(counts.get("LayerNorm"), Some(&BLOCKS), "{counts:?}");
         assert_eq!(counts.get("Add"), Some(&BLOCKS), "{counts:?}");
         // No transposed convolution: the upsample is the output reinterpretation.
         assert_eq!(counts.get("ConvTranspose"), None, "{counts:?}");
-        assert_eq!(counts.len(), 3, "{counts:?}");
+        assert_eq!(counts.len(), 4, "{counts:?}");
     }
 
     #[test]

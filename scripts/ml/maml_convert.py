@@ -126,7 +126,7 @@ EXPECTED_DIGEST = {
     "mobilefacenet": "40987839aec03378958581deba29ce9fd9dd1ae9aa88d0c7ad04a885a2e2122c",
     "ppocr_det": "51b0c9ed871526fa270b4bfa53b393c056db21c58193849fb83d44768f69ef9b",
     "ppocr_rec": "8c16a8702aa7a1e7b4d94787d089616ca4bc3d8aaeebb0b0159eabc56af3ba08",
-    "supertonic_voc": "64e3a3437fa8f889fb679a5e08553ba7392c05a32cd844a0d2340698372a0071",
+    "supertonic_voc": "5282083898554b1fae28de946bfc1a82a11e2acddf3911877f27b1b115c583aa",
     "supertonic_dp": "d9a548e1f1ed908a3b0ad27ab543dd7521858f9110b426edb1ed64ba1f1a13e4",
     "supertonic_ttl": "92d0fa8ae73d4a8a223c77fb4230e390df580744014a3fcf3211ab72a988c020",
     "supertonic_ve": "d76f1fb13eaa9f5a16fed1f97a491d25f75325a36f00535fa3a11a7b16527951",

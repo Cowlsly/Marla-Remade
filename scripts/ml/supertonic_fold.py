@@ -251,8 +251,18 @@ def collect(graph):
     layers, tensors = [], []
     scales = iter(layer_scales)
 
-    def add(op, name, weight, bias, key):
+    def add(op, name, weight, bias, key, int8=False):
         first = len(tensors)
+        if int8:
+            # The three-tensor layout `Builder::conv_int8` reads: kernel, per-output-channel
+            # scale, bias. `Table.conv` emits the same thing for the other graphs; this one
+            # cannot use it because it walks ONNX nodes rather than named parameters.
+            quantised, kernel_scale = maml_convert.quantise_per_channel(weight)
+            tensors.append(quantised)
+            tensors.append(np.ascontiguousarray(kernel_scale, dtype=np.float32))
+            tensors.append(np.ascontiguousarray(bias, dtype=np.float32))
+            layers.append(maml_convert.Layer(len(layers), op, name, key, first, 3))
+            return
         tensors.append(np.ascontiguousarray(weight, dtype=np.float32))
         tensors.append(np.ascontiguousarray(bias, dtype=np.float32))
         layers.append(maml_convert.Layer(len(layers), op, name, key, first, 2))
@@ -298,11 +308,22 @@ def collect(graph):
         for attribute in node.attribute:
             if attribute.name == "group":
                 group = attribute.i
-        key = (
-            f"Conv w={list(lifted.shape)} b={list(bias.shape)} g={group}"
-            f" pad=edge{note}"
+        # The two `1 x 1`s per block and `head/layer2` are read as int8; `embed`, the depthwise
+        # convolutions and `head/layer1` cannot be. See `nets::supertonic_vocoder::INT8_CONVS`,
+        # which spells out why for each, and must agree with this list.
+        int8 = any(
+            marker in node.name for marker in ("pwconv1", "pwconv2", "head/layer2")
         )
-        add("Conv", node.name, lifted, bias, key)
+        if int8 and (group != 1 or tuple(lifted.shape[2:]) != (1, 1)):
+            raise SystemExit(
+                f"{node.name}: marked int8 but it is g={group} k={list(lifted.shape[2:])};"
+                " only an ungrouped 1x1 can be quantised"
+            )
+        key = (
+            f"{'ConvInt8' if int8 else 'Conv'} w={list(lifted.shape)} b={list(bias.shape)}"
+            f" g={group} pad=edge{note}{' zp=0 dtype=int8' if int8 else ''}"
+        )
+        add("ConvInt8" if int8 else "Conv", node.name, lifted, bias, key, int8=int8)
 
         # The PReLU sits between the two head convolutions, and its slope is one tensor.
         if "head/layer1" in node.name:
