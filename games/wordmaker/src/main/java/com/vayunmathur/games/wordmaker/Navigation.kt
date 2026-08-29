@@ -9,6 +9,7 @@ import com.vayunmathur.games.wordmaker.ui.CompetitiveLobbyPage
 import com.vayunmathur.games.wordmaker.ui.SettingsPage
 import com.vayunmathur.games.wordmaker.ui.WordMakerGameLoader
 import com.vayunmathur.library.ui.GameCenterScreen
+import com.vayunmathur.library.util.FullscreenPage
 import com.vayunmathur.library.util.MainNavigation
 import com.vayunmathur.library.util.openSettingsIfRequested
 import com.vayunmathur.library.util.rememberNavBackStack
@@ -21,7 +22,7 @@ fun Navigation(viewModel: WordMakerViewModel) {
     b.openSettingsIfRequested(Route.Settings)
     GameHubSessionHook("wordmaker","Wordmaker")
     MainNavigation(b){
-        entry<Route.Game>{ WordMakerGameLoader(b,viewModel) }
+        entry<Route.Game>(metadata = FullscreenPage()){ WordMakerGameLoader(b,viewModel) }
         entry<Route.GameCenter>{
             val g=rememberAchievementsManager(viewModel.levelDataStore)
             if(g!=null) GameCenterScreen(backupAgent=AppBackupAgent(), manager=g, onBack={b.pop()})

@@ -70,6 +70,7 @@ import com.vayunmathur.health.util.HealthViewModelFactory
 import com.vayunmathur.library.ui.DynamicTheme
 import com.vayunmathur.library.ui.PermissionWall
 import com.vayunmathur.library.util.MainNavigation
+import com.vayunmathur.library.util.SiblingPage
 import com.vayunmathur.library.util.rememberNavBackStack
 import kotlinx.serialization.Serializable
 
@@ -218,16 +219,16 @@ fun Navigation(viewModel: HealthViewModel) {
             )
         }
     ) {
-        entry<Route.Today> {
+        entry<Route.Today>(metadata = SiblingPage()) {
             TodayPage(backStack, viewModel)
         }
-        entry<Route.Activity> {
+        entry<Route.Activity>(metadata = SiblingPage()) {
             ActivityPage(backStack, viewModel)
         }
-        entry<Route.Body> {
+        entry<Route.Body>(metadata = SiblingPage()) {
             BodyPage(backStack, viewModel)
         }
-        entry<Route.NutritionDetails> {
+        entry<Route.NutritionDetails>(metadata = SiblingPage()) {
             NutritionPage(backStack, viewModel)
         }
         entry<Route.NutritionFullBreakdown> {

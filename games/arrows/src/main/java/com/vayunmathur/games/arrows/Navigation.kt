@@ -13,6 +13,7 @@ import com.vayunmathur.games.arrows.ui.SettingsPage
 import com.vayunmathur.library.ui.AchievementNotification
 import com.vayunmathur.library.ui.GameCenterScreen
 import com.vayunmathur.library.util.GameHubComposeHook
+import com.vayunmathur.library.util.FullscreenPage
 import com.vayunmathur.library.util.MainNavigation
 import com.vayunmathur.library.util.openSettingsIfRequested
 import com.vayunmathur.library.util.rememberNavBackStack
@@ -26,7 +27,7 @@ fun Navigation(viewModel: ArrowsViewModel) {
     GameHubComposeHook("arrows", viewModel.achievementsManager)
     Box(Modifier.fillMaxSize()) {
         MainNavigation(backStack) {
-            entry<Route.Game> { ArrowsGamePage(backStack, viewModel) }
+            entry<Route.Game>(metadata = FullscreenPage()) { ArrowsGamePage(backStack, viewModel) }
             entry<Route.GameCenter> {
                 GameCenterScreen(
                     backupAgent = AppBackupAgent(),

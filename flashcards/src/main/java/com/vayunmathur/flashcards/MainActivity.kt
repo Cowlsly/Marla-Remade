@@ -29,6 +29,7 @@ import com.vayunmathur.library.ui.IconStyle
 import com.vayunmathur.library.ui.PagerTab
 import com.vayunmathur.library.ui.TabStyle
 import com.vayunmathur.library.ui.TabbedPagerScaffold
+import com.vayunmathur.library.util.FullscreenPage
 import com.vayunmathur.library.util.MainNavigation
 import com.vayunmathur.library.util.NavBackStack
 import com.vayunmathur.library.util.NavKey
@@ -96,7 +97,7 @@ fun Navigation(viewModel: FlashcardsViewModel) {
         entry<Route.NoteTypeEdit> { NoteTypeEditPage(backStack, viewModel, it.noteTypeId) }
         entry<Route.CardList> { NoteListPage(backStack, viewModel, it.deckId) }
         entry<Route.NoteEdit> { NoteEditPage(backStack, viewModel, it.deckId, it.noteId) }
-        entry<Route.Review> { ReviewPage(backStack, viewModel, it.deckId, it.mode, it.count, it.daysAhead, it.tags) }
+        entry<Route.Review>(metadata = FullscreenPage()) { ReviewPage(backStack, viewModel, it.deckId, it.mode, it.count, it.daysAhead, it.tags) }
     }
 }
 

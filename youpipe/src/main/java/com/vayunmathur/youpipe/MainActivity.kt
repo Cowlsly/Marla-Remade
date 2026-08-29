@@ -32,6 +32,7 @@ import com.vayunmathur.library.ui.TabStyle
 import com.vayunmathur.library.ui.TabbedPagerScaffold
 import com.vayunmathur.library.util.DataStoreUtils
 import com.vayunmathur.library.util.DialogPage
+import com.vayunmathur.library.util.FullscreenPage
 import com.vayunmathur.library.util.MainNavigation
 import com.vayunmathur.library.util.NavBackStack
 import com.vayunmathur.library.util.rememberNavBackStack
@@ -255,7 +256,7 @@ fun Navigation(initialBackStack: List<Route>, ypvm: YouPipeViewModel) {
     val backStack = rememberNavBackStack(initialBackStack)
     MainNavigation(backStack) {
         entry<Route.Main> { YouPipeTabs(backStack, ypvm, it.initialTab) }
-        entry<Route.VideoPage> {
+        entry<Route.VideoPage>(metadata = FullscreenPage()) {
             VideoPage(backStack, ypvm, it.videoID)
         }
         entry<Route.ChannelPage> {

@@ -15,6 +15,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import com.vayunmathur.library.ui.DynamicTheme
 import com.vayunmathur.library.util.DialogPage
+import com.vayunmathur.library.util.FullscreenPage
 import com.vayunmathur.library.util.MainNavigation
 import com.vayunmathur.library.util.rememberNavBackStack
 import com.vayunmathur.photos.data.PhotosRepository
@@ -70,7 +71,7 @@ fun EditNavigation(
 ) {
     val backStack = rememberNavBackStack<EditRoute>(EditRoute.EditPhoto(photoId, photoUri))
     MainNavigation(backStack) {
-        entry<EditRoute.EditPhoto> {
+        entry<EditRoute.EditPhoto>(metadata = FullscreenPage()) {
             EditPhotoPage(backStack, photoEditViewModel, it.id, it.uri)
         }
 

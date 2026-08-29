@@ -16,6 +16,7 @@ import com.vayunmathur.games.pipes.ui.SettingsPage
 import com.vayunmathur.library.ui.AchievementNotification
 import com.vayunmathur.library.ui.GameCenterScreen
 import com.vayunmathur.library.util.GameHubComposeHook
+import com.vayunmathur.library.util.FullscreenPage
 import com.vayunmathur.library.util.MainNavigation
 import com.vayunmathur.library.util.openSettingsIfRequested
 import com.vayunmathur.library.util.rememberNavBackStack
@@ -30,9 +31,9 @@ fun Navigation(viewModel: PipesViewModel) {
         MainNavigation(backStack) {
             entry<Route.PackSelector> { PackScreen(backStack, viewModel, onOpenGameCenter = { backStack.add(Route.GameCenter) }) }
             entry<Route.LevelSelector> { LevelScreen(backStack, viewModel, it.packIndex) }
-            entry<Route.Game> { GameScreen(backStack, viewModel, it.packIndex, it.levelIndex) }
+            entry<Route.Game>(metadata = FullscreenPage()) { GameScreen(backStack, viewModel, it.packIndex, it.levelIndex) }
             entry<Route.DailySelector> { DailyLevelScreen(backStack, viewModel) }
-            entry<Route.DailyGame> { GameScreen(backStack, viewModel, PipesViewModel.DAILY_PACK_INDEX, it.levelIndex) }
+            entry<Route.DailyGame>(metadata = FullscreenPage()) { GameScreen(backStack, viewModel, PipesViewModel.DAILY_PACK_INDEX, it.levelIndex) }
             entry<Route.GameCenter> { GameCenterScreen(backupAgent = AppBackupAgent(), manager = viewModel.achievementsManager, onBack = { backStack.pop() }) }
             entry<Route.Settings> { SettingsPage(backStack, viewModel) }
         }

@@ -58,7 +58,9 @@ import com.vayunmathur.library.ui.DynamicTheme
 import com.vayunmathur.library.util.OfflineAware
 import com.vayunmathur.library.ui.PermissionsChecker
 import com.vayunmathur.library.util.DataStoreUtils
+import com.vayunmathur.library.util.FullscreenPage
 import com.vayunmathur.library.util.MainNavigation
+import com.vayunmathur.library.util.SiblingPage
 import com.vayunmathur.library.util.BottomNavBar
 import com.vayunmathur.library.util.BottomNavBarItem
 import com.vayunmathur.library.util.NavBackStack
@@ -268,19 +270,19 @@ fun Navigation(
     }
 
     MainNavigation(backStack) {
-        entry<Route.Gallery> {
+        entry<Route.Gallery>(metadata = SiblingPage()) {
             GalleryPage(backStack, galleryViewModel, secureFolderViewModel)
         }
 
-        entry<Route.Map> {
+        entry<Route.Map>(metadata = SiblingPage()) {
             MapPage(backStack, galleryViewModel, photoMapViewModel)
         }
 
-        entry<Route.People> {
+        entry<Route.People>(metadata = SiblingPage()) {
             PeoplePage(backStack, galleryViewModel)
         }
 
-        entry<Route.PhotoPage> {
+        entry<Route.PhotoPage>(metadata = FullscreenPage()) {
             PhotoPage(galleryViewModel, photoMapViewModel, it.id, it.overridePhotosList, it.pendingUri, backStack)
         }
 
@@ -288,11 +290,11 @@ fun Navigation(
             WallpaperPage(backStack, it.id, it.uri)
         }
 
-        entry<Route.Trash> {
+        entry<Route.Trash>(metadata = SiblingPage()) {
             TrashPage(backStack, galleryViewModel)
         }
 
-        entry<Route.SecureFolder> {
+        entry<Route.SecureFolder>(metadata = SiblingPage()) {
             SecureFolderEntry(backStack, secureFolderViewModel, vaultPhotoDao != null, vaultPassword)
         }
     }

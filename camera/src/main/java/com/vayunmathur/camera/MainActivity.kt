@@ -19,6 +19,7 @@ import com.vayunmathur.camera.util.CameraViewModel
 import com.vayunmathur.library.ui.DynamicTheme
 import com.vayunmathur.library.ui.PermissionsChecker
 import com.vayunmathur.library.util.openSettingsIfRequested
+import com.vayunmathur.library.util.FullscreenPage
 import com.vayunmathur.library.util.MainNavigation
 import com.vayunmathur.library.util.NavKey
 import com.vayunmathur.library.util.rememberNavBackStack
@@ -66,7 +67,7 @@ class MainActivity : ComponentActivity() {
                     // Land on settings when opened from the system App Info page.
                     backStack.openSettingsIfRequested(Route.Settings)
                     MainNavigation(backStack) {
-                        entry<Route.Camera> {
+                        entry<Route.Camera>(metadata = FullscreenPage()) {
                             CameraScreen(
                                 backStack,
                                 viewModel,

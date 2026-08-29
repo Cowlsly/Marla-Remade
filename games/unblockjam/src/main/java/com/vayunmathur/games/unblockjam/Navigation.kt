@@ -75,6 +75,7 @@ import com.vayunmathur.library.ui.game.LevelPickerBox
 import com.vayunmathur.library.ui.game.MovesBox
 import com.vayunmathur.library.util.GameHubComposeHook
 import com.vayunmathur.library.util.LevelStats
+import com.vayunmathur.library.util.FullscreenPage
 import com.vayunmathur.library.util.MainNavigation
 import com.vayunmathur.library.util.NavBackStack
 import com.vayunmathur.library.util.openSettingsIfRequested
@@ -105,7 +106,7 @@ fun Navigation(viewModel: UnblockJamViewModel) {
                     LevelPage(backStack, viewModel, it.packIndex)
                 }
             }
-            entry<Route.Game> {
+            entry<Route.Game>(metadata = FullscreenPage()) {
                 val pack = LevelPack.PACKS[it.packIndex]
                 UnblockJamTheme(pack = pack) {
                     GamePage(backStack, viewModel, it.packIndex, it.levelIndex)
@@ -114,7 +115,7 @@ fun Navigation(viewModel: UnblockJamViewModel) {
             entry<Route.DailySelector> {
                 DailyLevelPage(backStack, viewModel)
             }
-            entry<Route.DailyGame> {
+            entry<Route.DailyGame>(metadata = FullscreenPage()) {
                 GamePage(backStack, viewModel, UnblockJamViewModel.DAILY_PACK_INDEX, it.levelIndex)
             }
             entry<Route.GameCenter> {

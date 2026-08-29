@@ -13,6 +13,7 @@ import com.vayunmathur.games.sudoku.ui.HomeScreen
 import com.vayunmathur.library.ui.AchievementNotification
 import com.vayunmathur.library.ui.GameCenterScreen
 import com.vayunmathur.library.util.GameHubComposeHook
+import com.vayunmathur.library.util.FullscreenPage
 import com.vayunmathur.library.util.MainNavigation
 import com.vayunmathur.library.util.rememberNavBackStack
 
@@ -24,7 +25,7 @@ fun Navigation(viewModel: SudokuViewModel) {
     Box(Modifier.fillMaxSize()) {
         MainNavigation(backStack) {
             entry<Route.Home> { HomeScreen(backStack, viewModel) }
-            entry<Route.Game> { GameScreen(backStack, viewModel, it.config) }
+            entry<Route.Game>(metadata = FullscreenPage()) { GameScreen(backStack, viewModel, it.config) }
             entry<Route.GameCenter> {
                 GameCenterScreen(
                     backupAgent = AppBackupAgent(),

@@ -10,6 +10,7 @@ import com.vayunmathur.library.ui.IconSettings
 import com.vayunmathur.library.util.BottomBarItem
 import com.vayunmathur.library.util.BottomNavBar
 import com.vayunmathur.library.util.MainNavigation
+import com.vayunmathur.library.util.SiblingPage
 import com.vayunmathur.library.util.rememberNavBackStack
 import com.vayunmathur.taxi.data.BookingTrip
 import com.vayunmathur.taxi.ui.AccountsScreen
@@ -46,9 +47,9 @@ fun Navigation(trackRideId: MutableState<String?>, bookingTrip: MutableState<Boo
         backStack = backStack,
         bottomBar = { BottomNavBar(backStack, pages, currentPage) },
     ) {
-        entry<Route.Ride> { RideScreen(bookingTrip) }
-        entry<Route.CurrentRide> { CurrentRideScreen() }
-        entry<Route.Accounts> {
+        entry<Route.Ride>(metadata = SiblingPage()) { RideScreen(bookingTrip) }
+        entry<Route.CurrentRide>(metadata = SiblingPage()) { CurrentRideScreen() }
+        entry<Route.Accounts>(metadata = SiblingPage()) {
             AccountsScreen(onConnectLyft = { backStack.add(Route.LyftSignIn) })
         }
         entry<Route.LyftSignIn> { LyftSignInScreen(onBack = { backStack.pop() }) }

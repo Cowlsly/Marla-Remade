@@ -12,6 +12,7 @@ import com.vayunmathur.games.logicgate.ui.GamePage
 import com.vayunmathur.games.logicgate.ui.ProgressionPage
 import com.vayunmathur.library.ui.AchievementNotification
 import com.vayunmathur.library.ui.GameCenterScreen
+import com.vayunmathur.library.util.FullscreenPage
 import com.vayunmathur.library.util.MainNavigation
 import com.vayunmathur.library.util.rememberNavBackStack
 
@@ -22,7 +23,7 @@ fun Navigation(viewModel: LogicViewModel) {
     Box(modifier = Modifier.fillMaxSize()) {
         MainNavigation(backStack) {
             entry<Route.Progression> { ProgressionPage(backStack, viewModel) }
-            entry<Route.Game> { GamePage(backStack, viewModel, it.levelId) }
+            entry<Route.Game>(metadata = FullscreenPage()) { GamePage(backStack, viewModel, it.levelId) }
             entry<Route.GameCenter> {
                 GameCenterScreen(backupAgent = AppBackupAgent(), manager = viewModel.achievementsManager, onBack = { backStack.pop() })
             }

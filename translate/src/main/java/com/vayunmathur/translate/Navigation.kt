@@ -1,6 +1,7 @@
 package com.vayunmathur.translate
 
 import androidx.compose.runtime.Composable
+import com.vayunmathur.library.util.FullscreenPage
 import com.vayunmathur.library.util.MainNavigation
 import com.vayunmathur.library.util.rememberNavBackStack
 import com.vayunmathur.translate.platform.TranslateViewModel
@@ -18,7 +19,7 @@ fun Navigation(viewModel: TranslateViewModel, initialText: String) {
                 onOpenCamera = { backStack.add(Route.Camera) },
             )
         }
-        entry<Route.Camera> {
+        entry<Route.Camera>(metadata = FullscreenPage()) {
             CameraTranslateScreen(
                 viewModel = viewModel,
                 onBack = { backStack.pop() },

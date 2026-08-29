@@ -37,6 +37,7 @@ import com.vayunmathur.education.util.rememberNarrator
 import com.vayunmathur.library.ui.DynamicTheme
 import com.vayunmathur.library.ui.AchievementNotification
 import com.vayunmathur.library.util.DialogPage
+import com.vayunmathur.library.util.FullscreenPage
 import com.vayunmathur.library.util.MainNavigation
 import com.vayunmathur.library.util.NavKey
 import com.vayunmathur.library.util.rememberNavBackStack
@@ -125,7 +126,7 @@ fun MainGraph(viewModel: EducationViewModel) {
             entry<Route.UnitScreen> { UnitPage(backStack, viewModel, it.unitId) }
             entry<Route.LessonScreen> { LessonPage(backStack, viewModel, it.lessonId) }
             entry<Route.Quiz> { QuizPage(backStack, viewModel, it.exerciseId) }
-            entry<Route.VideoPlayer> { VideoPlayerPage(backStack, it.youtubeId, it.title) }
+            entry<Route.VideoPlayer>(metadata = FullscreenPage()) { VideoPlayerPage(backStack, it.youtubeId, it.title) }
             entry<Route.K2Lesson> { K2LessonPage(backStack, viewModel, it.lessonId) }
             entry<Route.K2Quiz> { K2QuizPage(backStack, viewModel, it.exerciseId) }
             entry<Route.K2Reward> { K2RewardPage(backStack, viewModel, it.stars) }

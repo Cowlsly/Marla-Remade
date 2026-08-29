@@ -29,6 +29,7 @@ import com.vayunmathur.library.ui.PagerTab
 import com.vayunmathur.library.ui.TabStyle
 import com.vayunmathur.library.ui.TabbedPagerScaffold
 import com.vayunmathur.library.util.MainNavigation
+import com.vayunmathur.library.util.ZoomPage
 import com.vayunmathur.library.util.NavBackStack
 import com.vayunmathur.library.util.NavKey
 import com.vayunmathur.library.util.rememberNavBackStack
@@ -152,7 +153,7 @@ private fun FoodDeliveryApp(trackOrderId: MutableState<Int?>, openRestaurantId: 
                 cart = cart,
             )
         }
-        entry<Route.Restaurant> { route ->
+        entry<Route.Restaurant>(metadata = ZoomPage()) { route ->
             RestaurantScreen(
                 merchantId = route.id,
                 onBack = { backStack.pop() },

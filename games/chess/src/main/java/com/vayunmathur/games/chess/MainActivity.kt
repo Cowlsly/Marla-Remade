@@ -90,6 +90,7 @@ import com.vayunmathur.library.util.NavBackStack
 import com.vayunmathur.library.util.NavKey
 import com.vayunmathur.library.util.rememberNavBackStack
 import com.vayunmathur.library.util.MainNavigation
+import com.vayunmathur.library.util.SiblingPage
 import com.vayunmathur.library.util.BottomBarItem
 import com.vayunmathur.library.util.BottomNavBar
 import com.vayunmathur.library.util.GameHubComposeHook
@@ -164,7 +165,7 @@ class MainActivity : ComponentActivity() {
                             }
                         }
                     ) {
-                        entry<Route.Game> {
+                        entry<Route.Game>(metadata = SiblingPage()) {
                             val viewModel: ChessViewModel = viewModel()
                             var showNewGameDialog by remember { mutableStateOf(false) }
 
@@ -188,11 +189,11 @@ class MainActivity : ComponentActivity() {
                                 )
                             }
                         }
-                        entry<Route.Puzzles> {
+                        entry<Route.Puzzles>(metadata = SiblingPage()) {
                             val puzzleViewModel: PuzzleViewModel = viewModel()
                             PuzzleScreen(puzzleViewModel)
                         }
-                        entry<Route.Learn> {
+                        entry<Route.Learn>(metadata = SiblingPage()) {
                             LearnHomeScreen(
                                 onOpenStage = { cat, stage ->
                                     backStack.add(Route.LearnStage(cat, stage))

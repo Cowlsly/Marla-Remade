@@ -41,6 +41,7 @@ import com.vayunmathur.library.ui.PagerTab
 import com.vayunmathur.library.ui.TabStyle
 import com.vayunmathur.library.ui.TabbedPagerScaffold
 import com.vayunmathur.library.util.MainNavigation
+import com.vayunmathur.library.util.ZoomPage
 import com.vayunmathur.library.util.NavKey
 import com.vayunmathur.library.util.rememberNavBackStack
 import kotlinx.serialization.Serializable
@@ -167,7 +168,7 @@ private fun AppRoot(
                 onBack = { backStack.pop() },
             )
         }
-        entry<Route.Detail> {
+        entry<Route.Detail>(metadata = ZoomPage()) {
             AppDetailPage(
                 viewModel = viewModel,
                 onBack = {

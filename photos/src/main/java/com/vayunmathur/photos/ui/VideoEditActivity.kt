@@ -14,6 +14,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import com.vayunmathur.library.ui.DynamicTheme
+import com.vayunmathur.library.util.FullscreenPage
 import com.vayunmathur.library.util.MainNavigation
 import com.vayunmathur.library.util.rememberNavBackStack
 import com.vayunmathur.photos.data.PhotosRepository
@@ -69,7 +70,7 @@ fun VideoEditNavigation(
 ) {
     val backStack = rememberNavBackStack<VideoEditRoute>(VideoEditRoute.EditVideo(photoId, photoUri))
     MainNavigation(backStack) {
-        entry<VideoEditRoute.EditVideo> {
+        entry<VideoEditRoute.EditVideo>(metadata = FullscreenPage()) {
             VideoEditPage(videoEditViewModel, it.id, it.uri)
         }
     }

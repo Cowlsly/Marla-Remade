@@ -27,6 +27,7 @@ import com.vayunmathur.library.ui.IconRuler
 import com.vayunmathur.library.util.BottomBarItem
 import com.vayunmathur.library.util.BottomNavBar
 import com.vayunmathur.library.util.MainNavigation
+import com.vayunmathur.library.util.SiblingPage
 import com.vayunmathur.library.util.NavKey
 import com.vayunmathur.library.util.rememberNavBackStack
 import com.vayunmathur.library.widgets.updateWidgetPreviews
@@ -103,8 +104,8 @@ fun Navigation(viewModel: CalculatorViewModel, unitsRequest: Int = 0) {
             )
         },
     ) {
-        entry<Route.Calculator> { CalculatorPage(viewModel) }
-        entry<Route.Graph> { GraphPage(viewModel) }
-        entry<Route.Units> { UnitConverterPage(viewModel) }
+        entry<Route.Calculator>(metadata = SiblingPage()) { CalculatorPage(viewModel) }
+        entry<Route.Graph>(metadata = SiblingPage()) { GraphPage(viewModel) }
+        entry<Route.Units>(metadata = SiblingPage()) { UnitConverterPage(viewModel) }
     }
 }
