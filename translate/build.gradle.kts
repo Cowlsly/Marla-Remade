@@ -17,9 +17,9 @@ android {
 }
 
 dependencies {
-    // On-device translation runs entirely in the ncnn AAR (SMaLL-100 via the
-    // Small100 class); the model files are downloaded at runtime from the mirror.
-    implementation(libs.ncnn.android)
+    // On-device translation runs on `:library:ml`'s own Vulkan compute runtime (SMaLL-100 via
+    // `Small100Handle`); the two model files are downloaded at runtime from the mirror.
+    implementation(project(":library:ml"))
     implementation(project(":library:downloadservice"))
     implementation(project(":library:ocr"))
     implementation(project(":library:network"))

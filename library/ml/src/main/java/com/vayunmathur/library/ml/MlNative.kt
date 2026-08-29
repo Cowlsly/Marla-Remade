@@ -140,6 +140,58 @@ internal object MlNative {
     external fun synthesizeSupertonic(handle: Long, text: String): FloatArray?
 
     /**
+     * Bring up SMaLL-100 from its one `.maml` and its tokenizer table. Returns 0 on failure.
+     *
+     * One graph, not two: the 128,112-row embedding is **tied** — it is the encoder's input table,
+     * the decoder's input table and the logits kernel — so an encoder file and a decoder file would
+     * upload 125 MiB of it twice. Native selects between the encoder pass, the decode step and the
+     * logits projection by re-recording one net.
+     *
+     * The plan arrives as a **file descriptor** for the reason [createSupertonic] gives, and more
+     * so: at 318 MiB a `ByteArray` would allocate it three times over and be killed for it. Native
+     * reads the header and tensor table only, then streams the weights into the GPU. It also keeps
+     * the descriptor open for the life of the handle, because the tied embedding is gathered a row
+     * at a time on the host rather than uploaded a second time.
+     *
+     * **The descriptor must be detached.** Native takes ownership and closes it, on the failure
+     * paths as much as the successful one, so a caller must not close it itself. [offset] is 0 and
+     * [length] the file's size for a file on disk; only an asset needs a real range.
+     *
+     * [tokenizer] stays a byte array: 1.7 MB, where streaming saves nothing.
+     *
+     * Freed by [destroySmall100], not [destroy], [destroyOcr] or [destroySupertonic].
+     */
+    external fun createSmall100(
+        fd: Int,
+        offset: Long,
+        length: Long,
+        tokenizer: ByteArray,
+    ): Long
+
+    /**
+     * Translate [text] into the language [targetToken] names, or null on failure.
+     *
+     * [text] **must already be NFKC** - use `java.text.Normalizer.normalize(text, Form.NFKC)`. The
+     * model's normaliser is `nmt_nfkc` with a 237 KB precompiled charsmap, and reproducing that
+     * natively would mean carrying Unicode tables the platform already has.
+     *
+     * [targetToken] goes on the **source** side, which is the one thing about SMaLL-100 that is easy
+     * to get backwards: its distillation gives the *encoder* the target language and starts the
+     * decoder from `</s>`. Backwards it produces fluent output in the wrong language rather than an
+     * error. `Small100Model.LANG_ID` is the table.
+     *
+     * Greedy decoding, capped at 128 tokens. An empty string means the text had nothing to
+     * translate, which is not a failure.
+     */
+    external fun translateSmall100(handle: Long, text: String, targetToken: Int): String?
+
+    /**
+     * Free SMaLL-100's network, its open weights file and its tokenizer table.
+     * Exactly once per non-zero handle from [createSmall100].
+     */
+    external fun destroySmall100(handle: Long)
+
+    /**
      * Detect faces in [pixels] and return them flattened, nine floats per face.
      *
      * The layout per face is `left, top, right, bottom, leftEyeX, leftEyeY, rightEyeX,

@@ -375,7 +375,7 @@ fn encode(weights: &dyn WeightSource, len: u32) -> Result<Plan, String> {
     let b = &mut builder;
     // The tied weight and the whole decoder belong to the other two passes. The trailing encoder
     // norm is part of this range, so it runs to `DECODER` rather than to `ENCODER_NORM`.
-    name_host_tensors(b, &[ENCODER..DECODER]);
+    name_host_tensors(b, std::slice::from_ref(&(ENCODER..DECODER)));
 
     let x = b.input(Shape::new(D_MODEL, 1, len));
     let mut x = x;
@@ -404,7 +404,7 @@ fn logits(weights: &dyn WeightSource) -> Result<Plan, String> {
     let l = &mut Layers { next: HEAD };
     let mut builder = Builder::new(weights);
     let b = &mut builder;
-    name_host_tensors(b, &[HEAD..ENCODER]);
+    name_host_tensors(b, std::slice::from_ref(&(HEAD..ENCODER)));
 
     let state = b.input(Shape::new(D_MODEL, 1, 1));
     let halves: Vec<Id> = (0..HEAD_SPLITS)
@@ -614,11 +614,17 @@ mod tests {
     /// Stated here rather than returned by [`build`] because it is the thing under test: a pass
     /// that read the wrong range would name the right one and still be wrong.
     fn read_by(mode: Mode) -> Vec<std::ops::Range<usize>> {
+        let mut ranges = Vec::new();
         match mode {
-            Mode::Encode { .. } => vec![ENCODER..DECODER],
-            Mode::Logits => vec![HEAD..ENCODER],
-            Mode::DecodeStep { .. } => vec![HEAD..ENCODER, DECODER..TENSORS],
+            Mode::Encode { .. } => ranges.push(ENCODER..DECODER),
+            Mode::Logits => ranges.push(HEAD..ENCODER),
+            Mode::DecodeStep { .. } => {
+                // The decode step computes the tied head itself, so it reads both ends of the file.
+                ranges.push(HEAD..ENCODER);
+                ranges.push(DECODER..TENSORS);
+            }
         }
+        ranges
     }
 
     #[test]
