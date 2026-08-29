@@ -4,6 +4,7 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ColumnScope
 import androidx.compose.foundation.layout.Row
+import com.vayunmathur.library.util.sharedContainer
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -143,12 +144,28 @@ fun <T> FormDetailGroup(
     optionLabel: ((Int) -> String)? = null,
     leadingIcon: (@Composable (T) -> Unit)? = null,
     addIcon: (@Composable () -> Unit)? = null,
+    /**
+     * Per-item key pairing this field with the read-only row that shows the same value elsewhere, so
+     * the two morph into one another. Return null for an item with no counterpart - a row the user
+     * has just added has nothing to morph from, and two rows sharing a key would collide.
+     */
+    sharedKey: ((T) -> Any?)? = null,
+    /**
+     * Rows that must always exist, by index. Such a row keeps its place when emptied rather than
+     * disappearing, so a contact always offers somewhere to put its primary number or address.
+     *
+     * Only affects this row's own button. The type it uses stays available to every other row, so a
+     * contact can still have a second mobile number.
+     */
+    isMandatory: (Int) -> Boolean = { false },
 ) {
     Column(modifier = modifier, verticalArrangement = Arrangement.spacedBy(Spacing.sm)) {
         items.forEachIndexed { index, item ->
+            val rowKey = sharedKey?.invoke(item)
+            val rowModifier = if (rowKey == null) Modifier else Modifier.sharedContainer(rowKey)
             OutlinedTextField(
                 value = value(item),
-                onValueChange = { v -> onValueChange(index, v) },
+                onValueChange = { v: String -> onValueChange(index, v) },
                 label = { Text(label) },
                 visualTransformation = visualTransformation,
                 leadingIcon = leadingIcon?.let { { it(item) } },
@@ -170,14 +187,25 @@ fun <T> FormDetailGroup(
                                 )
                             }
                         }
-                        IconButton(onClick = { onRemove(index) }) {
-                            IconRemoveCircle()
+                        // A mandatory row cannot be taken away, so its button clears the value instead
+                        // - and only appears when there is something to clear, since an always-present
+                        // button on an empty row invites a tap that would do nothing.
+                        if (isMandatory(index)) {
+                            if (value(item).isNotEmpty()) {
+                                IconButton(onClick = { onValueChange(index, "") }) {
+                                    IconRemoveCircle()
+                                }
+                            }
+                        } else {
+                            IconButton(onClick = { onRemove(index) }) {
+                                IconRemoveCircle()
+                            }
                         }
                     }
                 },
                 keyboardOptions = KeyboardOptions(keyboardType = keyboardType),
                 singleLine = true,
-                modifier = Modifier.fillMaxWidth(),
+                modifier = rowModifier.fillMaxWidth(),
             )
             if (isCustom(item) && onLabelChange != null) {
                 Spacer(Modifier.height(Spacing.xs))
