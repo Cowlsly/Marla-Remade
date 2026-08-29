@@ -650,8 +650,19 @@ impl supertonic::Stages for SupertonicNets<'_> {
         let sequence = positions("duration ids", lanes.len(), LANES)?;
         let chars = sequence.checked_sub(1).ok_or("a duration pass over only a sentence token")?;
         let net = self.duration.at(chars)?;
-        let out = one_output(net.infer_raw_many(&[lanes, style])?)?;
-        match out.as_slice() {
+        // Two outputs, in `nets::supertonic_duration`'s declaration order: the sentence encoder's
+        // hidden states, then the one value `seconds` exponentiates. Only the second is wanted here.
+        // The first exists because it is what `scripts/ml/onnx_parity.py` probes for this graph — the
+        // net's own output is a single scalar, and a correlation over one value is not a number.
+        //
+        // Reading it with `one_output` was this engine's original bug: the duration predictor has
+        // always returned two tensors, so every synthesis failed at the first stage with
+        // "2 outputs, expected one" and no audio was ever produced.
+        let out = net.infer_raw_many(&[lanes, style])?;
+        let [_encoded, log_seconds] = <[Vec<f32>; 2]>::try_from(out).map_err(|other| {
+            format!("the duration predictor returned {} tensors, not two", other.len())
+        })?;
+        match log_seconds.as_slice() {
             [only] => Ok(*only),
             other => {
                 Err(format!("the duration predictor returned {} values, not one", other.len()))
