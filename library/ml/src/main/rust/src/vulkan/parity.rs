@@ -33,7 +33,27 @@
 //! Every number must be identical to the unforced run: windowing changes which descriptor set is
 //! bound and what the three weights offsets in [`crate::nets::Push`] are measured from, and
 //! nothing else. The variable is read once, when the [`Context`] is created, which is why it is set
-//! on the command line rather than inside a test — the device here is process-wide and shared.
+//! on the command line rather than inside a test - the device here is process-wide and shared.
+//!
+//! # Running them on the phone
+//!
+//! A desktop GPU passing these says nothing about Adreno, which is the only device this runtime
+//! actually ships to, and audio is far less forgiving of a shader that is subtly wrong than a
+//! segmentation mask is. The test binary cross-compiles and runs from a shell, because `ash` loads
+//! `libvulkan.so` at run time rather than linking it:
+//!
+//! ```text
+//! NDK=$ANDROID_HOME/ndk/29.0.14206865/toolchains/llvm/prebuilt/<host>/bin
+//! CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER=$NDK/aarch64-linux-android31-clang \
+//!   cargo test --release -p modelrunner --lib --no-run --target aarch64-linux-android
+//! adb push target/aarch64-linux-android/release/deps/modelrunner-<hash> /data/local/tmp/mr_test
+//! adb shell chmod 755 /data/local/tmp/mr_test
+//! adb shell /data/local/tmp/mr_test --ignored vulkan::parity
+//! ```
+//!
+//! The fixtures above need no assets and so run anywhere. The two that read a shipped `.maml` find
+//! nothing under `/data/local/tmp` and return, so push `speech/src/main/assets/supertonic` beside
+//! the binary if those are wanted too.
 //!
 //! # Tolerance
 //!
