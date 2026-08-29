@@ -9,9 +9,9 @@ import org.json.JSONObject
  * Speech-to-text entry point for [com.vayunmathur.speech.service.WhisperRecognitionService].
  *
  * A thin seam over [WhisperHandle], which runs **whisper-base** on `:library:ml`'s Vulkan compute
- * runtime. It replaced `WhisperOnnxEngine` and with it the last `onnxruntime-android` dependency in
- * the tree: the two int8 ONNX exports (76.9 MB) became one 70.6 MiB `.maml`, and ~27 MB of arm64
- * `.so` left the APK.
+ * runtime. It replaced `WhisperOnnxEngine` and with it the last third-party inference runtime in the
+ * tree: the two int8 ONNX exports (76.9 MB) became one 70.6 MiB `.maml`, and the reduced
+ * onnxruntime AAR's 10,466,856 bytes of arm64 `.so` left the APK with them.
  *
  * The port is also **four times closer** to the fp32 checkpoint than the exports were — mean absolute
  * error 0.029 against 0.110 over the encoder's output — because it quantises per output channel where

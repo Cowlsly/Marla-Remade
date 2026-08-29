@@ -26,8 +26,8 @@ import kotlinx.coroutines.withContext
  *
  * The two towers are hardcoded forward passes in `library/ml/src/main/rust/src/nets/tinyclip.rs`,
  * executed by our own Vulkan compute runtime through [ClipHandle]. That removed the last
- * `onnxruntime-android` dependency from this APK — 10,466,856 bytes of arm64 `.so`, against the
- * 779 KB `libmodelrunner.so` that was already here for face detection, segmentation and OCR.
+ * `onnxruntime-reduced-android` dependency from this APK - 10,466,856 bytes of arm64 `.so`, against
+ * the 797 KB `libmodelrunner.so` that was already here for face detection, segmentation and OCR.
  *
  * It is also *more* accurate than the ONNX path it replaces. Cosine against the fp32 export is
  * 0.999864 for an image and 0.999394 for a query, against the int8 export's 0.998478 and 0.982881:

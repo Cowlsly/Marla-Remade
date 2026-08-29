@@ -8,8 +8,8 @@
 //! over up to 77 tokens. 23,446,016 parameters, 22.6 MiB as int8.
 //!
 //! It replaces onnxruntime running `photos/src/main/assets/clip/model_int8.onnx`. That export was
-//! also int8, so this is not a size win on the weights — the APK shrinks because
-//! `onnxruntime-android`'s ~27 MB of native `.so` leaves with it. See
+//! also int8, so this is not a size win on the weights — the APK shrinks because the
+//! `onnxruntime-reduced-android` AAR's 10.5 MB of arm64 `.so` leaves with it. See
 //! `photos/src/main/assets/clip/README.md` for why the `.maml` is built from the **fp32** graph
 //! even though the shipped one was already quantised.
 //!

@@ -13,7 +13,7 @@ import kotlin.test.assertTrue
  * This is the highest-value test in the module: a wrong log-mel does not throw, it makes the
  * decoder emit fluent nonsense, so nothing downstream would catch a regression here. The
  * expectations were produced by running the real extractor over the closed-form signal in
- * [referenceSignal] — see the generator noted in `scripts/speech/fetch_whisper_onnx.sh`.
+ * [referenceSignal] — see the generator noted in `scripts/ml/fetch_whisper.py`.
  *
  * Tolerances are loose enough to absorb the reference being computed in float32 while this
  * runs in double, and tight enough that any indexing, window, scale or transpose error fails.

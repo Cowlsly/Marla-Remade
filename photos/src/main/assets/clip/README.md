@@ -68,12 +68,12 @@ indexed by either alone.
 
 The result is *smaller* than the file it replaces — 23,734,912 bytes against 24,281,512 — because
 the token embedding is int8 per row rather than uint8 per tensor and nothing is stored twice. The
-APK shrinks by much more than that, because `onnxruntime-android`'s native `.so` leaves with it:
-`onnxruntime-reduced-android-1.27.0-r1.aar` contributed **10,466,856 bytes** of arm64 `.so`
-(3.43 MiB after the APK's own compression), against the 779 KB of `libmodelrunner.so` that was
-already there for face detection, subject segmentation and OCR.
+APK saves more than that, because the reduced `onnxruntime-reduced-android-1.27.0-r1.aar` contributed
+**10,466,856 bytes** of arm64 `.so` (about 3.4 MiB deflated), against the 797 KB `libmodelrunner.so`
+that was already there for face detection, subject segmentation and OCR. The measured `:photos`
+release APK went from 59.0 MiB to **53.8 MiB**.
 
-A `:photos` release APK built after the port contains **no `onnxruntime` entry at all**.
+It contains **no `onnxruntime` entry and no `.onnx` asset at all**.
 
 ## What the `.maml` holds
 

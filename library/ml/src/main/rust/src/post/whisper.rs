@@ -18,7 +18,7 @@
 //! Dropping the last one does not fail: it changes the output from plain text to `<|0.00|>`-style
 //! timestamped text, because the model was trained to predict a timestamp first unless told not to.
 //! That is the same shape of hazard as SMaLL-100's "the target language goes on the source side",
-//! and [`tests::the_prompt_is_four_tokens_ending_in_no_timestamps`] is what pins it.
+//! and `tests::the_prompt_is_four_tokens_ending_in_no_timestamps` is what pins it.
 //!
 //! The reference feeds all four at once with `use_cache_branch=false`. This feeds them one at a
 //! time, because [`crate::nets::whisper::Mode::DecodeStep`] is one query per step — and for a

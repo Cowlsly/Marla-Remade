@@ -58,7 +58,17 @@ in `:photos` itself uses ncnn any more.
 
 ## `clip/`
 
-See `SUPPLY_CHAIN_RISKS.md` for the TinyCLIP int8 ONNX read by `ClipEmbedder`.
+TinyCLIP-ViT-8M/16 Text-3M, read by `ClipEmbedder` through `:library:ml`. It has a README
+of its own — `clip/README.md` — because it is the one asset here whose provenance had to be
+written from scratch: until `scripts/ml/fetch_tinyclip.py` existed it was the only bundled
+model in the tree with no pinned upstream SHA-256 and no fetch recipe. Rebuild it with that
+script rather than with `fetch_and_convert.sh`.
+
+`model_int8.onnx` and the `onnxruntime-reduced-android` AAR that ran it are both gone, which
+is 10,466,856 bytes of arm64 native code out of this APK. `libmodelrunner.so` was already here
+for the four models above, and there is now no third-party inference runtime in `:photos` at all.
+
+## Keeping these current
 
 Update: `./scripts/ml/fetch_and_convert.sh --update`, which reports the moved
 SHA-256 to re-pin. If the ordered layer table changed too, the converter says so

@@ -9,8 +9,11 @@
 //! 70.6 MiB as int8.
 //!
 //! It replaces onnxruntime running two int8 ONNX exports totalling 76.9 MB
-//! (`speech/src/main/assets/whisper-base/*.onnx`), and with them the last `onnxruntime-android`
-//! dependency in the tree — ~27 MB of native `.so`, which was 35% of the `:speech` APK.
+//! (`speech/src/main/assets/whisper-base/*.onnx`), and with them the last third-party inference
+//! runtime in the tree. `:speech` used the **reduced** `onnxruntime-reduced-android` build, so what
+//! actually left is 10,466,856 bytes of arm64 `.so` — about 3.6 MiB deflated in the APK — against the
+//! 797 KB `libmodelrunner.so` that was already there for Supertonic. The release APK went from
+//! 188.1 MiB to a measured **181.8 MiB**; the weights are most of both numbers.
 //!
 //! It is also **four times closer** to the fp32 checkpoint than what it replaces. Over the encoder's
 //! `[1500, 512]` output on one deterministic window, against an fp32 reference computed from the

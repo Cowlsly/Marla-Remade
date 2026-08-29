@@ -18,10 +18,10 @@ import android.util.Log
  * but the layer norms, the biases and the two position tables is int8, quantised per output channel
  * from `openai/whisper-base`'s fp32 checkpoint.
  *
- * It replaces `onnxruntime-android` running two int8 ONNX exports totalling 76.9 MB, and is **four
- * times closer** to the fp32 checkpoint than they were: over the encoder's output, mean absolute
- * error 0.029 against their 0.110, on a tensor whose largest value is 22.8. The APK loses ~27 MB of
- * arm64 `.so` with the runtime.
+ * It replaces `onnxruntime-reduced-android` running two int8 ONNX exports totalling 76.9 MB, and is
+ * **four times closer** to the fp32 checkpoint than they were: over the encoder's output, mean
+ * absolute error 0.029 against their 0.110, on a tensor whose largest value is 22.8. The APK loses
+ * 10,466,856 bytes of arm64 `.so` with the runtime — about 3.6 MiB of the packaged size.
  *
  * An asset must be stored **uncompressed** for this to work at all: `AssetManager.openFd` throws for
  * a deflated entry. That is what `noCompress += "maml"` in `speech/build.gradle.kts` is for.

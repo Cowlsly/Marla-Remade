@@ -11,13 +11,13 @@ import kotlin.math.sin
 
 /**
  * Whisper log-mel feature extraction: 16 kHz mono PCM to the `[80, 3000]` `input_features`
- * tensor the ONNX encoder expects. This replaces the `fbank` ncnn net that the old AAR path
+ * tensor the encoder expects. This replaces the `fbank` ncnn net that the old AAR path
  * used, and is a port of HuggingFace `WhisperFeatureExtractor` (slaney mel scale, slaney
  * normalisation) verified against it to ~1e-7.
  *
  * A wrong mel does not throw — it produces fluent, confident nonsense — so the constants here
  * are asserted against upstream `preprocessor_config.json` by
- * `scripts/speech/fetch_whisper_onnx.sh`, and the output is pinned in `WhisperFeaturesTest`.
+ * `scripts/ml/fetch_whisper.py`, and the output is pinned in `WhisperFeaturesTest`.
  */
 object WhisperFeatures {
 

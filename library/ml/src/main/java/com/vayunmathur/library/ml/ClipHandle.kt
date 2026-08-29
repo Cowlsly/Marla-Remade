@@ -20,8 +20,8 @@ import android.util.Log
  *
  * It replaces `onnxruntime-android` running a 24 MB int8 ONNX export of the same model, and is
  * *closer* to the fp32 reference than that was — 0.9994 against 0.9829 on a text query, because the
- * export quantised the 49,408-row token table per tensor with a zero point. The APK loses 10.5 MB of
- * arm64 `.so`, not weights.
+ * export quantised the 49,408-row token table per tensor with a zero point. The APK loses
+ * 10,466,856 bytes of arm64 `.so` with the runtime, not weights.
  *
  * An asset must be stored **uncompressed** for this to work at all: `AssetManager.openFd` throws for
  * a deflated entry. That is what `noCompress += "maml"` in `photos/build.gradle.kts` is for, and it

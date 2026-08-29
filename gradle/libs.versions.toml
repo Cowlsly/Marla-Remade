@@ -106,12 +106,6 @@ quickjs = "1.0.5"
 # Git
 jgit = "6.10.1.202505221210-r"
 
-# On-device AI
-onnxruntimeAndroid = "1.27.0"
-# Reduced-operator rebuild of the above, arm64-only. Version tracks upstream plus an -rN
-# suffix for the operator-set revision, so a rebuild with different ops gets a new version.
-onnxruntimeReduced = "1.27.0-r1"
-
 # Crypto, security & credential storage
 cryptographyCore = "0.6.0"
 sqlcipherAndroid = "4.18.0"
@@ -290,13 +284,17 @@ quickjs-kt = { module = "io.github.dokar3:quickjs-kt", version.ref = "quickjs" }
 # Git
 jgit = { module = "org.eclipse.jgit:org.eclipse.jgit", version.ref = "jgit" }
 
-# On-device AI
-onnxruntime-android = { module = "com.microsoft.onnxruntime:onnxruntime-android", version.ref = "onnxruntimeAndroid" }
-# Same source as onnxruntime-android, built with --include_ops_by_config for exactly the
-# operators whisper-base (speech) and TinyCLIP (photos) need: 10 MB of native code instead of
-# 28 MB. Only those two apps may use it — a model with an operator outside the configured set
-# fails at session creation, not at inference. openassistant stays on the full build.
-onnxruntime-reduced = { module = "io.github.vayun-mathur:onnxruntime-reduced-android", version.ref = "onnxruntimeReduced" }
+# On-device AI: nothing here.
+#
+# Every model in this tree runs on `:library:ml`, our own Vulkan compute runtime, reading `.maml`
+# weights. `com.microsoft.onnxruntime:onnxruntime-android` and the reduced rebuild of it,
+# `io.github.vayun-mathur:onnxruntime-reduced-android`, were the last third-party inference runtimes
+# and both are gone: TinyCLIP (`photos`) and whisper-base (`speech`) were the two remaining users.
+#
+# The reduced build is worth remembering as a shape of dependency to avoid. It was our own rebuild of
+# upstream with `--include_ops_by_config` against an operator list generated from the very models it
+# ran, so re-exporting a model meant regenerating the AAR by hand or watching session creation fail.
+# Nothing in `.maml` has that coupling: the container carries tensors and the forward pass is Rust.
 
 # Crypto, security & credential storage
 cryptography-core = { module = "dev.whyoleg.cryptography:cryptography-core", version.ref = "cryptographyCore" }
