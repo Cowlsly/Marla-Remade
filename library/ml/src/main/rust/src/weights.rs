@@ -349,15 +349,30 @@ impl Weights {
 
     /// A [`Weights`] that is nothing but a data section, for the device-parity fixtures.
     ///
-    /// [`crate::vulkan::run::Net::new`] reads no part of a [`Weights`] except [`data`], because
-    /// the [`crate::nets::Plan`] it is handed already carries every resolved offset. So a
-    /// fixture that built its plan against a test [`WeightSource`] can give the device the same
-    /// blob without assembling a header and a tensor table that nothing would ever read.
+    /// [`crate::vulkan::run::Net::new`] reads no part of a [`Weights`] except [`data`] to *record*
+    /// the plan, because the [`crate::nets::Plan`] it is handed already carries every resolved
+    /// offset. It does read the table to **validate** each op's weight range against it, though —
+    /// see `segment::tensor_end` — so the table cannot be empty or every op is rejected as reading
+    /// outside all zero of the tensors the file describes.
+    ///
+    /// One tensor spanning the whole blob is what a fixture can honestly assert: its plan was built
+    /// against a [`WeightSource`] whose own offsets are already consistent, so the property left to
+    /// check on the device is that nothing reads off the end of the data. Assembling a faithful
+    /// per-tensor table here would duplicate the fixture's source and check the fixture rather than
+    /// the shader.
     ///
     /// [`data`]: Weights::data
     #[cfg(test)]
     pub(crate) fn from_data(data: Vec<u8>) -> Weights {
-        let table = Offsets { tensors: Vec::new() };
+        let table = Offsets {
+            tensors: vec![Tensor {
+                rank: 1,
+                dims: [(data.len() / 2) as u32, 0, 0, 0],
+                offset: 0,
+                len: (data.len() / 2) as u32,
+                int8: false,
+            }],
+        };
         Weights { graph_id: 0, source_sha256: [0u8; 32], table, data }
     }
 

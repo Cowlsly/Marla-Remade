@@ -3397,4 +3397,125 @@ mod tests {
         // image contains no text, which makes a near-empty map the honest answer.
         assert_usable_mask("ppocr_det", &plan, weights.data());
     }
+
+    /// The whole Supertonic pipeline, on the shipped assets, to a waveform on disk.
+    ///
+    /// Every parity check in this repo is *per net*: `onnx_parity.py` compares one graph against
+    /// onnxruntime, and `vulkan::parity` compares one plan against this interpreter. Nothing
+    /// compares the **composition** - four nets, a sixteen-step sampler loop and the marshalling
+    /// between them - against anything, and that is where the engine's shipped bugs lived: the
+    /// duration predictor's second output, and the vocoder's two missing permutations.
+    ///
+    /// So this runs `post::supertonic::synthesise` exactly as `bridge.rs` does, with the noise read
+    /// from a file so an ONNX driver can be given the same draw, and writes the samples out for it
+    /// to correlate against. Driven by `PARITY_DIR`, like `dump_reference_output`.
+    #[test]
+    #[ignore = "runs all four shipped supertonic nets through the interpreter; minutes"]
+    fn dump_supertonic_utterance() {
+        let Ok(dir) = std::env::var("SUPERTONIC_DIR") else {
+            return;
+        };
+        let dir = std::path::PathBuf::from(dir);
+        let text = std::env::var("SUPERTONIC_TEXT").expect("SUPERTONIC_TEXT");
+        let Some(root) = repo_root() else {
+            return;
+        };
+        let assets = root.join("speech/src/main/assets/supertonic");
+        let load = |name: &str, id: u32| {
+            let bytes = std::fs::read(assets.join(name)).unwrap_or_else(|e| panic!("{name}: {e}"));
+            crate::weights::Weights::parse(&bytes, id).unwrap_or_else(|e| panic!("{name}: {e}"))
+        };
+        use crate::post::supertonic as post;
+        use crate::weights::graph;
+        let dp = load("supertonic_dp.maml", graph::SUPERTONIC_DP);
+        let ttl = load("supertonic_ttl.maml", graph::SUPERTONIC_TTL);
+        let ve = load("supertonic_ve.maml", graph::SUPERTONIC_VE);
+        let voc = load("supertonic_voc.maml", graph::SUPERTONIC_VOC);
+        let indexer = std::fs::read(assets.join("unicode_indexer.bin")).expect("the indexer");
+        let style = std::fs::read(assets.join("style_F1.bin")).expect("the voice");
+        let voice = post::Voice::read(&style).expect("the voice parses");
+        let conditioning = post::Conditioning::read(ve.reader()).expect("the conditioning");
+
+        /// The four nets through the interpreter, rebuilding a plan per shape as `Reshaped` does.
+        struct Interpreted<'a> {
+            dp: &'a crate::weights::Weights,
+            ttl: &'a crate::weights::Weights,
+            ve: &'a crate::weights::Weights,
+            voc: &'a crate::weights::Weights,
+        }
+        impl post::Stages for Interpreted<'_> {
+            fn duration(&mut self, lanes: &[f32], style: &[f32]) -> Result<f32, String> {
+                let chars = (lanes.len() / 2 - 1) as u32;
+                let plan = supertonic_duration::build(self.dp, chars)?;
+                let out = run_multi(&plan, self.dp.data(), &[lanes, style])?;
+                Ok(out[1][0])
+            }
+            fn text(&mut self, lanes: &[f32], style: &[f32]) -> Result<Vec<f32>, String> {
+                let chars = (lanes.len() / 2) as u32;
+                let plan = supertonic_text::build(self.ttl, chars)?;
+                Ok(run_multi(&plan, self.ttl.data(), &[lanes, style])?.remove(0))
+            }
+            #[allow(clippy::too_many_arguments)]
+            fn sampler(
+                &mut self,
+                latent: &[f32],
+                text: &[f32],
+                keys: &[f32],
+                style: &[f32],
+                shifts: &[f32],
+                query_angles: &[f32],
+                key_angles: &[f32],
+            ) -> Result<Vec<f32>, String> {
+                let frames = (latent.len() / 144) as u32;
+                let chars = (text.len() / 256) as u32;
+                let plan = supertonic_sampler::build(self.ve, frames, chars)?;
+                let inputs: &[&[f32]] =
+                    &[latent, text, keys, style, shifts, query_angles, key_angles];
+                Ok(run_multi(&plan, self.ve.data(), inputs)?.remove(0))
+            }
+            fn vocoder(&mut self, latent: &[f32], frames: u32) -> Result<Vec<f32>, String> {
+                let plan = supertonic_vocoder::build(self.voc, frames)?;
+                // Statistics of the latent the sampler converged to. A flow model that stayed on
+                // the data manifold lands in the same distribution as the export's, even when the
+                // trajectory differs; one that drifted off it does not, and that shows here long
+                // before it shows in a waveform correlation.
+                let n = latent.len() as f64;
+                let mean = latent.iter().map(|&v| f64::from(v)).sum::<f64>() / n;
+                let var =
+                    latent.iter().map(|&v| (f64::from(v) - mean).powi(2)).sum::<f64>() / n;
+                let absmax = latent.iter().fold(0.0f32, |t, &v| t.max(v.abs()));
+                println!(
+                    "final latent: {} values, absmax {absmax:.4}, mean {mean:.5}, sd {:.5}",
+                    latent.len(),
+                    var.sqrt()
+                );
+                let unpacked = supertonic_vocoder::unpack_latent(latent, frames as usize)?;
+                let channelled = run_multi(&plan, self.voc.data(), &[&unpacked])?.remove(0);
+                Ok(supertonic_vocoder::interleave(&channelled))
+            }
+        }
+
+        let raw = std::fs::read(dir.join("noise.f32")).expect("the noise");
+        let drawn: Vec<f32> = raw
+            .chunks_exact(4)
+            .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+            .collect();
+        let mut nets = Interpreted { dp: &dp, ttl: &ttl, ve: &ve, voc: &voc };
+        let samples = post::synthesise(&mut nets, &conditioning, &indexer, &voice, &text, &|count| {
+            assert_eq!(count, drawn.len(), "the driver drew a latent of a different size");
+            drawn.clone()
+        })
+        .expect("the utterance synthesises");
+        println!("supertonic utterance: {} samples", samples.len());
+        write(&dir.join("ours.f32"), &samples);
+    }
+
+    /// The repo root, or `None` when the assets are not checked out beside this crate.
+    fn repo_root() -> Option<std::path::PathBuf> {
+        let mut dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        while !dir.join("settings.gradle.kts").is_file() {
+            dir = dir.parent()?.to_path_buf();
+        }
+        Some(dir)
+    }
 }
