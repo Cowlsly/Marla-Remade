@@ -1,3 +1,21 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
+    <string name="app_name">Kalkulyator</string>
+    <string name="history">Tarix</string>
+    <string name="no_calculations_yet">Hələ heç bir hesablama yoxdur.</string>
+    <string name="add_function">Funksiya əlavə et</string>
+    <string name="toggle_curve_visibility">Bu əyrini göstər və ya gizlət</string>
+    <string name="feature_root">kök</string>
+    <string name="feature_y_intercept">y-oxu ilə kəsişmə nöqtəsi</string>
+    <string name="feature_minimum">minimum</string>
+    <string name="feature_maximum">maksimum</string>
+    <string name="feature_intersection">kəsişmə</string>
+    <string name="units">Vahidlər</string>
+    <string name="insert_unit">Bloku daxil edin</string>
+    <string name="convert_to">Çevir</string>
+    <string name="converter_value">Dəyər</string>
+    <string name="converter_from">-dan/-dən</string>
+    <string name="converter_to">-a/-ə</string>
+    <string name="converter_result">Nəticə</string>
+    <string name="converter_swap">Vahidlərin yerini dəyişdirin</string>
 </resources>
