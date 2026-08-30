@@ -62,7 +62,7 @@
     <string name="updates_channel_name">Tətbiq yeniləmələri</string>
     <string name="updates_channel_description">Burada quraşdırdığınız tətbiqlərin daha yeni versiyası olduqda sizə xəbər verir.</string>
     <string name="setting_auto_install_updates_title">Yeniləmələri avtomatik quraşdırın</string>
-    <string name="setting_auto_install_updates_summary">Heç bir əlavə hərəkət tələb olunmadan yeniləmələri avtomatik yoxlayır və quraşdırır. Bu funksiya yalnız həmin mağaza vasitəsilə quraşdırılmış və səssiz şəkildə yenilənə bilən tətbiqlərə şamil edilir; digər tətbiqlər üçün isə sadəcə bildiriş verilir.</string>
+    <string name="setting_auto_install_updates_summary">Yeniləmələr aşkar edildikdə, heç bir əlavə toxunuş tələb olunmadan dərhal quraşdırılır. Bu funksiya deaktiv edildikdə isə yeniləmələr siz \"Yenilə\" düyməsinə toxunana qədər gözləyir. Hər iki halda, bu mağaza vasitəsilə quraşdırılmış tətbiqlər hər dəfə sorğu göndərilmədən yenilənir; digər hallarda isə sadəcə bildiriş verilir.</string>
     <plurals name="updates_count">
         <item quantity="one">%1$d yeniləmələr mövcuddur</item>
         <item quantity="other">%1$d yeniləmə mövcuddur</item>
@@ -127,7 +127,7 @@
     <string name="store_rule_fail_blocks_detail">Əgər yoxlama uğursuz olarsa, quraşdırma dayanır. Əgər mənbə müqayisə üçün heç nə təqdim etmirsə, tətbiq quraşdırılır, lakin \"təsdiqlənməmiş\" kimi işarələnir.</string>
     <string name="store_rule_updates_stay_title">Yeniləmələr bu mağazada qalır.</string>
     <string name="store_rule_updates_stay_detail">Telefonunuzdakı heç nə burada quraşdırdığınız bir tətbiqi səssizcə əvəz edə bilməz.</string>
-    <string name="store_rule_fixed_sources_title">Mənbələr sabitdir.</string>
+    <string name="store_rule_fixed_sources_title">Mənbələr sabitdir</string>
     <string name="store_rule_fixed_sources_detail">Aşağıdakı üç mənbə sistemə daxil edilib və onlara əlavə mənbə əlavə edə bilməzsiniz. Özünüz əlavə etdiyiniz repozitoriya üçün yuxarıda qeyd olunanlara heç bir zəmanət verilmir.</string>
     <string name="trust_page_title">Tətbiqlər necə yoxlanılır</string>
     <string name="trust_intro">Buradakı üç mənbə sizi müxtəlif yollarla qoruyur və onlardan heç biri sadəcə \"ən təhlükəsiz\" olan deyil. Hər bir kartda həmin mənbənin öz funksiyası, tətbiqin yükləmə zamanı nələri yoxladığı və həmin mənbənin digərlərinə nisbətən harada daha zəif olduğu göstərilir.</string>
@@ -185,4 +185,14 @@
     <string name="source_play_pin">Sabitləniləcək heç nə yoxdur: İmzalama açarı Google</string>
     <string name="source_accrescent">Accrescent</string>
     <string name="source_accrescent_pin">Accrescent-in repodata imzalama açarına (ed25519) bərkidilib</string>
+    <string name="updates_confirm_notification_body">Android yalnız özünün quraşdırdığı tətbiqlərin yenilənməsinə icazə verir, buna görə də həmin tətbiqləri yeniləmək üçün sizin müdaxiləniz (toxunuşunuz) tələb olunur. Onları quraşdırmaq üçün App Store-u açın.</string>
+    <plurals name="updates_confirm_count">
+        <item quantity="one">%1$d yeniləmə təsdiqinizi tələb edir</item>
+        <item quantity="other">%1$d yeniləmə təsdiqinizi tələb edir</item>
+    </plurals>
+    <string name="install_failed_reason">%1$s quraşdırıla bilmədi: %2$s</string>
+    <string name="install_failure_incompatible">Bu cihaz üçün hazırlanmayıb</string>
+    <string name="install_failure_storage">kifayət qədər saxlama yoxdur</string>
+    <string name="install_failure_conflict">Bu, artıq quraşdırılmış versiya ilə ziddiyyət təşkil edir</string>
+    <string name="install_failure_unknown">Sistem onu rədd etdi</string>
 </resources>
