@@ -17,4 +17,36 @@
     <string name="set_1">Təyin et: <xliff:g id="time" example="04:12">%1$s</xliff:g> ?:</string>
     <string name="ra_h_h">RA h: <xliff:g id="hours" example="5.5">%1$s</xliff:g>h</string>
     <string name="search_1">Axtarış</string>
+    <string name="search_stars_planets_messier">Ulduzlar, planetlər və Messye obyektləri üzrə axtarış</string>
+    <string name="settings">Parametrlər</string>
+    <string name="magnitude_limit">Maqnituda həddi: <xliff:g id="limit" example="4.5">%1$s</xliff:g></string>
+    <string name="longitude_deg">Uzunluq (dərəcə)</string>
+    <string name="save_location">Məkanı yadda saxla</string>
+    <string name="catalog_stars_constellations_dso">Kataloq: <xliff:g id="star_count" example="5000">%1$s</xliff:g> ulduz, <xliff:g id="constellation_count" example="88">%2$s</xliff:g> bürc, <xliff:g id="dso_count" example="110">%3$s</xliff:g> Dərin Kosmos Obyekti.</string>
+    <string name="off">Söndürülüb</string>
+    <string name="display">Ekran</string>
+    <string name="constellations">Bürclər</string>
+    <string name="lines_only">Yalnız xətlər</string>
+    <string name="show_below_horizon_all_sky">Üfüqdən aşağıda göstər (bütün səma)</string>
+    <string name="notes_true_north_correction_via_geomagne">Qeydlər: Geomaqnit meyli vasitəsilə əsl şimala düzəliş. AR, CameraX və fırlanma vektoru sintezindən istifadə edir.</string>
+    <string name="lines_art">Xətlər və incəsənət</string>
+    <string name="location">Yerləşmə</string>
+    <string name="coordinate_grid_whole_sphere">Koordinat şəbəkəsi (bütün kürə)</string>
+    <string name="latitude_deg">Enlik (dərəcə)</string>
+    <string name="use_current_location">Cari məkandan istifadə et</string>
+    <string name="planets_sun_moon">Planetlər / Günəş / Ay</string>
+    <string name="fov">Baxış sahəsi: <xliff:g id="degrees" example="60">%1$s</xliff:g>°</string>
+    <string name="planet_sun">Günəş</string>
+    <string name="planet_moon">Ay</string>
+    <string name="planet_mercury">Merkuri</string>
+    <string name="planet_venus">Venera</string>
+    <string name="planet_mars">Mars</string>
+    <string name="planet_jupiter">Yupiter</string>
+    <string name="planet_saturn">Saturn</string>
+    <string name="planet_uranus">Uran</string>
+    <string name="planet_neptune">Neptun</string>
+    <string name="search_result_planet">Planet</string>
+    <string name="search_result_star_fallback">Ulduz <xliff:g id="star_id" example="123">%1$s</xliff:g></string>
+    <string name="search_result_star_mag">Ulduzun parlaqlığı <xliff:g id="magnitude" example="2.1">%1$s</xliff:g></string>
+    <string name="search_result_constellation">Bürc <xliff:g id="constellation" example="Orion">%1$s</xliff:g></string>
 </resources>
