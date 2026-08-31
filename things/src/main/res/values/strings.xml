@@ -18,4 +18,57 @@
     <string name="ml"><xliff:g id="volume" example="450">%1$s</xliff:g> mL</string>
     <!-- HydrationCard: daily goal beneath progress bar. %1$s = goal number e.g. 2000 -->
     <string name="goal_ml">Goal <xliff:g id="goal" example="2000">%1$s</xliff:g> mL</string>
+    <!-- Bottle status section header shown when connected and sensor values available -->
+    <string name="bottle_status">Bottle status</string>
+    <!-- Bottle status: water temperature. %1$d = degrees Celsius integer -->
+    <string name="temperature_c"><xliff:g id="temp" example="22">%1$d</xliff:g>°C</string>
+    <!-- Bottle status: water purity as TDS. %1$d = ppm integer -->
+    <string name="purity_ppm"><xliff:g id="tds" example="85">%1$d</xliff:g> ppm</string>
+    <!-- Bottle status: battery level. %1$d = percent 0-100 -->
+    <string name="battery_pct"><xliff:g id="pct" example="75">%1$d</xliff:g>%%</string>
+    <!-- Bottle status: battery level while charging. %1$d = percent 0-100 -->
+    <string name="battery_charging"><xliff:g id="pct" example="75">%1$d</xliff:g>%% (charging)</string>
+
+    <!-- Scale section -->
+    <!-- Scale section title. Noun -->
+    <string name="scale_title">Body Scale</string>
+    <!-- Scale section subtitle. Explains offline BLE -->
+    <string name="scale_subtitle">Renpho Elis 1 — offline BLE, no cloud</string>
+    <!-- Scale profile header -->
+    <string name="scale_profile">Profile</string>
+    <!-- Sex options -->
+    <string name="sex_male">Male</string>
+    <string name="sex_female">Female</string>
+    <!-- Profile fields -->
+    <string name="age">Age</string>
+    <string name="height_cm">Height (cm)</string>
+    <string name="athlete">Athlete mode</string>
+    <!-- Scale scan button -->
+    <string name="scan_scale">Scan scale</string>
+    <!-- Scale weight labels -->
+    <string name="weight">Weight</string>
+    <string name="weighing">Weighing…</string>
+    <!-- Impedance label. %1$d = ohms -->
+    <string name="impedance">Impedance %1$d Ω</string>
+    <string name="no_impedance">No impedance — BMI only</string>
+    <!-- Body composition -->
+    <string name="body_composition">Body composition</string>
+    <string name="bmi">BMI</string>
+    <string name="body_fat">Body fat</string>
+    <string name="fat_mass">Fat mass</string>
+    <string name="lbm">Lean mass</string>
+    <string name="water">Water</string>
+    <string name="muscle">Muscle</string>
+    <string name="bone">Bone</string>
+    <string name="protein">Protein</string>
+    <string name="bmr">BMR</string>
+    <string name="visceral">Visceral fat</string>
+    <string name="body_age">Body age</string>
+    <string name="score">Score</string>
+    <string name="segmental">Segmental (8-electrode)</string>
+    <string name="seg_arms">Arms R/L</string>
+    <string name="seg_legs">Legs R/L</string>
+    <string name="seg_trunk">Trunk</string>
+    <string name="bmi_only">BMI shown — step on bare feet for impedance</string>
+    <string name="bmi_hint">Impedance measures body fat via foot electrodes</string>
 </resources>
