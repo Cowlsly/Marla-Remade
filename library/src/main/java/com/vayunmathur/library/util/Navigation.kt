@@ -12,10 +12,12 @@ import androidx.compose.animation.core.LinearEasing
 import androidx.compose.animation.core.Spring
 import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.tween
+import androidx.compose.animation.expandVertically
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.scaleIn
 import androidx.compose.animation.scaleOut
+import androidx.compose.animation.shrinkVertically
 import androidx.compose.animation.slideInHorizontally
 import androidx.compose.animation.slideOutHorizontally
 import androidx.compose.animation.slideOutVertically
@@ -48,6 +50,7 @@ import androidx.compose.runtime.compositionLocalOf
 import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.staticCompositionLocalOf
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.graphics.Color
@@ -322,7 +325,7 @@ private fun rememberNavTransitions(): NavTransitions {
  * default, 0.6 for fast). An overshoot on a bounds morph means the element visibly flies past its
  * target and rubber-bands back, which is far more obvious across a long travel than on a short slide.
  */
-private const val NavMorphMillis = 350
+internal const val NavMorphMillis = 220
 
 /** M3's emphasized curve: slow start, quick middle, gentle settle. */
 private val NavMorphEasing = CubicBezierEasing(0.2f, 0f, 0f, 1f)
@@ -581,6 +584,79 @@ fun Modifier.exitDownward(): Modifier {
         )
     }
 }
+
+/**
+ * [sharedContainer] for text.
+ *
+ * Scales the glyphs to the animating bounds instead of laying them out again at each intermediate
+ * size. That difference is the whole point: the same name is `bodyLarge` in a list row and
+ * `headlineMedium` in a header, and remeasuring between the two re-wraps the string on nearly every
+ * frame, which reads as the text garbling rather than growing. Scaling interpolates it smoothly.
+ *
+ * Use [sharedContainer] instead when the two ends hold genuinely different content - a read-only row
+ * becoming a text field - where a reflow is correct and scaling would distort.
+ */
+@OptIn(ExperimentalSharedTransitionApi::class)
+@Composable
+fun Modifier.sharedText(key: Any): Modifier {
+    if (LocalNavMultiPane.current) return this
+    val shared = LocalSharedTransitionScope.current ?: return this
+    val animated = LocalEntryAnimatedScope.current ?: return this
+    return with(shared) {
+        this@sharedText.sharedBounds(
+            rememberSharedContentState(key),
+            animated,
+            enter = fadeIn(NavMorphContentFade),
+            exit = fadeOut(NavMorphContentFade),
+            boundsTransform = NavMorphBoundsTransform,
+            resizeMode = SharedTransitionScope.ResizeMode.scaleToBounds(),
+        )
+    }
+}
+
+/**
+ * Enters by unfurling from a flat horizontal line into full height, rather than fading in.
+ *
+ * For a block of fields arriving as a unit: it reads as the form opening up in place, which suits a
+ * destination whose content is a stack of rows. A fade makes the same block look like it was already
+ * there and merely became visible.
+ *
+ * Duration-based, so it stays seekable under a predictive-back gesture.
+ *
+ * No-ops outside a [MainNavigation].
+ */
+@Composable
+fun Modifier.expandFromLine(): Modifier {
+    val scope = LocalEntryAnimatedScope.current ?: return this
+    return with(scope) {
+        this@expandFromLine.animateEnterExit(
+            enter = expandVertically(
+                animationSpec = tween(NavMorphMillis, easing = NavMorphEasing),
+                expandFrom = Alignment.CenterVertically,
+                initialHeight = { 0 },
+            ) + fadeIn(NavMorphContentFade),
+            exit = shrinkVertically(
+                animationSpec = tween(NavMorphMillis, easing = NavMorphEasing),
+                shrinkTowards = Alignment.CenterVertically,
+                targetHeight = { 0 },
+            ) + fadeOut(NavMorphContentFade),
+        )
+    }
+}
+
+/**
+ * True while a shared element is mid-flight between two destinations.
+ *
+ * For content that would otherwise be visible in both places at once: a field can hide its own text
+ * while the copy travelling in from the previous screen is on screen, so there is one piece of text
+ * rather than two, and reveal it as the morph lands.
+ *
+ * False outside a [MainNavigation], so a screen on its own always shows its content.
+ */
+@OptIn(ExperimentalSharedTransitionApi::class)
+@Composable
+fun isNavMorphing(): Boolean =
+    LocalSharedTransitionScope.current?.isTransitionActive == true
 
 fun DialogPage() = DialogSceneStrategy.dialog()
 

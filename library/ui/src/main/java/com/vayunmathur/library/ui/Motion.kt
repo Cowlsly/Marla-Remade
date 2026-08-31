@@ -106,4 +106,14 @@ object Motion {
 
     /** A page snapping into place, on `PagedView`'s own curve rather than a spring. */
     fun <T> pageSnap(): FiniteAnimationSpec<T> = tween(PageSnapMillis, easing = Scroll)
+
+    /**
+     * A movement whose only interesting property is how long it takes, on [FastOutSlowIn].
+     *
+     * The escape hatch for a genuinely one-off duration, so a screen can say "over this many
+     * milliseconds" without reaching for `tween` itself. A duration that shows up twice wants a
+     * named entry above instead.
+     */
+    fun <T> over(durationMillis: Int): FiniteAnimationSpec<T> =
+        tween(durationMillis, easing = FastOutSlowIn)
 }

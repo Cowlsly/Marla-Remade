@@ -4,6 +4,11 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ColumnScope
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.text.BasicTextField
+import androidx.compose.ui.graphics.SolidColor
+import com.vayunmathur.library.util.SharedEditableText
+import com.vayunmathur.library.util.expandFromLine
 import com.vayunmathur.library.util.sharedContainer
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -86,7 +91,36 @@ fun LabeledTextField(
     placeholder: String? = null,
     leadingIcon: (@Composable () -> Unit)? = null,
     trailingIcon: (@Composable () -> Unit)? = null,
+    /**
+     * Pairs the *text inside* this field with the same key elsewhere, so a read-only value morphs into
+     * the editable one.
+     *
+     * Deliberately not a modifier on the field. A key on the field itself pairs the other screen's text
+     * with this whole box, so the text grows to the box's width and then snaps to its real size on
+     * arrival. Reaching the inner text means driving the field from [BasicTextField] and supplying
+     * Material's own decoration around it, which is what the keyed branch below does.
+     */
+    sharedTextKey: Any? = null,
 ) {
+    if (sharedTextKey != null) {
+        SharedTextLabeledField(
+            value = value,
+            onValueChange = onValueChange,
+            label = label,
+            sharedTextKey = sharedTextKey,
+            modifier = modifier,
+            enabled = enabled,
+            readOnly = readOnly,
+            singleLine = singleLine,
+            keyboardType = keyboardType,
+            visualTransformation = visualTransformation,
+            isError = isError,
+            placeholder = placeholder,
+            leadingIcon = leadingIcon,
+            trailingIcon = trailingIcon,
+        )
+        return
+    }
     OutlinedTextField(
         value = value,
         onValueChange = onValueChange,
@@ -103,6 +137,63 @@ fun LabeledTextField(
         keyboardOptions = KeyboardOptions(keyboardType = keyboardType),
         singleLine = singleLine,
     )
+}
+
+/**
+ * [LabeledTextField] with its inner text exposed as a shared element.
+ *
+ * A separate branch rather than the default one for everybody: this rebuilds the field from
+ * [BasicTextField] plus [OutlinedTextFieldDefaults.DecorationBox], and while that is the documented way
+ * to keep Material's outline, label and label-cutout, it is still a reimplementation. Fields that do
+ * not morph keep using [OutlinedTextField] directly, so nothing changes for them.
+ */
+@Composable
+private fun SharedTextLabeledField(
+    value: String,
+    onValueChange: (String) -> Unit,
+    label: String,
+    sharedTextKey: Any,
+    modifier: Modifier,
+    enabled: Boolean,
+    readOnly: Boolean,
+    singleLine: Boolean,
+    keyboardType: KeyboardType,
+    visualTransformation: VisualTransformation,
+    isError: Boolean,
+    placeholder: String?,
+    leadingIcon: (@Composable () -> Unit)?,
+    trailingIcon: (@Composable () -> Unit)?,
+) {
+    val interactionSource = remember { MutableInteractionSource() }
+    BasicTextField(
+        value = value,
+        onValueChange = onValueChange,
+        modifier = modifier,
+        enabled = enabled,
+        readOnly = readOnly,
+        textStyle = LocalTextStyle.current.copy(color = MaterialTheme.colorScheme.onSurface),
+        keyboardOptions = KeyboardOptions(keyboardType = keyboardType),
+        singleLine = singleLine,
+        visualTransformation = visualTransformation,
+        interactionSource = interactionSource,
+        cursorBrush = SolidColor(MaterialTheme.colorScheme.primary),
+    ) { innerTextField ->
+        OutlinedTextFieldDefaults.DecorationBox(
+            value = value,
+            innerTextField = {
+                SharedEditableText(key = sharedTextKey, value = value) { innerTextField() }
+            },
+            enabled = enabled,
+            singleLine = singleLine,
+            visualTransformation = visualTransformation,
+            interactionSource = interactionSource,
+            isError = isError,
+            label = { Text(label) },
+            placeholder = placeholder?.let { { Text(it) } },
+            leadingIcon = leadingIcon,
+            trailingIcon = trailingIcon,
+        )
+    }
 }
 
 /**
@@ -158,55 +249,88 @@ fun <T> FormDetailGroup(
      * contact can still have a second mobile number.
      */
     isMandatory: (Int) -> Boolean = { false },
+    /**
+     * Makes each row unfurl from a flat line on arrival instead of sliding into place.
+     *
+     * Per row rather than per group on purpose: expanding the whole group as one block reads as a
+     * single slab growing, which does not match a list of separate fields.
+     */
+    expandOnEnter: Boolean = false,
 ) {
     Column(modifier = modifier, verticalArrangement = Arrangement.spacedBy(Spacing.sm)) {
+        // Hoisted out of the row loop so the add button below can unfurl the same way the rows do.
+        val enterModifier = if (expandOnEnter) Modifier.expandFromLine() else Modifier
         items.forEachIndexed { index, item ->
             val rowKey = sharedKey?.invoke(item)
             val rowModifier = if (rowKey == null) Modifier else Modifier.sharedContainer(rowKey)
-            OutlinedTextField(
-                value = value(item),
-                onValueChange = { v: String -> onValueChange(index, v) },
-                label = { Text(label) },
-                visualTransformation = visualTransformation,
-                leadingIcon = leadingIcon?.let { { it(item) } },
-                trailingIcon = {
-                    Row {
-                        var expanded by remember { mutableStateOf(false) }
-                        TextButton({ expanded = true }) {
-                            Text(typeLabel(item))
-                            IconArrowDropDown()
+            // Hoisted so both branches below draw the same trailing controls.
+            val rowTrailing: @Composable () -> Unit = {
+                Row {
+                    var expanded by remember { mutableStateOf(false) }
+                    TextButton({ expanded = true }) {
+                        Text(typeLabel(item))
+                        IconArrowDropDown()
+                    }
+                    DropdownMenu(expanded = expanded, onDismissRequest = { expanded = false }) {
+                        typeOptions.forEach { option ->
+                            DropdownMenuItem(
+                                text = { Text(optionLabel?.invoke(option) ?: option.toString()) },
+                                onClick = {
+                                    onTypeChange(index, option)
+                                    expanded = false
+                                },
+                            )
                         }
-                        DropdownMenu(expanded = expanded, onDismissRequest = { expanded = false }) {
-                            typeOptions.forEach { option ->
-                                DropdownMenuItem(
-                                    text = { Text(optionLabel?.invoke(option) ?: option.toString()) },
-                                    onClick = {
-                                        onTypeChange(index, option)
-                                        expanded = false
-                                    },
-                                )
-                            }
-                        }
-                        // A mandatory row cannot be taken away, so its button clears the value instead
-                        // - and only appears when there is something to clear, since an always-present
-                        // button on an empty row invites a tap that would do nothing.
-                        if (isMandatory(index)) {
-                            if (value(item).isNotEmpty()) {
-                                IconButton(onClick = { onValueChange(index, "") }) {
-                                    IconRemoveCircle()
-                                }
-                            }
-                        } else {
-                            IconButton(onClick = { onRemove(index) }) {
+                    }
+                    // A mandatory row cannot be taken away, so its button clears the value instead
+                    // - and only appears when there is something to clear, since an always-present
+                    // button on an empty row invites a tap that would do nothing.
+                    if (isMandatory(index)) {
+                        if (value(item).isNotEmpty()) {
+                            IconButton(onClick = { onValueChange(index, "") }) {
                                 IconRemoveCircle()
                             }
                         }
+                    } else {
+                        IconButton(onClick = { onRemove(index) }) {
+                            IconRemoveCircle()
+                        }
                     }
-                },
-                keyboardOptions = KeyboardOptions(keyboardType = keyboardType),
-                singleLine = true,
-                modifier = rowModifier.fillMaxWidth(),
-            )
+                }
+            }
+            if (rowKey == null) {
+                OutlinedTextField(
+                    value = value(item),
+                    onValueChange = { v: String -> onValueChange(index, v) },
+                    label = { Text(label) },
+                    visualTransformation = visualTransformation,
+                    leadingIcon = leadingIcon?.let { { it(item) } },
+                    trailingIcon = rowTrailing,
+                    keyboardOptions = KeyboardOptions(keyboardType = keyboardType),
+                    singleLine = true,
+                    modifier = enterModifier.fillMaxWidth(),
+                )
+            } else {
+                // Two pairings at once: the field's box morphs from the read-only row's box, and the
+                // text inside it morphs from the text inside that row. Keying only the box would drag
+                // the old row's text along as cargo and crossfade it out in the wrong place.
+                SharedTextLabeledField(
+                    value = value(item),
+                    onValueChange = { v: String -> onValueChange(index, v) },
+                    label = label,
+                    sharedTextKey = "$rowKey-text",
+                    modifier = rowModifier.then(enterModifier).fillMaxWidth(),
+                    enabled = true,
+                    readOnly = false,
+                    singleLine = true,
+                    keyboardType = keyboardType,
+                    visualTransformation = visualTransformation,
+                    isError = false,
+                    placeholder = null,
+                    leadingIcon = leadingIcon?.let { { it(item) } },
+                    trailingIcon = rowTrailing,
+                )
+            }
             if (isCustom(item) && onLabelChange != null) {
                 Spacer(Modifier.height(Spacing.xs))
                 OutlinedTextField(
@@ -220,7 +344,10 @@ fun <T> FormDetailGroup(
             }
             Spacer(Modifier.height(Spacing.xs))
         }
-        FilledTonalButton(onClick = onAdd, modifier = Modifier.fillMaxWidth()) {
+        FilledTonalButton(
+            onClick = onAdd,
+            modifier = enterModifier.fillMaxWidth(),
+        ) {
             addIcon?.invoke() ?: IconAdd()
             Spacer(Modifier.width(Spacing.sm))
             Text(addLabel)
