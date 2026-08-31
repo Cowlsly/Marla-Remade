@@ -18,7 +18,7 @@
 #
 # Usage:
 #   .\measure_build.ps1 -Pbf ..\..\..\maps-work\us-west-latest.osm.pbf -Out usw.mamaps
-#   .\measure_build.ps1 -Pbf north-america-latest.osm.pbf -Out na.mamaps -MaxZoom 13 -Keep
+#   .\measure_build.ps1 -Pbf north-america-latest.osm.pbf -Out na.mamaps -Lanes 16 -Keep
 #   .\measure_build.ps1 -Pbf x.osm.pbf -Out x.mamaps -Timing   # + encode / node-pass CPU
 param(
     [Parameter(Mandatory = $true)][string] $Pbf,
@@ -31,6 +31,12 @@ param(
     # what it measures.
     [switch] $Timing,
     [switch] $Keep,
+    # Spill-decode threads. Four is the default and is right when the spill stays in page
+    # cache; a continent wants 16, because there the clipping workers are blocked waiting on
+    # the reader and the extra lanes compete with nothing. Sixteen is a 65% regression on a
+    # us-west-sized extract, so this is deliberately not automatic - see
+    # `store::prefetch_lanes`.
+    [int]    $Lanes = 0,
     # Leave the feature spill and its index behind, so a later -ReuseStore run skips stage A.
     [switch] $KeepStore,
     # Tile from a spill an earlier -KeepStore run left. Stage A is most of a large build and is
@@ -68,6 +74,7 @@ if ($ReuseStore -and -not (Test-Path $spill)) {
 }
 if ($Threads -gt 0) { $env:MAPS_THREADS = "$Threads" } else { Remove-Item Env:MAPS_THREADS -ErrorAction SilentlyContinue }
 if ($Timing)        { $env:MAPS_TIMING  = "1"       } else { Remove-Item Env:MAPS_TIMING  -ErrorAction SilentlyContinue }
+if ($Lanes -gt 0)   { $env:MAPS_PREFETCH_LANES = "$Lanes" } else { Remove-Item Env:MAPS_PREFETCH_LANES -ErrorAction SilentlyContinue }
 
 # Started before the build, so the first spike cannot be missed.
 $sampler = Start-Job -ArgumentList $name, $spill, $Out -ScriptBlock {
@@ -94,9 +101,10 @@ $flags = @()
 if ($KeepStore)  { $flags += "--keep-store" }
 if ($ReuseStore) { $flags += "--reuse-store" }
 
-Write-Output ("=== {0} -> {1}   z{2}..z{3}{4}{5} ===" -f `
+Write-Output ("=== {0} -> {1}   z{2}..z{3}{4}{5}{6} ===" -f `
     (Split-Path $Pbf -Leaf), (Split-Path $Out -Leaf), $MinZoom, $MaxZoom,
     $(if ($Threads -gt 0) { ", $Threads thread(s)" } else { "" }),
+    $(if ($Lanes -gt 0) { ", $Lanes prefetch lane(s)" } else { "" }),
     $(if ($ReuseStore) { ", reusing the spill" } elseif ($KeepStore) { ", keeping the spill" } else { "" }))
 Write-Output ""
 
@@ -212,16 +220,21 @@ $bodyBytes = ($r.zooms | Measure-Object bytes -Sum).Sum
 Write-Output ""
 Write-Output ("  tiles addressed   {0,14:N0}" -f [long]$h["tiles_addressed"])
 Write-Output ("  bodies written    {0,14:N0}   dedup {1} — run-length plus content" -f [long]$h["bodies_written"], $h["dedup"])
+# `[long]1` rather than `1`, at every one of these. PowerShell resolves `[Math]::Max`
+# on the *first* argument, so a literal `1` selects the `Int32` overload and then
+# throws converting the second - which is a byte count or a feature count, and on a
+# continent is comfortably past 2^31. North America's data section is 16.8 GB and
+# killed the report here after a 25-minute build had already succeeded.
 Write-Output ("  body bytes raw    {0,14:N0}   {1:N2}x compression into the archive" -f `
-    $bodyBytes, ($bodyBytes / [Math]::Max(1, (Span "data"))))
+    $bodyBytes, ($bodyBytes / [Math]::Max([long]1, (Span "data"))))
 Write-Output ("  features          {0,14:N0}   from {1:N0} ways + {2:N0} relations" -f `
     $r.features, $r.ways_classified, $r.relations_classified)
 if ($r.coalesced.line_features_before -gt $r.coalesced.line_features_after) {
     Write-Output ("  coalesced         {0,14:N0} -> {1:N0} line features ({2:N0}x), {3:N0} -> {4:N0} parts ({5:N1}x)" -f `
         $r.coalesced.line_features_before, $r.coalesced.line_features_after,
-        ($r.coalesced.line_features_before / [Math]::Max(1, $r.coalesced.line_features_after)),
+        ($r.coalesced.line_features_before / [Math]::Max([long]1, [long]$r.coalesced.line_features_after)),
         $r.coalesced.parts_before, $r.coalesced.parts_after,
-        ($r.coalesced.parts_before / [Math]::Max(1, $r.coalesced.parts_after)))
+        ($r.coalesced.parts_before / [Math]::Max([long]1, [long]$r.coalesced.parts_after)))
 }
 Write-Output ("  build id          {0,14}" -f $h["build_id"])
 Write-Output ("  sha256            {0}" -f (Get-FileHash $Out -Algorithm SHA256).Hash)

@@ -349,6 +349,16 @@ pub fn build(store: &Store, settings: &Settings) -> Result<(Vec<u8>, Vec<ZoomSta
 /// waiting to write. Off the pool, one thread is merely slow — which matters, because one thread is
 /// a configuration this has to stay byte-identical at.
 fn map_zoom(store: &Store, z: u8, tolerance: f64, buffer: f64) -> Result<(Vec<Chunk>, Tally)> {
+    // The full budget, **not** minus the reader's prefetch lanes. Subtracting them was tried, on the
+    // reasoning that 64 workers plus 16 lanes plus a reader is 81 runnable threads on 64 CPUs. It
+    // fixed us-west (151.9 s to 94.4 s) and cost north-america more than it saved (766.9 s to
+    // 900.4 s), because the premise is only true when the lanes are actually running: on
+    // north-america the workers are the ones blocked, waiting on a channel the reader cannot fill
+    // fast enough, so the lanes were competing with nothing and the subtraction just removed a
+    // quarter of the clipping. z14's map went 138.7 s to 170.0 s, almost exactly the ratio.
+    //
+    // Which of those two regimes a build is in is what `crate::store::PREFETCH_LANES` has to be set
+    // for, and it is not knowable from the thread count.
     let workers = par::threads().max(1);
     // Bounded, because this is the one place the parallel tiler holds features the sequential one
     // did not: `2 * threads` chunks of about `chunk_vertices()` vertices, and no more however far
@@ -417,8 +427,9 @@ fn map_zoom(store: &Store, z: u8, tolerance: f64, buffer: f64) -> Result<(Vec<Ch
 /// workers drain — so two runs chunk identically even before the merge makes the boundaries
 /// invisible.
 ///
-/// A feature below the zoom's own floor is dropped here rather than sent. It costs nothing to
-/// recognise, and at z0 shipping them would be shipping the whole store.
+/// A feature below the zoom's own floor never arrives: [`crate::store::ZoomReader`] drops it in one
+/// of its prefetch lanes. That filter used to be right here, and here it was one thread discarding
+/// most of a billion features — see the reader's own docs for what that cost.
 /// Nanoseconds spent deserialising the spill, summed across every zoom.
 ///
 /// Measured because `map_ms` covers the whole of [`map_zoom`], reader included, so it reports the
@@ -467,9 +478,6 @@ fn read_chunks(
             ticked += 1;
         }
         let Some(feature) = next else { break };
-        if z < feature.class.min_zoom {
-            continue;
-        }
         vertices += vertex_count(&feature.geometry);
         chunk.push(feature);
         if vertices >= want {

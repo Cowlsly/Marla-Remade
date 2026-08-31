@@ -452,6 +452,7 @@ impl Store {
             NormalizedChunks::open(self.path.clone(), self.chunks.clone())
                 .map_err(|e| osm_ingest::proto::Error(e.to_string()))?,
             wanted,
+            z,
         )
     }
 
@@ -514,30 +515,71 @@ type Decoded = Result<Vec<Feature>>;
 
 /// Threads decoding spill chunks ahead of the tiler.
 ///
-/// Four rather than the pool, and four rather than one. See [`ZoomReader::spawn`] for why it is not
-/// the pool. Four because the decode was 62.6 s of a 175 s build and four is where that stops being
-/// the constraint: at four the tiling stage is 95.1 s, at eight it is 96.0 s and the reader's own
-/// time is 30.9 s against 30.0 s — inside this machine's run-to-run noise. What is left on the
-/// reader after four lanes is not decode waiting to be spread, it is the reader's own per-feature
-/// work, and more lanes cannot touch it.
-const PREFETCH_LANES: usize = 4;
+/// Not the pool: see [`ZoomReader::spawn`]. **Four is the safe default, not the right answer**, and
+/// there is no right answer available as a constant. The two extracts want opposite things:
+///
+/// | lanes / tiling workers | us-west | north-america |
+/// |---|---|---|
+/// | 4 / 64 | **91.9 s** | 945.7 s |
+/// | 16 / 64 | 151.9 s | **766.9 s** |
+/// | 16 / 48 | 94.4 s | 900.4 s |
+///
+/// Sixteen lanes is a 65% regression on us-west and a 19% improvement on north-america, and the
+/// mechanism is the same in both: a lane competes for a CPU only when it is running. On
+/// north-america the reader cannot fill the channel fast enough, so the clipping workers are blocked
+/// and the lanes are free; on us-west the workers saturate the machine and the lanes take CPU from
+/// the single reader thread they exist to feed. Which regime a build lands in depends on the spill
+/// against the page cache, not on anything this constant can see — the middle row of that table is
+/// the attempt to correct for it by taking the lanes out of the worker budget, and it makes each
+/// case worse than that case's own best.
+///
+/// So it is a knob, defaulting to the value that cannot hurt. `MAPS_PREFETCH_LANES=16` is what a
+/// continent wants. Removing the need for the knob means removing the re-decode it is compensating
+/// for: the spill is read once per zoom, which is ~1.06 billion feature decodes to deliver
+/// 199.7 M distinct features on north-america, and no lane count makes redundant work cheap.
+pub fn prefetch_lanes() -> usize {
+    static LANES: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    *LANES.get_or_init(|| {
+        std::env::var("MAPS_PREFETCH_LANES")
+            .ok()
+            .and_then(|raw| raw.trim().parse::<usize>().ok())
+            .filter(|n| *n > 0)
+            .unwrap_or(4)
+    })
+}
+
+/// Consecutive chunks one lane claims at a time.
+///
+/// **One, because dealing longer runs was tried and measured as nothing.** The reasoning for runs is
+/// good and the measurement does not support it: single-chunk round-robin means each of sixteen
+/// lanes walks the file in ~9 KB hops sixteen chunks apart, which is the pattern readahead exists to
+/// defeat, and the spill was moving at 643 MB/s on hardware that does several gigabytes. Dealing
+/// runs of 64 consecutive chunks — ~600 KB, a streaming read — changed north-america tiling from
+/// 807.0 s to 813.1 s and the reader from 292.6 s to 298.4 s. Noise, and slightly the wrong way.
+///
+/// So the reads were never the problem, and the throughput figure was measuring something else: the
+/// reader was not waiting on disk, it was busy discarding features (see [`ZoomReader::spawn`]). Kept
+/// as a named constant of 1 rather than deleted, because the shape of the partition is worth being
+/// explicit about and because the next person to look at a 643 MB/s number will have the same idea.
+const PREFETCH_RUN: usize = 1;
 
 /// Chunks one lane may run ahead by.
 ///
-/// A chunk is [`NORM_CHUNK_FEATURES`] features, so the whole prefetch holds at most
-/// `PREFETCH_LANES * (PREFETCH_DEPTH + 1) * 64` features — a few thousand, against the 512 Ki
-/// *vertices* the tiler batches downstream. Depth is here to absorb a slow chunk, not to buffer.
+/// Bounds the prefetch at `prefetch_lanes() * (PREFETCH_DEPTH + 1) * 64` features — about 34 K at
+/// constants above, which is small against the 512 Ki *vertices* the tiler batches immediately
+/// downstream. Depth is here to absorb a slow chunk, not to buffer.
 const PREFETCH_DEPTH: usize = 32;
 
 /// Reads the chunks one zoom needs and seeks past the rest.
 pub struct ZoomReader {
-    /// One receiver per lane. Chunk `k` of the wanted list is decoded by lane `k % lanes.len()`, so
-    /// taking them round-robin reproduces file order exactly. Empty when there is nothing to read.
+    /// One receiver per lane. Wanted-chunk `k` is decoded by lane `(k / PREFETCH_RUN) % lanes.len()`,
+    /// so walking the lanes a run at a time reproduces file order exactly. Empty when there is
+    /// nothing to read.
     lanes: Vec<std::sync::mpsc::Receiver<Decoded>>,
     /// Joined on drop, after the receivers are dropped: a lane blocked on a full channel exits when
     /// its receiver goes, so the order of those two steps is what makes the join finite.
     lanes_running: Vec<std::thread::JoinHandle<()>>,
-    /// Chunks taken so far, which is also the lane to take the next one from.
+    /// Chunks taken so far, which is also what decides the lane to take the next one from.
     at: usize,
     total: usize,
     records: Vec<Feature>,
@@ -556,7 +598,7 @@ impl Drop for ZoomReader {
 }
 
 impl ZoomReader {
-    /// Start a lane per [`PREFETCH_LANES`] over `wanted`, dealt round-robin.
+    /// Start a lane per [`prefetch_lanes`] over `wanted`, dealt round-robin.
     ///
     /// # Why dedicated threads and not the pool
     ///
@@ -575,14 +617,30 @@ impl ZoomReader {
     /// So: threads of their own, outside the pool, which is what [`crate::tiler`] does for the
     /// reader itself and for the same reason.
     ///
+    /// # Why the lanes drop features rather than hand them over
+    ///
+    /// A feature below `z`'s own floor is dropped **here**, and that is not tidiness — it is most of
+    /// what this reader costs. The chunk index skips a chunk only when *every* feature in it is too
+    /// deep, and a chunk is 64 features in file order with no relationship between their
+    /// `min_zoom`s, so at a shallow zoom nearly every chunk survives the index while holding almost
+    /// nothing that zoom draws. z5 of north-america reads 590,002 chunks — 37.8 M features — to
+    /// produce 156 tiles.
+    ///
+    /// Left to the consumer, as it was, that is roughly **1.06 billion features across the build**
+    /// pulled one `next()` at a time and then discarded. No lane count fixes it, because it is not
+    /// the lanes' work: raising lanes from 4 to 16 took the reader 496.8 s to 292.6 s and then
+    /// stopped, and dealing sequential runs instead of strided chunks changed nothing at all. The
+    /// filter is per-feature and order-preserving, so moving it up here removes exactly the features
+    /// the tiler removed, in a place where sixteen threads share the cost.
+    ///
     /// # Why the order cannot move
     ///
     /// Lane `j` takes wanted-chunks `j`, `j + n`, `j + 2n`, ... and a lane's own channel is FIFO, so
     /// the `k`th chunk out of lane `k % n` is wanted-chunk `k`. Reading the lanes round-robin is
     /// therefore the wanted list in order, which is the file in order, which is what the archive's
     /// feature ordering rests on. Nothing here depends on which lane finishes first; a lane that
-    /// races ahead simply fills its channel and parks.
-    fn spawn(inner: NormalizedChunks, wanted: Vec<usize>) -> Result<ZoomReader> {
+    /// races ahead fills its channel and parks.
+    fn spawn(inner: NormalizedChunks, wanted: Vec<usize>, z: u8) -> Result<ZoomReader> {
         let total = wanted.len();
         if total == 0 {
             return Ok(ZoomReader {
@@ -596,13 +654,23 @@ impl ZoomReader {
         // One handle shared rather than one file open per lane: `read_into` is positional and
         // documented to serve every thread from one handle.
         let inner = std::sync::Arc::new(inner);
-        let count = PREFETCH_LANES.min(total);
+        // No more lanes than there are runs to deal, or the tail lanes are threads started to do
+        // nothing.
+        let count = prefetch_lanes().min(total.div_ceil(PREFETCH_RUN));
         let mut lanes = Vec::with_capacity(count);
         let mut lanes_running = Vec::with_capacity(count);
         for lane in 0..count {
             let (send, receive) = std::sync::mpsc::sync_channel::<Decoded>(PREFETCH_DEPTH);
             let inner = std::sync::Arc::clone(&inner);
-            let mine: Vec<usize> = wanted.iter().skip(lane).step_by(count).copied().collect();
+            // This lane's runs, flattened back into the chunks it will read: sequential within a
+            // run, which is the whole point of dealing runs rather than chunks.
+            let mine: Vec<usize> = wanted
+                .chunks(PREFETCH_RUN)
+                .skip(lane)
+                .step_by(count)
+                .flatten()
+                .copied()
+                .collect();
             let running = std::thread::Builder::new()
                 .name(format!("mamaps-spill-{lane}"))
                 .spawn(move || {
@@ -622,7 +690,13 @@ impl ZoomReader {
                             .and_then(|()| {
                                 let mut out = Vec::with_capacity(records.len());
                                 for record in records.drain(..).rev() {
-                                    out.push(feature_of(record)?);
+                                    let feature = feature_of(record)?;
+                                    // The zoom floor, applied where the work is spread. See this
+                                    // function's docs: at a shallow zoom this is nearly the whole
+                                    // chunk.
+                                    if z >= feature.class.min_zoom {
+                                        out.push(feature);
+                                    }
                                 }
                                 Ok(out)
                             });
@@ -946,11 +1020,12 @@ mod tests {
             let mut got = Vec::new();
             let mut reader = store.reader_for_zoom(z).expect("reader");
             while let Some(feature) = reader.next().expect("read") {
-                // The filter is per chunk, so a kept chunk still carries features too deep for this
-                // zoom. The tiler drops those itself; what matters is that nothing wanted is lost.
-                if feature.class.min_zoom <= z {
-                    got.push(feature.class.kind);
-                }
+                // Asserted, not filtered. The chunk index only skips a chunk when *every* feature
+                // in it is too deep, so a kept chunk still carries features this zoom does not
+                // draw -- and the reader's lanes are now what drops them. Anything arriving below
+                // the floor means that filter has gone missing.
+                assert!(feature.class.min_zoom <= z, "z{z} was handed a z{} feature", feature.class.min_zoom);
+                got.push(feature.class.kind);
             }
             assert_eq!(got, expected_by_zoom[z as usize], "z{z}");
         }
@@ -1035,6 +1110,67 @@ mod tests {
         assert!(pack(&huge).is_err(), "a threshold past a byte");
         let deep = Class { min_zoom: 32, ..Class::area(0, 1, 0) };
         assert!(pack(&deep).is_err(), "a zoom past five bits");
+    }
+
+    /// **The lane partition, across every lane and past the wrap.**
+    ///
+    /// [`ZoomReader`] deals chunks over [`prefetch_lanes`] threads and reads them back by walking
+    /// the lanes in the same order, and the archive's whole feature ordering rests on those two
+    /// agreeing. Nothing else here reaches that code: the other store fixtures are a few hundred
+    /// features, which is fewer chunks than there are lanes, so they run on a handful of lanes with
+    /// one chunk each and would pass against a partition that shuffled the file.
+    ///
+    /// So this writes three full rounds over every lane, sized off the constants rather than a
+    /// literal so it keeps its teeth if they change. Three rather than one because the wrap is the
+    /// interesting part — a reader that dealt correctly but read back assuming one chunk per lane
+    /// would agree for the first round and diverge after it. Every feature carries a coordinate
+    /// unique to its position, so the assertion is the file's exact order rather than a count or a
+    /// checksum.
+    #[test]
+    fn a_zoom_reader_returns_chunks_in_file_order_across_every_lane() {
+        let count = 3 * prefetch_lanes() * PREFETCH_RUN * NORM_CHUNK_FEATURES as usize;
+        // Unique per feature and inside real lon/lat, so the bbox fold has nothing to complain
+        // about. 997 is prime, so it shares no factor with the lane or chunk counts and no aliasing
+        // can hide a swapped chunk.
+        //
+        // Compared as e7 integers, never as `f64`. The spill quantises to the same 1e-7 grid the
+        // archive header uses, so a round trip is exact on that grid and an ULP apart off it — and
+        // an ULP is not what this test is about.
+        let at = |i: usize| (-120.0 + (i % 997) as f64 * 0.0001, 35.0 + (i / 997) as f64 * 0.0001);
+        let grid = |(x, y): (f64, f64)| ((x * 1e7).round() as i64, (y * 1e7).round() as i64);
+
+        let path = temp("laneorder");
+        let mut sink = Sink::create(&path).expect("create");
+        let class = Class::line(dict::LAYER_ROADS, schema::kind("highway"), 0);
+        for i in 0..count {
+            let (x, y) = at(i);
+            sink.push(&class, &Geometry::Lines(vec![vec![(x, y), (x, y + 0.0001)]]))
+                .expect("push");
+        }
+        let store = sink.finish(&path).expect("finish");
+        assert_eq!(store.len(), count as u64);
+
+        // z0 keeps every chunk, because the class above is drawn from z0 -- so this is the whole
+        // file, through the prefetch, with every lane loaded.
+        let mut got = Vec::with_capacity(count);
+        let mut reader = store.reader_for_zoom(0).expect("reader");
+        while let Some(feature) = reader.next().expect("read") {
+            let Geometry::Lines(lines) = &feature.geometry else { panic!("a line went in") };
+            got.push(grid(lines[0][0]));
+        }
+        let expected: Vec<(i64, i64)> = (0..count).map(|i| grid(at(i))).collect();
+        assert_eq!(got.len(), expected.len(), "the prefetch lost or invented features");
+        // Located rather than just reported: `assert_eq` on two vectors this long prints something
+        // nobody can read, and which chunk went astray is the whole diagnosis.
+        if let Some(i) = (0..count).find(|&i| got[i] != expected[i]) {
+            let chunk = i / NORM_CHUNK_FEATURES as usize;
+            panic!(
+                "feature {i} (chunk {chunk}, lane {}) is {:?}, expected {:?}",
+                (chunk / PREFETCH_RUN) % prefetch_lanes(),
+                got[i],
+                expected[i],
+            );
+        }
     }
 
     #[test]
