@@ -1,11 +1,19 @@
 //! On-disk spill for the streaming tiler: a record format, and `tile_id`-range buckets.
 //!
-//! [`crate::pyramid::build_archive`] holds every feature, a second projected copy of
-//! every geometry, and a whole zoom's `tile -> features` map. All three are
-//! proportional to the input BYTES, which is why a `roads` layer — every OSM road,
-//! z11-16, planet-wide — cannot be built by it: the `maxspeed` layer, which is only the
-//! ways carrying a `maxspeed` tag and one zoom shallower, already produces an 8.3 GB
-//! archive.
+//! [`crate::pyramid::build_archive`] holds every feature and, per zoom, every CLIPPED
+//! copy of every geometry: one per `(feature, tile)` pair, plus the `tile -> candidates`
+//! map that indexes them. So it is proportional to the input bytes and then again to the
+//! zoom's OUTPUT geometry, which is why a `roads` layer — every OSM road, z11-16,
+//! planet-wide — cannot be built by it: the `maxspeed` layer, which is only the ways
+//! carrying a `maxspeed` tag and one zoom shallower, already produces an 8.3 GB archive.
+//!
+//! Holding the clipped copies is what [`crate::subdivide`] costs that path. The old loop
+//! clipped lazily inside the per-tile encode batch and could throw each copy away, but it
+//! paid a full vertex walk per tile to do it — `O(T · V)` for a feature reaching `T`
+//! tiles. Keeping the descent's output instead trades memory for that, and it is the
+//! right trade *here* because this path is the in-memory oracle the byte-identity tests
+//! pin the streaming one against; anything at real scale goes through
+//! [`crate::pyramid::build_archive_to`], which spills these very records to disk.
 //!
 //! This module is the disk that replaces that memory. It follows
 //! `osm_ingest::chains`: manual little-endian encode and decode, a zero-filled reserved

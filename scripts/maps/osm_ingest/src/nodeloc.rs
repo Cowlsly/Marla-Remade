@@ -153,9 +153,32 @@ struct IdIndex {
     len: usize,
 }
 
+/// One `offsets` entry, or an error when `deltas` has outgrown a `u32`.
+fn offset(at: usize) -> Result<u32> {
+    u32::try_from(at).map_err(|_| {
+        Error(format!("an id index's delta bytes ({at}) are past the {} it can address", u32::MAX))
+    })
+}
+
 impl IdIndex {
     /// Build from ids that are already sorted and unique.
-    fn build(ids: &[i64]) -> IdIndex {
+    ///
+    /// Errors rather than truncates on the two `u32` fields, because both are within reach at planet
+    /// scale and both fail silently: a truncated `offsets` entry sends [`IdIndex::find`] scanning
+    /// from the wrong place in `deltas`, and a truncated position sends a coordinate to the wrong
+    /// node. Neither produces a wrong-looking value -- they produce a plausible one, which is worse.
+    /// `deltas` runs about 1.1 bytes per id, so the 4.29 GB ceiling is roughly 3.9 G ids away; the
+    /// crate's README already flags exactly this class of bug for `road_graph`.
+    fn build(ids: &[i64]) -> Result<IdIndex> {
+        // A position is returned as a `u32` by `find`, so the id count is capped by that and not by
+        // the delta bytes.
+        if ids.len() > u32::MAX as usize {
+            return Err(Error(format!(
+                "{} node ids is past the {} an id index can address",
+                ids.len(),
+                u32::MAX,
+            )));
+        }
         let blocks = ids.len().div_ceil(BLOCK);
         let mut index = IdIndex {
             bases: Vec::with_capacity(blocks),
@@ -166,7 +189,7 @@ impl IdIndex {
         };
         for block in ids.chunks(BLOCK) {
             index.bases.push(block[0]);
-            index.offsets.push(index.deltas.len() as u32);
+            index.offsets.push(offset(index.deltas.len())?);
             let mut previous = block[0];
             for &id in &block[1..] {
                 // Non-negative because the input is sorted and unique, so the gap is at least one.
@@ -174,9 +197,9 @@ impl IdIndex {
                 previous = id;
             }
         }
-        index.offsets.push(index.deltas.len() as u32);
+        index.offsets.push(offset(index.deltas.len())?);
         index.deltas.shrink_to_fit();
-        index
+        Ok(index)
     }
 
     fn len(&self) -> usize {
@@ -211,6 +234,107 @@ impl IdIndex {
         }
         None
     }
+
+    /// A cursor for a run of **ascending** lookups.
+    ///
+    /// [`Self::find`] pays a binary search over `bases` per call. That is the right shape for a random
+    /// lookup and the wrong one for the node pass, which asks about every node in a PBF block in
+    /// ascending order: `bases` grew from 53 MB on a us-west extract to 290 MB on a north-america one,
+    /// so each of those searches became about twenty-two cache misses plus the page walks to reach
+    /// them. Measured, the pass spent 317.9 s of CPU searching against 5.1 s writing, and went 90x
+    /// between those two extracts for 5.4x the nodes -- superlinear, because the array stopped
+    /// fitting rather than because there was more work.
+    ///
+    /// A cursor searches once and then walks, which is one sequential sweep instead of thousands of
+    /// scattered probes. Correct for any query order -- a query that goes backwards re-seeks -- so it
+    /// does not depend on the PBF actually being sorted, only on it usually being sorted to be fast.
+    fn cursor(&self) -> Cursor<'_> {
+        Cursor { index: self, block: 0, at: 0, current: 0, position: 0, live: false }
+    }
+}
+
+/// How many blocks a cursor will walk past before it gives up and searches instead.
+///
+/// Without a bound, a worker handed a distant blob would scan from wherever it happened to be, which
+/// is the pathological case this whole change is meant to avoid. Sixty-four blocks is 4096 ids: past
+/// that a binary search is cheaper than the walk.
+const FORWARD_SCAN_BLOCKS: usize = 64;
+
+/// A forward cursor into an [`IdIndex`]. See [`IdIndex::cursor`].
+struct Cursor<'a> {
+    index: &'a IdIndex,
+    /// The block the cursor sits inside.
+    block: usize,
+    /// Offset into `deltas` just past `current`.
+    at: usize,
+    /// The id the cursor is on.
+    current: i64,
+    /// Position of `current` in the set.
+    position: usize,
+    /// False before the first lookup, when `current` means nothing.
+    live: bool,
+}
+
+impl Cursor<'_> {
+    /// The position of `id`, or `None` if it is not in the set.
+    ///
+    /// Answers exactly what [`IdIndex::find`] would, which a test asserts over thousands of cases in
+    /// both ascending and shuffled order.
+    fn find(&mut self, id: i64) -> Option<u32> {
+        if !self.live || id < self.current || self.too_far(id) {
+            let block = match self.index.bases.binary_search(&id) {
+                Ok(block) => block,
+                // Before the first id in the set. The cursor is left alone: a miss says nothing about
+                // where the next hit will be.
+                Err(0) => return None,
+                Err(next) => next - 1,
+            };
+            self.enter(block);
+        }
+        while self.current < id {
+            if !self.step() {
+                return None;
+            }
+        }
+        if self.current == id {
+            Some(self.position as u32)
+        } else {
+            None
+        }
+    }
+
+    /// Whether `id` is far enough ahead that walking to it would cost more than a search.
+    fn too_far(&self, id: i64) -> bool {
+        let ahead = self.block + FORWARD_SCAN_BLOCKS;
+        ahead < self.index.bases.len() && self.index.bases[ahead] <= id
+    }
+
+    /// Sit on `block`'s first id.
+    fn enter(&mut self, block: usize) {
+        self.block = block;
+        self.current = self.index.bases[block];
+        self.at = self.index.offsets[block] as usize;
+        self.position = block * BLOCK;
+        self.live = true;
+    }
+
+    /// Move to the next id in the set. `false` at the end, leaving the cursor where it was.
+    fn step(&mut self) -> bool {
+        let end = self.index.offsets[self.block + 1] as usize;
+        if self.at < end {
+            let (gap, used) = get_uvarint(&self.index.deltas[self.at..]);
+            self.at += used;
+            self.current += gap as i64;
+            self.position += 1;
+            return true;
+        }
+        // The block is spent, and the next block's base is the next id.
+        if self.block + 1 >= self.index.bases.len() {
+            return false;
+        }
+        self.enter(self.block + 1);
+        true
+    }
 }
 
 /// LEB128, as the rest of this crate spells varints.
@@ -244,7 +368,7 @@ impl NodeLocations {
     pub fn new(mut ids: Vec<i64>) -> Result<NodeLocations> {
         ids.sort_unstable();
         ids.dedup();
-        let index = IdIndex::build(&ids);
+        let index = IdIndex::build(&ids)?;
         // The plain vector goes here rather than being kept alongside: it is 8 bytes per id against
         // the index's ~1.2, and holding both would give back the saving. Freed before the coordinate
         // array is mapped, so the two never peak together.
@@ -283,6 +407,34 @@ impl NodeLocations {
     }
 }
 
+/// Where the node pass's CPU goes, split between decoding blocks and writing coordinates.
+///
+/// Nanoseconds. `SCAN_NANOS` covers **both** the protobuf decode of a block and the id lookups for
+/// its nodes, because it brackets the whole `visit_block` call -- timing the lookups alone would need
+/// a clock read per node, and there are 2.3 billion of them on a north-america extract. An earlier
+/// version of this comment called it "searching" and a conclusion was drawn from it about the id
+/// index; that was wrong, and the number cannot tell those two apart. What it does bound is the
+/// write side, which is the part that is serialised: `run_pass_sink` calls its sink under a lock.
+///
+/// Timed per CHUNK rather than per node -- a chunk is eight blobs, tens of thousands of nodes -- so
+/// two `Instant::now()` calls and one atomic add cost nothing measurable. Off unless `MAPS_TIMING`
+/// is set regardless, for the reason `mamaps_build`'s encode counters are: an instrument hit once per
+/// item across 64 workers changes what it measures.
+static SCAN_NANOS: atomic::AtomicU64 = atomic::AtomicU64::new(0);
+static WRITE_NANOS: atomic::AtomicU64 = atomic::AtomicU64::new(0);
+
+fn timing() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("MAPS_TIMING").is_some())
+}
+
+/// The node pass's split in seconds of CPU: `(decode and look up, write)`. Zero without
+/// `MAPS_TIMING`.
+pub fn resolve_seconds() -> (f64, f64) {
+    let s = |c: &atomic::AtomicU64| c.load(atomic::Ordering::Relaxed) as f64 / 1e9;
+    (s(&SCAN_NANOS), s(&WRITE_NANOS))
+}
+
 /// The node pass: fill in every coordinate the earlier passes asked for.
 ///
 /// Uses [`pbf::run_pass_sink`] rather than [`pbf::run_pass`], because `run_pass`'s contract is to
@@ -305,6 +457,7 @@ pub fn resolve_nodes(
     if table.is_empty() {
         return Ok(table);
     }
+    let on = timing();
     // Moved out so the workers can search it while the sink writes coordinates; put back below.
     let ids = std::mem::take(&mut table.ids);
     let locs = &mut table.locs;
@@ -316,20 +469,32 @@ pub fn resolve_nodes(
         label,
         Vec::<(u32, i32, i32)>::new,
         |state: &mut Vec<(u32, i32, i32)>, block| {
+            let at = on.then(std::time::Instant::now);
             let mut kinds = 0u8;
+            // One cursor per block, because that is the run of ascending ids: a PBF block's dense
+            // nodes are delta-encoded and therefore sorted, so this pays one binary search here and
+            // walks the rest.
+            let mut cursor = ids.cursor();
             visit_block(block, KIND_NODES, &mut kinds, &mut |el: Element| {
                 if let Element::Node(n) = el {
-                    if let Some(idx) = ids.find(n.id) {
+                    if let Some(idx) = cursor.find(n.id) {
                         state.push((idx, n.lat_e7, n.lon_e7));
                     }
                 }
                 Ok(())
             })?;
+            if let Some(at) = at {
+                SCAN_NANOS.fetch_add(at.elapsed().as_nanos() as u64, atomic::Ordering::Relaxed);
+            }
             Ok(kinds)
         },
         |chunk| {
+            let at = on.then(std::time::Instant::now);
             for (idx, lat, lon) in chunk {
                 locs.set(idx as usize, lat, lon);
+            }
+            if let Some(at) = at {
+                WRITE_NANOS.fetch_add(at.elapsed().as_nanos() as u64, atomic::Ordering::Relaxed);
             }
             Ok(())
         },
@@ -340,6 +505,98 @@ pub fn resolve_nodes(
 
 #[cfg(test)]
 mod tests {
+    /// **The test the cursor lives or dies by.** It has to answer exactly what [`IdIndex::find`] does
+    /// for every id, in ascending order (its fast path), in shuffled order (where it must re-seek),
+    /// and for ids that are absent — including ones below the first and above the last.
+    ///
+    /// Ascending alone would not catch it: the whole risk of a cursor is that it is correct while
+    /// walking forwards and wrong the moment something asks out of order, and nothing in the PBF
+    /// format actually promises sorted ids.
+    #[test]
+    fn the_cursor_answers_exactly_what_a_fresh_search_would() {
+        let mut state = 0x9E37_79B9_7F4A_7C15u64;
+        let mut next = || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state
+        };
+        // Spans several blocks, with gaps too large for a one-byte varint so the walk has to handle
+        // multi-byte deltas, and a run of dense ids so it handles the cheap case too.
+        let mut ids: Vec<i64> = Vec::new();
+        let mut id = 5i64;
+        for i in 0..1000 {
+            id += if i % 7 == 0 { (next() % 300_000) as i64 + 1 } else { (next() % 4) as i64 + 1 };
+            ids.push(id);
+        }
+        ids.sort_unstable();
+        ids.dedup();
+        let index = super::IdIndex::build(&ids).expect("an index that fits");
+
+        // Every id, ascending: the path the node pass actually takes.
+        let mut cursor = index.cursor();
+        for &want in &ids {
+            assert_eq!(cursor.find(want), index.find(want), "ascending, id {want}");
+        }
+
+        // Absent ids interleaved with present ones, still ascending.
+        let mut cursor = index.cursor();
+        for &want in &ids {
+            assert_eq!(cursor.find(want - 1), index.find(want - 1), "ascending gap below {want}");
+            assert_eq!(cursor.find(want), index.find(want), "ascending, id {want}");
+        }
+
+        // Shuffled, which forces a re-seek on most calls.
+        let mut shuffled = ids.clone();
+        for i in (1..shuffled.len()).rev() {
+            shuffled.swap(i, (next() % (i as u64 + 1)) as usize);
+        }
+        let mut cursor = index.cursor();
+        for &want in &shuffled {
+            assert_eq!(cursor.find(want), index.find(want), "shuffled, id {want}");
+        }
+
+        // Strictly descending, the worst order for a forward cursor.
+        let mut cursor = index.cursor();
+        for &want in ids.iter().rev() {
+            assert_eq!(cursor.find(want), index.find(want), "descending, id {want}");
+        }
+
+        // Outside the set at both ends, and far enough past the end to trip the scan bound.
+        let first = ids[0];
+        let last = ids[ids.len() - 1];
+        let mut cursor = index.cursor();
+        for want in [i64::MIN, first - 1, 0, last + 1, last + 10_000_000, i64::MAX] {
+            assert_eq!(cursor.find(want), index.find(want), "outside, id {want}");
+        }
+
+        // A jump far ahead then far back, which is what work stealing does to a live cursor.
+        let mut cursor = index.cursor();
+        assert_eq!(cursor.find(ids[0]), index.find(ids[0]));
+        assert_eq!(cursor.find(last), index.find(last));
+        assert_eq!(cursor.find(ids[0]), index.find(ids[0]));
+        assert_eq!(cursor.find(ids[ids.len() / 2]), index.find(ids[ids.len() / 2]));
+    }
+
+    /// The cursor must be right on a set small enough to have one partial block, where `position`
+    /// arithmetic that assumed full blocks would still look plausible.
+    #[test]
+    fn the_cursor_is_right_on_a_set_smaller_than_one_block() {
+        for count in [1usize, 2, 63, 64, 65, 129] {
+            let ids: Vec<i64> = (0..count as i64).map(|i| i * 3 + 11).collect();
+            let index = super::IdIndex::build(&ids).expect("an index that fits");
+            let mut cursor = index.cursor();
+            for &want in &ids {
+                assert_eq!(cursor.find(want), index.find(want), "{count} id(s), id {want}");
+            }
+            let mut cursor = index.cursor();
+            for &want in &ids {
+                let miss = want + 1;
+                assert_eq!(cursor.find(miss), index.find(miss), "{count} id(s), absent {miss}");
+            }
+        }
+    }
+
     /// **The test the compressed index lives or dies by.** It has to answer exactly what a plain
     /// `binary_search` over the same ids would, for ids that are present and ids that are not, and it
     /// has to hold at block boundaries and across gaps too large for a one-byte varint.
@@ -370,7 +627,7 @@ mod tests {
             id += gap as i64;
             ids.push(id);
         }
-        let index = IdIndex::build(&ids);
+        let index = IdIndex::build(&ids).expect("an index that fits");
         assert_eq!(index.len(), ids.len());
 
         // Every id present resolves to its own position.
@@ -399,7 +656,7 @@ mod tests {
         // Three full blocks and a partial one, with a gap of exactly one so positions and ids differ
         // by a constant and an off-by-one is unmissable.
         let ids: Vec<i64> = (0..BLOCK as i64 * 3 + 7).map(|i| 1_000 + i).collect();
-        let index = IdIndex::build(&ids);
+        let index = IdIndex::build(&ids).expect("an index that fits");
         for (position, &id) in ids.iter().enumerate() {
             assert_eq!(index.find(id), Some(position as u32));
         }
@@ -416,11 +673,11 @@ mod tests {
 
     #[test]
     fn an_empty_or_single_id_set_is_not_a_special_case_that_panics() {
-        let empty = IdIndex::build(&[]);
+        let empty = IdIndex::build(&[]).expect("an empty index");
         assert_eq!(empty.len(), 0);
         assert_eq!(empty.find(1), None);
 
-        let one = IdIndex::build(&[42]);
+        let one = IdIndex::build(&[42]).expect("a one-id index");
         assert_eq!(one.len(), 1);
         assert_eq!(one.find(42), Some(0));
         assert_eq!(one.find(41), None);
@@ -433,7 +690,7 @@ mod tests {
     fn the_index_costs_about_one_byte_per_id() {
         // Gaps of one to four, which is roughly what a real needed-node set looks like.
         let ids: Vec<i64> = (0..100_000i64).map(|i| 5 + i * 3).collect();
-        let index = IdIndex::build(&ids);
+        let index = IdIndex::build(&ids).expect("an index that fits");
         let bytes = index.bases.len() * 8 + index.offsets.len() * 4 + index.deltas.len();
         let plain = ids.len() * 8;
         assert!(

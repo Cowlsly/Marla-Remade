@@ -128,13 +128,10 @@ pub struct StreamWriter {
     /// accumulated in memory here.
     data: Spill,
     /// One per stored body, ascending by tile id, partitioned into leaves at `finish`.
-    ///
-    /// The [`LeafEntry::offset_delta`] here is still **absolute** within the data section; it is
-    /// rebased onto its leaf's `base_data_offset` by [`Self::partition`].
-    entries: Vec<(u64, LeafEntry)>,
+    entries: Vec<Pending>,
     /// `(hash, stored length) -> offsets already written`. Several per key only on a collision,
     /// which is why it is a list. Probed, never iterated.
-    seen: HashMap<(u64, u32), Vec<u32>>,
+    seen: HashMap<(u64, u32), Vec<u64>>,
     last_id: Option<u64>,
     /// The stored bytes of the body `entries.last()` points at, which is what a run-length compare
     /// is against.
@@ -152,6 +149,39 @@ pub struct StreamWriter {
     distinct: u64,
     runs_used: bool,
 }
+
+/// One stored body's index entry, before it knows which leaf it belongs to.
+///
+/// Deliberately not a [`LeafEntry`]: that type's `offset_delta` is 32-bit *relative to its leaf's*
+/// `base_data_offset`, which is exactly what makes the format hold a data section past 4 GiB. Holding
+/// an absolute offset in that field meant the writer could not build one -- a north-america z13
+/// archive stopped at `a .mamaps data section past 4 GiB needs a wider offset field` after 56 minutes
+/// of work, on a limit the format does not actually have. The narrowing belongs at
+/// [`StreamWriter::partition`], where the leaf base is known.
+struct Pending {
+    tile_id: u64,
+    /// Absolute within the data section.
+    offset: u64,
+    run_length: u32,
+    length: u32,
+}
+
+/// A root index and its leaves, as [`StreamWriter::partition`] produces them.
+type Split = (Vec<RootEntry>, Vec<Vec<LeafEntry>>);
+
+/// How far back content dedup may point, in bytes of the data section.
+///
+/// [`LeafEntry::offset_delta`] is 32-bit relative to its leaf's `base_data_offset`, and that base is
+/// the **minimum** offset in the leaf because dedup lets a tile reuse a body written for an earlier
+/// one. So a leaf late in a large archive that reuses a body from the very beginning would need a
+/// delta of the whole archive -- past 4 GiB on a north-america z13 build, which no `u32` holds.
+///
+/// Bounding the reach bounds the delta: every offset in a leaf is then within `MAX_DEDUP_REACH` of
+/// the write head when that leaf was written, so the span cannot approach 4 GiB. The cost is a
+/// re-appended body when a match is older than this, and it is small in practice because tile ids are
+/// Hilbert-ordered -- tiles that share a body are neighbours, and neighbours are written close
+/// together.
+const MAX_DEDUP_REACH: u64 = 2 << 30;
 
 impl StreamWriter {
     pub fn new(options: Options) -> Result<StreamWriter> {
@@ -256,14 +286,14 @@ impl StreamWriter {
         // Run-length first: a consecutive repeat needs no dedup lookup and no new entry at all.
         // The compare is against `last_body` rather than the spill, because the bytes the last
         // entry points at are the one body always worth keeping to hand.
-        if let Some((previous_id, previous)) = self.entries.last_mut() {
+        if let Some(previous) = self.entries.last_mut() {
             debug_assert!(
-                self.data.matches_at(previous.offset_delta, &self.last_body)?,
+                self.data.matches_at(previous.offset, &self.last_body)?,
                 "last_body must be the bytes the last entry points at, or the shortcut below is \
                  answering for a body that is not there",
             );
             if previous.length == length
-                && *previous_id + previous.run_length as u64 == tile_id
+                && previous.tile_id + previous.run_length as u64 == tile_id
                 && self.last_body == stored
             {
                 previous.run_length += 1;
@@ -278,7 +308,13 @@ impl StreamWriter {
         let StreamWriter { seen, data, distinct, .. } = &mut *self;
         let bucket = seen.entry(key).or_default();
         let mut hit = None;
+        let head = data.len();
         for &at in bucket.iter() {
+            // Too far back to be addressable from a leaf that ends here. Skipped rather than
+            // matched, so the body is written again and the delta stays inside a `u32`.
+            if head - at > MAX_DEDUP_REACH {
+                continue;
+            }
             if data.matches_at(at, &stored)? {
                 hit = Some(at);
                 break;
@@ -287,21 +323,14 @@ impl StreamWriter {
         let offset = match hit {
             Some(at) => at,
             None => {
-                let at = u32::try_from(data.len()).map_err(|_| {
-                    crate::proto::Error(
-                        "a .mamaps data section past 4 GiB needs a wider offset field".to_string(),
-                    )
-                })?;
+                let at = data.len();
                 data.append(&stored)?;
                 bucket.push(at);
                 *distinct += 1;
                 at
             }
         };
-        self.entries.push((
-            tile_id,
-            LeafEntry { tile_id_lo: 0, run_length: 1, offset_delta: offset, length },
-        ));
+        self.entries.push(Pending { tile_id, offset, run_length: 1, length });
         self.last_body.clear();
         self.last_body.extend_from_slice(stored);
         Ok(())
@@ -380,16 +409,15 @@ impl StreamWriter {
         // entries per leaf; a root that still does not fit is a build failure, never a silent
         // third round trip charged to every reader forever.
         let (root, leaves) = loop {
-            match self.partition(capacity) {
-                Some(split) => {
-                    let root_len = split.0.len() * index::ROOT_ENTRY_LEN;
-                    if HEADER_LEN + dictionary.len() + root_len <= OPEN_PREFIX_BYTES as usize {
-                        break split;
-                    }
+            // A `None` is a leaf whose tile-id span will not fit a `u32`. A wider leaf spans more
+            // ids, not fewer, so growing the capacity does not fix that one -- it runs out at the
+            // cap below and reports. Kept distinct from the root-too-large case because the two want
+            // opposite things from the capacity and a future fix has to choose between them.
+            if let Some(split) = self.partition(capacity)? {
+                let root_len = split.0.len() * index::ROOT_ENTRY_LEN;
+                if HEADER_LEN + dictionary.len() + root_len <= OPEN_PREFIX_BYTES as usize {
+                    break split;
                 }
-                // A leaf whose tile-id span will not fit a `u32`. Splitting further makes each
-                // leaf narrower, which is the fix.
-                None => {}
             }
             if capacity >= 1 << 24 {
                 return err(format!(
@@ -458,28 +486,37 @@ impl StreamWriter {
     /// Chop the entries into leaves of at most `capacity`, rebasing each leaf's ids and offsets.
     ///
     /// `None` when some leaf's tile-id span will not fit the `u32` a [`LeafEntry::tile_id_lo`]
-    /// carries. That is a real possibility at a deep zoom with a large capacity, and truncating it
-    /// would put a body at the wrong tile with no diagnostic at all -- so the caller splits instead.
-    fn partition(&self, capacity: u32) -> Option<(Vec<RootEntry>, Vec<Vec<LeafEntry>>)> {
+    /// carries, which the caller answers by choosing a different capacity. `Err` when a leaf's
+    /// data-offset span will not fit [`LeafEntry::offset_delta`], which no capacity fixes and which
+    /// [`MAX_DEDUP_REACH`] exists to make unreachable -- so it is reported rather than retried.
+    /// Truncating either would put a body at the wrong tile or the wrong offset with no diagnostic.
+    fn partition(&self, capacity: u32) -> Result<Option<Split>> {
         let mut root = Vec::new();
         let mut leaves = Vec::new();
         for chunk in self.entries.chunks(capacity as usize) {
-            let (base_tile_id, _) = chunk[0];
+            let base_tile_id = chunk[0].tile_id;
             // The **minimum** offset in the chunk, not the first. Content dedup lets a tile in
             // this leaf point at a body written for an earlier one, so basing on the first entry
             // would make that delta negative.
-            let base_data_offset =
-                chunk.iter().map(|(_, e)| e.offset_delta).min().unwrap_or(0) as u64;
-            let (last_id, last) = chunk[chunk.len() - 1];
-            if !index::span_fits(last_id + last.run_length as u64 - 1 - base_tile_id) {
-                return None;
+            let base_data_offset = chunk.iter().map(|e| e.offset).min().unwrap_or(0);
+            let last = &chunk[chunk.len() - 1];
+            if !index::span_fits(last.tile_id + last.run_length as u64 - 1 - base_tile_id) {
+                return Ok(None);
             }
             let mut leaf = Vec::with_capacity(chunk.len());
-            for (tile_id, entry) in chunk {
+            for entry in chunk {
+                let delta = u32::try_from(entry.offset - base_data_offset).map_err(|_| {
+                    crate::proto::Error(format!(
+                        "a .mamaps leaf spans {} bytes of the data section, past the {} a leaf entry \
+                         addresses",
+                        entry.offset - base_data_offset,
+                        u32::MAX,
+                    ))
+                })?;
                 leaf.push(LeafEntry {
-                    tile_id_lo: (tile_id - base_tile_id) as u32,
+                    tile_id_lo: (entry.tile_id - base_tile_id) as u32,
                     run_length: entry.run_length,
-                    offset_delta: entry.offset_delta - base_data_offset as u32,
+                    offset_delta: delta,
                     length: entry.length,
                 });
             }
@@ -491,7 +528,7 @@ impl StreamWriter {
             });
             leaves.push(leaf);
         }
-        Some((root, leaves))
+        Ok(Some((root, leaves)))
     }
 }
 
@@ -582,7 +619,7 @@ impl Spill {
     ///
     /// The compare that makes a content-dedup hit a fact rather than a probability. Answered out of
     /// the buffer when the body is still in it, which costs nothing at all.
-    fn matches_at(&mut self, offset: u32, candidate: &[u8]) -> Result<bool> {
+    fn matches_at(&mut self, offset: u64, candidate: &[u8]) -> Result<bool> {
         let start = offset as u64;
         let end = start + candidate.len() as u64;
         debug_assert!(end <= self.len(), "a dedup candidate past the end of the data section");

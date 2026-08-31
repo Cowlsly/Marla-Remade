@@ -15,10 +15,11 @@
 //!   zoom, so the same vertex survives or does not regardless of which tile it lands in. Doing it
 //!   the other way round is what lets a shared edge simplify differently on each side and open a
 //!   seam.
-//! * [`geom::tiles_touched`], whose per-segment bisection is not optional: a transcontinental line
-//!   touches 16 632 tiles against 34 535 986 for its bounding box.
-//! * [`clip`]'s Liang-Barsky for lines and Sutherland-Hodgman for rings, against a tile rect with a
-//!   buffer so a stroke at the edge has geometry to join to.
+//! * [`subdivide::subdivide`], which walks a feature down the tile quadtree instead of clipping it
+//!   in full against every tile it touches. A feature inside one tile is clipped once, exactly as
+//!   before; one spanning three states pays one vertex pass per zoom level rather than one per tile.
+//! * [`clip`](tile_build::clip)'s Liang-Barsky for lines and Sutherland-Hodgman for rings, against a
+//!   tile rect with a buffer so a stroke at the edge has geometry to join to.
 //!
 //! # Memory
 //!
@@ -35,12 +36,24 @@
 //!
 //! 1. **Map.** One reader thread cuts the feature stream into chunks of roughly
 //!    [`CHUNK_VERTICES`] input vertices and hands them over a bounded channel to a pool of workers.
-//!    Each worker projects, simplifies, bisects and clips its own chunk into a private [`Chunk`]
-//!    map, touching nothing shared.
+//!    Each worker projects, simplifies and clips its own chunk into a private [`Chunk`] map,
+//!    touching nothing shared.
 //! 2. **Reduce.** The chunks are ordered by the index they were *read* at — never by the order they
 //!    finished in — and k-way merged on the tile id.
 //! 3. **Encode.** Stage C and body serialisation are pure functions of one tile, so a batch of
 //!    merged tiles is encoded in parallel and appended in tile order on one thread.
+//!
+//! Steps 2 and 3 alternate, and **overlapping them has been tried and made the build slower.** The
+//! reduce is single-threaded and the encode is the whole pool, so a merge thread behind a
+//! one-batch channel looks like free time: 33 s of a 351 s us-west tiling stage with sixty-three
+//! cores idle. Measured, it cost 53 s instead — 351 s to 404 s, byte-identical — and the merge's own
+//! busy time went 33 s to 217 s. Two reasons, both about the machine rather than the code. The pool
+//! is already one thread per logical CPU, so the merge thread is a sixty-fifth on sixty-four and has
+//! to be timesliced against threads that never yield; and the merge is a pointer walk over
+//! `BTreeMap` nodes, which was fast because it had L3 to itself and is not once sixty-four encode
+//! workers are streaming gigabytes through it. This is the same shape as the parallel spill refill
+//! in [`crate::store`], and it is recorded here for the same reason: it reads like an obvious win
+//! and it is not one.
 //!
 //! The reason this is byte-identical is stronger than "the merge is sorted". Concatenating a
 //! partition of a sequence in partition order reproduces the sequence, so a tile layer's features
@@ -76,7 +89,9 @@ use std::sync::Mutex;
 use rayon::prelude::*;
 use tile_build::geom::{self, Geometry, IntGeometry, SigPt};
 use tile_build::par;
-use tile_build::{clip, simplify};
+use tile_build::subdivide;
+use tile_build::progress::Progress;
+use tile_build::simplify;
 use tilecodec::mamaps::body::{
     Body, Feature as BodyFeature, Layer as BodyLayer, Part, GEOM_LINE, GEOM_POLYGON, WINDING_HOLE,
     WINDING_OUTER,
@@ -177,6 +192,8 @@ pub struct ZoomStats {
     pub bytes: u64,
     /// What stage C had to correct.
     pub rings: crate::rings::Stats,
+    /// What coalescing merged away: an OSM way is an editing unit, not a rendering one.
+    pub lines: crate::coalesce::Stats,
     /// Milliseconds in each phase of this zoom: map, merge, encode, append.
     ///
     /// Kept because guessing which one dominates has already cost two wrong optimisations. The map
@@ -269,6 +286,11 @@ pub fn build(store: &Store, settings: &Settings) -> Result<(Vec<u8>, Vec<ZoomSta
         // remembered. A `BTreeMap` per chunk and a heap across them is the same guarantee the
         // single-threaded `BTreeMap` gave.
         let mut merged = merge(chunks);
+        // Merge, encode and append have no total to count against -- the tile count is only known once
+        // the merge has produced it -- so this reports what has been written rather than a
+        // percentage. Still the difference between forty silent minutes and a number that moves.
+        let mut written = 0usize;
+        let mut shown = 0usize;
         loop {
             // Batched rather than a task per tile: one tile's stage C and encode is tens of
             // microseconds and rayon's stealing costs more than that. Batched rather than a whole
@@ -288,15 +310,27 @@ pub fn build(store: &Store, settings: &Settings) -> Result<(Vec<u8>, Vec<ZoomSta
             let done = encode_batch(batch)?;
             stats.encode_ms += encoding.elapsed().as_millis() as u64;
             let appending = std::time::Instant::now();
-            for (id, encoded, rings) in done {
+            for (id, encoded, rings, lines) in done {
                 stats.rings.add(rings);
+                stats.lines.add(lines);
                 let Some((stored, raw_len)) = encoded else { continue };
                 // Uncompressed, as this column has always meant.
                 stats.bytes += raw_len as u64;
                 stats.tiles += 1;
                 writer.append_stored(id, &stored)?;
+                written += 1;
+                // Every 25k tiles: often enough to look alive on a continent, rare enough that the
+                // write itself is never the cost.
+                if written - shown >= 25_000 {
+                    shown = written;
+                    print!("\r{:<28} [{written:>10} tile(s)]", format!("Encode z{z}"));
+                    let _ = std::io::Write::flush(&mut std::io::stdout());
+                }
             }
             stats.append_ms += appending.elapsed().as_millis() as u64;
+        }
+        if written > 0 {
+            println!("\r{:<28} [{written:>10} tile(s)]", format!("Encode z{z}"));
         }
         per_zoom.push(stats);
     }
@@ -414,12 +448,24 @@ fn read_chunks(
     let mut vertices = 0usize;
     let mut index = 0usize;
     let mut read_nanos = 0u64;
+    // The map phase's only visible progress. Chunks rather than features, because the count is known
+    // up front: `reader_for_zoom` has already worked out which of the spill's chunks this zoom wants.
+    let (_, total) = reader.chunks();
+    let mut bar = Progress::new(format!("Map z{z}"), total, "chunk(s)", true);
+    let mut ticked = 0usize;
     loop {
         // Timed around the deserialise alone. The send below can block on a full channel, and that is
         // the workers being busy rather than the reader being the bottleneck.
         let at = std::time::Instant::now();
         let next = reader.next().map_err(|e| tile_build::proto::Error(e.to_string()))?;
         read_nanos += at.elapsed().as_nanos() as u64;
+        // Ticked from the reader's own cursor rather than counted here, so the bar cannot drift from
+        // what is actually being read.
+        let (done, _) = reader.chunks();
+        while ticked < done {
+            bar.tick("chunk(s)");
+            ticked += 1;
+        }
         let Some(feature) = next else { break };
         if z < feature.class.min_zoom {
             continue;
@@ -440,6 +486,7 @@ fn read_chunks(
     if !chunk.is_empty() {
         let _ = send.send((index, chunk));
     }
+    bar.finish("chunk(s)");
     READ_NANOS.fetch_add(read_nanos, Ordering::Relaxed);
     Ok(())
 }
@@ -460,19 +507,15 @@ fn tile_chunks(
     tolerance: f64,
     buffer: f64,
 ) {
-    // Reused across chunks, because `tiles_touched` fills a caller's buffer precisely so that a
-    // transcontinental line's 16 632 tiles are not a fresh allocation per feature.
-    let mut touched: Vec<(u64, u64)> = Vec::new();
     loop {
         // Held to take a chunk and never while tiling one: the lock covers a pointer move, and the
         // work either side of it is milliseconds.
         let next = receive.lock().expect("the chunk queue").recv();
         let Ok((index, features)) = next else { return };
         // `AssertUnwindSafe` because everything the closure touches is a local: the chunk map it
-        // builds is thrown away on a panic and `touched` is a scratch buffer that `tiles_touched`
-        // overwrites from the start each time.
+        // builds is thrown away on a panic.
         let tiled = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            tile_chunk(&features, z, tolerance, buffer, &mut touched)
+            tile_chunk(&features, z, tolerance, buffer)
         }));
         match tiled {
             Ok((chunk, tally)) => done.lock().expect("the chunk list").push((index, chunk, tally)),
@@ -484,19 +527,19 @@ fn tile_chunks(
     }
 }
 
-/// Project, simplify, bisect and clip one chunk of features into a tile map of its own.
+/// Project, simplify and clip one chunk of features into a tile map of its own.
 ///
 /// Verbatim the loop this module used to run on the main thread over the whole store, with the
 /// destination private to the caller. Nothing here reads shared state, and that is why the chunk
 /// boundaries cannot change a result: a feature's fate depends on the feature, the zoom and the
 /// tolerance, and on nothing else in the chunk it happens to be in.
-fn tile_chunk(
-    features: &[Feature],
-    z: u8,
-    tolerance: f64,
-    buffer: f64,
-    touched: &mut Vec<(u64, u64)>,
-) -> (Chunk, Tally) {
+///
+/// The tile loop is a quadtree descent ([`subdivide::subdivide`]), not a pass over every tile the
+/// feature touches. A boundary relation spanning three states used to be clipped in full against
+/// each of its hundreds of thousands of z13 tiles; now it is clipped once per zoom level. Filtering
+/// stays where it was, **before** the descent: significance is measured on the whole geometry, so a
+/// vertex's fate must not depend on which tile it lands in.
+fn tile_chunk(features: &[Feature], z: u8, tolerance: f64, buffer: f64) -> (Chunk, Tally) {
     let mut tiles: Chunk = BTreeMap::new();
     let mut tally = Tally::default();
     for feature in features {
@@ -509,21 +552,20 @@ fn tile_chunk(
             tally.dropped += 1;
             continue;
         }
-        geom::tiles_touched(&thinned, z, EXTENT, buffer, touched);
-        for &(tx, ty) in touched.iter() {
-            let rect = geom::tile_rect(tx, ty, EXTENT, buffer);
-            let clipped = clip::clip_geometry(&thinned, &rect);
-            if is_empty(&clipped) {
-                continue;
+        subdivide::subdivide(&thinned, z, EXTENT, buffer, &mut |tx, ty, clipped| {
+            // The descent prunes on a part surviving at all; this is the stricter test that
+            // decides whether a tile is worth writing, and it stays exactly where it was.
+            if is_empty(clipped) {
+                return;
             }
-            let local = geom::to_tile(&clipped, tx, ty, EXTENT);
+            let local = geom::to_tile(clipped, tx, ty, EXTENT);
             let layer = tiles
                 .entry((tile_id(z, tx, ty), feature.class.layer))
                 .or_insert_with(|| BodyLayer::new(feature.class.layer));
             let added = push(layer, feature, &local);
             tally.features += added.0;
             tally.points += added.1;
-        }
+        });
     }
     (tiles, tally)
 }
@@ -642,39 +684,109 @@ fn concatenate(into: &mut BodyLayer, from: BodyLayer) {
 /// Returns the raw length alongside the compressed frame, because the per-zoom `bytes` column has
 /// always reported *uncompressed* body size and moving compression must not silently change what a
 /// build report means.
-fn encode_batch(
-    batch: Vec<(u64, Vec<BodyLayer>)>,
-) -> Result<Vec<(u64, Option<(Vec<u8>, usize)>, crate::rings::Stats)>> {
+/// Where the encode pass's CPU actually goes, accumulated across workers.
+///
+/// Nanoseconds, summed per tile. Split three ways because the three steps have nothing to do with
+/// each other and the totals cannot say which is which: stage C is geometry with a quadratic
+/// hole-versus-hole test in it, serialisation is a memcpy, and DEFLATE at level nine is a
+/// throughput-bound compressor. This exists for the same reason
+/// [`tile_build::pyramid`]'s `MVT_NANOS` and `GZIP_NANOS` do -- four rounds of plausible-sounding
+/// optimisation there bought 3% between them, and splitting the measurement is what found the real
+/// cost. Here it found a `clone` of every tile's coordinate arena.
+///
+/// **Off unless `MAPS_TIMING` is set**, and that is not tidiness. `pyramid`'s counters are hit once
+/// per gzip probe, a handful per tile; these are hit three times per tile, and at 943,401 tiles
+/// across 64 workers three contended atomics per tile is itself a scalability problem. Leaving them
+/// always-on would mean the instrument changed what it measured.
+static STAGE_C_NANOS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static SERIALIZE_NANOS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static DEFLATE_NANOS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Whether to time the encode split at all. Read once; an `Instant::now()` pair and an atomic per
+/// step per tile is not free at this tile count.
+fn timing() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("MAPS_TIMING").is_some())
+}
+
+/// The encode split in seconds of CPU: `(stage C, serialise, deflate)`. All zero without
+/// `MAPS_TIMING`.
+pub fn encode_seconds() -> (f64, f64, f64) {
+    let s = |c: &std::sync::atomic::AtomicU64| c.load(Ordering::Relaxed) as f64 / 1e9;
+    (s(&STAGE_C_NANOS), s(&SERIALIZE_NANOS), s(&DEFLATE_NANOS))
+}
+
+/// Time `f` into `counter`, or just run it when timing is off.
+#[inline]
+fn timed<R>(on: bool, counter: &std::sync::atomic::AtomicU64, f: impl FnOnce() -> R) -> R {
+    if !on {
+        return f();
+    }
+    let at = std::time::Instant::now();
+    let out = f();
+    counter.fetch_add(at.elapsed().as_nanos() as u64, Ordering::Relaxed);
+    out
+}
+
+/// One encoded tile on its way back from [`encode_batch`]: its id, the compressed body with its raw
+/// length, and what stage C and coalescing did to it.
+///
+/// Folded by the caller in `tile_id` order rather than accumulated across workers, so the counters
+/// need no atomics and a million tiles do not contend on three cache lines.
+type Encoded = (u64, Option<(Vec<u8>, usize)>, crate::rings::Stats, crate::coalesce::Stats);
+
+fn encode_batch(batch: Vec<(u64, Vec<BodyLayer>)>) -> Result<Vec<Encoded>> {
     let min_len = par::min_task_len(batch.len());
+    let on = timing();
     par::install(|| {
         batch
             .into_par_iter()
             .with_min_len(min_len)
-            // One DEFLATE state per worker, not one per tile. `compress_to_vec` builds a
-            // 65,712-byte `CompressorOxide` every call, and at a tile each across 64 cores that
-            // construction swamps the compression it exists to do -- see
-            // `mamaps::write::compress_body_with`.
-            .map_init(tilecodec::gz::Compressor::new, |deflate, (id, mut layers)| {
-                // **Stage C**, per tile: winding normalised, hole containment resolved, degenerate
-                // rings dropped. Once, here, in `f64` with no frame budget, instead of every frame
-                // on device in `i32` under one. This is what makes `FLAG_RINGS_VALIDATED` true.
-                let mut rings = crate::rings::Stats::default();
-                for layer in &mut layers {
-                    rings.add(crate::rings::normalise(layer));
-                }
-                // A layer that ended up empty - every feature in it fell below the minimum area
-                // after clipping, or lost its exterior to stage C - costs bytes in the archive and
-                // a draw call on device for nothing.
-                layers.retain(|layer| !layer.features.is_empty());
-                if layers.is_empty() {
-                    return Ok((id, None, rings));
-                }
-                let body = Body { extent: EXTENT as u16, layers };
-                let encoded = tilecodec::mamaps::body::serialize(&body)?;
-                let raw_len = encoded.len();
-                let stored = tilecodec::mamaps::write::compress_body_with(deflate, &encoded);
-                Ok((id, Some((stored, raw_len)), rings))
-            })
+            // One DEFLATE state and one serialisation buffer per worker, not one per tile.
+            // `compress_to_vec` builds a 65,712-byte `CompressorOxide` every call, and at a tile
+            // each across 64 cores that construction swamps the compression it exists to do -- see
+            // `mamaps::write::compress_body_with`. The `Scratch` is there for the same reason on
+            // the serialisation side: its allocations, not its encoding, were what made
+            // serialisation cost 20.9 s of CPU at 16 threads and 1120 s at 64.
+            .map_init(
+                || (tilecodec::gz::Compressor::new(), tilecodec::mamaps::body::Scratch::default()),
+                |(deflate, scratch), (id, mut layers)| {
+                    // **Coalesce first.** An OSM way is an editing unit, not a rendering one, so a
+                    // road arrives as hundreds of two-point fragments each carrying its own 28 bytes
+                    // of header -- see `crate::coalesce`. Merging them before stage C is also what
+                    // keeps stage C off tens of thousands of features it would only copy through.
+                    let mut lines = crate::coalesce::Stats::default();
+                    for layer in &mut layers {
+                        lines.add(crate::coalesce::coalesce_lines(layer));
+                    }
+                    // **Stage C**, per tile: winding normalised, hole containment resolved,
+                    // degenerate rings dropped. Once, here, in `f64` with no frame budget, instead
+                    // of every frame on device in `i32` under one. This is what makes
+                    // `FLAG_RINGS_VALIDATED` true.
+                    let mut rings = crate::rings::Stats::default();
+                    timed(on, &STAGE_C_NANOS, || {
+                        for layer in &mut layers {
+                            rings.add(crate::rings::normalise(layer));
+                        }
+                        // A layer that ended up empty - every feature in it fell below the minimum
+                        // area after clipping, or lost its exterior to stage C - costs bytes in the
+                        // archive and a draw call on device for nothing.
+                        layers.retain(|layer| !layer.features.is_empty());
+                    });
+                    if layers.is_empty() {
+                        return Ok((id, None, rings, lines));
+                    }
+                    let body = Body { extent: EXTENT as u16, layers };
+                    let encoded = timed(on, &SERIALIZE_NANOS, || {
+                        tilecodec::mamaps::body::serialize_into(&body, scratch)
+                    })?;
+                    let raw_len = encoded.len();
+                    let stored = timed(on, &DEFLATE_NANOS, || {
+                        tilecodec::mamaps::write::compress_body_with(deflate, encoded)
+                    });
+                    Ok((id, Some((stored, raw_len)), rings, lines))
+                },
+            )
             .collect()
     })
 }

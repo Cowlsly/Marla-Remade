@@ -8,6 +8,14 @@
 //! mamaps_build --input california.osm.pbf --out california.mamaps
 //!              [--layers water,buildings] [--min-zoom 0] [--max-zoom 14]
 //!              [--simplification 1.0] [--build-id N] [--report FILE]
+//!              [--keep-store] [--reuse-store]
+//!
+//! `--keep-store` leaves the feature spill and writes a small index beside it; `--reuse-store` then
+//! skips stage A entirely and tiles from that spill. Stage A is 17.6 minutes of a north-america
+//! build and identical every run for the same input and layer set, so the pair is what makes
+//! iterating on the tiler affordable. The index records the source's length and mtime plus the layer
+//! selection, and reuse refuses a spill that does not match — a stale spill would otherwise produce
+//! an archive that looks fine and is missing most of the world.
 //! ```
 //!
 //! # Why not through the existing tiler
@@ -22,6 +30,7 @@
 use std::path::PathBuf;
 use std::process::ExitCode;
 
+mod coalesce;
 mod extract;
 mod rings;
 mod shapefile;
@@ -29,11 +38,57 @@ mod schema;
 mod store;
 mod tiler;
 
+/// The allocator, replaced because the default one was three quarters of the build.
+///
+/// A build tool has no business caring which allocator it gets, and this one did not until the
+/// encode pass was measured against the machine it runs on: **1358 s of worker CPU against 180 s of
+/// wall on a 32-core, 64-thread box** — a speed-up of 7.5 where the pool can give 64. Nothing in
+/// that pass is shared. [`rings::normalise`], `body::serialize_into` and DEFLATE each read one tile
+/// and write one tile, there is no lock and no atomic in the path with `MAPS_TIMING` off, and the
+/// memory traffic works out at a few hundred MB/s against eight channels of DDR5. The only thing
+/// all sixty-four threads still contend on is the heap.
+///
+/// And they hit it hard. `normalise` allocates a `Vec` per polygon group, another for its exterior
+/// and one per hole it keeps, on the way to rebuilding a layer's arenas; z14 of a us-west build is
+/// 44.4 M features across 943,401 tiles, which is tens of millions of allocate/free pairs on
+/// Windows' process heap in about two and a half minutes.
+///
+/// Swapping it out took the tiling stage from **351 s to 110 s** on the same spill, for a
+/// byte-identical archive:
+///
+/// | phase | default heap | mimalloc |
+/// |---|---|---|
+/// | map | 125.1 s | 72.9 s |
+/// | merge | 33.2 s | 9.6 s |
+/// | encode | 180.3 s | 21.6 s |
+/// | append | 12.4 s | 3.3 s |
+/// | *encode CPU: stage C* | *452.6 s* | *54.4 s* |
+/// | *encode CPU: serialise* | *355.9 s* | *5.4 s* |
+/// | *encode CPU: deflate* | *550.0 s* | *181.1 s* |
+///
+/// Serialisation is the one that says what this really was. It is a memcpy into a reused
+/// [`tilecodec::mamaps::body::Scratch`] and it cost 356 s of CPU; it now costs 5.4 s. That was never
+/// encoding, it was the handful of buffer growths per tile going to `HeapAlloc` under sixty-four
+/// threads of contention.
+///
+/// Two things this is not. It is not a substitute for allocating less — `normalise` should be
+/// threading scratch buffers through rather than building a `Vec` per ring, and a cheaper allocator
+/// only makes that less urgent. And it is not free: mimalloc holds freed pages back rather than
+/// returning them promptly, which took peak RSS from 6.86 GB to 10.14 GB on the same build. That
+/// trade is worth revisiting if memory becomes the binding constraint again.
+///
+/// It cannot change a byte of the output — an allocator decides *where*, never *what* — so it needed
+/// no argument about ordering, only a measurement. The us-west archive hashes the same either way.
+#[global_allocator]
+static ALLOCATOR: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().collect();
     let mut input: Option<PathBuf> = None;
     let mut out: Option<PathBuf> = None;
     let mut report: Option<PathBuf> = None;
+    let mut keep_store = false;
+    let mut reuse_store = false;
     let mut layers = schema::Layers::all();
     let mut min_zoom = 0u8;
     let mut max_zoom = 14u8;
@@ -59,6 +114,14 @@ fn main() -> ExitCode {
                 report = Some(PathBuf::from(v));
                 2
             }),
+            "--keep-store" => {
+                keep_store = true;
+                Ok(1)
+            }
+            "--reuse-store" => {
+                reuse_store = true;
+                Ok(1)
+            }
             "--coastline" => value("--coastline").map(|v| {
                 coastline = Some(PathBuf::from(v));
                 2
@@ -111,6 +174,8 @@ fn main() -> ExitCode {
 
     let settings = RunSettings {
         report,
+        keep_store,
+        reuse_store,
         coastline,
         layers,
         min_zoom,
@@ -137,6 +202,10 @@ struct RunSettings {
     max_zoom: u8,
     simplification: f64,
     build_id: Option<u64>,
+    /// Keep the feature spill and write its index, so a later run can `--reuse-store`.
+    keep_store: bool,
+    /// Skip stage A and read the spill an earlier `--keep-store` run left behind.
+    reuse_store: bool,
 }
 
 fn run(
@@ -160,21 +229,42 @@ fn run(
         // not an error: an island is real data and the renderer's backdrop is the water colour.
         println!("no --coastline given, so `earth` carries islands only and there is no mainland");
     }
-    let (store, stats) = extract::extract(input, layers, run.coastline.as_deref(), &spill)
-        .map_err(|e| format!("{}: {e}", input.display()))?;
-    println!(
-        "classified {} way(s) and {} relation(s) -> {} feature(s), {} node(s) resolved",
-        stats.ways_classified, stats.relations_classified, stats.features, stats.nodes_needed,
-    );
-    if stats.geometry_failed > 0 {
-        // Expected at an extract's cut edges, and worth reporting because a large count means
-        // something else.
-        println!("  {} classified element(s) produced no geometry", stats.geometry_failed);
-    }
-
-    if stats.land_polygons > 0 {
-        println!("  including {} prepared land polygon(s)", stats.land_polygons);
-    }
+    let provenance = store::Provenance::of(input, layers, run.coastline.is_some())
+        .map_err(|e| e.to_string())?;
+    // Stage A is most of a large build -- 17.6 minutes of a north-america run, and identical every
+    // time for the same input and layer set. `--reuse-store` skips it, which is what makes iterating
+    // on the tiler affordable. The index records what it was built from and `Store::open` refuses a
+    // mismatch, so the shortcut cannot silently produce an archive missing most of the world.
+    let (store, stats) = if run.reuse_store {
+        let (store, features) =
+            store::Store::open(&spill, provenance).map_err(|e| e.to_string())?;
+        println!(
+            "reusing the feature spill at {} ({} feature(s)); stage A skipped",
+            spill.display(),
+            features,
+        );
+        (store, extract::Stats { features, ..Default::default() })
+    } else {
+        let (store, stats) = extract::extract(input, layers, run.coastline.as_deref(), &spill)
+            .map_err(|e| format!("{}: {e}", input.display()))?;
+        println!(
+            "classified {} way(s) and {} relation(s) -> {} feature(s), {} node(s) resolved",
+            stats.ways_classified, stats.relations_classified, stats.features, stats.nodes_needed,
+        );
+        if stats.geometry_failed > 0 {
+            // Expected at an extract's cut edges, and worth reporting because a large count means
+            // something else.
+            println!("  {} classified element(s) produced no geometry", stats.geometry_failed);
+        }
+        if stats.land_polygons > 0 {
+            println!("  including {} prepared land polygon(s)", stats.land_polygons);
+        }
+        if run.keep_store {
+            let index = store.save_index(provenance, stats.features).map_err(|e| e.to_string())?;
+            println!("  wrote {} so --reuse-store can skip stage A", index.display());
+        }
+        (store, stats)
+    };
 
     // The build id identifies the *data*: change the input, the zoom range, the layer set or the
     // simplification and every reader has to drop its cache. Derived rather than asked for, so a
@@ -187,8 +277,11 @@ fn run(
     let (bytes, per_zoom) = tiler::build(&store, &settings).map_err(|e| e.to_string())?;
     tiler::check_not_empty(&per_zoom).map_err(|e| e.to_string())?;
     std::fs::write(out, &bytes).map_err(|e| format!("cannot write {}: {e}", out.display()))?;
-    // The spill is scratch. Removed on success; left behind on failure, where it is evidence.
-    let _ = std::fs::remove_file(&spill);
+    // The spill is scratch. Removed on success; left behind on failure, where it is evidence, and
+    // kept deliberately under `--keep-store`, where it is the input to the next run.
+    if !run.keep_store && !run.reuse_store {
+        let _ = std::fs::remove_file(&spill);
+    }
 
     println!(
         "\n{:<6}{:>10}{:>12}{:>12}{:>10}{:>12}{:>8}{:>8}{:>8}{:>8}",
@@ -217,6 +310,26 @@ fn run(
     });
     let serial = (merge + append) as f64;
     let total = (map + merge + encode + append).max(1) as f64;
+    // What coalescing removed. The `features` column above is counted in `push`, during the map
+    // phase and therefore BEFORE the merge that coalescing runs after, so it reports what OSM
+    // yielded rather than what was written -- which is the number the map phase's cost tracks. This
+    // line is what was actually encoded.
+    let lines = per_zoom.iter().fold(coalesce::Stats::default(), |mut a, z| {
+        a.add(z.lines);
+        a
+    });
+    if lines.features_before > lines.features_after {
+        println!(
+            "       coalesced: {} line feature(s) -> {} ({:.0}x), {} part(s) -> {} ({:.1}x)",
+            lines.features_before,
+            lines.features_after,
+            lines.features_before as f64 / lines.features_after.max(1) as f64,
+            lines.parts_before,
+            lines.parts_after,
+            lines.parts_before as f64 / lines.parts_after.max(1) as f64,
+        );
+    }
+    let (stage_c, serialize, deflate) = tiler::encode_seconds();
     println!(
         "total  map {:.1}s (of which {:.1}s deserialising the spill, on one thread)  merge {:.1}s  encode {:.1}s  append {:.1}s   ({:.0}% of tiling is serial)",
         map as f64 / 1000.0,
@@ -226,6 +339,17 @@ fn run(
         append as f64 / 1000.0,
         serial / total * 100.0,
     );
+    // CPU, not wall, and summed across workers: compared against the encode wall above it says
+    // whether that phase is short of work or short of parallelism. Only under `MAPS_TIMING`,
+    // because three atomics per tile is not free at a million tiles.
+    if stage_c + serialize + deflate > 0.0 {
+        println!(
+            "       encode CPU: stage C {stage_c:.1}s  serialise {serialize:.1}s  deflate {deflate:.1}s  \
+             (={:.1}s of CPU against {:.1}s of wall)",
+            stage_c + serialize + deflate,
+            encode as f64 / 1000.0,
+        );
+    }
     println!(
         "\nwrote {} ({} bytes, build_id {build_id:#018x}) in {:.1}s",
         out.display(),
@@ -305,17 +429,31 @@ fn build_report(
     out.push_str(&format!("  \"features\": {},\n", stats.features));
     out.push_str(&format!("  \"geometry_failed\": {},\n", stats.geometry_failed));
     out.push_str(&format!("  \"nodes_needed\": {},\n", stats.nodes_needed));
+    let lines = per_zoom.iter().fold(coalesce::Stats::default(), |mut a, z| {
+        a.add(z.lines);
+        a
+    });
+    out.push_str(&format!(
+        "  \"coalesced\": {{ \"line_features_before\": {}, \"line_features_after\": {}, \
+         \"parts_before\": {}, \"parts_after\": {} }},\n",
+        lines.features_before, lines.features_after, lines.parts_before, lines.parts_after,
+    ));
     out.push_str("  \"zooms\": [\n");
     for (i, z) in per_zoom.iter().enumerate() {
         out.push_str(&format!(
             "    {{ \"zoom\": {}, \"tiles\": {}, \"features\": {}, \"points\": {}, \
-             \"dropped\": {}, \"bytes\": {} }}{}\n",
+             \"dropped\": {}, \"bytes\": {}, \"map_ms\": {}, \"merge_ms\": {}, \
+             \"encode_ms\": {}, \"append_ms\": {} }}{}\n",
             z.zoom,
             z.tiles,
             z.features,
             z.points,
             z.dropped,
             z.bytes,
+            z.map_ms,
+            z.merge_ms,
+            z.encode_ms,
+            z.append_ms,
             if i + 1 == per_zoom.len() { "" } else { "," },
         ));
     }
@@ -329,7 +467,11 @@ fn usage() {
          \x20                   [--layers earth,water,buildings,roads,boundaries,landcover,landuse]\n\
          \x20                   [--min-zoom N] [--max-zoom N]\n\
          \x20                   [--coastline LAND.geojsonseq]\n\
-         \x20                   [--simplification F] [--build-id N] [--report FILE]"
+         \x20                   [--simplification F] [--build-id N] [--report FILE]\n\
+         \x20                   [--keep-store] [--reuse-store]\n\
+         \n\
+         --keep-store   leave the feature spill and its index behind\n\
+         --reuse-store  tile from that spill instead of re-running stage A"
     );
 }
 

@@ -12,6 +12,12 @@
 //!   summary  one line per (zoom, layer): tile/feature counts, geometry-type counts and the
 //!            sorted union of `kind`s. The default.
 //!   tiles    one line per (z/x/y, layer). Verbose, for chasing a single tile.
+//!   rings    one line per (z/x/y, layer, feature, part): winding, point count and signed area.
+//!            The finest grain there is, and only sensible with `--tile`.
+//!   geometry one line per (z/x/y, layer) carrying the MEASURES of the shapes rather than their
+//!            counts: ring count, total absolute ring area, net signed area and total line length.
+//!            What `test/diff_mamaps.py` compares, and the check that says two archives hold the
+//!            same picture when they do not hold the same bytes.
 //!   header   the header fields, one per line. Also what checks a published file is sane.
 //!   dict     the interned tables, one id per line.
 //!
@@ -31,6 +37,7 @@ fn main() -> ExitCode {
     let mut input = None;
     let mut mode = "summary".to_string();
     let mut only_layer: Option<String> = None;
+    let mut only_tile: Option<(u8, u64, u64)> = None;
 
     let mut i = 1;
     while i < args.len() {
@@ -48,6 +55,16 @@ fn main() -> ExitCode {
             }
             "--layer" => {
                 only_layer = take(i);
+                i += 2;
+            }
+            "--tile" => {
+                match take(i).as_deref().and_then(parse_tile) {
+                    Some(t) => only_tile = Some(t),
+                    None => {
+                        eprintln!("mamaps_dump: --tile needs a z/x/y, e.g. 13/1308/2994");
+                        return ExitCode::from(2);
+                    }
+                }
                 i += 2;
             }
             "-h" | "--help" => {
@@ -81,7 +98,7 @@ fn main() -> ExitCode {
             return ExitCode::from(1);
         }
     };
-    match run(&bytes, &mode, only_layer.as_deref()) {
+    match run(&bytes, &mode, only_layer.as_deref(), only_tile) {
         Ok(code) => code,
         Err(e) => {
             eprintln!("mamaps_dump: {input}: {e}");
@@ -90,7 +107,21 @@ fn main() -> ExitCode {
     }
 }
 
-fn run(bytes: &[u8], mode: &str, only_layer: Option<&str>) -> tile_build::proto::Result<ExitCode> {
+/// `z/x/y` as three integers, or `None` if it is not that.
+fn parse_tile(s: &str) -> Option<(u8, u64, u64)> {
+    let mut parts = s.split('/');
+    let z = parts.next()?.parse().ok()?;
+    let x = parts.next()?.parse().ok()?;
+    let y = parts.next()?.parse().ok()?;
+    parts.next().is_none().then_some((z, x, y))
+}
+
+fn run(
+    bytes: &[u8],
+    mode: &str,
+    only_layer: Option<&str>,
+    only_tile: Option<(u8, u64, u64)>,
+) -> tile_build::proto::Result<ExitCode> {
     let (header, dictionary, _root) = read::open_prefix(bytes)?;
     if mode == "header" {
         println!("format_version\t{}", tile_build::mamaps::header::FORMAT_VERSION);
@@ -135,7 +166,7 @@ fn run(bytes: &[u8], mode: &str, only_layer: Option<&str>) -> tile_build::proto:
         }
         return Ok(ExitCode::SUCCESS);
     }
-    if !matches!(mode, "summary" | "tiles") {
+    if !matches!(mode, "summary" | "tiles" | "geometry" | "rings") {
         eprintln!("mamaps_dump: unknown mode '{mode}'");
         return Ok(ExitCode::from(2));
     }
@@ -155,6 +186,9 @@ fn run(bytes: &[u8], mode: &str, only_layer: Option<&str>) -> tile_build::proto:
         // happened not to dedup.
         for offset in 0..run_length as u64 {
             let (z, x, y) = tile_zxy(tile_id + offset);
+            if only_tile.is_some_and(|want| want != (z, x, y)) {
+                continue;
+            }
             for layer in &body.layers {
                 let name = dictionary
                     .layer_name(layer.layer_id)
@@ -171,6 +205,66 @@ fn run(bytes: &[u8], mode: &str, only_layer: Option<&str>) -> tile_build::proto:
                     kinds.insert(kind_label(&dictionary, feature));
                     points +=
                         layer.parts_of(feature).iter().map(|p| p.point_count as usize).sum::<usize>();
+                }
+                if mode == "rings" {
+                    for (fi, feature) in layer.features.iter().enumerate() {
+                        for (pi, part) in layer.parts_of(feature).iter().enumerate() {
+                            let pts = layer.points(part);
+                            println!(
+                                "{z}/{x}/{y}\t{name}\tfeature={fi}\tpart={pi}\tkind={}\twinding={}\tpoints={}\tsigned={:.2}\tfirst={:?}\tlast={:?}",
+                                kind_label(&dictionary, feature),
+                                if part.is_hole() { "hole" } else { "outer" },
+                                part.point_count,
+                                ring_area(pts),
+                                pts.first(),
+                                pts.last(),
+                            );
+                        }
+                    }
+                    continue;
+                }
+                if mode == "geometry" {
+                    // Three measures, because they fail differently and the difference
+                    // between them is diagnostic:
+                    //
+                    //   rings   how many parts. A dropped hole shows up here and nowhere
+                    //           else -- the geom= column counts FEATURES by type, so a
+                    //           feature losing a ring looks identical there.
+                    //   area    absolute, summed per ring, so a hole adds rather than
+                    //           cancels. Sensitive to a ring being lost.
+                    //   net     signed, summed per FEATURE, so holes subtract. This is
+                    //           the ground actually covered, and it is what a renderer
+                    //           fills. A self-touching ring's zero-width sliver
+                    //           contributes nothing to it, which is the point.
+                    //
+                    // `area` and `net` disagreeing is how a prong of a self-touching
+                    // ring changing orientation is told apart from one going missing.
+                    let mut rings = 0usize;
+                    let mut area = 0.0f64;
+                    let mut net = 0.0f64;
+                    let mut length = 0.0f64;
+                    for feature in &layer.features {
+                        for part in layer.parts_of(feature) {
+                            let pts = layer.points(part);
+                            rings += 1;
+                            if feature.geom_type == GEOM_POLYGON {
+                                let signed = ring_area(pts);
+                                area += signed.abs();
+                                net += signed;
+                            } else {
+                                length += path_length(pts);
+                            }
+                        }
+                    }
+                    // Two decimals of an extent unit: far below the quantisation grid the
+                    // coordinates are already on, so this cannot manufacture a difference,
+                    // and fixed-width so a text diff is meaningful.
+                    println!(
+                        "{z}/{x}/{y}\t{name}\tfeatures={}\tpoints={points}\trings={rings}\tgeom={}\tarea={area:.2}\tnet={net:.2}\tlength={length:.2}",
+                        layer.features.len(),
+                        join_counts(&geoms),
+                    );
+                    continue;
                 }
                 if mode == "tiles" {
                     println!(
@@ -251,6 +345,34 @@ fn geom_name(geom_type: u8) -> &'static str {
     }
 }
 
+/// Twice-the-signed-area over two, by the shoelace formula, treating the ring as closed.
+///
+/// `i64` throughout before the divide: two `i16` spans multiply to 32 bits and a ring can hold
+/// thousands of them, so accumulating in `f64` would round while `i64` cannot overflow.
+fn ring_area(pts: &[(i16, i16)]) -> f64 {
+    let n = pts.len();
+    if n < 3 {
+        return 0.0;
+    }
+    let mut twice: i64 = 0;
+    for i in 0..n {
+        let (x1, y1) = pts[i];
+        let (x2, y2) = pts[(i + 1) % n];
+        twice += x1 as i64 * y2 as i64 - x2 as i64 * y1 as i64;
+    }
+    twice as f64 / 2.0
+}
+
+fn path_length(pts: &[(i16, i16)]) -> f64 {
+    pts.windows(2)
+        .map(|w| {
+            let dx = w[1].0 as f64 - w[0].0 as f64;
+            let dy = w[1].1 as f64 - w[0].1 as f64;
+            (dx * dx + dy * dy).sqrt()
+        })
+        .sum()
+}
+
 fn join_counts(m: &BTreeMap<&str, usize>) -> String {
     m.iter().map(|(k, v)| format!("{k}:{v}")).collect::<Vec<_>>().join(",")
 }
@@ -260,5 +382,7 @@ fn join_counts_owned(m: &BTreeMap<String, usize>) -> String {
 }
 
 fn usage() {
-    eprintln!("usage: mamaps_dump IN.mamaps [--mode summary|tiles|header|dict] [--layer NAME]");
+    eprintln!(
+        "usage: mamaps_dump IN.mamaps [--mode summary|tiles|geometry|header|dict] [--layer NAME]"
+    );
 }

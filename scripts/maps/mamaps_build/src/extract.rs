@@ -35,6 +35,9 @@ use osm_ingest::proto::{err, Result};
 use osm_ingest::rings::{self, MemberWay, RingStats};
 use osm_ingest::select::Select;
 use tile_build::geom::Geometry;
+use tile_build::par;
+use tile_build::progress::Progress;
+use rayon::prelude::*;
 
 use crate::schema::{self, Class, Layers};
 use crate::store::{Sink, Store, WayCounts, WayReader, WaySink};
@@ -255,6 +258,16 @@ pub fn extract(
     stats.nodes_needed = table.len() as u64;
     let table = resolve_nodes(input, &blobs, &blob_kinds, "Pass 3: nodes", table)?;
     mark("coordinates resolved");
+    // The split, when asked for. Note what it does and does not separate: the first number is the
+    // protobuf decode of each block *plus* the id lookups inside it, because bracketing the lookups
+    // alone would need a clock read per node and there are billions. The second is the write, which
+    // is the half that is serialised behind `run_pass_sink`'s lock.
+    let (scan, write) = osm_ingest::nodeloc::resolve_seconds();
+    if scan + write > 0.0 {
+        println!(
+            "  [stage A] node pass CPU: decode+lookup {scan:.1}s  write {write:.1}s (serialised)",
+        );
+    }
 
     // --- materialise ----------------------------------------------------------------------
     //
@@ -266,22 +279,69 @@ pub fn extract(
     let mut sink = Sink::create(spill_path)?;
     let mut reader = WayReader::open(&ways_path)?;
     let mut refs: Vec<i64> = Vec::new();
-    while let Some((_, class)) = reader.next(&mut refs)? {
-        let line = table.line(&refs);
-        match way_geometry(&line, class.area) {
-            Some(geometry) => {
-                sink.push(&class, &geometry)?;
-                stats.features += 1;
+    // Silent until now, and it is not a short step: on a north-america extract this loop ran 623
+    // seconds on one thread with nothing on stdout, which is indistinguishable from a hang.
+    let mut bar = Progress::new(
+        "Materialise: ways".to_string(),
+        stats.ways_classified as usize,
+        "way(s)",
+        true,
+    );
+    // Batched, because the expensive part of a way is embarrassingly parallel and the cheap part
+    // cannot be. `table.line` is a coordinate lookup per node -- an id search plus a random read of a
+    // mapped file -- and `way_geometry` closes and winds rings; neither touches shared mutable state,
+    // so a batch of them goes as wide as the pool. The sink then takes the results **in order**,
+    // which is what keeps the archive byte-identical: the spill's feature order is the archive's.
+    //
+    // 64 Ki ways at ~10 nodes each is a few tens of MB of geometry in flight, against a build that
+    // peaks near 7 GB.
+    const MATERIALISE_BATCH: usize = 64 * 1024;
+    let mut batch: Vec<(Class, Vec<i64>)> = Vec::with_capacity(MATERIALISE_BATCH);
+    let mut built: Vec<Option<Geometry<(f64, f64)>>> = Vec::with_capacity(MATERIALISE_BATCH);
+    loop {
+        let more = reader.next(&mut refs)?;
+        if let Some((_, class)) = more {
+            batch.push((class, std::mem::take(&mut refs)));
+        }
+        // Flushed when full, and once more at the end with whatever is left.
+        if batch.len() >= MATERIALISE_BATCH || (more.is_none() && !batch.is_empty()) {
+            built.clear();
+            par::install(|| {
+                batch
+                    .par_iter()
+                    .map(|(class, refs)| way_geometry(&table.line(refs), class.area))
+                    .collect_into_vec(&mut built);
+            });
+            for ((class, _), geometry) in batch.iter().zip(built.drain(..)) {
+                match geometry {
+                    Some(geometry) => {
+                        sink.push(class, &geometry)?;
+                        stats.features += 1;
+                    }
+                    None => stats.geometry_failed += 1,
+                }
+                bar.tick("way(s)");
             }
-            None => stats.geometry_failed += 1,
+            batch.clear();
+        }
+        if more.is_none() {
+            break;
         }
     }
+    bar.finish("way(s)");
     // Nothing reads the ways spill after this: the relations below reach their members through
     // `members`, which is why that table is kept at all.
     drop(reader);
     let _ = std::fs::remove_file(&ways_path);
 
+    let mut bar = Progress::new(
+        "Materialise: relations".to_string(),
+        relations.len(),
+        "relation(s)",
+        true,
+    );
     for relation in &relations {
+        bar.tick("relation(s)");
         // A boundary relation's members are the border. Each is emitted as its own line rather than
         // stitched: the renderer strokes them, and a gap between two member ways is invisible in a
         // stroke while a failed stitch would drop the whole border.
@@ -316,6 +376,7 @@ pub fn extract(
         sink.push(&relation.class, &Geometry::Polygons(polygons))?;
         stats.features += 1;
     }
+    bar.finish("relation(s)");
     // The mainland, last, because clipping it needs the extract's own bounding box and that is
     // only known once every OSM feature has been through the sink. Order in the file does not
     // matter: the tiler groups by layer id, so `earth` is the first layer of every body whenever it

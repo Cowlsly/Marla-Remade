@@ -25,6 +25,9 @@
 //!     a tile's buffered rect.
 //!   * [`simplify`] — Douglas-Peucker once per feature to score every vertex, then
 //!     a per-zoom threshold on those scores.
+//!   * [`subdivide`] — tile one feature by walking the tile quadtree, so a
+//!     continent-spanning feature costs one vertex pass per zoom level rather than
+//!     one per tile it touches.
 //!   * [`pyramid`] — the tile pyramid driver and the drop policy.
 //!   * [`par`] — the thread budget (`--threads`, `MAPS_THREADS`) and the pool the
 //!     tilers run on. Parallelism never changes an output byte.
@@ -62,6 +65,7 @@ pub mod progress;
 pub mod pyramid;
 pub mod simplify;
 pub mod spill;
+pub mod subdivide;
 pub mod tiling;
 
 // The formats themselves live in `tilecodec`, shared with the Android renderer in

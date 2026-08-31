@@ -52,6 +52,39 @@ fn resolve(override_n: usize, env: Option<&str>) -> usize {
         .unwrap_or(4)
 }
 
+/// The most workers a phase that dislikes them should use — **not currently applied**.
+///
+/// Left as a documented dead end rather than deleted, because the measurement is real and the next
+/// person to look at thread counts should start from it rather than repeat it.
+///
+/// Tiling one us-west z13 archive four times from the same feature spill, back to back in one command
+/// so the machine state is shared, on a 64-thread box:
+///
+/// | threads | map  | merge | encode | append |
+/// |---------|------|-------|--------|--------|
+/// | 64      | 87.5 | 9.4   | 42.0   | 5.2    |
+/// | 32      | 80.1 | 6.6   | 26.3   | 2.6    |
+/// | 16      | 76.5 | 5.4   | 29.0   | 2.0    |
+/// | 8       | 74.7 | 4.4   | 29.3   | 1.5    |
+///
+/// Encode looks 37% faster at 32 than at 64, every phase looks better with fewer workers, and all four
+/// archives were byte-identical.
+///
+/// # Why it is not applied
+///
+/// Neither a global cap nor an encode-only pool survived a full z14 build. This box produced 610.1,
+/// 631.0, 563.4 and 786.0 second us-west z14 builds that all wrote the **same archive bytes** — ±20%
+/// of wall clock, several times the effect being chased, because other work shares the machine. The
+/// z13 table above is internally consistent only because its four runs were consecutive; comparing it
+/// against a z14 run measured an hour later compares machine load, not code.
+///
+/// Validating this needs an A/B where both arms run back to back on an otherwise idle box, ideally
+/// interleaved and repeated. `--threads` and `MAPS_THREADS` are how to do that; see also
+/// [`min_task_len`], which documents the same anti-scaling from the scheduling side and *is* applied,
+/// because a synthetic benchmark could isolate it.
+#[allow(dead_code)]
+const NARROW_THREADS_UNVALIDATED: usize = 32;
+
 /// A malformed or non-positive `MAPS_THREADS` is ignored rather than fatal: it is
 /// usually exported once for a whole script run, and killing an eight-hour planet
 /// build over a typo in an environment variable serves nobody.

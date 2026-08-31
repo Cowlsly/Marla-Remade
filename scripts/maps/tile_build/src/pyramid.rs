@@ -44,7 +44,6 @@
 //!   unclipped source and filters per zoom, so both rings keep the same vertices
 //!   along the edge.
 
-use crate::clip::clip_geometry;
 use crate::geom::{self, Geometry, IntGeometry};
 use crate::mvt::{self, FeatureRef as MvtFeature, GeomType, Value, DEFAULT_EXTENT};
 use crate::par;
@@ -53,6 +52,7 @@ use crate::progress::Progress;
 use crate::proto::{err, Error, Result};
 use crate::simplify;
 use crate::spill::{self, GeomKind};
+use crate::subdivide;
 use rayon::prelude::*;
 use std::path::Path;
 
@@ -111,11 +111,12 @@ impl Options {
 
 /// A one-line progress bar for one zoom's tile loop.
 ///
-/// The count is CANDIDATE tiles, which is the loop's length -- larger than the `tiles`
-/// column in the report below, because a candidate whose geometry clips away to
-/// nothing is never written. Saying "candidate" keeps the two numbers from looking
-/// like a contradiction.
-const CANDIDATES: &str = "candidate tile(s)";
+/// The count is the tiles that will be written. It used to be *candidate* tiles -- the
+/// tiles `geom::tiles_touched` listed, which was larger, because a candidate whose
+/// geometry clipped away to nothing was walked and then skipped. The quadtree descent
+/// does not reach those tiles at all, so the two numbers are now the same one and the
+/// bar agrees with the `tiles` column in the report below.
+const TILES: &str = "tile(s)";
 
 /// What one zoom cost, for the per-zoom report the drop policy owes the operator.
 #[derive(Debug, Default, Clone, PartialEq)]
@@ -183,22 +184,6 @@ fn by_importance(a: &TileCandidate, b: &TileCandidate) -> std::cmp::Ordering {
     by_importance_keys(a.extent, a.seq, b.extent, b.seq)
 }
 
-/// The candidate tiles of one zoom as `(tile_id, tx, ty)`, ascending by `tile_id`.
-///
-/// `(tx, ty)` order is **not** `tile_id` order -- at z1 the lexicographic walk gives
-/// ids 1, 2, 4, 3 -- so sorting on the pair is not enough. [`Builder`] sorts by id
-/// itself and so does not care, but [`pmtiles::StreamBuilder`] hard-errors on a
-/// non-ascending id, and both producers visiting tiles in the same order is what lets
-/// their outputs be compared byte for byte.
-fn tiles_in_id_order(z: u8, tiles: impl IntoIterator<Item = (u64, u64)>) -> Vec<(u64, u64, u64)> {
-    let mut out: Vec<(u64, u64, u64)> = tiles
-        .into_iter()
-        .map(|(tx, ty)| (pmtiles::tile_id(z, tx, ty), tx, ty))
-        .collect();
-    out.sort_unstable();
-    out
-}
-
 /// One feature's contribution to one zoom's spill: every record it produces, in one
 /// allocation.
 ///
@@ -213,11 +198,17 @@ struct BucketedFeature {
 /// Project one feature, clip it into every tile it reaches, and encode a spill
 /// record per tile.
 ///
-/// Pure: every argument is shared except the two scratch buffers, which are the
-/// caller's per-worker `touched` and `rec`. That is what lets the bucket pass run
-/// this across the pool — and the reason the buffers are passed in rather than
-/// declared here is the one the serial loop had, unchanged: allocating them per
-/// feature would cost three million allocations a zoom.
+/// Pure: every argument is shared except `rec`, which is the caller's per-worker
+/// scratch buffer. That is what lets the bucket pass run this across the pool — and
+/// the reason the buffer is passed in rather than declared here is the one the serial
+/// loop had, unchanged: allocating it per feature would cost three million
+/// allocations a zoom.
+///
+/// The tile loop is [`subdivide::subdivide`], a quadtree descent, rather than a pass
+/// over every tile [`geom::tiles_touched`] lists. Filtering stays **after** the clip
+/// and per tile, which is where this crate has always done it and where
+/// [`build_archive`] still does it -- the two are compared byte for byte, so the step
+/// order has to match.
 ///
 /// Takes the geometry and properties rather than a [`Feature`] so the chunked read path
 /// can pass a [`crate::spill::NormalizedFeature`]'s fields straight in. The two types
@@ -232,7 +223,6 @@ fn bucket_feature(
     opts: &Options,
     buffer: f64,
     tolerance: f64,
-    touched: &mut Vec<(u64, u64)>,
     rec: &mut Vec<u8>,
 ) -> Result<BucketedFeature> {
     let t0 = std::time::Instant::now();
@@ -242,41 +232,48 @@ fn bucket_feature(
     // `simplify`'s module docs.
     let mut projected = geom::project_geometry(geometry, z, opts.extent);
     simplify::annotate(&mut projected);
-    geom::tiles_touched(&projected, z, opts.extent, buffer, touched);
-    let mut out = BucketedFeature {
-        blob: Vec::new(),
-        spans: Vec::with_capacity(touched.len()),
-    };
-    for &(tx, ty) in touched.iter() {
-        let rect = geom::tile_rect(tx, ty, opts.extent, buffer);
-        let clipped = clip_geometry(&projected, &rect);
-        let filtered = simplify::filter(&clipped, tolerance);
+    let mut out = BucketedFeature { blob: Vec::new(), spans: Vec::new() };
+    // `encode_record` can fail on a record too large to describe, and the descent's
+    // callback cannot return. The first failure is held and re-raised below rather
+    // than panicking: a `?` inside the closure is not available and unwinding out of
+    // it would cross the rayon boundary the callers put us behind.
+    let mut failed: Option<Error> = None;
+    subdivide::subdivide(&projected, z, opts.extent, buffer, &mut |tx, ty, clipped| {
+        if failed.is_some() {
+            return;
+        }
+        let filtered = simplify::filter(clipped, tolerance);
         let local = geom::to_tile(&filtered, tx, ty, opts.extent);
         if local.is_empty() {
-            continue;
+            return;
         }
         rec.clear();
-        spill::encode_record(
-            pmtiles::tile_id(z, tx, ty),
-            seq,
-            extent_of(&local),
-            &local,
-            props,
-            rec,
-        )?;
+        let id = pmtiles::tile_id(z, tx, ty);
+        if let Err(e) = spill::encode_record(id, seq, extent_of(&local), &local, props, rec) {
+            failed = Some(e);
+            return;
+        }
         let at = out.blob.len();
         out.blob.extend_from_slice(rec);
-        out.spans
-            .push((pmtiles::tile_id(z, tx, ty), at, out.blob.len() - at));
-    }
+        out.spans.push((id, at, out.blob.len() - at));
+    });
     BUCKET_NANOS.fetch_add(
         t0.elapsed().as_nanos() as u64,
         std::sync::atomic::Ordering::Relaxed,
     );
-    Ok(out)
+    match failed {
+        Some(e) => Err(e),
+        None => Ok(out),
+    }
 }
 
 /// Build the archive, and a per-zoom report.
+///
+/// **The in-memory oracle**, not the path for anything at scale. Per zoom this holds a
+/// clipped copy of every geometry for every tile it reaches, so peak memory tracks the
+/// zoom's output volume; [`build_archive_to`] is the streaming twin, produces the same
+/// bytes, and is what the `tile_*` binaries use. Keeping the clipped copies is what buys
+/// the quadtree descent — see [`crate::spill`]'s module docs for that trade.
 pub fn build_archive(features: &[Feature], opts: &Options) -> Result<(Vec<u8>, Vec<ZoomStats>)> {
     if opts.min_zoom > opts.max_zoom {
         return err("minzoom is above maxzoom");
@@ -306,110 +303,92 @@ pub fn build_archive(features: &[Feature], opts: &Options) -> Result<(Vec<u8>, V
         let mut stats = ZoomStats { zoom: z, ..Default::default() };
         let tolerance = simplify::tolerance_for(z, opts.max_zoom, opts.simplification);
 
-        // Project once per zoom, not once per tile: a coastline can cross thousands
-        // of tiles and the projection is the expensive part. Annotate here too, both
-        // for that reason and because significance has to be measured on the
-        // UNCLIPPED ring. Per-feature pure, so it maps across the pool; `collect`
-        // into a Vec keeps it in input order.
+        // Project, annotate, descend, clip, thin and move into the tile -- per feature,
+        // across the pool. `collect` into a Vec keeps the outer order the input's, which
+        // is what makes the drop policy's tie-break deterministic below.
         //
-        // Identical to `bucket_feature`'s prologue on purpose: the byte-identity
-        // tests compare the two producers, so a step added to one and not the other
-        // is a test failure rather than a silent divergence.
-        let projected: Vec<Option<Geometry<geom::SigPt>>> = par::install(|| {
+        // Step for step what `bucket_feature` does, on purpose: the byte-identity tests
+        // compare the two producers, so a step added to one and not the other is a test
+        // failure rather than a silent divergence. Projection and annotation are once
+        // per feature per zoom because projection is the expensive part and because
+        // significance has to be measured on the UNCLIPPED ring; the filter is per tile
+        // and AFTER the clip, which is this crate's order and not `tiler.rs`'s.
+        let placed: Vec<Vec<(u64, i64, IntGeometry)>> = par::install(|| {
             features
                 .par_iter()
                 .map(|f| {
                     let mut p = geom::project_geometry(&f.geometry, z, opts.extent);
                     simplify::annotate(&mut p);
-                    Some(p)
+                    let mut out = Vec::new();
+                    subdivide::subdivide(&p, z, opts.extent, buffer, &mut |tx, ty, clipped| {
+                        let filtered = simplify::filter(clipped, tolerance);
+                        let local = geom::to_tile(&filtered, tx, ty, opts.extent);
+                        // Anything that vanishes here never reached the tile in the
+                        // first place, so it is not a "drop".
+                        if local.is_empty() {
+                            return;
+                        }
+                        out.push((pmtiles::tile_id(z, tx, ty), extent_of(&local), local));
+                    });
+                    out
                 })
                 .collect()
         });
 
-        // tile -> the features that reach it, in input order.
-        let mut by_tile: std::collections::HashMap<(u64, u64), Vec<usize>> =
+        // tile -> its candidates, in ascending feature index. Borrowed from `placed`
+        // rather than moved out of it: a tile's geometry is read once by `fit_tile` and
+        // a copy per candidate would be the largest allocation in the tiler.
+        let mut by_tile: std::collections::HashMap<u64, Vec<(u64, i64, &IntGeometry)>> =
             std::collections::HashMap::new();
-        // Reused across features so the per-feature tile list is not reallocated
-        // 3 million times per zoom.
-        let mut touched: Vec<(u64, u64)> = Vec::new();
-        for (i, p) in projected.iter().enumerate() {
-            let Some(p) = p else { continue };
-            // Per-segment boxes, not the whole feature's: see `geom::tiles_touched`.
-            // The whole-feature box is what made a country-spanning line get clipped
-            // into millions of z16 tiles it never enters.
-            geom::tiles_touched(p, z, opts.extent, buffer, &mut touched);
-            for &(tx, ty) in &touched {
-                by_tile.entry((tx, ty)).or_default().push(i);
+        for (i, one) in placed.iter().enumerate() {
+            for (id, extent, local) in one {
+                by_tile.entry(*id).or_default().push((i as u64, *extent, local));
             }
         }
 
-        let tiles = tiles_in_id_order(z, by_tile.keys().copied());
-        let mut bar = Progress::new(
-            format!("{} z{z}", opts.layer),
-            tiles.len(),
-            CANDIDATES,
-            opts.progress,
-        );
+        // Sorted on the id itself, so this is `tile_id` order by construction. Sorting
+        // on `(tx, ty)` would not be: at z1 the lexicographic walk gives ids 1, 2, 4, 3,
+        // and `pmtiles::StreamBuilder` hard-errors on a non-ascending id.
+        let mut tiles: Vec<u64> = by_tile.keys().copied().collect();
+        tiles.sort_unstable();
+        let mut bar = Progress::new(format!("{} z{z}", opts.layer), tiles.len(), TILES, opts.progress);
         // Across tiles, not within one: a tile holds a handful of features, so mapping
-        // its clip loop over the pool costs more in scheduling than the clipping is
-        // worth. Tiles are independent and there are many, which is the seam. The fold
-        // below is sequential and in `tile_id` order, so `stats` and the archive are
-        // exactly what the serial version produced.
+        // its encode over the pool costs more in scheduling than the encoding is worth.
+        // Tiles are independent and there are many, which is the seam. The fold below is
+        // sequential and in `tile_id` order, so `stats` and the archive are exactly what
+        // the serial version produced.
         for chunk in tiles.chunks(par::batch_len()) {
-            let done: Vec<Option<EncodedTile>> = par::install(|| {
+            let done: Vec<EncodedTile> = par::install(|| {
                 chunk
                     .par_iter()
                     .with_min_len(par::min_task_len(chunk.len()))
-                    .map_init(crate::gz::Compressor::new, |gz, &(id, tx, ty)| {
-                        let indices = &by_tile[&(tx, ty)];
-                        let rect = geom::tile_rect(tx, ty, opts.extent, buffer);
-
-                        // Clip, thin, move into the tile. Anything that vanishes
-                        // here never reached the tile in the first place, so it is not
-                        // a "drop".
-                        let mut placed: Vec<(usize, i64, IntGeometry)> =
-                            Vec::with_capacity(indices.len());
-                        for &i in indices {
-                            let p = projected[i].as_ref().expect("filtered above");
-                            let clipped = clip_geometry(p, &rect);
-                            let filtered = simplify::filter(&clipped, tolerance);
-                            let local = geom::to_tile(&filtered, tx, ty, opts.extent);
-                            if local.is_empty() {
-                                continue;
-                            }
-                            placed.push((i, extent_of(&local), local));
-                        }
-                        if placed.is_empty() {
-                            return Ok(None);
-                        }
-
-                        let mut candidates: Vec<TileCandidate> = placed
+                    .map_init(crate::gz::Compressor::new, |gz, &id| {
+                        let mut candidates: Vec<TileCandidate> = by_tile[&id]
                             .iter()
-                            .map(|(i, extent, g)| TileCandidate {
-                                seq: *i as u64,
-                                geom: g,
-                                props: &features[*i].props,
-                                extent: *extent,
+                            .map(|&(seq, extent, geom)| TileCandidate {
+                                seq,
+                                geom,
+                                props: &features[seq as usize].props,
+                                extent,
                             })
                             .collect();
                         candidates.sort_by(by_importance);
 
                         let (body, kept, over) =
                             fit_tile(&candidates, &opts.layer, geom_type, opts, gz)?;
-                        Ok(Some(EncodedTile {
+                        Ok(EncodedTile {
                             id,
                             body,
                             kept,
                             over_budget: over,
                             placed: candidates.len(),
-                        }))
+                        })
                     })
                     .collect::<Result<Vec<_>>>()
             })?;
 
-            for one in done {
-                bar.tick(CANDIDATES);
-                let Some(t) = one else { continue };
+            for t in done {
+                bar.tick(TILES);
                 stats.placed += t.placed;
                 stats.kept += t.kept;
                 stats.dropped += t.placed - t.kept;
@@ -421,7 +400,7 @@ pub fn build_archive(features: &[Feature], opts: &Options) -> Result<(Vec<u8>, V
                 builder.add_tile_raw(t.id, t.body);
             }
         }
-        bar.finish(CANDIDATES);
+        bar.finish(TILES);
         report.push(stats);
     }
 
@@ -851,7 +830,6 @@ fn bucket_serial(
     set: &mut spill::BucketSet,
     bar: &mut Progress,
 ) -> Result<()> {
-    let mut touched: Vec<(u64, u64)> = Vec::new();
     let mut rec = Vec::new();
     let mut seq = 0u64;
     let batch_len = par::batch_len();
@@ -879,7 +857,6 @@ fn bucket_serial(
                 opts,
                 buffer,
                 tolerance,
-                &mut touched,
                 &mut rec,
             )]
         } else {
@@ -888,22 +865,18 @@ fn bucket_serial(
                     .par_iter()
                     .enumerate()
                     .with_min_len(par::min_task_len(batch.len()))
-                    .map_init(
-                        || (Vec::new(), Vec::new()),
-                        |(touched, rec), (i, f)| {
-                            bucket_feature(
-                                &f.geometry,
-                                &f.props,
-                                first + i as u64,
-                                z,
-                                opts,
-                                buffer,
-                                tolerance,
-                                touched,
-                                rec,
-                            )
-                        },
-                    )
+                    .map_init(Vec::new, |rec, (i, f)| {
+                        bucket_feature(
+                            &f.geometry,
+                            &f.props,
+                            first + i as u64,
+                            z,
+                            opts,
+                            buffer,
+                            tolerance,
+                            rec,
+                        )
+                    })
                     .collect()
             })
         };
@@ -955,8 +928,8 @@ fn bucket_chunked(
             ids.par_iter()
                 .with_min_len(par::min_task_len(ids.len()))
                 .map_init(
-                    || (Vec::new(), Vec::new(), Vec::new(), Vec::new()),
-                    |(scratch, feats, touched, rec), &ci| {
+                    || (Vec::new(), Vec::new(), Vec::new()),
+                    |(scratch, feats, rec), &ci| {
                         chunks.read_into(ci, scratch, feats)?;
                         let first = ci as u64 * spill::NORM_CHUNK_FEATURES;
                         let mut out = Vec::with_capacity(feats.len());
@@ -969,7 +942,6 @@ fn bucket_chunked(
                                 opts,
                                 buffer,
                                 tolerance,
-                                touched,
                                 rec,
                             )?);
                         }
@@ -1851,6 +1823,33 @@ mod tests {
         }
     }
 
+    /// The same fixture, moved to straddle longitude 0.
+    ///
+    /// At z6, lon 0 projects to world x exactly 32, so this crosses the edge between
+    /// tile 31 and tile 32 -- and `31 >> 5` is 0 where `32 >> 5` is 1, so those two
+    /// tiles' quadtree ancestries diverge at the ROOT. That is the worst case for
+    /// [`crate::subdivide`]: the geometry each tile sees has been clipped down two
+    /// completely separate chains of six cells, rather than sharing a parent.
+    fn root_straddling_polygon() -> Feature {
+        let Feature { geometry, props } = straddling_polygon();
+        let shift = -Z6_TILE_EDGE_LON;
+        let Geometry::Polygons(polys) = geometry else { panic!("a polygon fixture") };
+        Feature {
+            geometry: Geometry::Polygons(
+                polys
+                    .into_iter()
+                    .map(|rings| {
+                        rings
+                            .into_iter()
+                            .map(|r| r.into_iter().map(|(lon, lat)| (lon + shift, lat)).collect())
+                            .collect()
+                    })
+                    .collect(),
+            ),
+            props,
+        }
+    }
+
     /// Crossing-number point-in-ring, with a point on the ring counting as inside.
     ///
     /// Integer throughout, and `i64` for the cross products: two `i32` spans
@@ -1929,15 +1928,42 @@ mod tests {
     /// The comparison is over the band strictly inside BOTH buffered rects: the
     /// crossings each tile's own clip introduced sit exactly on the edge of that
     /// band and belong to one tile only.
+    ///
+    /// Held **exact**, and that is a claim worth stating since [`crate::subdivide`]
+    /// arrived. A leaf's geometry is now clipped down a chain of ancestor cells, and
+    /// two adjacent leaves can have different chains -- so it would have been
+    /// reasonable to expect the shared band to need a shape comparison rather than a
+    /// vertex one. It does not, because an ancestor boundary line either coincides
+    /// with the leaf's own line on that side or lies outside the leaf entirely, so no
+    /// ancestor ever puts a vertex *inside* a leaf that the leaf's own clip would not
+    /// have put there. `subdivide`'s tests measure that directly; this measures the
+    /// consequence at the seam, which is the thing a reader actually cares about.
     #[test]
     fn two_adjacent_tiles_agree_on_the_geometry_they_share() {
-        let (bytes, _) =
-            build_archive(&[straddling_polygon()], &Options::new("land", 6, 7)).unwrap();
+        assert_adjacent_tiles_agree(straddling_polygon(), Z6_TILE_EDGE_LON);
+    }
+
+    /// The same seam, at the one edge where the two tiles share no quadtree ancestor
+    /// at all: tile 31 and tile 32 at z6 diverge at the root, so each side's geometry
+    /// has been clipped down six cells that have nothing in common but the world.
+    ///
+    /// If a descent could open a seam, it would open it here.
+    #[test]
+    fn two_tiles_under_different_quadtree_roots_still_agree_on_their_seam() {
+        assert_adjacent_tiles_agree(root_straddling_polygon(), 0.0);
+    }
+
+    /// Build one feature at z6 and compare the two tiles either side of `edge_lon`
+    /// over the band their buffers share.
+    fn assert_adjacent_tiles_agree(feature: Feature, edge_lon: f64) {
+        // maxzoom above the zoom under test, so z6 is genuinely being thinned:
+        // `tolerance_for` spares only the deepest zoom.
+        let (bytes, _) = build_archive(&[feature], &Options::new("land", 6, 7)).unwrap();
         let a = Archive::parse(&bytes).unwrap();
 
         let extent = DEFAULT_EXTENT;
         let buffer = geom::buffer_for(extent);
-        let (edge_tile_x, _) = geom::project(Z6_TILE_EDGE_LON, 0.0, 6);
+        let (edge_tile_x, _) = geom::project(edge_lon, 0.0, 6);
         let edge = edge_tile_x * extent as f64;
         let east_tx = edge_tile_x as u64;
         // The straddling polygon covers lat 36..40, which at z6 is one tile row.

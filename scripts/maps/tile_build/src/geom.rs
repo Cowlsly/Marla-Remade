@@ -298,24 +298,14 @@ impl TileRange {
 
 /// Every tile a geometry can reach at zoom `z`, sorted and deduplicated.
 ///
-/// The point of this over `tile_range(bounds(g))` is long thin diagonal features. A
-/// bounding box is a terrible approximation of a route: measured on one
-/// transcontinental rail relation (40° of longitude, 2000 vertices) at z16, the box
-/// covers **34,535,986** tiles and the route passes through **29,276** — a 1180x
-/// difference, and each of those tiles ran a full clip and simplify of the whole
-/// geometry. That is why `transit_lines` at planet scale took hours.
+/// **No longer the tiling path.** [`crate::subdivide`] replaced all three of this
+/// function's callers, because finding the tiles and then clipping the whole feature
+/// against each of them is `O(T · V)` however tight `T` is. What remains is its use as
+/// that module's reference: a descent must not reach a tile this does not list, and the
+/// two are compared over a corpus there. Kept for that, and for the safety property its
+/// own tests below pin -- a conservative superset is a useful thing to have a name for.
 ///
-/// Each SEGMENT's own box is used instead, and their union taken. Real OSM geometry
-/// has short segments, so those boxes are 1-4 tiles each and the total tracks the
-/// tiles actually traversed. It stays a conservative superset — a segment's box always
-/// contains the segment — so no tile a feature reaches can be missed, which a
-/// line-walking algorithm would have to get exactly right to be safe.
-///
-/// Polygons keep whole-ring boxes: a polygon legitimately covers its interior tiles,
-/// and per-segment boxes would drop every tile strictly inside the ring.
-/// Every tile a geometry can reach at zoom `z`, sorted and deduplicated.
-///
-/// The point of this over `tile_range(bounds(g))` is long thin diagonal features. A
+/// The point of it over `tile_range(bounds(g))` is long thin diagonal features. A
 /// bounding box is a terrible approximation of a route. Measured on one
 /// transcontinental rail relation (40° of longitude) at z16:
 ///

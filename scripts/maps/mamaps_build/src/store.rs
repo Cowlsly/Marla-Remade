@@ -237,6 +237,192 @@ pub struct Store {
     bbox: (i32, i32, i32, i32),
 }
 
+/// What a spill was built from, so reusing one cannot silently build the wrong archive.
+///
+/// A store is only valid for the input and layer selection that produced it. Reusing one built from
+/// a different `.pbf`, or with `--layers water` when this run wants all seven, would produce an
+/// archive that looks fine and is missing most of the world. Cheap to record, impossible to diagnose
+/// from the symptom.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Provenance {
+    /// Length and modification time of the source `.pbf`. Not a hash: hashing 18 GB to save 18
+    /// minutes of stage A would give most of the saving back.
+    pub source_len: u64,
+    pub source_mtime: u64,
+    /// The layer selection, one bit each, in [`crate::schema::Layers`] declaration order.
+    pub layers: u8,
+    /// Whether a coastline product was folded in, which adds features nothing else would.
+    pub coastline: bool,
+}
+
+impl Provenance {
+    /// Read the source file's identity, or an error naming it.
+    pub fn of(source: &Path, layers: crate::schema::Layers, coastline: bool) -> Result<Provenance> {
+        let meta = std::fs::metadata(source)
+            .map_err(|e| osm_ingest::proto::Error(format!("cannot stat {}: {e}", source.display())))?;
+        let mtime = meta
+            .modified()
+            .ok()
+            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        Ok(Provenance {
+            source_len: meta.len(),
+            source_mtime: mtime,
+            layers: u8::from(layers.earth)
+                | u8::from(layers.water) << 1
+                | u8::from(layers.buildings) << 2
+                | u8::from(layers.roads) << 3
+                | u8::from(layers.boundaries) << 4
+                | u8::from(layers.landcover) << 5
+                | u8::from(layers.landuse) << 6,
+            coastline,
+        })
+    }
+}
+
+/// Magic and version of the sidecar index. Bumped whenever the layout below changes, so an index
+/// written by an older build is refused rather than misread.
+const INDEX_MAGIC: &[u8; 8] = b"MAMASTOR";
+const INDEX_VERSION: u32 = 1;
+
+impl Store {
+    /// Write the sidecar that lets [`Store::open`] skip stage A.
+    ///
+    /// Beside the spill, as `<spill>.index`. Everything a `Store` holds that is not the spill itself:
+    /// the chunk offsets, the per-chunk shallowest zoom, the count and the bounding box. On a
+    /// north-america build that is about 28 MB against a 29 GB spill, and it buys eighteen minutes
+    /// per subsequent run.
+    ///
+    /// `features` is [`crate::extract::Stats::features`], which the build id is derived from. Stored
+    /// rather than recomputed so a reused run derives the **same** id as the run that built the
+    /// spill -- otherwise reuse would quietly republish under a different id.
+    pub fn save_index(&self, provenance: Provenance, features: u64) -> Result<PathBuf> {
+        let path = index_path(&self.path);
+        let mut out = Vec::with_capacity(16 + self.chunks.len() * 8 + self.chunk_mins.len());
+        out.extend_from_slice(INDEX_MAGIC);
+        out.extend_from_slice(&INDEX_VERSION.to_le_bytes());
+        out.extend_from_slice(&provenance.source_len.to_le_bytes());
+        out.extend_from_slice(&provenance.source_mtime.to_le_bytes());
+        out.push(provenance.layers);
+        out.push(u8::from(provenance.coastline));
+        out.extend_from_slice(&features.to_le_bytes());
+        out.extend_from_slice(&self.count.to_le_bytes());
+        for v in [self.bbox.0, self.bbox.1, self.bbox.2, self.bbox.3] {
+            out.extend_from_slice(&v.to_le_bytes());
+        }
+        out.extend_from_slice(&(self.chunks.len() as u64).to_le_bytes());
+        for c in &self.chunks {
+            out.extend_from_slice(&c.to_le_bytes());
+        }
+        out.extend_from_slice(&(self.chunk_mins.len() as u64).to_le_bytes());
+        out.extend_from_slice(&self.chunk_mins);
+        std::fs::write(&path, &out)
+            .map_err(|e| osm_ingest::proto::Error(format!("cannot write {}: {e}", path.display())))?;
+        Ok(path)
+    }
+
+    /// Reopen a spill written by an earlier run, refusing one that does not match `want`.
+    ///
+    /// Returns the store and the feature count the build id is derived from. The whole point is
+    /// iterating on tiling without paying for stage A again, so the checks are what make that safe
+    /// rather than merely fast.
+    pub fn open(spill: &Path, want: Provenance) -> Result<(Store, u64)> {
+        let path = index_path(spill);
+        if !spill.exists() {
+            return err(format!("no feature spill at {}", spill.display()));
+        }
+        let raw = std::fs::read(&path).map_err(|e| {
+            osm_ingest::proto::Error(format!(
+                "cannot read {} ({e}) -- a store can only be reused if the run that built it wrote \
+                 its index",
+                path.display(),
+            ))
+        })?;
+        let mut at = 0usize;
+        let mut take = |n: usize| -> Result<&[u8]> {
+            let end = at + n;
+            if end > raw.len() {
+                return err(format!("{} is truncated", path.display()));
+            }
+            let slice = &raw[at..end];
+            at = end;
+            Ok(slice)
+        };
+        if take(8)? != INDEX_MAGIC {
+            return err(format!("{} is not a store index", path.display()));
+        }
+        let version = u32::from_le_bytes(take(4)?.try_into().expect("four bytes"));
+        if version != INDEX_VERSION {
+            return err(format!(
+                "{} is version {version}, this build writes {INDEX_VERSION}",
+                path.display(),
+            ));
+        }
+        let got = Provenance {
+            source_len: u64::from_le_bytes(take(8)?.try_into().expect("eight bytes")),
+            source_mtime: u64::from_le_bytes(take(8)?.try_into().expect("eight bytes")),
+            layers: take(1)?[0],
+            coastline: take(1)?[0] != 0,
+        };
+        if got != want {
+            return err(format!(
+                "{} was built from a different input or layer set (source {} bytes at mtime {}, \
+                 layers {:#04x}, coastline {}) than this run wants (source {} bytes at mtime {}, \
+                 layers {:#04x}, coastline {}) -- delete it or drop --reuse-store",
+                path.display(),
+                got.source_len,
+                got.source_mtime,
+                got.layers,
+                got.coastline,
+                want.source_len,
+                want.source_mtime,
+                want.layers,
+                want.coastline,
+            ));
+        }
+        let features = u64::from_le_bytes(take(8)?.try_into().expect("eight bytes"));
+        let count = u64::from_le_bytes(take(8)?.try_into().expect("eight bytes"));
+        let mut bbox = [0i32; 4];
+        for slot in &mut bbox {
+            *slot = i32::from_le_bytes(take(4)?.try_into().expect("four bytes"));
+        }
+        let chunk_count = u64::from_le_bytes(take(8)?.try_into().expect("eight bytes")) as usize;
+        let mut chunks = Vec::with_capacity(chunk_count);
+        for _ in 0..chunk_count {
+            chunks.push(u64::from_le_bytes(take(8)?.try_into().expect("eight bytes")));
+        }
+        let min_count = u64::from_le_bytes(take(8)?.try_into().expect("eight bytes")) as usize;
+        let chunk_mins = take(min_count)?.to_vec();
+        // The same cross-check `WaySink::finish` makes, for the same reason: two indexes that
+        // disagree silently drop real features from a handful of tiles at one zoom.
+        if chunk_mins.len() != chunks.len().saturating_sub(1) {
+            return err(format!(
+                "{} describes {} chunk(s) but {} zoom entr(ies)",
+                path.display(),
+                chunks.len().saturating_sub(1),
+                chunk_mins.len(),
+            ));
+        }
+        Ok((
+            Store {
+                path: spill.to_path_buf(),
+                count,
+                bbox: (bbox[0], bbox[1], bbox[2], bbox[3]),
+                chunks,
+                chunk_mins,
+            },
+            features,
+        ))
+    }
+}
+
+fn index_path(spill: &Path) -> PathBuf {
+    let mut p = spill.as_os_str().to_owned();
+    p.push(".index");
+    PathBuf::from(p)
+}
+
 impl Store {
     /// How many features are in the file.
     #[cfg_attr(not(test), allow(dead_code))]
@@ -255,20 +441,18 @@ impl Store {
     /// skipped outright — not read, not parsed. Order is unchanged, because the chunks that survive
     /// are still visited in file order, and that is what keeps the archive byte-identical.
     pub fn reader_for_zoom(&self, z: u8) -> Result<ZoomReader> {
-        Ok(ZoomReader {
-            inner: NormalizedChunks::open(self.path.clone(), self.chunks.clone())
+        let wanted: Vec<usize> = self
+            .chunk_mins
+            .iter()
+            .enumerate()
+            .filter(|(_, min)| **min <= z)
+            .map(|(i, _)| i)
+            .collect();
+        ZoomReader::spawn(
+            NormalizedChunks::open(self.path.clone(), self.chunks.clone())
                 .map_err(|e| osm_ingest::proto::Error(e.to_string()))?,
-            wanted: self
-                .chunk_mins
-                .iter()
-                .enumerate()
-                .filter(|(_, min)| **min <= z)
-                .map(|(i, _)| i)
-                .collect(),
-            at: 0,
-            scratch: Vec::new(),
-            records: Vec::new(),
-        })
+            wanted,
+        )
     }
 
     /// Read every feature, in the order they were written.
@@ -319,30 +503,174 @@ fn feature_of(record: tile_build::spill::NormalizedFeature) -> Result<Feature> {
     Ok(Feature { class: unpack(bits), geometry: record.geometry })
 }
 
+/// Chunks of features as the lanes hand them over, or the error that stopped one.
+///
+/// [`Feature`] rather than the decoder's own record, because turning one into the other is where
+/// the reader thread's remaining time went. It looks like a field lookup and a move, and the field
+/// lookup and the move are free; what is not is dropping the `props` the decoder built — a `Vec` and
+/// an owned key `String` per feature, freed one at a time on the one thread the whole map phase
+/// waits on. Converting in the lane puts that on the lane.
+type Decoded = Result<Vec<Feature>>;
+
+/// Threads decoding spill chunks ahead of the tiler.
+///
+/// Four rather than the pool, and four rather than one. See [`ZoomReader::spawn`] for why it is not
+/// the pool. Four because the decode was 62.6 s of a 175 s build and four is where that stops being
+/// the constraint: at four the tiling stage is 95.1 s, at eight it is 96.0 s and the reader's own
+/// time is 30.9 s against 30.0 s — inside this machine's run-to-run noise. What is left on the
+/// reader after four lanes is not decode waiting to be spread, it is the reader's own per-feature
+/// work, and more lanes cannot touch it.
+const PREFETCH_LANES: usize = 4;
+
+/// Chunks one lane may run ahead by.
+///
+/// A chunk is [`NORM_CHUNK_FEATURES`] features, so the whole prefetch holds at most
+/// `PREFETCH_LANES * (PREFETCH_DEPTH + 1) * 64` features — a few thousand, against the 512 Ki
+/// *vertices* the tiler batches downstream. Depth is here to absorb a slow chunk, not to buffer.
+const PREFETCH_DEPTH: usize = 32;
+
 /// Reads the chunks one zoom needs and seeks past the rest.
 pub struct ZoomReader {
-    inner: NormalizedChunks,
-    /// Indices of the chunks this zoom wants, ascending.
-    wanted: Vec<usize>,
+    /// One receiver per lane. Chunk `k` of the wanted list is decoded by lane `k % lanes.len()`, so
+    /// taking them round-robin reproduces file order exactly. Empty when there is nothing to read.
+    lanes: Vec<std::sync::mpsc::Receiver<Decoded>>,
+    /// Joined on drop, after the receivers are dropped: a lane blocked on a full channel exits when
+    /// its receiver goes, so the order of those two steps is what makes the join finite.
+    lanes_running: Vec<std::thread::JoinHandle<()>>,
+    /// Chunks taken so far, which is also the lane to take the next one from.
     at: usize,
-    scratch: Vec<u8>,
-    records: Vec<tile_build::spill::NormalizedFeature>,
+    total: usize,
+    records: Vec<Feature>,
+}
+
+impl Drop for ZoomReader {
+    fn drop(&mut self) {
+        // Receivers first. A lane parked on `send` to a full channel wakes with an error the moment
+        // its receiver is gone, and only then is the join below guaranteed to finish -- which
+        // matters on the error path, where the tiler abandons a zoom with every lane backed up.
+        self.lanes.clear();
+        for lane in self.lanes_running.drain(..) {
+            let _ = lane.join();
+        }
+    }
 }
 
 impl ZoomReader {
+    /// Start a lane per [`PREFETCH_LANES`] over `wanted`, dealt round-robin.
+    ///
+    /// # Why dedicated threads and not the pool
+    ///
+    /// This decode is 62.6 s of a 175 s us-west build, all of it on one thread, and
+    /// [`NormalizedChunks::read_into`] is an obvious candidate for the pool: it takes `&self`, reads
+    /// its own byte range positionally, and is pure. Decoding 512 chunks at a time across the pool
+    /// was tried and made the map phase **62% slower** — 102.4 s to 165.5 s — for byte-identical
+    /// output.
+    ///
+    /// The reason is what this reader is: it feeds the clipping workers through a channel. Handing
+    /// the refill to the same pool queues it *behind* the clipping tasks it exists to supply, so the
+    /// reader blocks waiting on a pool that is busy with work only the reader can extend. The
+    /// overlap between reading and clipping — the entire point of the arrangement — disappears, and
+    /// both halves get slower.
+    ///
+    /// So: threads of their own, outside the pool, which is what [`crate::tiler`] does for the
+    /// reader itself and for the same reason.
+    ///
+    /// # Why the order cannot move
+    ///
+    /// Lane `j` takes wanted-chunks `j`, `j + n`, `j + 2n`, ... and a lane's own channel is FIFO, so
+    /// the `k`th chunk out of lane `k % n` is wanted-chunk `k`. Reading the lanes round-robin is
+    /// therefore the wanted list in order, which is the file in order, which is what the archive's
+    /// feature ordering rests on. Nothing here depends on which lane finishes first; a lane that
+    /// races ahead simply fills its channel and parks.
+    fn spawn(inner: NormalizedChunks, wanted: Vec<usize>) -> Result<ZoomReader> {
+        let total = wanted.len();
+        if total == 0 {
+            return Ok(ZoomReader {
+                lanes: Vec::new(),
+                lanes_running: Vec::new(),
+                at: 0,
+                total: 0,
+                records: Vec::new(),
+            });
+        }
+        // One handle shared rather than one file open per lane: `read_into` is positional and
+        // documented to serve every thread from one handle.
+        let inner = std::sync::Arc::new(inner);
+        let count = PREFETCH_LANES.min(total);
+        let mut lanes = Vec::with_capacity(count);
+        let mut lanes_running = Vec::with_capacity(count);
+        for lane in 0..count {
+            let (send, receive) = std::sync::mpsc::sync_channel::<Decoded>(PREFETCH_DEPTH);
+            let inner = std::sync::Arc::clone(&inner);
+            let mine: Vec<usize> = wanted.iter().skip(lane).step_by(count).copied().collect();
+            let running = std::thread::Builder::new()
+                .name(format!("mamaps-spill-{lane}"))
+                .spawn(move || {
+                    // One byte buffer and one record buffer for the lane, reused across its
+                    // chunks. What is sent is a third `Vec`, allocated per chunk -- one allocation
+                    // per 64 features, against the per-feature geometry the decode allocates
+                    // anyway.
+                    let mut scratch = Vec::new();
+                    let mut records = Vec::new();
+                    for chunk in mine {
+                        let decoded = inner
+                            .read_into(chunk, &mut scratch, &mut records)
+                            .map_err(|e| osm_ingest::proto::Error(e.to_string()))
+                            // Reversed here rather than by the consumer, which takes from the
+                            // back: same reason as everything else in this closure, it is work and
+                            // it does not have to be the reader's.
+                            .and_then(|()| {
+                                let mut out = Vec::with_capacity(records.len());
+                                for record in records.drain(..).rev() {
+                                    out.push(feature_of(record)?);
+                                }
+                                Ok(out)
+                            });
+                        // Stop on the first error: the consumer surfaces it and abandons the zoom,
+                        // and carrying on would only queue work behind a build that is already
+                        // failing.
+                        let stop = decoded.is_err();
+                        if send.send(decoded).is_err() || stop {
+                            return;
+                        }
+                    }
+                })
+                .map_err(|e| {
+                    osm_ingest::proto::Error(format!("cannot start spill prefetch lane {lane}: {e}"))
+                })?;
+            lanes.push(receive);
+            lanes_running.push(running);
+        }
+        Ok(ZoomReader { lanes, lanes_running, at: 0, total, records: Vec::new() })
+    }
+
+    /// How many spill chunks this zoom will read, and how many it has.
+    ///
+    /// Exposed so the tiler can show progress: the map phase is the longest in the build and was
+    /// silent for all of it, which on a continent is forty minutes of no output at all.
+    pub fn chunks(&self) -> (usize, usize) {
+        (self.at.min(self.total), self.total)
+    }
+
     /// The next feature, or `None` once this zoom's chunks are exhausted.
     pub fn next(&mut self) -> Result<Option<Feature>> {
         loop {
-            if let Some(record) = self.records.pop() {
-                return Ok(Some(feature_of(record)?));
+            // From the back, which is why the lane reversed the chunk before sending it.
+            if let Some(feature) = self.records.pop() {
+                return Ok(Some(feature));
             }
-            let Some(&chunk) = self.wanted.get(self.at) else { return Ok(None) };
+            if self.at >= self.total {
+                return Ok(None);
+            }
+            let lane = self.at % self.lanes.len();
             self.at += 1;
-            self.inner
-                .read_into(chunk, &mut self.scratch, &mut self.records)
-                .map_err(|e| osm_ingest::proto::Error(e.to_string()))?;
-            // Taken from the back, so reversing here is what preserves file order.
-            self.records.reverse();
+            // A lane that hung up before delivering all of its chunks panicked: it returns only
+            // after sending every one of them or after sending an error, and an error arrives as a
+            // value rather than a hangup.
+            let decoded = self.lanes[lane].recv().map_err(|_| {
+                osm_ingest::proto::Error(format!("spill prefetch lane {lane} stopped early"))
+            })?;
+            self.records = decoded?;
         }
     }
 }

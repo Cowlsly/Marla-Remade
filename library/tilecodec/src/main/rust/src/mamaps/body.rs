@@ -371,8 +371,29 @@ pub(crate) fn align4(at: usize) -> usize {
 ///
 /// Deliberately available without the `write` feature: a synthetic body is how the reader's own
 /// tests get something to read, and `mamaps_dump` round-trips one to check a body is sane.
-pub fn serialize(body: &Body) -> Result<Vec<u8>> {
-    let mut layers = body.layers.clone();
+/// Reusable buffers for [`serialize_into`].
+///
+/// One per worker, not one per tile. Serialising allocated a payload `Vec` per layer plus the
+/// output `Vec` per tile, and on a us-west z14 build across 64 threads that allocation traffic --
+/// not the encoding -- was the cost: measured with the encode pass split three ways, serialisation
+/// took 20.9 s of CPU at 16 threads and 1120 s at 64, while DEFLATE over the same work merely
+/// doubled. Encode wall time was *lower* at 16 threads than at 64. Buffers that outlive a tile take
+/// the allocator out of the loop.
+#[derive(Default)]
+pub struct Scratch {
+    payloads: Vec<Vec<u8>>,
+    meta: Vec<(u8, u16)>,
+    out: Vec<u8>,
+}
+
+/// Serialise a body into `scratch`, returning the bytes it holds.
+///
+/// Byte for byte what [`serialize`] returns; that function is this one with a fresh [`Scratch`].
+pub fn serialize_into<'s>(body: &Body, scratch: &'s mut Scratch) -> Result<&'s [u8]> {
+    // Borrowed and sorted by reference, never cloned. Cloning to sort copied every layer's whole
+    // coordinate arena per tile, which is 2.5 GB of memcpy on a us-west z14 build. Nothing here
+    // mutates a layer, so the sort only ever needed the order.
+    let mut layers: Vec<&Layer> = body.layers.iter().collect();
     // Ascending by id, which the parser requires and `Body::layer` assumes. Sorted rather than
     // rejected, because a caller assembling a tile per style layer has no reason to care.
     layers.sort_by_key(|l| l.layer_id);
@@ -425,9 +446,26 @@ pub fn serialize(body: &Body) -> Result<Vec<u8>> {
     }
 
     let index_end = BODY_HEADER_LEN + layers.len() * LAYER_INDEX_LEN;
-    let mut payloads: Vec<(u8, u16, Vec<u8>)> = Vec::with_capacity(layers.len());
-    for layer in &layers {
-        let mut out = Vec::new();
+    // Both fields at once, which needs the struct broken apart: the payloads are built first and
+    // then copied into the output, and each wants its own mutable borrow.
+    let Scratch { payloads, meta, out: assembled } = scratch;
+    meta.clear();
+    for (i, layer) in layers.iter().enumerate() {
+        if i >= payloads.len() {
+            payloads.push(Vec::new());
+        }
+        let out = &mut payloads[i];
+        out.clear();
+        // Sized up front rather than doubled into. Feature and part records are fixed width, and
+        // two zigzag varints average under three bytes a point on clipped tile geometry -- an
+        // estimate that is allowed to be wrong, because the only cost of being wrong is the growth
+        // this avoids in the common case. On a reused buffer it is usually already large enough.
+        out.reserve(
+            layer.features.len() * FEATURE_RECORD_LEN
+                + layer.parts.len() * PART_ENTRY_LEN
+                + layer.coords.len() * 3
+                + 4,
+        );
         for feature in &layer.features {
             out.extend_from_slice(&feature.kind.to_le_bytes());
             out.extend_from_slice(&feature.kind_detail.to_le_bytes());
@@ -448,49 +486,69 @@ pub fn serialize(body: &Body) -> Result<Vec<u8>> {
         }
         // The arena, in parts-table order. Deltas restart at each part so a part decodes
         // independently and a long line accumulates nothing.
-        let mut writer = crate::proto::Writer::new();
+        //
+        // Written straight into `out` rather than through a `proto::Writer` and copied: the writer
+        // is a `Vec<u8>` with a varint method, so routing through one bought a second allocation
+        // and a second pass over every coordinate in the archive.
         for part in &layer.parts {
             let (mut px, mut py) = (0i32, 0i32);
             for &(x, y) in layer.points(part) {
-                writer.uvarint(crate::proto::zigzag_encode(x as i64 - px as i64));
-                writer.uvarint(crate::proto::zigzag_encode(y as i64 - py as i64));
+                push_uvarint(out, crate::proto::zigzag_encode(x as i64 - px as i64));
+                push_uvarint(out, crate::proto::zigzag_encode(y as i64 - py as i64));
                 (px, py) = (x as i32, y as i32);
             }
         }
-        out.extend_from_slice(writer.as_slice());
-        payloads.push((layer.layer_id, layer.features.len() as u16, out));
+        meta.push((layer.layer_id, layer.features.len() as u16));
     }
 
     let mut offset = align4(index_end);
-    let mut index = Vec::with_capacity(layers.len() * LAYER_INDEX_LEN);
-    for (layer_id, feature_count, payload) in &payloads {
-        index.push(*layer_id);
-        index.push(0);
-        index.extend_from_slice(&feature_count.to_le_bytes());
-        index.extend_from_slice(&(offset as u32).to_le_bytes());
-        index.extend_from_slice(&(payload.len() as u32).to_le_bytes());
-        offset += payload.len();
-    }
-
-    let mut out = Vec::with_capacity(offset);
-    out.extend_from_slice(b"MBD");
-    out.push(super::header::FORMAT_VERSION);
+    assembled.clear();
+    assembled.reserve(index_end + payloads[..layers.len()].iter().map(Vec::len).sum::<usize>() + 4);
+    assembled.extend_from_slice(b"MBD");
+    assembled.push(super::header::FORMAT_VERSION);
     // Patched below, once the length is known.
-    out.extend_from_slice(&0u32.to_le_bytes());
-    out.extend_from_slice(&body.extent.to_le_bytes());
-    out.push(layers.len() as u8);
-    out.push(0);
-    out.extend_from_slice(&0u32.to_le_bytes());
-    out.extend_from_slice(&index);
-    while out.len() % 4 != 0 {
-        out.push(0);
+    assembled.extend_from_slice(&0u32.to_le_bytes());
+    assembled.extend_from_slice(&body.extent.to_le_bytes());
+    assembled.push(layers.len() as u8);
+    assembled.push(0);
+    assembled.extend_from_slice(&0u32.to_le_bytes());
+    for (i, (layer_id, feature_count)) in meta.iter().enumerate() {
+        assembled.push(*layer_id);
+        assembled.push(0);
+        assembled.extend_from_slice(&feature_count.to_le_bytes());
+        assembled.extend_from_slice(&(offset as u32).to_le_bytes());
+        assembled.extend_from_slice(&(payloads[i].len() as u32).to_le_bytes());
+        offset += payloads[i].len();
     }
-    for (_, _, payload) in &payloads {
-        out.extend_from_slice(payload);
+    while assembled.len() % 4 != 0 {
+        assembled.push(0);
     }
-    let raw_len = out.len() as u32;
-    out[4..8].copy_from_slice(&raw_len.to_le_bytes());
-    Ok(out)
+    for payload in &payloads[..layers.len()] {
+        assembled.extend_from_slice(payload);
+    }
+    let raw_len = assembled.len() as u32;
+    assembled[4..8].copy_from_slice(&raw_len.to_le_bytes());
+    Ok(assembled)
+}
+
+/// Serialise a body to a fresh buffer. [`serialize_into`] is the same thing with the buffer reused.
+pub fn serialize(body: &Body) -> Result<Vec<u8>> {
+    let mut scratch = Scratch::default();
+    serialize_into(body, &mut scratch).map(<[u8]>::to_vec)
+}
+
+/// One unsigned LEB128 varint, appended.
+///
+/// The same encoding [`crate::proto::Writer::uvarint`] writes, spelled out here so the arena can go
+/// straight into the payload buffer. Byte for byte identical by construction: seven bits at a time,
+/// low group first, continuation bit on every group but the last.
+#[inline]
+fn push_uvarint(out: &mut Vec<u8>, mut value: u64) {
+    while value >= 0x80 {
+        out.push((value as u8) | 0x80);
+        value >>= 7;
+    }
+    out.push(value as u8);
 }
 
 #[cfg(test)]
