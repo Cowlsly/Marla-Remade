@@ -1,6 +1,5 @@
 package com.vayunmathur.launcher.ui.components
 
-import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.RowScope
@@ -20,6 +19,7 @@ import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.unit.dp
 import com.vayunmathur.launcher.domain.DropBarSecondary
 import com.vayunmathur.launcher.domain.DropBarTargets
+import com.vayunmathur.library.ui.ExpandVisibility
 import com.vayunmathur.library.ui.IconDelete
 import com.vayunmathur.library.ui.IconInfo
 import com.vayunmathur.library.ui.IconUninstall
@@ -44,7 +44,7 @@ fun DropBar(
     onAppInfo: (Long) -> Unit,
     modifier: Modifier = Modifier,
 ) {
-    AnimatedVisibility(visible = controller.isDragging, modifier = modifier) {
+    ExpandVisibility(visible = controller.isDragging, modifier = modifier) {
         val payload = controller.payload
         val secondary = payload?.let {
             // An app straight out of the drawer was never on the workspace, so nothing about it can

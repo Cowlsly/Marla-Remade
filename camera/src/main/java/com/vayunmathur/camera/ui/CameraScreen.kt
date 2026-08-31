@@ -1,3 +1,6 @@
+// RAW ANIMATION EXCEPTION: the panorama capture flash is imperative - an Animatable snapped to
+// white as each guide dot is captured and released back to zero, with no declarative target to
+// animate towards; the shutter and record-button springs are tuned to this viewfinder's own feel.
 package com.vayunmathur.camera.ui
 
 import android.content.ClipData
@@ -26,11 +29,6 @@ import androidx.camera.core.DynamicRange
 import androidx.camera.viewfinder.compose.MutableCoordinateTransformer
 import androidx.camera.viewfinder.core.ImplementationMode
 import androidx.compose.animation.core.Animatable
-import androidx.compose.animation.core.RepeatMode
-import androidx.compose.animation.core.animateFloat
-import androidx.compose.animation.core.animateFloatAsState
-import androidx.compose.animation.core.infiniteRepeatable
-import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.Canvas
@@ -88,11 +86,13 @@ import com.vayunmathur.library.ui.IconVideoCamera
 import com.vayunmathur.library.ui.IconSettings
 import com.vayunmathur.library.ui.IconButton
 import com.vayunmathur.library.ui.MaterialTheme
+import com.vayunmathur.library.ui.Motion
 import com.vayunmathur.library.ui.Scaffold
 import com.vayunmathur.library.ui.Slider
 import com.vayunmathur.library.ui.SliderDefaults
 import com.vayunmathur.library.ui.Text
 import com.vayunmathur.library.ui.TextButton
+import com.vayunmathur.library.ui.animatedFloat
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
@@ -279,9 +279,9 @@ fun CameraScreen(
 
     // Orientation tracking
     var deviceRotation by remember { mutableIntStateOf(0) }
-    val animatedRotation by animateFloatAsState(
-        targetValue = deviceRotation.toFloat(),
-        animationSpec = tween(durationMillis = 300)
+    val animatedRotation = animatedFloat(
+        target = deviceRotation.toFloat(),
+        spec = Motion.over(300)
     )
 
     // Tracks physical orientation purely to rotate the on-screen control icons. Capture output
@@ -1304,13 +1304,13 @@ private fun ShutterRow(
     iconRotation: Float,
     flipEnabled: Boolean = true
 ) {
-    val shutterScale by animateFloatAsState(
-        targetValue = if (isCapturing) 0.8f else 1f,
-        animationSpec = spring(dampingRatio = 0.4f, stiffness = 800f)
+    val shutterScale = animatedFloat(
+        target = if (isCapturing) 0.8f else 1f,
+        spec = spring(dampingRatio = 0.4f, stiffness = 800f)
     )
-    val recordingCornerRadius by animateFloatAsState(
-        targetValue = if (isRecording) 8f else 38f,
-        animationSpec = spring(dampingRatio = 0.6f, stiffness = 500f)
+    val recordingCornerRadius = animatedFloat(
+        target = if (isRecording) 8f else 38f,
+        spec = spring(dampingRatio = 0.6f, stiffness = 500f)
     )
 
     Row(
@@ -1354,9 +1354,9 @@ private fun ShutterRow(
             }
         }
 
-        val animatedSize by animateFloatAsState(
-            targetValue = if (isRecording) 36f else 66f,
-            animationSpec = spring(dampingRatio = 0.6f, stiffness = 500f)
+        val animatedSize = animatedFloat(
+            target = if (isRecording) 36f else 66f,
+            spec = spring(dampingRatio = 0.6f, stiffness = 500f)
         )
         Box(
             modifier = Modifier
@@ -1590,9 +1590,9 @@ private fun QrResultOverlay(text: String, onDismiss: () -> Unit, context: Contex
 
 @Composable
 private fun RecordingIndicator(durationSec: Long, modifier: Modifier = Modifier) {
-    val dotAlpha by animateFloatAsState(
-        targetValue = if ((durationSec % 2) == 0L) 1f else 0.3f,
-        animationSpec = tween(500)
+    val dotAlpha = animatedFloat(
+        target = if ((durationSec % 2) == 0L) 1f else 0.3f,
+        spec = Motion.over(500)
     )
 
     val minutes = durationSec / 60

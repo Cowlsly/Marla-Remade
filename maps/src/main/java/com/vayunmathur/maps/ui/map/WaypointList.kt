@@ -1,6 +1,4 @@
 package com.vayunmathur.maps.ui.map
-
-import androidx.compose.animation.core.animateDpAsState
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -27,6 +25,7 @@ import com.vayunmathur.library.ui.Text
 import com.vayunmathur.library.ui.draggableHandle
 import com.vayunmathur.library.ui.rememberReorderableLazyListState
 import com.vayunmathur.library.ui.verticalShape
+import com.vayunmathur.library.ui.animatedDp
 import com.vayunmathur.maps.data.SpecificFeature
 import com.vayunmathur.maps.ui.theme.MapChromeMetrics
 import com.vayunmathur.maps.R as MapsR
@@ -67,7 +66,7 @@ fun WaypointList(
         ) { index, waypoint ->
             val key = waypoint?.position?.toString() ?: ""
             ReorderableItem(reorderState = reorderState, key = key) { isDragging ->
-                val elevation by animateDpAsState(if (isDragging) 4.dp else 0.dp)
+                val elevation = animatedDp(if (isDragging) 4.dp else 0.dp)
                 Card(
                     shape = verticalShape(index, route.waypoints.size),
                     elevation = CardDefaults.cardElevation(elevation),

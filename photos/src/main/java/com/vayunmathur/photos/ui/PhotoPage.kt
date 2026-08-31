@@ -1,6 +1,7 @@
 package com.vayunmathur.photos.ui
 
 import com.vayunmathur.library.ui.ExternalIntents
+import com.vayunmathur.library.ui.FadeVisibility
 import com.vayunmathur.library.ui.R as UiR
 import com.vayunmathur.library.ui.DateString
 import android.app.Activity
@@ -13,9 +14,6 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.IntentSenderRequest
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.annotation.OptIn
-import androidx.compose.animation.AnimatedVisibility
-import androidx.compose.animation.fadeIn
-import androidx.compose.animation.fadeOut
 import androidx.compose.foundation.background
 import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
@@ -569,10 +567,8 @@ fun PhotoDetailView(
         // composed while the chrome is hidden, or its tap targets would swallow
         // the single tap that brings the chrome back.
         faceBoxes?.takeIf { isSettled && size != IntSize.Zero }?.let { boxes ->
-            AnimatedVisibility(
+            FadeVisibility(
                     visible = isMetadataVisible,
-                    enter = fadeIn(),
-                    exit = fadeOut(),
                     modifier = Modifier.fillMaxSize().then(zoomModifier)
             ) {
                 FaceBoxLayer(
@@ -585,10 +581,8 @@ fun PhotoDetailView(
             }
         }
 
-        AnimatedVisibility(
+        FadeVisibility(
                 visible = isMetadataVisible,
-                enter = fadeIn(),
-                exit = fadeOut(),
                 modifier = Modifier.align(Alignment.BottomStart)
         ) {
             Column(
@@ -678,10 +672,8 @@ fun PhotoDetailView(
         }
 
         if (isPanorama) {
-            AnimatedVisibility(
+            FadeVisibility(
                     visible = isMetadataVisible,
-                    enter = fadeIn(),
-                    exit = fadeOut(),
                     modifier = Modifier.align(Alignment.TopEnd).padding(16.dp)
             ) {
                 FilledTonalButton(onClick = { showImmersive = true }) {
@@ -798,7 +790,7 @@ fun VideoPlayer(
         }
 
         // Play/Pause Overlay
-        AnimatedVisibility(visible = isMetadataVisible, enter = fadeIn(), exit = fadeOut()) {
+        FadeVisibility(visible = isMetadataVisible) {
             IconButton(onClick = { if (isPlaying) exoPlayer.pause() else exoPlayer.play() }) {
                 if (isPlaying) IconPause(
                         modifier = Modifier.size(64.dp),
@@ -813,10 +805,8 @@ fun VideoPlayer(
         // Seek bar overlay, shares the metadata-visible gate with the play/pause button.
         // Anchored to the top so it never sits under the centered play/pause control or
         // the bottom metadata/button card, both of which are drawn over the video.
-        AnimatedVisibility(
+        FadeVisibility(
                 visible = isMetadataVisible && durationMs > 0,
-                enter = fadeIn(),
-                exit = fadeOut(),
                 modifier = Modifier.align(Alignment.TopCenter)
         ) {
             val sliderValue =

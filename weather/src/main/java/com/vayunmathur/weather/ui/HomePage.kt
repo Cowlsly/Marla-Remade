@@ -1,11 +1,8 @@
 package com.vayunmathur.weather.ui
 
 import androidx.activity.compose.BackHandler
-import androidx.compose.animation.AnimatedVisibility
-import androidx.compose.animation.expandVertically
-import androidx.compose.animation.fadeIn
-import androidx.compose.animation.fadeOut
-import androidx.compose.animation.shrinkVertically
+import com.vayunmathur.library.ui.AppScaffold
+import com.vayunmathur.library.ui.ExpandVisibility
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -279,11 +276,7 @@ private fun ForecastColumn(
 
             var lastSelection by remember { mutableStateOf(selected) }
             LaunchedEffect(selected) { if (selected != null) lastSelection = selected }
-            AnimatedVisibility(
-                visible = selected != null,
-                enter = expandVertically() + fadeIn(),
-                exit = shrinkVertically() + fadeOut(),
-            ) {
+            ExpandVisibility(visible = selected != null) {
                 (selected ?: lastSelection)?.let { sel ->
                     SelectedDateTimeHeader(
                         selection = sel,

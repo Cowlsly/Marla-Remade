@@ -5,7 +5,6 @@ import android.appwidget.AppWidgetProviderInfo
 import androidx.activity.compose.BackHandler
 import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.animate
-import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -102,6 +101,7 @@ import com.vayunmathur.library.ui.MaterialTheme
 import com.vayunmathur.library.ui.ModalBottomSheet
 import com.vayunmathur.library.ui.Motion
 import com.vayunmathur.library.ui.Spacing
+import com.vayunmathur.library.ui.animatedFloat
 import com.vayunmathur.library.ui.scrim
 import kotlinx.coroutines.launch
 
@@ -839,10 +839,9 @@ private fun WorkspaceCell(
     val beingDragged = drag.payload?.itemId == item.id
     // Animated, and held dimmed for the whole settle: the drag layer is still flying towards this
     // cell, and two solid copies of one icon is the artefact that would replace the jump.
-    val dim by animateFloatAsState(
-        targetValue = if (beingDragged) LauncherTuning.DraggedAlpha else 1f,
-        animationSpec = Motion.reorder(),
-        label = "cellDim",
+    val dim = animatedFloat(
+        if (beingDragged) LauncherTuning.DraggedAlpha else 1f,
+        Motion.reorder(),
     )
 
     Box(
@@ -1012,10 +1011,9 @@ private fun HotseatCell(
 ) {
     val drag = LocalLauncherDrag.current
     var bounds by remember { mutableStateOf(Rect.Zero) }
-    val dim by animateFloatAsState(
-        targetValue = if (drag.payload?.itemId == item.id) LauncherTuning.DraggedAlpha else 1f,
-        animationSpec = Motion.reorder(),
-        label = "hotseatDim",
+    val dim = animatedFloat(
+        if (drag.payload?.itemId == item.id) LauncherTuning.DraggedAlpha else 1f,
+        Motion.reorder(),
     )
     Box(
         modifier = Modifier

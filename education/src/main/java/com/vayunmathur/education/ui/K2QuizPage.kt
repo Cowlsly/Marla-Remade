@@ -1,9 +1,6 @@
 package com.vayunmathur.education.ui
 import com.vayunmathur.education.R
 
-import androidx.compose.animation.AnimatedVisibility
-import androidx.compose.animation.fadeIn
-import androidx.compose.animation.fadeOut
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
@@ -15,6 +12,7 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import com.vayunmathur.library.ui.AppScaffold
+import com.vayunmathur.library.ui.FadeVisibility
 import com.vayunmathur.library.ui.Card
 import com.vayunmathur.library.ui.CardDefaults
 import com.vayunmathur.library.ui.ExperimentalMaterial3Api
@@ -184,7 +182,7 @@ fun K2QuizScreen(state: QuizUiState, actions: QuizActions) {
                 }
             }
 
-            AnimatedVisibility(visible = celebrating, enter = fadeIn(), exit = fadeOut()) {
+            FadeVisibility(visible = celebrating) {
                 Box(
                     Modifier
                         .fillMaxSize()

@@ -1,6 +1,4 @@
 package com.vayunmathur.clock.ui
-
-import androidx.compose.animation.core.animateDpAsState
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -40,6 +38,7 @@ import com.vayunmathur.library.ui.MaterialTheme
 import com.vayunmathur.library.ui.ReorderableItem
 import com.vayunmathur.library.ui.Text
 import com.vayunmathur.library.ui.appBarScrollBehavior
+import com.vayunmathur.library.ui.animatedDp
 import com.vayunmathur.library.ui.draggableHandle
 import com.vayunmathur.library.ui.rememberReorderableLazyListState
 import com.vayunmathur.library.util.NavBackStack
@@ -106,7 +105,7 @@ fun ClockScreen(
             val is24h = state.is24Hour
             val amPm = if (is24h) "" else if (timeHere.time.hour >= 12) stringResource(R.string.time_pm) else stringResource(R.string.time_am)
             ReorderableItem(reorderState, key = worldClock.city, modifier = Modifier.fillParentMaxWidth().animateItem()) { isDragging ->
-                val elevation by animateDpAsState(if (isDragging) 6.dp else 0.dp)
+                val elevation = animatedDp(if (isDragging) 6.dp else 0.dp)
                 Card(Modifier.fillMaxWidth().shadow(elevation, MaterialTheme.shapes.medium)) {
                     ListItem({ Text(worldClock.city) }, trailingContent = {
                         Row(verticalAlignment = Alignment.CenterVertically) {

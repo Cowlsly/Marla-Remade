@@ -9,7 +9,6 @@ import android.provider.Settings
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.clickable
-import androidx.compose.animation.core.animateDpAsState
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -90,6 +89,7 @@ import com.vayunmathur.library.ui.ReorderableItem
 import com.vayunmathur.library.ui.draggableHandle
 import com.vayunmathur.library.ui.rememberReorderableLazyListState
 import com.vayunmathur.library.ui.appBarScrollBehavior
+import com.vayunmathur.library.ui.animatedDp
 
 /**
  * Composable helper that provides a device-location request action with
@@ -305,7 +305,7 @@ fun LocationsScreen(
         itemsIndexed(localData, key = { _, item -> item.location.id }) { idx, row ->
             val loc = row.location
             ReorderableItem(reorderState, key = loc.id) { isDragging ->
-                val elevation by animateDpAsState(if (isDragging) 6.dp else 0.dp)
+                val elevation = animatedDp(if (isDragging) 6.dp else 0.dp)
                 LocationItem(
                     location = loc,
                     description = row.description,

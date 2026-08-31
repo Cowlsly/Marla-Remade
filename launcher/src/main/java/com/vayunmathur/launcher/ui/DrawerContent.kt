@@ -1,6 +1,5 @@
 package com.vayunmathur.launcher.ui
 
-import androidx.compose.animation.core.animateFloatAsState
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable

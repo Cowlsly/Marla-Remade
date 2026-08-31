@@ -1,8 +1,6 @@
 package com.vayunmathur.photos.ui
 
-import androidx.compose.animation.AnimatedVisibility
-import androidx.compose.animation.fadeIn
-import androidx.compose.animation.fadeOut
+import com.vayunmathur.library.ui.FadeVisibility
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
@@ -114,7 +112,7 @@ fun OcrTextLayer(
     Box(modifier = modifier) {
         // Both of these sit under the selectable text in z-order so they can never
         // intercept a touch (a Canvas takes no pointer input either way).
-        AnimatedVisibility(visible = dimImage, enter = fadeIn(), exit = fadeOut()) {
+        FadeVisibility(visible = dimImage) {
             Canvas(modifier = Modifier.fillMaxSize()) {
                 drawRect(color = Color.Black.copy(alpha = 0.4f))
             }
@@ -122,7 +120,7 @@ fun OcrTextLayer(
 
         // Shown with the metadata card, and whenever text is being selected, which
         // makes the feature discoverable without adding a control.
-        AnimatedVisibility(visible = showOutlines || dimImage, enter = fadeIn(), exit = fadeOut()) {
+        FadeVisibility(visible = showOutlines || dimImage) {
             Canvas(modifier = Modifier.fillMaxSize()) {
                 // The whole layer is inside the image's zoom transform, so the
                 // strokes are pre-divided by it to stay a constant thickness

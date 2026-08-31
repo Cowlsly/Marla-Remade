@@ -2,7 +2,6 @@ package com.vayunmathur.office.ui
 
 import android.content.Intent
 import android.graphics.BitmapFactory
-import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
@@ -42,6 +41,7 @@ import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import com.vayunmathur.library.ui.R as UiR
 import com.vayunmathur.library.ui.AlertDialog
+import com.vayunmathur.library.ui.ExpandVisibility
 import com.vayunmathur.library.ui.Card
 import com.vayunmathur.library.ui.CardDefaults
 import com.vayunmathur.library.ui.HorizontalDivider
@@ -799,7 +799,7 @@ fun ParagraphView(paragraph: OdfParagraph, searchQuery: String = "", fontSizeMul
                     expandedAnnotation = if (expandedAnnotation == a.item) null else a.item
                 }
             })
-            AnimatedVisibility(visible = expandedAnnotation != null) { expandedAnnotation?.let { AnnotationPopup(it) } }
+            ExpandVisibility(visible = expandedAnnotation != null) { expandedAnnotation?.let { AnnotationPopup(it) } }
         }
     } else Text(text = annotatedString, style = scaledStyle, modifier = modifier)
 }

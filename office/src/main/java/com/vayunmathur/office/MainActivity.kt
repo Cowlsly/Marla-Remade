@@ -27,7 +27,6 @@ import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.viewModels
-import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
@@ -49,6 +48,7 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import com.vayunmathur.library.ui.AlertDialog
+import com.vayunmathur.library.ui.ExpandVisibility
 import com.vayunmathur.library.ui.AppScaffold
 import com.vayunmathur.library.ui.Button
 import com.vayunmathur.library.ui.CircularProgressIndicator
@@ -1096,7 +1096,7 @@ fun DocumentScreen(document: OdfDocument, viewModel: OfficeViewModel, activity: 
                             }
                         }
                     }
-                    AnimatedVisibility(visible = showTimer && isPresentation) {
+                    ExpandVisibility(visible = showTimer && isPresentation) {
                         Surface(color = MaterialTheme.colorScheme.secondaryContainer) {
                             Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 4.dp), verticalAlignment = Alignment.CenterVertically) {
                                 Text("⏱ %02d:%02d".format(timerSeconds / 60, timerSeconds % 60), style = MaterialTheme.typography.titleMedium, color = MaterialTheme.colorScheme.onSecondaryContainer)
@@ -1106,7 +1106,7 @@ fun DocumentScreen(document: OdfDocument, viewModel: OfficeViewModel, activity: 
                             }
                         }
                     }
-                    AnimatedVisibility(visible = showSearch) {
+                    ExpandVisibility(visible = showSearch) {
                         Column {
                             TextField(value = searchQuery, onValueChange = { searchQuery = it }, placeholder = { Text(stringResource(R.string.search_hint)) }, singleLine = true,
                                 modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 4.dp),
@@ -1132,7 +1132,7 @@ fun DocumentScreen(document: OdfDocument, viewModel: OfficeViewModel, activity: 
                                     Text(if (total > 0) "${(findIndex % total) + 1}/$total" else "0/0", style = MaterialTheme.typography.labelMedium)
                                 }
                             }
-                            AnimatedVisibility(visible = showReplaceBar && searchQuery.isNotEmpty()) {
+                            ExpandVisibility(visible = showReplaceBar && searchQuery.isNotEmpty()) {
                                 Column {
                                     Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 2.dp), verticalAlignment = Alignment.CenterVertically) {
                                         TextField(value = replaceText, onValueChange = { replaceText = it }, placeholder = { Text(stringResource(R.string.replace_hint)) }, singleLine = true, modifier = Modifier.weight(1f),
@@ -1148,7 +1148,7 @@ fun DocumentScreen(document: OdfDocument, viewModel: OfficeViewModel, activity: 
                             }
                         }
                     }
-                    AnimatedVisibility(visible = showFontControl) {
+                    ExpandVisibility(visible = showFontControl) {
                         Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp)) {
                             Text("A", style = MaterialTheme.typography.bodySmall)
                             Slider(value = fontSizeMultiplier, onValueChange = { fontSizeMultiplier = it }, valueRange = 0.5f..2.0f, modifier = Modifier.weight(1f).padding(horizontal = 8.dp))
@@ -1157,7 +1157,7 @@ fun DocumentScreen(document: OdfDocument, viewModel: OfficeViewModel, activity: 
                             TextButton(onClick = { fontSizeMultiplier = 1f }) { Text(stringResource(R.string.reset)) }
                         }
                     }
-                    AnimatedVisibility(visible = showWordBar && isTextDoc) {
+                    ExpandVisibility(visible = showWordBar && isTextDoc) {
                         Surface(color = MaterialTheme.colorScheme.surfaceVariant) {
                             Text(stringResource(R.string.words_characters_min_read, wordCount, charCount, readingTime),
                                 style = MaterialTheme.typography.labelMedium,
