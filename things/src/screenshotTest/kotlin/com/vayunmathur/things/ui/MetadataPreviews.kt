@@ -68,6 +68,7 @@ class MetadataPreviews {
                 onScaleAgeChange = {},
                 onScaleHeightChange = {},
                 onScaleAthleteChange = {},
+                onHealthConnectClick = {},
             )
         }
     }
@@ -112,6 +113,7 @@ class MetadataPreviews {
                 onScaleAgeChange = {},
                 onScaleHeightChange = {},
                 onScaleAthleteChange = {},
+                onHealthConnectClick = {},
             )
         }
     }

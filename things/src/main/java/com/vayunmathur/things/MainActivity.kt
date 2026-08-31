@@ -17,11 +17,14 @@ import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.core.content.edit
+import androidx.health.connect.client.HealthConnectClient
+import androidx.lifecycle.lifecycleScope
 import com.vayunmathur.library.ui.DynamicTheme
 import com.vayunmathur.things.platform.BleManager
 import com.vayunmathur.things.platform.BodyComposition
 import com.vayunmathur.things.platform.BodyMetrics
 import com.vayunmathur.things.platform.BottleStatus
+import com.vayunmathur.things.platform.HealthConnectHelper
 import com.vayunmathur.things.platform.HydrationReading
 import com.vayunmathur.things.platform.ScaleBleManager
 import com.vayunmathur.things.platform.ScaleMeasurement
@@ -29,6 +32,7 @@ import com.vayunmathur.things.platform.ScaleProfile
 import com.vayunmathur.things.platform.SegmentalImpedance
 import com.vayunmathur.things.platform.Sex
 import java.time.LocalDate
+import kotlinx.coroutines.launch
 
 class MainActivity : ComponentActivity() {
     private lateinit var bleManager: BleManager
@@ -90,6 +94,8 @@ class MainActivity : ComponentActivity() {
         }
         val formatted = formatReadingTimestamp(local)
         messages.add(0, "[$formatted]  +${reading.amountMl} mL")
+        // Write to Health Connect (best-effort, no crash if unavailable).
+        writeHydrationToHealthConnect(reading)
     }
 
     fun onBottleStatus(status: BottleStatus) {
@@ -134,6 +140,7 @@ class MainActivity : ComponentActivity() {
                 putString("scale_athlete", profile.athlete.toString())
             }
         } catch (_: Exception) {}
+        writeBodyCompositionToHealthConnect(weightKg, metrics)
     }
 
     private fun formatReadingTimestamp(local: kotlinx.datetime.LocalDateTime): String {
@@ -152,6 +159,24 @@ class MainActivity : ComponentActivity() {
         if (grants.values.all { it }) {
             bleManager.startScan()
         }
+    }
+
+    // Health Connect permission contract (mirrors health app). No-op if HC not available.
+    private val healthPermissionLauncher = registerForActivityResult(
+        HealthConnectHelper.permissionsContract()
+    ) { granted ->
+        if (granted.containsAll(HealthConnectHelper.requiredPermissions)) {
+            // Permissions granted — next writes will succeed.
+        }
+    }
+
+    fun requestHealthConnectPermissions() {
+        val status = HealthConnectHelper.availabilityStatus(this)
+        if (status != HealthConnectClient.SDK_AVAILABLE) {
+            com.vayunmathur.library.util.AppMessages.show("Health Connect not available")
+            return
+        }
+        healthPermissionLauncher.launch(HealthConnectHelper.requiredPermissions)
     }
 
     private fun loadScaleProfile() {
@@ -182,11 +207,6 @@ class MainActivity : ComponentActivity() {
             athlete = scaleAthlete.value,
         )
         scaleProfile.value = profile
-        val seg = scaleMetrics.value?.segmental?.let {
-            // Keep existing segmental if present; otherwise null.
-            null
-        }
-        // Recompute with current R values
         val r50 = scaleR50.value ?: 0
         val r500 = scaleR500.value ?: 0
         scaleMetrics.value = BodyComposition.calculate(profile, ScaleMeasurement(w, r50, r500, null))
@@ -198,6 +218,43 @@ class MainActivity : ComponentActivity() {
                 putString("scale_athlete", profile.athlete.toString())
             }
         } catch (_: Exception) {}
+    }
+
+    private fun writeHydrationToHealthConnect(reading: HydrationReading) {
+        // Check Health Connect availability synchronously; writes are async.
+        val status = HealthConnectHelper.availabilityStatus(this)
+        if (status != HealthConnectClient.SDK_AVAILABLE) return
+        lifecycleScope.launch {
+            try {
+                val client = HealthConnectClient.getOrCreate(this@MainActivity)
+                if (!HealthConnectHelper.hasAllPermissions(client)) return@launch
+                val instant = java.time.Instant.ofEpochMilli(reading.epochMillis)
+                HealthConnectHelper.writeHydration(client, instant, reading.amountMl / 1000.0)
+            } catch (_: Exception) {}
+        }
+    }
+
+    private fun writeBodyCompositionToHealthConnect(weightKg: Double, metrics: BodyMetrics) {
+        val status = HealthConnectHelper.availabilityStatus(this)
+        if (status != HealthConnectClient.SDK_AVAILABLE) return
+        lifecycleScope.launch {
+            try {
+                val client = HealthConnectClient.getOrCreate(this@MainActivity)
+                if (!HealthConnectHelper.hasAllPermissions(client)) return@launch
+                val instant = java.time.Instant.now()
+                val waterMassKg = if (metrics.waterPercent > 0) weightKg * metrics.waterPercent / 100.0 else null
+                HealthConnectHelper.writeBodyComposition(
+                    client = client,
+                    instant = instant,
+                    weightKg = weightKg,
+                    bodyFatPct = metrics.bodyFatPercent.takeIf { it > 0 },
+                    leanMassKg = metrics.lbmKg.takeIf { it > 0 },
+                    boneMassKg = metrics.boneKg.takeIf { it > 0 },
+                    bodyWaterMassKg = waterMassKg,
+                    bmrKcal = metrics.bmrKcal.takeIf { it > 0 },
+                )
+            } catch (_: Exception) {}
+        }
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -258,6 +315,7 @@ class MainActivity : ComponentActivity() {
                     onScaleAgeChange = { scaleAge.value = it; recalcScaleMetrics() },
                     onScaleHeightChange = { scaleHeight.value = it; recalcScaleMetrics() },
                     onScaleAthleteChange = { scaleAthlete.value = it; recalcScaleMetrics() },
+                    onHealthConnectClick = { requestHealthConnectPermissions() },
                 )
             }
         }

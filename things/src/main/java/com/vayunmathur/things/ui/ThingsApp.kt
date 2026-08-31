@@ -15,9 +15,9 @@ import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.res.stringResource
 import com.vayunmathur.library.ui.AppScaffold
 import com.vayunmathur.library.ui.Button
 import com.vayunmathur.library.ui.Card
@@ -71,6 +71,7 @@ fun ThingsApp(
     onScaleAgeChange: (String) -> Unit,
     onScaleHeightChange: (String) -> Unit,
     onScaleAthleteChange: (Boolean) -> Unit,
+    onHealthConnectClick: () -> Unit,
 ) {
     AppScaffold(
         title = stringResource(R.string.hydration),
@@ -133,6 +134,11 @@ fun ThingsApp(
             }
 
             item { HorizontalDivider() }
+            item {
+                OutlinedButton(onClick = onHealthConnectClick, modifier = Modifier.fillMaxWidth()) {
+                    Text(stringResource(R.string.health_connect))
+                }
+            }
             item { ScaleSection(
                 weight = scaleWeight,
                 realtimeWeight = scaleRealtimeWeight,

@@ -42,6 +42,7 @@ fun Navigation(
     onScaleAgeChange: (String) -> Unit,
     onScaleHeightChange: (String) -> Unit,
     onScaleAthleteChange: (Boolean) -> Unit,
+    onHealthConnectClick: () -> Unit,
 ) {
     val backStack = rememberNavBackStack<Route>(Route.Home)
     MainNavigation(backStack) {
@@ -78,6 +79,7 @@ fun Navigation(
                 onScaleAgeChange = onScaleAgeChange,
                 onScaleHeightChange = onScaleHeightChange,
                 onScaleAthleteChange = onScaleAthleteChange,
+                onHealthConnectClick = onHealthConnectClick,
             )
         }
     }

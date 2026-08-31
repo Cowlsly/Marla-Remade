@@ -71,4 +71,7 @@
     <string name="seg_trunk">Trunk</string>
     <string name="bmi_only">BMI shown — step on bare feet for impedance</string>
     <string name="bmi_hint">Impedance measures body fat via foot electrodes</string>
+    <!-- Health Connect -->
+    <!-- Button to grant Health Connect permissions. Verb phrase -->
+    <string name="health_connect">Health Connect</string>
 </resources>

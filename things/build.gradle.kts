@@ -14,3 +14,7 @@ android {
         applicationId = "com.vayunmathur.things"
     }
 }
+
+dependencies {
+    implementation(libs.androidx.connect.client)
+}
