@@ -3501,11 +3501,14 @@ mod tests {
             .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
             .collect();
         let mut nets = Interpreted { dp: &dp, ttl: &ttl, ve: &ve, voc: &voc };
-        let samples = post::synthesise(&mut nets, &conditioning, &indexer, &voice, &text, &|count| {
+        let language = std::env::var("SUPERTONIC_LANG").unwrap_or_else(|_| "en".into());
+        let draw = |count: usize| {
             assert_eq!(count, drawn.len(), "the driver drew a latent of a different size");
             drawn.clone()
-        })
-        .expect("the utterance synthesises");
+        };
+        let samples =
+            post::synthesise(&mut nets, &conditioning, &indexer, &voice, &text, &language, &draw)
+                .expect("the utterance synthesises");
         println!("supertonic utterance: {} samples", samples.len());
         write(&dir.join("ours.f32"), &samples);
     }

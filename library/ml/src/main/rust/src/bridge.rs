@@ -949,12 +949,16 @@ pub unsafe extern "system" fn Java_com_vayunmathur_library_ml_MlNative_destroySu
     drop(unsafe { Box::from_raw(handle as *mut SupertonicHandle) });
 }
 
-/// Synthesise `text` and return the waveform, or null on failure.
+/// Synthesise `text` in `language` and return the waveform, or null on failure.
 ///
-/// `text` must already be **NFD**-decomposed. That is the Kotlin side's job, through
+/// `text` must already be **NFKD**-decomposed. That is the Kotlin side's job, through
 /// `java.text.Normalizer`, because the model has no precomposed accents and doing the
 /// decomposition here would mean carrying Unicode tables in the APK — see
 /// [`supertonic::to_ids`].
+///
+/// `language` is the ISO-639-1 code the model should read in, or `na` for one it does not list.
+/// It is not a hint: Supertonic 3 is the multilingual model and was trained with the tag always
+/// present, so a wrong or missing one produces fluent-sounding non-words rather than an error.
 ///
 /// The samples are mono `-1..1` at 44,100 Hz. Two calls with the same text differ: flow matching
 /// starts from a sampled latent, which it is meant to.
@@ -969,6 +973,7 @@ pub unsafe extern "system" fn Java_com_vayunmathur_library_ml_MlNative_synthesiz
     _class: JClass<'l>,
     handle: jlong,
     text: JString<'l>,
+    language: JString<'l>,
 ) -> jfloatArray {
     let null = std::ptr::null_mut();
     if handle == 0 {
@@ -984,7 +989,14 @@ pub unsafe extern "system" fn Java_com_vayunmathur_library_ml_MlNative_synthesiz
             return null;
         }
     };
-    match speak_supertonic(state, &words) {
+    let code: String = match env.get_string(&language) {
+        Ok(found) => found.into(),
+        Err(e) => {
+            log(&format!("cannot read the language: {e}"));
+            return null;
+        }
+    };
+    match speak_supertonic(state, &words, &code) {
         Ok(samples) => match new_float_array(&mut env, &samples) {
             Ok(array) => array,
             Err(e) => {
@@ -1000,7 +1012,11 @@ pub unsafe extern "system" fn Java_com_vayunmathur_library_ml_MlNative_synthesiz
 }
 
 /// The whole pipeline for one utterance.
-fn speak_supertonic(state: &mut SupertonicHandle, text: &str) -> Result<Vec<f32>, String> {
+fn speak_supertonic(
+    state: &mut SupertonicHandle,
+    text: &str,
+    language: &str,
+) -> Result<Vec<f32>, String> {
     let SupertonicHandle {
         duration,
         text: encoder,
@@ -1015,7 +1031,7 @@ fn speak_supertonic(state: &mut SupertonicHandle, text: &str) -> Result<Vec<f32>
     // frame count, so the generator has to be reachable from a `Fn` rather than pre-drawn.
     let noise = std::cell::RefCell::new(rng);
     let mut nets = SupertonicNets { duration, text: encoder, sampler, vocoder };
-    supertonic::synthesise(&mut nets, conditioning, indexer, voice, text, &|count| {
+    supertonic::synthesise(&mut nets, conditioning, indexer, voice, text, language, &|count| {
         noise.borrow_mut().normal(count)
     })
 }

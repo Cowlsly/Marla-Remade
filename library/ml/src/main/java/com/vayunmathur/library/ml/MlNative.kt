@@ -88,7 +88,7 @@ internal object MlNative {
      * No shape arguments: every Supertonic plan is utterance-shaped, so each net is re-recorded per
      * sentence rather than compiled once at a padded width. There is also no phoneme dictionary -
      * phoneme dictionary - the front end is [indexer], a flat 65,536-entry codepoint table, which is
-     * why [synthesizeSupertonic] insists on NFD.
+     * why [synthesizeSupertonic] insists on NFKD.
      *
      * The four plans arrive as **file descriptors** rather than byte arrays. A `ByteArray` would
      * allocate the model three times over - the Java array, the `Vec<u8>` JNI hands Rust, and the
@@ -127,17 +127,23 @@ internal object MlNative {
     external fun setSupertonicVoice(handle: Long, style: ByteArray): Boolean
 
     /**
-     * Synthesise [text] and return mono samples in `-1..1` at 44,100 Hz, or null on failure.
+     * Synthesise [text] in [language] and return mono samples in `-1..1` at 44,100 Hz, or null on
+     * failure.
      *
-     * [text] **must already be NFD**-decomposed - use `java.text.Normalizer.normalize(text,
-     * Form.NFD)`. The model has no precomposed accents: `é` is unmapped while `e` and the
+     * [text] **must already be NFKD**-decomposed - use `java.text.Normalizer.normalize(text,
+     * Form.NFKD)`. The model has no precomposed accents: `é` is unmapped while `e` and the
      * combining acute are both first-class tokens, so precomposed text silently loses
      * characters. Doing the decomposition natively would mean carrying Unicode tables in the
      * APK when the platform already has them.
      *
+     * [language] is the ISO-639-1 code, or `na` for one the model does not list. It is not a
+     * hint. Supertonic 3 is the multilingual model and was trained with every utterance wrapped
+     * in a `<en>...</en>` tag, so the wrong code reads the text in the wrong language and no
+     * code at all produces fluent-sounding non-words rather than an error.
+     *
      * Two calls with the same text differ, as flow matching starts from a sampled latent.
      */
-    external fun synthesizeSupertonic(handle: Long, text: String): FloatArray?
+    external fun synthesizeSupertonic(handle: Long, text: String, language: String): FloatArray?
 
     /**
      * Bring up SMaLL-100 from its one `.maml` and its tokenizer table. Returns 0 on failure.

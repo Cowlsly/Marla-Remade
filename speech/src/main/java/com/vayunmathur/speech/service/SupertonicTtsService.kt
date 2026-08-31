@@ -189,7 +189,7 @@ class SupertonicTtsService : TextToSpeechService() {
         }
 
         val maxBytes = callback.maxBufferSize
-        val ok = engine.synthesize(text) { samples ->
+        val ok = engine.synthesize(text, language.code) { samples ->
             if (stopped) return@synthesize false
             val pcm = floatsToPcm16(samples)
             var offset = 0

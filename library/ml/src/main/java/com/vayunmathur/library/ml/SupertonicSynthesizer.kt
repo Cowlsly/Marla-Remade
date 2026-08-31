@@ -99,7 +99,11 @@ class SupertonicSynthesizer private constructor(
     }
 
     /**
-     * Synthesise [text] and return mono samples in `-1..1` at [sampleRate].
+     * Synthesise [text] in [language] and return mono samples in `-1..1` at [sampleRate].
+     *
+     * [language] is the ISO-639-1 code the model should read in, or `na` for one it does not
+     * list. Supertonic 3 is the multilingual model and was trained with the language tag always
+     * present; getting it wrong is silent, so this has no default.
      *
      * Returns an empty array when there is nothing in the model's vocabulary, when the engine is
      * unavailable, or when the pass failed — all three are "no audio" to a caller, and the reason
@@ -110,10 +114,10 @@ class SupertonicSynthesizer private constructor(
      *
      * Two calls with the same text differ, as flow matching starts from a sampled latent.
      */
-    fun synthesize(text: String): FloatArray {
+    fun synthesize(text: String, language: String): FloatArray {
         if (handle == 0L || text.isBlank()) return FloatArray(0)
-        val decomposed = Normalizer.normalize(text, Normalizer.Form.NFD)
-        return MlNative.synthesizeSupertonic(handle, decomposed) ?: FloatArray(0)
+        val decomposed = Normalizer.normalize(text, Normalizer.Form.NFKD)
+        return MlNative.synthesizeSupertonic(handle, decomposed, language) ?: FloatArray(0)
     }
 
     /** Free all four networks. Idempotent. */

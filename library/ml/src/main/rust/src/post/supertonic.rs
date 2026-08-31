@@ -158,26 +158,41 @@ pub fn style_keys(weights: Reader, conditional: bool) -> Result<Vec<f32>, String
 /// Entries in the codepoint table: every code unit of the Basic Multilingual Plane.
 pub const INDEXER_ENTRIES: usize = 65_536;
 
-/// Character ids for text that is **already NFD-decomposed**, dropping what the model has no
-/// token for.
+/// Character ids for text that is **already NFKD-decomposed**, wrapped in its language tag and
+/// dropping what the model has no token for.
 ///
 /// `indexer` is the voice bundle's `unicode_indexer.bin`: [`INDEXER_ENTRIES`] little-endian
 /// `int16`, one per BMP codepoint, `-1` where there is no token. 8,321 of them are mapped.
 ///
-/// # NFD is the caller's job, and it is not optional
+/// # The language tag is not optional, and getting it wrong is silent
+///
+/// Supertonic 3 is the 31-language model, and it was trained with every utterance wrapped as
+/// `<en>text</en>`. `language` is the ISO-639-1 code, or `na` for one the model does not list.
+///
+/// The tag is not a special token with a row of its own — it is literally the characters `<`,
+/// `e`, `n` and `>` through this same table, which is why it needs no re-export. That is also
+/// what makes omitting it so expensive to find: the ids stay in range, every net still matches
+/// onnxruntime to five decimal places, and the model reads the sentence in confident,
+/// correctly-timed gibberish. The symptom is fluent-sounding speech that is not words. Untagged,
+/// two noise draws of one sentence agreed spectrally at 0.36; tagged, 0.70 — a conditioned flow
+/// says the same thing whatever the noise, and that ratio is the cheapest check that this
+/// argument is still being threaded through.
+///
+/// # NFKD is the caller's job, and it is not optional either
 ///
 /// The model has no precomposed accents: `U+00E9` is unmapped while `e` and `U+0301` are both
 /// first-class tokens, and Hangul syllables map only through the Jamo block. So `café`, `über`,
-/// `niño`, `안녕` and `привет` index completely under NFD and partially or not at all otherwise.
-/// The Kotlin side calls `java.text.Normalizer.normalize(text, Form.NFD)`, which is a platform
+/// `niño`, `안녕` and `привет` index completely under NFKD and partially or not at all otherwise.
+/// The Kotlin side calls `java.text.Normalizer.normalize(text, Form.NFKD)`, which is a platform
 /// API and free; doing it here would mean carrying Unicode decomposition tables in the APK.
 ///
 /// # Unmapped codepoints are dropped, not substituted
 ///
 /// There is no unknown token to substitute. Dropping loses a character; mapping to something
 /// else would mispronounce it, and mapping past the table would read the sentence token — see
-/// [`crate::nets::supertonic_duration`].
-pub fn to_ids(indexer: &[u8], text: &str) -> Result<Vec<u32>, String> {
+/// [`crate::nets::supertonic_duration`]. Text of which *nothing* maps is refused rather than
+/// synthesised as an empty tag pair.
+pub fn to_ids(indexer: &[u8], text: &str, language: &str) -> Result<Vec<u32>, String> {
     if indexer.len() != INDEXER_ENTRIES * 2 {
         return Err(format!(
             "a codepoint table of {} bytes, not {}",
@@ -185,22 +200,46 @@ pub fn to_ids(indexer: &[u8], text: &str) -> Result<Vec<u32>, String> {
             INDEXER_ENTRIES * 2
         ));
     }
-    let mut ids = Vec::new();
-    for codepoint in text.chars() {
-        let index = codepoint as usize;
-        // Astral-plane characters — emoji, most CJK extensions — are outside the table
-        // entirely rather than mapped to -1.
-        if index >= INDEXER_ENTRIES {
-            continue;
-        }
-        let at = index * 2;
-        let token = i16::from_le_bytes([indexer[at], indexer[at + 1]]);
-        if token >= 0 {
-            ids.push(token as u32);
-        }
+    // Every code the model knows is two ASCII lowercase letters, `na` included. Checked because
+    // a malformed tag indexes cleanly and then mispronounces the whole utterance.
+    if language.len() != 2 || !language.bytes().all(|b| b.is_ascii_lowercase()) {
+        return Err(format!("a language code of {language:?}, not two lowercase letters"));
     }
+    let index = |text: &str| {
+        text.chars()
+            .filter_map(|codepoint| {
+                let entry = codepoint as usize;
+                // Astral-plane characters — emoji, most CJK extensions — are outside the table
+                // entirely rather than mapped to -1.
+                if entry >= INDEXER_ENTRIES {
+                    return None;
+                }
+                let at = entry * 2;
+                let token = i16::from_le_bytes([indexer[at], indexer[at + 1]]);
+                (token >= 0).then_some(token as u32)
+            })
+            .collect::<Vec<u32>>()
+    };
+
+    // The tag is indexed apart from the text so that text which maps to nothing is still refused.
+    // Tagged, the ids would never be empty, and the model would read out an empty utterance.
+    let body = index(text);
+    if body.is_empty() {
+        return Err("nothing in this text is in the model's vocabulary".into());
+    }
+    let mut ids = index(&format!("<{language}>"));
+    ids.extend(body);
+    ids.extend(index(&format!("</{language}>")));
     Ok(ids)
 }
+
+/// The speed the SDK reads at by default, which the predicted duration is divided by.
+///
+/// `supertonic`'s Python SDK defaults `synthesize(speed=1.05)` and calls values near it "more
+/// natural speech"; the duration predictor is trained against un-sped reference audio, so
+/// reading its answer literally is a 5% drawl. It divides the seconds, so a *larger* speed is a
+/// *shorter* utterance.
+pub const SPEED: f32 = 1.05;
 
 /// Sampler steps per utterance.
 ///
@@ -208,6 +247,9 @@ pub fn to_ids(indexer: &[u8], text: &str) -> Result<Vec<u32>, String> {
 /// for a stable level, and audio at 16 correlates with audio at 32 at only 0.883. There is no
 /// cheap-steps escape hatch here, which with two guidance branches per step means 32 passes of
 /// [`crate::nets::supertonic_sampler`] for one sentence.
+///
+/// The 0.883 is not a quality argument either way. It was once read as one, and 32 was tried
+/// against speech that turned out to be garbled for an unrelated reason — see [`to_ids`].
 pub const STEPS: u32 = 16;
 
 /// The GPU stages, as a trait, so the sequencing below is host-testable against stubs.
@@ -313,16 +355,16 @@ impl Voice {
 
 /// Synthesise one utterance.
 ///
-/// `text` must already be NFD; see [`to_ids`]. `noise` supplies the flow's starting latent, one
-/// standard normal per value — flow matching is meant to vary between calls, so the caller seeds
-/// it from the clock.
+/// `text` must already be NFKD; `language` is its ISO-639-1 code. See [`to_ids`] for why both
+/// matter. `noise` supplies the flow's starting latent, one standard normal per value — flow
+/// matching is meant to vary between calls, so the caller seeds it from the clock.
 ///
 /// ```text
-/// text -> ids                    to_ids, over the bundle's codepoint table
-/// ids + style_dp -> seconds      the duration predictor, then exp
-/// seconds -> frames              round(seconds * 44100 / 3072)
+/// text + language -> ids         to_ids, over the bundle's codepoint table
+/// ids + style_dp -> seconds      the duration predictor, then exp, then / SPEED
+/// seconds -> frames              ceil(seconds * 44100 / 3072)
 /// ids + style_ttl -> text_emb    the text encoder
-/// noise + text_emb -> latent     the sampler, 16 steps of two guidance branches
+/// noise + text_emb -> latent     the sampler, [`STEPS`] steps of two guidance branches
 /// latent -> waveform             the vocoder
 /// ```
 pub fn synthesise(
@@ -331,12 +373,10 @@ pub fn synthesise(
     indexer: &[u8],
     voice: &Voice,
     text: &str,
+    language: &str,
     noise: &dyn Fn(usize) -> Vec<f32>,
 ) -> Result<Vec<f32>, String> {
-    let ids = to_ids(indexer, text)?;
-    if ids.is_empty() {
-        return Err("nothing in this text is in the model's vocabulary".into());
-    }
+    let ids = to_ids(indexer, text, language)?;
     let chars = ids.len() as u32;
 
     // The duration predictor's sequence leads with the sentence token; the text encoder's does
@@ -345,7 +385,7 @@ pub fn synthesise(
     with_token.push(duration_net::SENTENCE_TOKEN);
     with_token.extend_from_slice(&ids);
     let log_seconds = stages.duration(&embed_lanes(&with_token), &voice.duration)?;
-    let frames = duration_net::latent_frames(duration_net::seconds(log_seconds));
+    let frames = duration_net::latent_frames(duration_net::seconds(log_seconds) / SPEED);
 
     let conditioning_text = stages.text(&embed_lanes(&ids), &voice.text)?;
 
@@ -420,26 +460,55 @@ pub fn step(
 mod tests {
     use super::*;
 
+    /// A table where only the characters named are mapped; everything else is `-1`.
+    fn table_of(mapped: &[(char, i16)]) -> Vec<u8> {
+        let mut table = vec![0u8; INDEXER_ENTRIES * 2];
+        for entry in 0..INDEXER_ENTRIES {
+            table[entry * 2..entry * 2 + 2].copy_from_slice(&(-1i16).to_le_bytes());
+        }
+        for &(codepoint, token) in mapped {
+            let at = codepoint as usize * 2;
+            table[at..at + 2].copy_from_slice(&token.to_le_bytes());
+        }
+        table
+    }
+
     #[test]
     fn the_indexer_drops_what_it_cannot_map() {
-        // A table where only 'a' (0x61) and the combining acute (0x301) are mapped. 'z' and an
-        // emoji outside the BMP both disappear rather than becoming some other character.
-        let mut table = vec![0u8; INDEXER_ENTRIES * 2];
-        for (codepoint, token) in [(0x61usize, 60i16), (0x301, 146)] {
-            table[codepoint * 2..codepoint * 2 + 2].copy_from_slice(&token.to_le_bytes());
-        }
-        for entry in 0..INDEXER_ENTRIES {
-            if entry != 0x61 && entry != 0x301 {
-                table[entry * 2..entry * 2 + 2].copy_from_slice(&(-1i16).to_le_bytes());
-            }
-        }
-        let got = to_ids(&table, "a\u{301}z\u{1F600}a").expect("indexes");
+        // Only 'a' and the combining acute are mapped. 'z' and an emoji outside the BMP both
+        // disappear rather than becoming some other character. The tag's characters are unmapped
+        // here too, so this says nothing about the tag - `the_indexer_wraps_the_text_in_its_
+        // language_tag` does that.
+        let table = table_of(&[('a', 60), ('\u{301}', 146)]);
+        let got = to_ids(&table, "a\u{301}z\u{1F600}a", "en").expect("indexes");
         assert_eq!(got, vec![60, 146, 60]);
     }
 
     #[test]
+    fn the_indexer_wraps_the_text_in_its_language_tag() {
+        // The tag is ordinary characters through the ordinary table, so it has to come out as
+        // ids on both sides of the text. Omitting it costs nothing detectable downstream, which
+        // is why it is asserted here.
+        let table = table_of(&[('<', 1), ('>', 2), ('/', 3), ('e', 4), ('n', 5), ('a', 6)]);
+        assert_eq!(
+            to_ids(&table, "a", "en").expect("indexes"),
+            vec![1, 4, 5, 2, 6, 1, 3, 4, 5, 2],
+            "<en>a</en>"
+        );
+    }
+
+    #[test]
+    fn the_indexer_refuses_a_language_that_is_not_a_two_letter_code() {
+        let table = table_of(&[('a', 6)]);
+        for bad in ["", "e", "eng", "EN", "e1"] {
+            let error = to_ids(&table, "a", bad).expect_err("a bad code");
+            assert!(error.contains("language code"), "{bad:?}: {error}");
+        }
+    }
+
+    #[test]
     fn the_indexer_refuses_a_table_of_the_wrong_size() {
-        let error = to_ids(&[0u8; 16], "a").expect_err("a short table");
+        let error = to_ids(&[0u8; 16], "a", "en").expect_err("a short table");
         assert!(error.contains("codepoint table"), "{error}");
     }
 
@@ -532,12 +601,15 @@ mod tests {
         }
     }
 
-    /// A codepoint table mapping the ASCII letters to themselves and nothing else.
+    /// A codepoint table mapping the ASCII letters to themselves, plus the three punctuation
+    /// marks the language tag is spelled with, and nothing else.
     fn letters() -> Vec<u8> {
         let mut table = vec![0u8; INDEXER_ENTRIES * 2];
         for entry in 0..INDEXER_ENTRIES {
             let token = if (b'a' as usize..=b'z' as usize).contains(&entry) {
                 (entry - b'a' as usize + 1) as i16
+            } else if entry < 128 && [b'<', b'>', b'/'].contains(&(entry as u8)) {
+                27
             } else {
                 -1
             };
@@ -559,10 +631,11 @@ mod tests {
 
     #[test]
     fn the_pipeline_runs_the_four_nets_in_order_at_the_predicted_length() {
-        // "hello" is five mapped letters. At one second the duration predictor's answer becomes
-        // round(44100 / 3072) = 14 frames, and the vocoder emits 3072 samples a frame.
+        // "hello" is five mapped letters, and `<en>` and `</en>` are nine more. At one second the
+        // duration predictor's answer becomes ceil(44100 / 1.05 / 3072) = 14 frames, and the
+        // vocoder emits 3072 samples a frame.
         let mut stages =
-            Recording { seconds: 1.0, chars: 5, frames: 14, sampler_calls: 0, latents: Vec::new(), vocoded_frames: Vec::new() };
+            Recording { seconds: 1.0, chars: 14, frames: 14, sampler_calls: 0, latents: Vec::new(), vocoded_frames: Vec::new() };
         let voice = Voice { duration: vec![0.1; 128], text: vec![0.2; 256 * 50] };
         let samples = synthesise(
             &mut stages,
@@ -570,6 +643,7 @@ mod tests {
             &letters(),
             &voice,
             "hello",
+            "en",
             &|count| vec![0.0; count],
         )
         .expect("synthesises");
@@ -585,7 +659,7 @@ mod tests {
         // the same latent. A `step` that scaled or reordered would show here rather than as
         // quiet noise on a device.
         let mut stages =
-            Recording { seconds: 1.0, chars: 5, frames: 14, sampler_calls: 0, latents: Vec::new(), vocoded_frames: Vec::new() };
+            Recording { seconds: 1.0, chars: 14, frames: 14, sampler_calls: 0, latents: Vec::new(), vocoded_frames: Vec::new() };
         let voice = Voice { duration: vec![0.1; 128], text: vec![0.2; 256 * 50] };
         synthesise(
             &mut stages,
@@ -593,6 +667,7 @@ mod tests {
             &letters(),
             &voice,
             "hello",
+            "en",
             &|count| (0..count).map(|i| i as f32 * 0.001).collect(),
         )
         .expect("synthesises");
@@ -605,7 +680,8 @@ mod tests {
     #[test]
     fn text_with_nothing_in_the_vocabulary_is_refused() {
         // Rather than synthesising silence, or a plan over zero characters that the nets refuse
-        // with a message about frames.
+        // with a message about frames. The language tag maps in `letters()`, so this also covers
+        // the tag alone not being mistaken for content.
         let mut stages =
             Recording { seconds: 1.0, chars: 0, frames: 1, sampler_calls: 0, latents: Vec::new(), vocoded_frames: Vec::new() };
         let voice = Voice { duration: vec![0.1; 128], text: vec![0.2; 256 * 50] };
@@ -615,6 +691,7 @@ mod tests {
             &letters(),
             &voice,
             "12345",
+            "en",
             &|count| vec![0.0; count],
         )
         .expect_err("no vocabulary");

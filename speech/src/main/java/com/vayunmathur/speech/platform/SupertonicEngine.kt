@@ -70,6 +70,8 @@ class SupertonicEngine(private val context: Context) {
      * audio track and blocks while it plays, so holding the handle across it would make [close] —
      * which arrives on the main thread from `onDestroy` — wait out a whole utterance.
      *
+     * [language] is the ISO-639-1 code the model reads in; see [SupertonicSynthesizer.synthesize].
+     *
      * There is no `speed`: [SupertonicSynthesizer.synthesize] takes none, and the only ways to fake
      * one on the host are to resample the PCM, which shifts the pitch, or to time-stretch it, which
      * is a signal-processing feature rather than part of a port. Rate control therefore does not
@@ -77,11 +79,11 @@ class SupertonicEngine(private val context: Context) {
      * scaling the duration predictor's frame count natively, which is where Piper's `length_scale`
      * did it too.
      */
-    fun synthesize(text: String, onChunk: (FloatArray) -> Boolean): Boolean {
+    fun synthesize(text: String, language: String, onChunk: (FloatArray) -> Boolean): Boolean {
         val samples = synchronized(lock) {
             val engine = ensure() ?: return false
             try {
-                engine.synthesize(text)
+                engine.synthesize(text, language)
             } catch (e: Throwable) {
                 Log.e(TAG, "synthesis failed", e)
                 return false

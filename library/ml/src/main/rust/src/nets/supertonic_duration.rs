@@ -129,10 +129,14 @@ pub const INT8_CONVS: usize = BLOCKS * 2 + ATTN_LAYERS * 6;
 ///
 /// One frame is [`super::supertonic_vocoder::SAMPLES_PER_FRAME`] samples at
 /// [`super::supertonic_vocoder::SAMPLE_RATE`]. Verified against onnxruntime at 54, 55 and 108.
+///
+/// `ceil`, not `round`, which is what `supertonic`'s Python SDK does: a partial frame still has
+/// speech in it, and rounding down truncates the tail. Rounding agrees with the SDK on most
+/// lengths and is one frame short on the rest, so a fixture will not catch it.
 pub fn latent_frames(seconds: f32) -> u32 {
     let per_frame = super::supertonic_vocoder::SAMPLES_PER_FRAME as f32;
     let frames = seconds * super::supertonic_vocoder::SAMPLE_RATE as f32 / per_frame;
-    frames.round().max(1.0) as u32
+    frames.ceil().max(1.0) as u32
 }
 
 /// The export's trailing `Exp`, on the plan's one output value.
