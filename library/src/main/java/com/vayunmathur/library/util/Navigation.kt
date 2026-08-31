@@ -26,6 +26,7 @@ import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.consumeWindowInsets
 import androidx.compose.foundation.layout.ime
 import androidx.compose.foundation.layout.imePadding
+import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.union
 import androidx.compose.foundation.layout.padding
 import androidx.compose.material3.ExperimentalMaterial3ExpressiveApi
@@ -487,7 +488,17 @@ fun <T: NavKey> MainNavigation(
         contentWindowInsets = WindowInsets(),
         containerColor = resolvedContainerColor,
         contentColor = resolvedContentColor,
-        snackbarHost = { SnackbarHost(snackbarHostState) },
+        // The scaffold disables automatic insets (contentWindowInsets = WindowInsets()), so the
+        // snackbar host must apply its own navigation-bar and IME padding — otherwise messages
+        // render behind the system navigation bar and are hidden (issue #630).
+        snackbarHost = {
+            SnackbarHost(
+                snackbarHostState,
+                modifier = Modifier
+                    .navigationBarsPadding()
+                    .imePadding(),
+            )
+        },
         bottomBar = bottomBar
     ) { paddingValues ->
         CompositionLocalProvider(

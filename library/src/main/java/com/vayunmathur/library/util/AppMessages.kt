@@ -40,13 +40,30 @@ object AppMessages {
 
     val messages: SharedFlow<Message> = _messages.asSharedFlow()
 
+    /** Window within which an identical, actionless message is suppressed as a repeat. */
+    private const val DEDUP_WINDOW_MS = 3_000L
+    private var lastText: String? = null
+    private var lastAtMs: Long = 0L
+
     /**
      * Post a message from anywhere - ViewModel, worker, or a plain Activity.
      *
      * Never suspends and never fails; if nothing is collecting, the message is
      * dropped.
+     *
+     * Identical actionless messages posted within [DEDUP_WINDOW_MS] are dropped so a
+     * repeatedly-failing operation (e.g. an update retrying, or a per-package install
+     * callback firing for a batch) doesn't spam the same snackbar. See issue #630.
      */
     fun show(text: String, actionLabel: String? = null, duration: Duration = Duration.Short, onAction: (() -> Unit)? = null) {
+        if (actionLabel == null) {
+            val now = System.currentTimeMillis()
+            synchronized(this) {
+                if (text == lastText && now - lastAtMs < DEDUP_WINDOW_MS) return
+                lastText = text
+                lastAtMs = now
+            }
+        }
         _messages.tryEmit(Message(text, actionLabel, onAction, duration))
     }
 }
