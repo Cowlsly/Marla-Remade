@@ -267,6 +267,11 @@ class CameraViewModel(private val app: Application) : AndroidViewModel(app) {
     private val _availableZoomLevels = MutableStateFlow(listOf("1x" to 1f))
     val availableZoomLevels = _availableZoomLevels.asStateFlow()
 
+    // Whether the front-camera preview and saved selfie are horizontally mirrored (issue #632).
+    // Default true preserves the long-standing mirror-like selfie behavior.
+    private val _mirrorFront = MutableStateFlow(true)
+    val mirrorFront = _mirrorFront.asStateFlow()
+
     private val _isCapturing = MutableStateFlow(false)
     val isCapturing = _isCapturing.asStateFlow()
 
@@ -700,12 +705,23 @@ class CameraViewModel(private val app: Application) : AndroidViewModel(app) {
         ds.getString("camera_grid")?.let { _gridEnabled.value = it.toBoolean() }
         ds.getString("camera_level")?.let { _levelEnabled.value = it.toBoolean() }
         ds.getString("camera_mic_muted")?.let { _micMuted.value = it.toBoolean() }
+        ds.getString("camera_zoom_ratio")?.toFloatOrNull()?.let { _zoomRatio.value = it }
+        ds.getString("camera_mirror_front")?.let { _mirrorFront.value = it.toBoolean() }
         if (_levelEnabled.value) registerLevelSensor()
     }
 
     fun setFlashMode(mode: FlashMode) {
         _flashMode.value = mode
         viewModelScope.launch { ds.setString("camera_flash", mode.name) }
+    }
+
+    /**
+     * Toggle horizontal mirroring of the front-camera preview and saved photo/video (issue #632).
+     * Takes effect on the next capture; the preview updates immediately via the UI layer.
+     */
+    fun setMirrorFront(enabled: Boolean) {
+        _mirrorFront.value = enabled
+        viewModelScope.launch { ds.setString("camera_mirror_front", enabled.toString()) }
     }
 
     fun toggleTorch() {
@@ -982,9 +998,11 @@ class CameraViewModel(private val app: Application) : AndroidViewModel(app) {
     /**
      * Whether captures should be horizontally mirrored to match the preview. CameraX mirrors the
      * front-camera preview but saves un-mirrored by default, so selfies otherwise come out flipped.
+     * Controlled by the user-facing "mirror selfie" setting (issue #632); only ever applies to the
+     * front lens.
      */
     private val mirrorCaptures: Boolean
-        get() = _lensFacing.value == CameraSelector.LENS_FACING_FRONT
+        get() = _lensFacing.value == CameraSelector.LENS_FACING_FRONT && _mirrorFront.value
 
     fun setQrResult(text: String?) {
         _qrResult.value = text
@@ -997,6 +1015,7 @@ class CameraViewModel(private val app: Application) : AndroidViewModel(app) {
      */
     fun onViewfinderZoomRatio(ratio: Float) {
         _zoomRatio.value = ratio
+        viewModelScope.launch { ds.setString("camera_zoom_ratio", ratio.toString()) }
     }
 
     fun setZoomRatio(ratio: Float) {
@@ -1008,10 +1027,27 @@ class CameraViewModel(private val app: Application) : AndroidViewModel(app) {
         } ?: ratio
         if (clamped != ratio) Log.w("NightPreview", "setZoomRatio() CLAMPED $ratio -> $clamped due to zoomState min/max – vendor NIGHT often reports max=1x, causing bar to show only 1x")
         _zoomRatio.value = clamped
+        viewModelScope.launch { ds.setString("camera_zoom_ratio", clamped.toString()) }
         try {
             cam?.cameraControl?.setZoomRatio(clamped)
         } catch (e: Exception) {
             Log.e("NightPreview", "setZoomRatio() setZoomRatio() threw (was hidden before)", e)
+        }
+    }
+
+    /**
+     * Restore the previously selected zoom after a (re)bind instead of snapping back to the
+     * hardware default. [_zoomRatio] holds the last value the user picked (kept in memory across
+     * teardown/rebind and loaded from DataStore on process restart); clamp it to the new lens'
+     * supported range and re-apply it to the camera. Fixes issue #631 (zoom reset on resume).
+     */
+    private fun restoreZoom(minZoom: Float, maxZoom: Float) {
+        val desired = _zoomRatio.value.coerceIn(minZoom, maxZoom)
+        _zoomRatio.value = desired
+        try {
+            boundCamera?.cameraControl?.setZoomRatio(desired)
+        } catch (e: Exception) {
+            Log.e("NightPreview", "restoreZoom() setZoomRatio() threw", e)
         }
     }
 
@@ -1197,8 +1233,8 @@ class CameraViewModel(private val app: Application) : AndroidViewModel(app) {
 
             boundCamera?.cameraInfo?.zoomState?.value?.let {
                 updateZoomLevels(it.minZoomRatio, it.maxZoomRatio)
-                _zoomRatio.value = it.zoomRatio
-            }
+                restoreZoom(it.minZoomRatio, it.maxZoomRatio)
+                Log.d("NightPreview", "setupPhotoSession() after levels=
             _sloMoSupported.value = true
             _highSpeedActive.value = true
             true
@@ -1359,8 +1395,8 @@ class CameraViewModel(private val app: Application) : AndroidViewModel(app) {
             boundCamera?.cameraInfo?.zoomState?.value?.let {
                 Log.d("NightPreview", "setupPhotoSession() calling updateZoomLevels min=${it.minZoomRatio} max=${it.maxZoomRatio} – should show .5,1x,2x,5x if >1x else only 1x")
                 updateZoomLevels(it.minZoomRatio, it.maxZoomRatio)
-                _zoomRatio.value = it.zoomRatio
-                Log.d("NightPreview", "setupPhotoSession() after levels=${_availableZoomLevels.value} ratio=${_zoomRatio.value}")
+                restoreZoom(it.minZoomRatio, it.maxZoomRatio)
+                Log.d("NightPreview", "setupNightPreviewSession() updated zoomRatio=
             }
             readManualControlRanges()
             applyManualControls()
@@ -1474,8 +1510,8 @@ class CameraViewModel(private val app: Application) : AndroidViewModel(app) {
             boundCamera?.cameraInfo?.zoomState?.value?.let {
                 Log.d("NightPreview", "setupNightPreviewSession() calling updateZoomLevels min=${it.minZoomRatio} max=${it.maxZoomRatio}")
                 updateZoomLevels(it.minZoomRatio, it.maxZoomRatio)
-                _zoomRatio.value = it.zoomRatio
-                Log.d("NightPreview", "setupNightPreviewSession() updated zoomRatio=${_zoomRatio.value} levels=${_availableZoomLevels.value}")
+                restoreZoom(it.minZoomRatio, it.maxZoomRatio)
+                Log.d("NightPreview", "setupPanoramaSession() levels=
             }
             // Do NOT observe getNightModeIndicator() on the extension camera: it reports
             // UNKNOWN/NOT_RECOMMENDED there, which fights the normal session's RECOMMENDED reading
@@ -1587,8 +1623,8 @@ class CameraViewModel(private val app: Application) : AndroidViewModel(app) {
             boundCamera?.cameraInfo?.zoomState?.value?.let {
                 Log.d("NightPreview", "setupPanoramaSession() updateZoomLevels min=${it.minZoomRatio} max=${it.maxZoomRatio}")
                 updateZoomLevels(it.minZoomRatio, it.maxZoomRatio)
-                _zoomRatio.value = it.zoomRatio
-                Log.d("NightPreview", "setupPanoramaSession() levels=${_availableZoomLevels.value}")
+                restoreZoom(it.minZoomRatio, it.maxZoomRatio)
+                Log.d("NightPreview", "setupPortraitSession() after update levels=
             }
             _photoSessionActive.value = true
             Log.d("NightPreview", "setupPanoramaSession() SUCCESS photoActive=true surface=${_surfaceRequest.value?.resolution}")
@@ -1744,9 +1780,9 @@ class CameraViewModel(private val app: Application) : AndroidViewModel(app) {
             boundCamera?.cameraInfo?.zoomState?.value?.let {
                 Log.d("NightPreview", "setupPortraitSession() updateZoomLevels min=${it.minZoomRatio} max=${it.maxZoomRatio}")
                 updateZoomLevels(it.minZoomRatio, it.maxZoomRatio)
-                _zoomRatio.value = it.zoomRatio
-                Log.d("NightPreview", "setupPortraitSession() after update levels=${_availableZoomLevels.value} ratio=${_zoomRatio.value}")
+                restoreZoom(it.minZoomRatio, it.maxZoomRatio)
             }
+            _sloMoSupported.value = true
             readManualControlRanges()
             applyManualControls()
             _photoSessionActive.value = true
@@ -1844,7 +1880,10 @@ class CameraViewModel(private val app: Application) : AndroidViewModel(app) {
                 else if (hevc) recorderBuilder.setVideoMimeType(MediaFormat.MIMETYPE_VIDEO_HEVC)
                 if (opus) recorderBuilder.setAudioMimeType(MediaFormat.MIMETYPE_AUDIO_OPUS)
                 val captureBuilder = VideoCapture.Builder(recorderBuilder.build())
-                    .setMirrorMode(MirrorMode.MIRROR_MODE_ON_FRONT_ONLY)
+                    .setMirrorMode(
+                        if (_mirrorFront.value) MirrorMode.MIRROR_MODE_ON_FRONT_ONLY
+                        else MirrorMode.MIRROR_MODE_OFF
+                    )
                     .setDynamicRange(dynamicRange)
                 applyVideoCaptureRequestOptions(captureBuilder, bestFpsRange, stabilizationMode)
                 val capture = captureBuilder.build()
@@ -1890,7 +1929,7 @@ class CameraViewModel(private val app: Application) : AndroidViewModel(app) {
 
             boundCamera?.cameraInfo?.zoomState?.value?.let {
                 updateZoomLevels(it.minZoomRatio, it.maxZoomRatio)
-                _zoomRatio.value = it.zoomRatio
+                restoreZoom(it.minZoomRatio, it.maxZoomRatio)
             }
             _videoSessionActive.value = true
             true

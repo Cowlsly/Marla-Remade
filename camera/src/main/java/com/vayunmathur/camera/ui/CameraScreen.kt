@@ -189,6 +189,7 @@ fun CameraScreen(
     val qrResult by viewModel.qrResult.collectAsState()
     val aspectRatio by viewModel.aspectRatio.collectAsState()
     val zoomRatio by viewModel.zoomRatio.collectAsState()
+    val mirrorFront by viewModel.mirrorFront.collectAsState()
     val timerDuration by viewModel.timerDuration.collectAsState()
     val isCapturing by viewModel.isCapturing.collectAsState()
     val burstActive by viewModel.burstActive.collectAsState()
@@ -557,7 +558,12 @@ fun CameraScreen(
                     } else {
                         Modifier.fillMaxHeight().aspectRatio(previewAspectRatio)
                     }
+                    val mirrorPreview =
+                        lensFacing == CameraSelector.LENS_FACING_FRONT && !mirrorFront
                     val previewModifier = previewSize
+                        // CameraX mirrors the front-camera preview by default; counter it when the
+                        // user turns selfie mirroring off so the preview matches the saved image (#632).
+                        .graphicsLayer { scaleX = if (mirrorPreview) -1f else 1f }
                         .clip(RoundedCornerShape(12.dp))
                         .then(
                             run {

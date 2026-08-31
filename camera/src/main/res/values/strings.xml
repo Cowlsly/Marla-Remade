@@ -30,6 +30,11 @@
     <!-- SettingsPage: summary explaining save location in EXIF metadata -->
     <string name="settings_location_description">Save location in photo metadata</string>
 
+    <!-- SettingsPage: section title for selfie (front camera) mirroring -->
+    <string name="settings_mirror_front">Selfie mirroring</string>
+    <!-- SettingsPage: summary explaining front-camera mirroring toggle -->
+    <string name="settings_mirror_front_description">Mirror the front camera preview and saved selfies</string>
+
     <!-- Video codec settings (SettingsPage) -->
     <!-- SettingsPage: section header for video codec selection -->
     <string name="settings_video_codec">Video codec</string>

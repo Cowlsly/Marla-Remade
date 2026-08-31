@@ -44,6 +44,7 @@ fun <T : NavKey> SettingsPage(backStack: NavBackStack<T>, viewModel: CameraViewM
     val locationEnabled by viewModel.locationEnabled.collectAsState()
     val videoCodec by viewModel.videoCodec.collectAsState()
     val audioInputSource by viewModel.audioInputSource.collectAsState()
+    val mirrorFront by viewModel.mirrorFront.collectAsState()
 
     val requestLocation = rememberPermissionRequest(
         Manifest.permission.ACCESS_FINE_LOCATION
@@ -156,6 +157,14 @@ fun <T : NavKey> SettingsPage(backStack: NavBackStack<T>, viewModel: CameraViewM
                         }
                     }
                 }
+            }
+
+            SettingsSection(title = stringResource(R.string.settings_mirror_front)) {
+                SettingsSwitchRow(
+                    title = stringResource(R.string.settings_mirror_front_description),
+                    checked = mirrorFront,
+                    onCheckedChange = { viewModel.setMirrorFront(it) },
+                )
             }
 
             SettingsSection(title = stringResource(R.string.settings_location)) {
