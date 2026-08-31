@@ -28,9 +28,9 @@ sealed interface PdfPrimitive {
      * A run of text with its baseline origin, on-page size and color. Optional
      * stroke for Tr modes 1,2,5,6. [renderMode] is the PDF text render mode (Tr):
      * 0 fill, 1 stroke, 2 fill+stroke, 3 invisible, 4-6 = 0-2 plus clip, 7 clip.
-     * v8 adds isBold/isItalic/hScale recovered from font BaseFont/FontDescriptor.
-     * [fontFamily] selects the substitute system typeface: 0 sans-serif, 1 serif,
-     * 2 monospace (also from BaseFont/FontDescriptor).
+     * v8 adds isBold/isItalic recovered from font BaseFont/FontDescriptor, plus
+     * [hScale]. [fontFamily] selects the substitute system typeface: 0 sans-serif,
+     * 1 serif, 2 monospace (also from BaseFont/FontDescriptor).
      */
     data class Text(
         val origin: Offset,
@@ -48,6 +48,16 @@ sealed interface PdfPrimitive {
         /// True when the glyph was already drawn via Fill prims (embedded-font
         /// outline rendering); kept only for text selection/search, not painted.
         val outline: Boolean = false,
+        /**
+         * Horizontal scale for the substitute face, applied as `Paint.textScaleX`.
+         *
+         * NOT the Tz percentage the name suggests: `draw.rs`'s `show_string_in` sends
+         * `Th * x_scale / y_scale` (its `wire_h_scale`), because [size] carries only the
+         * text matrix's Y
+         * scale, so an anisotropic matrix has nowhere else to put its X/Y ratio. Exactly
+         * 1.0 for every isotropic matrix, rotations included, so ordinary pages are
+         * unaffected; a `4 0 0 1 0 0 cm` stretch sends 4.0.
+         */
         val hScale: Float = 1f,
     ) : PdfPrimitive
 

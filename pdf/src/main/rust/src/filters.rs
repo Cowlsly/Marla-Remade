@@ -453,27 +453,43 @@ pub fn decode_ccitt(data: &[u8], w: u32, h: u32, params: &CcittParams) -> Option
     if cols_us == 0 || rows_us == 0 || cols_us > 20000 || rows_us > 20000 { return None; }
     let row_bytes = cols_us.div_ceil(8);
     if (cols_us * rows_us) > 16 * 1024 * 1024 { return None; }
-    let mut packed = vec![0u8; row_bytes * rows_us];
 
     let black_is1 = params.black_is1;
-    // Fill helper honoring BlackIs1 inversion: fax crate Black pel = 1 bit per G3/G4 logical.
-    // Spec: BlackIs1 false (default) means 0 bits are black? Actually PDF spec: BlackIs1 false => 1-bits are not black (0=black), True=>1=black.
-    // Wait typical fax: BlackIs1 false (default) 0=white, 1? Actually check: PDF 1.7 Table 8: BlackIs1: 0= white is 0? spec says if false, 1 bits are white? Let's interpret: false => 1 is black? Quick reference: PDF spec says BlackIs1 false (default) means 1 bits will be interpreted as white (0 black), True means 1 is black. But many viewers treat default as 1=white? Actually typical TIFF: 0=white means Photometric 0=white, so 1=black. BlackIs1 true means 1=black.
-    // So false => 1=white => need invert black pels (fax Black -> should be white when false? Hmm)
-    // For robustness and to match Telerik # fix: invert when BlackIs1==false (default) vs true? Let's implement: true=>1=black => keep black as black (no invert), false=>1=white => black pel should become white => invert.
-    // Previous code ignored flag; we now honor: paint_black = is_black if black_is1 else !is_black
+    // Byte value meaning WHITE in the sample polarity this function emits (see
+    // `fill_rows`): with the /BlackIs1 default of false a 1 bit is white, with
+    // /BlackIs1 true a 0 bit is.
+    //
+    // Rows the fax decoder never produced — a truncated or corrupt codestream, or a
+    // /Rows//Height taller than the data — keep this value. They used to keep 0, which
+    // under the DEFAULT parameters is BLACK, so the undecoded tail of a scan rendered
+    // as a solid black band across the page (and as alpha 0, i.e. the base image
+    // vanishing, when the stream was a soft mask). Neither `decode_ccitt`'s caller nor
+    // this function can tell those rows apart from decoded ones after the fact, so the
+    // background has to be right here. White is the background of every fax page.
+    let white_byte: u8 = if black_is1 { 0x00 } else { 0xFF };
+    let mut packed = vec![white_byte; row_bytes * rows_us];
+    // §7.4.6 Table 11 /BlackIs1: false (the default) means 0 bits are black, true means
+    // 1 bits are black. The filter's job is only to emit samples in that polarity; it is
+    // the COLOUR SPACE that then decides what a sample means on the page, so this must
+    // not also be folded into the image layer (`images.rs` reads sample 0 as black per
+    // §8.9.5.2 and does not re-apply the flag).
     let fill_rows = |lines: Vec<Vec<u32>>, packed: &mut Vec<u8>| {
         for (y, trans) in lines.into_iter().enumerate() {
             if y >= rows_us { break; }
+            let row_off = y * row_bytes;
             let mut cur_x = 0usize;
             for pel in fax::decoder::pels(&trans, columns) {
-                let is_black = matches!(pel, fax::Color::Black);
-                let paint_black = if black_is1 { is_black } else { !is_black };
-                if paint_black {
-                    packed[y * row_bytes + cur_x / 8] |= 1 << (7 - (cur_x % 8));
-                }
-                cur_x += 1;
                 if cur_x >= cols_us { break; }
+                let is_black = matches!(pel, fax::Color::Black);
+                // Whether this pel's SAMPLE is a 1 bit, which /BlackIs1 selects.
+                let bit_is_one = if black_is1 { is_black } else { !is_black };
+                let mask = 1u8 << (7 - (cur_x % 8));
+                // Written rather than OR-ed: the row starts at `white_byte`, so a pel
+                // the decoder says is white must be able to CLEAR a bit as well as set
+                // one. Pels the decoder never reaches keep the white background.
+                let b = &mut packed[row_off + cur_x / 8];
+                if bit_is_one { *b |= mask; } else { *b &= !mask; }
+                cur_x += 1;
             }
         }
     };
@@ -746,6 +762,52 @@ fn apply_tiff_predictor2(mut data: Vec<u8>, cols: usize, colors: usize, bpc: usi
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn ccitt_rows_the_decoder_never_reached_come_back_white() {
+        // §7.4.6 Table 11: /Rows (or /Height) fixes the scan-line count, and a real
+        // fax stream is routinely truncated. The rows the decoder never produced used
+        // to keep the zero the buffer was allocated with, which under the /BlackIs1
+        // DEFAULT is BLACK - a solid black band across the bottom of the page, and
+        // alpha 0 (the base image gone) when the same stream is a soft mask.
+        //
+        // A fax page's background is white, so that is what an unproduced row has to be.
+        let mut enc = fax::encoder::Encoder::new(fax::VecWriter::new());
+        let row = (0..8).map(|_| fax::Color::White);
+        enc.encode_line(row, 8).expect("VecWriter is infallible");
+        let data = enc.finish().expect("infallible").finish();
+
+        // Three rows declared, one row of payload.
+        let params = CcittParams { k: -1, columns: 8, rows: 3, ..CcittParams::default() };
+        let packed = decode_ccitt(&data, 8, 3, &params).expect("one good row must still decode");
+        assert_eq!(packed.len(), 3, "one byte per 8-column row, three rows");
+        // /BlackIs1 false => a 1 bit is WHITE, so an unreached row must be all ones.
+        assert_eq!(packed[1], 0xFF, "row 1 was never decoded and must read as white");
+        assert_eq!(packed[2], 0xFF, "row 2 likewise");
+
+        // /BlackIs1 true reverses which bit means white, so the background flips too.
+        let params = CcittParams { black_is1: true, ..params };
+        let packed = decode_ccitt(&data, 8, 3, &params).expect("decodes");
+        assert_eq!(packed[1], 0x00, "with /BlackIs1 true a 0 bit is white");
+        assert_eq!(packed[2], 0x00);
+    }
+
+    #[test]
+    fn ccitt_pels_are_written_not_or_ed_into_the_white_background() {
+        // The background fill only works if a decoded pel can CLEAR a bit as well as
+        // set one; an OR-only fill would leave every pel white.
+        let mut enc = fax::encoder::Encoder::new(fax::VecWriter::new());
+        // 1010... so a bug that writes only one polarity is visible in one byte.
+        let row: Vec<fax::Color> = (0..8)
+            .map(|x| if x % 2 == 0 { fax::Color::Black } else { fax::Color::White })
+            .collect();
+        enc.encode_line(row.iter().copied(), 8).expect("infallible");
+        let data = enc.finish().expect("infallible").finish();
+        let params = CcittParams { k: -1, columns: 8, rows: 1, ..CcittParams::default() };
+        let packed = decode_ccitt(&data, 8, 1, &params).expect("decodes");
+        // /BlackIs1 false: black pel => 0 bit, white pel => 1 bit.
+        assert_eq!(packed[0], 0b0101_0101, "alternating pels must survive the fill");
+    }
+
     #[test] fn ascii_hex_basic() {
         let out = decode_ascii_hex(b"48656C6C6F>");
         assert_eq!(out, b"Hello");

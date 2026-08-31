@@ -29,6 +29,20 @@ const MAX_SAMPLED_INPUTS: usize = 8;
 /// Cap on a function's output arity, so a bogus `/Range` cannot make every
 /// evaluation allocate an absurd vector.
 const MAX_FN_OUTPUTS: usize = 32;
+/// Nesting and total-node budgets for function PARSING.
+///
+/// Type 3 (`/Functions`) and the array-of-functions form both recurse through
+/// `PdfFunction::parse`, and nothing in 7.10 stops `5 0 R` naming a Type 3 whose
+/// `/Functions` array is `[5 0 R]`. That recursed forever: a Rust stack overflow is
+/// not a panic, so `catch_unwind` cannot contain it and the whole process dies.
+///
+/// A depth cap alone is not sufficient, because the recursion BRANCHES — a Type 3
+/// holding 100 sub-functions, each holding 100, is 100^depth nodes long before it
+/// ever reaches the depth limit. The shared node budget is what actually bounds the
+/// work; the depth cap bounds the stack. Real functions nest one or two levels
+/// (7.10.4 NOTE: a Type 3's sub-functions "shall not" themselves be Type 3).
+const MAX_FN_DEPTH: u32 = 8;
+const MAX_FN_NODES: usize = 4096;
 
 #[derive(Clone)]
 pub(crate) enum PdfFunction {
@@ -135,12 +149,26 @@ fn clip(v: f64, a: f64, b: f64) -> f64 {
 impl PdfFunction {
     /// Parse a function object (reference, dict, stream, or array-of-functions).
     pub(crate) fn parse(doc: &Document, obj: &Object) -> Option<PdfFunction> {
+        let mut budget = MAX_FN_NODES;
+        PdfFunction::parse_at(doc, obj, 0, &mut budget)
+    }
+
+    fn parse_at(
+        doc: &Document,
+        obj: &Object,
+        depth: u32,
+        budget: &mut usize,
+    ) -> Option<PdfFunction> {
+        if depth > MAX_FN_DEPTH || *budget == 0 {
+            return None;
+        }
+        *budget -= 1;
         let resolved = deref(doc, obj)?;
         if let Object::Array(arr) = resolved {
             // Array of functions -> one output component each.
             let mut fns = Vec::new();
             for o in arr {
-                if let Some(f) = PdfFunction::parse(doc, o) {
+                if let Some(f) = PdfFunction::parse_at(doc, o, depth + 1, budget) {
                     fns.push(f);
                 }
             }
@@ -236,7 +264,7 @@ impl PdfFunction {
                 let funcs_arr = funcs_obj.as_array().ok()?;
                 let mut functions = Vec::new();
                 for o in funcs_arr {
-                    functions.push(PdfFunction::parse(doc, o)?);
+                    functions.push(PdfFunction::parse_at(doc, o, depth + 1, budget)?);
                 }
                 // An empty /Functions array would make `eval` return an empty
                 // vector, which downstream colour code cannot distinguish from a
@@ -672,12 +700,16 @@ fn exec_ps_op(op: PsOp, stack: &mut Vec<PsVal>, steps: &mut usize, depth: u32) -
             stack.push(PsVal::Num(if b != 0.0 { a / b } else { 0.0 }));
         }
         Idiv => {
+            // `f64 as i64` SATURATES, so any large real reaches i64::MIN, and
+            // `i64::MIN / -1` overflows — which Rust panics on in every profile,
+            // not just debug. The panic unwinds out of the whole page render.
             let b = pop_num(stack)? as i64; let a = pop_num(stack)? as i64;
-            stack.push(PsVal::Num(if b != 0 { (a / b) as f64 } else { 0.0 }));
+            stack.push(PsVal::Num(if b != 0 { a.wrapping_div(b) as f64 } else { 0.0 }));
         }
         Mod => {
+            // `i64::MIN % -1` overflows for the same reason as `idiv` above.
             let b = pop_num(stack)? as i64; let a = pop_num(stack)? as i64;
-            stack.push(PsVal::Num(if b != 0 { (a % b) as f64 } else { 0.0 }));
+            stack.push(PsVal::Num(if b != 0 { a.wrapping_rem(b) as f64 } else { 0.0 }));
         }
         Exp => {
             let b = pop_num(stack)?; let a = pop_num(stack)?;
@@ -707,7 +739,9 @@ fn exec_ps_op(op: PsOp, stack: &mut Vec<PsVal>, steps: &mut usize, depth: u32) -
         }
         Bitshift => {
             let shift = pop_num(stack)? as i64; let a = pop_num(stack)? as i64;
-            let r = if shift >= 0 { a << (shift.min(63)) } else { a >> ((-shift).min(63)) };
+            // `-i64::MIN` overflows; a saturating negation cannot, and everything
+            // past 63 clamps to a full-width shift anyway.
+            let r = if shift >= 0 { a << (shift.min(63)) } else { a >> (shift.saturating_neg().min(63)) };
             stack.push(PsVal::Num(r as f64));
         }
         Eq => { let b = pop_num(stack)?; let a = pop_num(stack)?; stack.push(bool_of(a == b)); }
@@ -962,6 +996,88 @@ mod tests {
         // `int shift bitshift`, negative shift = right.
         assert_eq!(one(b"{ 1 4 bitshift }"), 16.0);
         assert_eq!(one(b"{ 16 -4 bitshift }"), 1.0);
+    }
+
+    // 7.10.5 Table 42's integer operators take their operands from a `f64 as i64`
+    // cast, which SATURATES — so any real large enough reaches i64::MIN and
+    // `i64::MIN / -1`, `i64::MIN % -1` and `-i64::MIN` all overflow. Rust panics on
+    // signed division overflow in RELEASE as well as debug, and the panic unwinds out
+    // of the whole page render. This is the sharpest example of the shared-evaluator
+    // blast radius: the same six lines serve gradient colours (§8.7.4) and
+    // Separation/DeviceN tint transforms (§8.6.6.4), so one crafted Type 4 kills both.
+    #[test]
+    fn postscript_integer_operators_saturate_instead_of_panicking() {
+        let one = |src: &[u8]| eval_ps(&parse_ps_program(src).unwrap(), &[]).unwrap()[0];
+        assert!(one(b"{ -1e300 -1 idiv }").is_finite());
+        assert!(one(b"{ -1e300 -1 mod }").is_finite());
+        assert!(one(b"{ 1 -1e300 bitshift }").is_finite());
+        assert!(one(b"{ 1 1e300 bitshift }").is_finite());
+        // Division by zero still yields 0 rather than a trap.
+        assert_eq!(one(b"{ 7 0 idiv }"), 0.0);
+        assert_eq!(one(b"{ 7 0 mod }"), 0.0);
+        assert_eq!(one(b"{ 7 0 div }"), 0.0);
+        // And the ordinary cases are unchanged.
+        assert_eq!(one(b"{ -7 2 idiv }"), -3.0);
+        assert_eq!(one(b"{ -7 2 mod }"), -1.0);
+    }
+
+    // 7.10.4's `/Functions` array and the array-of-functions form both recurse through
+    // `parse`, and nothing stops `5 0 R` naming a Type 3 whose `/Functions` is `[5 0 R]`.
+    // That recursed until the stack overflowed — which is NOT a panic, so `catch_unwind`
+    // cannot contain it and the process dies rather than the page failing to render.
+    #[test]
+    fn a_self_referential_function_is_rejected_rather_than_overflowing_the_stack() {
+        let mut doc = Document::with_version("1.7");
+        let id = doc.new_object_id();
+        doc.set_object(
+            id,
+            dictionary! {
+                "FunctionType" => 3,
+                "Domain" => vec![0.into(), 1.into()],
+                "Functions" => vec![Object::Reference(id)],
+                "Bounds" => Vec::<Object>::new(),
+                "Encode" => vec![0.into(), 1.into()],
+            },
+        );
+        assert!(PdfFunction::parse(&doc, &Object::Reference(id)).is_none());
+
+        // An array of functions that contains itself takes the other recursive path.
+        let arr = doc.new_object_id();
+        doc.set_object(arr, Object::Array(vec![Object::Reference(arr)]));
+        assert!(PdfFunction::parse(&doc, &Object::Reference(arr)).is_none());
+
+        // A mutual cycle between a Type 3 and an array goes through both arms.
+        let a = doc.new_object_id();
+        let b = doc.new_object_id();
+        doc.set_object(a, Object::Array(vec![Object::Reference(b)]));
+        doc.set_object(
+            b,
+            dictionary! {
+                "FunctionType" => 3,
+                "Domain" => vec![0.into(), 1.into()],
+                "Functions" => vec![Object::Reference(a)],
+                "Bounds" => Vec::<Object>::new(),
+                "Encode" => vec![0.into(), 1.into()],
+            },
+        );
+        assert!(PdfFunction::parse(&doc, &Object::Reference(a)).is_none());
+
+        // A legitimate one-level Type 3 over two Type 2s still parses.
+        let leaf = doc.add_object(dictionary! {
+            "FunctionType" => 2,
+            "Domain" => vec![0.into(), 1.into()],
+            "C0" => vec![0.into()],
+            "C1" => vec![1.into()],
+            "N" => 1,
+        });
+        let ok = doc.add_object(dictionary! {
+            "FunctionType" => 3,
+            "Domain" => vec![0.into(), 1.into()],
+            "Functions" => vec![Object::Reference(leaf), Object::Reference(leaf)],
+            "Bounds" => vec![Object::Real(0.5)],
+            "Encode" => vec![0.into(), 1.into(), 0.into(), 1.into()],
+        });
+        assert!(PdfFunction::parse(&doc, &Object::Reference(ok)).is_some());
     }
 
     // 7.10.2: sample data is ordered with the FIRST input dimension varying fastest,

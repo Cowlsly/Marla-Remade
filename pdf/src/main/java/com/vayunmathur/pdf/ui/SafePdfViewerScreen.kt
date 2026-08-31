@@ -1588,6 +1588,25 @@ private const val MIN_EMBEDDED_GLYPHS_FOR_TEXT = 6
 private const val SELECT_HIT_PX = 80f
 
 /**
+ * Bounds on the wire's horizontal text scale, applied to `Paint.textScaleX`.
+ *
+ * The field is `Th * x_scale / y_scale` (draw.rs), not the Tz percentage its name suggests,
+ * so it legitimately reaches the single digits on an anisotropic text matrix. The clamp
+ * exists only to bound what Skia is asked to raster — `textScaleX` multiplies the glyph's
+ * device width, and an unbounded value blows up the glyph cache — not to express any PDF
+ * limit. Both consumers must use the same range: [drawSafePage] paints with it and
+ * [buildEmbeddedGlyphs] measures selection rectangles with it, and they have to agree.
+ *
+ * Rust bounds the geometric factor to the same 0.01..100 before it reaches the wire, so on
+ * a well-formed stream this clamp normally never bites. It is deliberately kept as a
+ * second line: Rust does NOT bound the Tz half of the product (`interpret.rs` takes
+ * `Tz / 100` unchecked), so a pathological `Tz` still arrives large. NaN is handled at the
+ * decoder instead — `coerceIn` propagates it — see the hScale read in [SafePdfParser].
+ */
+private const val MIN_TEXT_H_SCALE = 0.01f
+private const val MAX_TEXT_H_SCALE = 100f
+
+/**
  * Build ordered selectable glyphs from a page's embedded Text primitives. Uses
  * accurate glyph advances via Text.advance and Paint.measureText for ligatures /
  * multi-char runs, with bold/italic so measured widths match the painted glyphs.
@@ -1605,20 +1624,26 @@ private fun buildEmbeddedGlyphs(page: SafePdfPage, ch: Float, scale: Float): Lis
         tmpPaint.typeface = selTf
         tmpPaint.isFakeBoldText = prim.isBold && !selTf.isBold
         tmpPaint.textSkewX = if (prim.isItalic && !selTf.isItalic) -0.25f else 0f
-        tmpPaint.textScaleX = prim.hScale.coerceIn(0.2f, 4f)
+        tmpPaint.textScaleX = prim.hScale.coerceIn(MIN_TEXT_H_SCALE, MAX_TEXT_H_SCALE)
         tmpPaint.textSize = prim.size * scale
         val textStr = prim.text
         val measuredTotal = tmpPaint.measureText(textStr)
         // A run that is PAINTED (drawText with this same paint) occupies exactly
         // measuredTotal, so per-glyph measured widths are what put the selection rects on
-        // the pixels the user sees. A run that is NOT painted — render mode 3, the invisible
-        // OCR layer of a scanned PDF, or a glyph already drawn from its real outline — is
-        // aligned to the scan underneath instead, and only `advance` (the true device-space
-        // advance, wire v7) knows where that is. Substitute-typeface metrics have no relation
-        // to it, so rescale the run to span `advance`. Characters are still spread evenly
-        // within the run, as they were before — the fix is the run's total extent, which is
-        // where the error accumulated and grew with run length.
-        val alignToAdvance = prim.renderMode == 3 || prim.outline
+        // the pixels the user sees. A run that is NOT painted is aligned to whatever is
+        // underneath instead, and only `advance` (the true device-space advance, wire v7)
+        // knows where that is. Substitute-typeface metrics have no relation to it, so
+        // rescale the run to span `advance`. Characters are still spread evenly within the
+        // run, as they were before — the fix is the run's total extent, which is where the
+        // error accumulated and grew with run length.
+        //
+        // §9.3.6 Table 106 makes modes 3 AND 7 the two that paint nothing — 3 invisible,
+        // 7 clip-only — so both belong here, along with a glyph already drawn from its real
+        // outline. Mode 7 was originally missed because it was rare; it stopped being rare
+        // when interpret.rs:118 `hidden_render_mode` began routing OC-hidden clipping runs
+        // to 7 instead of collapsing them to 3, which is where that text used to pick up
+        // this alignment.
+        val alignToAdvance = prim.renderMode == 3 || prim.renderMode == 7 || prim.outline
         val advanceFit = if (alignToAdvance && measuredTotal > 0f && prim.advance > 0f) {
             prim.advance * scale / measuredTotal
         } else {
@@ -2951,13 +2976,25 @@ internal fun DrawScope.drawSafePage(page: SafePdfPage) {
                 // generic family (sans/serif/mono) + bold/italic recovered by Rust. Rust
                 // already emits one glyph per prim at its exact advance-based origin, so
                 // letters are correctly spaced without distorting glyph widths — we draw
-                // each glyph at its natural width and only apply Tz (hScale).
+                // each glyph at its natural width and apply the wire's horizontal scale.
                 val tf = pdfTypeface(prim.fontFamily, prim.isBold, prim.isItalic)
                 // Only synthesize bold/italic when the real typeface can't supply it,
                 // so a genuine bold serif isn't double-weighted into a heavy/wrong look.
                 val fakeBold = prim.isBold && !tf.isBold
                 val skew = if (prim.isItalic && !tf.isItalic) -0.25f else 0f
-                val hs = prim.hScale.coerceIn(0.2f, 4f)
+                // hScale is NOT Tz alone. `draw.rs`'s `show_string_in` sends
+                // `Th * x_scale / y_scale` as its `wire_h_scale`,
+                // because `size` carries only the matrix's Y scale, so the X/Y ratio has
+                // nowhere else to ride. It is 1.0 for every isotropic matrix, rotations
+                // included, and a 4x horizontal stretch (`4 0 0 1 0 0 cm`, ordinary for
+                // expanded display text) reaches 4.0 on its own — so the old 0.2..4 range,
+                // sized for Tz percentages of 50..200, clamped legitimate anisotropy and
+                // drew that text too narrow. Widened to admit real matrices while still
+                // bounding what Skia is asked to raster: textScaleX multiplies the glyph's
+                // device width, so an unbounded value blows up the glyph cache. Keep this
+                // range identical to the one in buildEmbeddedGlyphs, or the selection
+                // rectangles stop matching the painted glyphs.
+                val hs = prim.hScale.coerceIn(MIN_TEXT_H_SCALE, MAX_TEXT_H_SCALE)
                 textPaint.typeface = tf
                 textPaint.textSize = ts
                 textPaint.isFakeBoldText = fakeBold

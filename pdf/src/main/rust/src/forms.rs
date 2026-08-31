@@ -12,6 +12,15 @@ pub(crate) fn field_attr<'a>(doc: &'a Document, mut id: ObjectId, key: &[u8]) ->
     None
 }
 
+/// A numeric field key resolved as §12.7.3.1 requires for the entries it marks
+/// "Optional; inheritable": the widget's own value if it has one, otherwise the
+/// nearest ancestor's up the `/Parent` chain.
+fn inherited_num(doc: &Document, id: ObjectId, key: &[u8]) -> Option<f64> {
+    field_attr(doc, id, key)
+        .and_then(|o| deref(doc, o).or(Some(o)))
+        .and_then(num)
+}
+
 /// The terminal field a widget belongs to: the nearest dictionary at or above it
 /// carrying `/FT` (§12.7.3.1). `/V`, `/I`, `/Ff`, `/Q` and `/MaxLen` are keys of
 /// THAT field, so writing them on the clicked widget (when the widget is a
@@ -45,6 +54,20 @@ fn acroform(doc: &Document) -> Option<&Dictionary> {
         .ok()
         .and_then(|o| deref(doc, o))
         .and_then(|o| o.as_dict().ok())
+}
+
+/// A variable-text field's `/Q` quadding (0 left, 1 centred, 2 right): the
+/// field's own, inheritable up `/Parent` (§12.7.4.3 Table 222), else the
+/// AcroForm document-wide default (§12.7.2 Table 218).
+fn field_quadding(doc: &Document, id: ObjectId) -> i64 {
+    inherited_num(doc, id, b"Q")
+        .or_else(|| {
+            acroform(doc)
+                .and_then(|af| af.get(b"Q").ok())
+                .and_then(|o| deref(doc, o).or(Some(o)))
+                .and_then(num)
+        })
+        .unwrap_or(0.0) as i64
 }
 
 /// The pieces of a `/DA` default appearance string that a generated field
@@ -500,12 +523,18 @@ fn build_text_appearance(
         String::from_utf8_lossy(font)
     ));
 
-    if comb && max_len > 0 {
-        // One glyph per cell, centered in each cell. The vertical offset has to
-        // be repeated on every `Tm`: `Tm` REPLACES the text matrix rather than
-        // concatenating (§9.4.2), so setting the baseline once up front and then
-        // issuing per-cell `Tm`s dropped every glyph to y=0, sitting the row on
-        // the bottom edge of the box with its descenders clipped.
+    if comb && !multiline && max_len > 0 {
+        // One glyph per cell, centered in each cell. §12.7.4.3 Table 226 bit 25
+        // makes Comb "meaningful only if the MaxLen entry is present ... and if
+        // the Multiline, Password, and FileSelect flags are clear", so a field
+        // carrying both flags wraps rather than chopping the value into MaxLen
+        // one-character cells on a single row.
+        //
+        // The vertical offset has to be repeated on every `Tm`: `Tm` REPLACES
+        // the text matrix rather than concatenating (§9.4.2), so setting the
+        // baseline once up front and then issuing per-cell `Tm`s dropped every
+        // glyph to y=0, sitting the row on the bottom edge of the box with its
+        // descenders clipped.
         let cell_w = w / max_len as f64;
         let base_y = (h - size) / 2.0;
         for (i, ch) in value.chars().take(max_len).enumerate() {
@@ -598,22 +627,17 @@ pub(crate) fn set_text_field(handle: i64, widget_id: i64, value: &str) -> bool {
     // /V is a field key, so it belongs on the terminal field; setting it on the
     // clicked widget leaves every other widget of the field stale.
     let root_id = terminal_field_id(doc, id);
-    // Field flags / alignment / comb length (Q may be inherited from AcroForm).
-    let dict_ro = doc.get_dictionary(root_id).ok().or_else(|| doc.get_dictionary(id).ok());
-    let flags = dict_ro
-        .and_then(|d| d.get(b"Ff").ok())
-        .and_then(num)
-        .unwrap_or(0.0) as u32;
+    // §12.7.3.1 Table 220 marks /Ff and §12.7.4.3 Table 222 marks /Q and /MaxLen
+    // "Optional; inheritable", and §12.7.2 Table 218 makes the AcroForm /Q the
+    // document-wide default. Reading them off one dictionary missed both routes:
+    // a field whose /Ff sits on a grouping ancestor lost its Multiline flag and
+    // rendered a wrapped value as one clipped line, and a form aligned solely by
+    // the AcroForm /Q rendered every field flush left.
+    let flags = inherited_num(doc, id, b"Ff").unwrap_or(0.0) as u32;
     let multiline = flags & (1 << 12) != 0; // Ff bit 13
     let comb = flags & (1 << 24) != 0; // Ff bit 25
-    let quadding = dict_ro
-        .and_then(|d| d.get(b"Q").ok())
-        .and_then(num)
-        .unwrap_or(0.0) as i64;
-    let max_len = dict_ro
-        .and_then(|d| d.get(b"MaxLen").ok())
-        .and_then(num)
-        .unwrap_or(0.0) as usize;
+    let quadding = field_quadding(doc, id);
+    let max_len = inherited_num(doc, id, b"MaxLen").unwrap_or(0.0) as usize;
     // §12.7.3.3: /DA carries the field's font, size and colour. Resolved once for
     // the field, since /DA is a field key shared by all its widgets.
     let da = field_da(doc, id);
@@ -808,6 +832,9 @@ pub(crate) fn set_choice_field(handle: i64, widget_id: i64, value: &str) -> bool
 
     let da = field_da(doc, id);
     let (da_res, da_font) = da_font_resources(doc, da.font.as_deref());
+    // §12.7.4.4 makes a choice field a variable-text field, so /Q applies to it
+    // exactly as it does to a text field.
+    let quadding = field_quadding(doc, id);
     let ap_id = rect.map(|r| {
         // Same display-orientation handling as set_text_field (§12.5.2 /P).
         let rot = doc
@@ -820,7 +847,7 @@ pub(crate) fn set_choice_field(handle: i64, widget_id: i64, value: &str) -> bool
         let (w, h, apm) = display_orientation(rot, r[2] - r[0], r[3] - r[1]);
         let size = field_font_size(da.size, h);
         // The widget shows the display string, not the export value.
-        let content = build_text_appearance(value, w, h, size, &da_font, da.argb, 0, false, false, 0);
+        let content = build_text_appearance(value, w, h, size, &da_font, da.argb, quadding, false, false, 0);
         make_appearance_oriented(doc, w, h, content, da_res, apm)
     });
 
@@ -1302,6 +1329,85 @@ mod da_tests {
         let fonts = res.get(b"Font").and_then(|o| o.as_dict()).expect("/Font");
         assert!(fonts.get(&name).is_ok(), "adopted font missing from resources");
         assert!(fonts.get(b"F1").is_ok(), "substitute must stay available");
+    }
+
+    /// §12.7.3.1 Table 220 marks `/Ff`, and §12.7.4.3 Table 222 marks `/Q` and
+    /// `/MaxLen`, "Optional; inheritable"; §12.7.2 Table 218 makes the AcroForm
+    /// `/Q` the document-wide default. A generator that reads them off a single
+    /// dictionary renders a wrapped value as one clipped line and ignores the
+    /// form's alignment entirely.
+    #[test]
+    fn inheritable_field_attributes_reach_the_generated_appearance() {
+        // widget -> terminal field (/FT, /Ff, /MaxLen) -> group -> AcroForm /Q.
+        let mut doc = Document::with_version("1.7");
+        let group_id = doc.new_object_id();
+        let field_id = doc.new_object_id();
+        let widget = doc.add_object(dictionary! {
+            "Type" => name_obj("Annot"), "Subtype" => name_obj("Widget"),
+            "Rect" => rect_obj([0.0, 0.0, 200.0, 60.0]),
+            "Parent" => Object::Reference(field_id),
+        });
+        doc.objects.insert(
+            field_id,
+            Object::Dictionary(dictionary! {
+                "FT" => name_obj("Tx"),
+                "Ff" => 1 << 12, // Multiline
+                "Parent" => Object::Reference(group_id),
+                "Kids" => Object::Array(vec![Object::Reference(widget)]),
+            }),
+        );
+        doc.objects.insert(
+            group_id,
+            Object::Dictionary(dictionary! { "Kids" => Object::Array(vec![Object::Reference(field_id)]) }),
+        );
+        let acro = doc.add_object(dictionary! {
+            "Q" => 2, // right-aligned, document-wide
+            "Fields" => Object::Array(vec![Object::Reference(group_id)]),
+        });
+        let pages = doc.add_object(dictionary! { "Type" => "Pages", "Kids" => Object::Array(vec![]), "Count" => 0 });
+        let cat = doc.add_object(dictionary! { "Type" => "Catalog", "Pages" => pages, "AcroForm" => acro });
+        doc.trailer.set("Root", cat);
+
+        assert_eq!(super::inherited_num(&doc, widget, b"Ff"), Some(4096.0), "/Ff up /Parent");
+
+        let handle = next_handle();
+        registry().lock().unwrap_or_else(|e| e.into_inner()).insert(handle, doc);
+        assert!(set_text_field(handle, encode_id(widget), "alpha beta gamma delta epsilon zeta"));
+
+        let reg = registry().lock().unwrap_or_else(|e| e.into_inner());
+        let doc = reg.get(&handle).expect("doc");
+        let ap = doc
+            .get_dictionary(widget)
+            .and_then(|d| d.get(b"AP"))
+            .ok()
+            .and_then(|o| deref(doc, o))
+            .and_then(|o| o.as_dict().ok())
+            .and_then(|ap| ap.get(b"N").ok())
+            .and_then(|o| deref(doc, o))
+            .and_then(|o| o.as_stream().ok())
+            .expect("/AP /N");
+        let c = String::from_utf8_lossy(&ap.content).into_owned();
+        assert!(c.matches("Tj").count() > 1, "inherited Multiline never wrapped: {c}");
+        // Right-aligned from the AcroForm /Q, so no line starts at the left inset.
+        assert!(!c.contains("1 0 0 1 2.00 "), "AcroForm /Q 2 ignored, drew flush left: {c}");
+        drop(reg);
+        close_document(handle);
+    }
+
+    /// §12.7.4.3 Table 226 bit 25: Comb is "meaningful only if the MaxLen entry
+    /// is present ... and if the Multiline, Password, and FileSelect flags are
+    /// clear". Applied regardless, it chops a multiline value into `MaxLen`
+    /// one-character cells on a single row.
+    #[test]
+    fn comb_is_ignored_when_the_field_is_also_multiline() {
+        let combed = build_text_appearance("AB", 100.0, 20.0, 12.0, b"F1", 0, 0, false, true, 5);
+        let wrapped = build_text_appearance("AB", 100.0, 20.0, 12.0, b"F1", 0, 0, true, true, 5);
+        assert_eq!(String::from_utf8_lossy(&combed).matches("Tj").count(), 2, "comb: one Tj per cell");
+        assert_eq!(
+            String::from_utf8_lossy(&wrapped).matches("Tj").count(),
+            1,
+            "multiline + comb must lay out as one line, not per-character cells"
+        );
     }
 }
 

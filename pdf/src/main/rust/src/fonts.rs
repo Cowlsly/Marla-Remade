@@ -405,7 +405,10 @@ fn named_base_encoding_names(doc: &Document, font: &lopdf::Dictionary) -> HashMa
 }
 
 pub(crate) fn font_info(doc: &Document, font: &lopdf::Dictionary) -> FontInfo {
-    let subtype = font.get(b"Subtype").ok().and_then(|o| o.as_name().ok());
+    // Every one of these may be an indirect reference. An unresolved `/Subtype`
+    // silently makes a Type0 font parse as a simple one — 2-byte codes read as
+    // single bytes, so the whole string decodes to garbage.
+    let subtype = font.get(b"Subtype").ok().and_then(|o| deref(doc, o)).and_then(|o| o.as_name().ok());
     let two_byte = matches!(subtype, Some(b"Type0"));
     let is_type3 = subtype == Some(b"Type3");
     let to_unicode = font
@@ -619,7 +622,7 @@ pub(crate) fn font_info(doc: &Document, font: &lopdf::Dictionary) -> FontInfo {
     }
 
     // --- Font style detection for bold/italic synthesis ---
-    let base_font_name = font.get(b"BaseFont").ok().and_then(|o| o.as_name().ok())
+    let base_font_name = font.get(b"BaseFont").ok().and_then(|o| deref(doc, o)).and_then(|o| o.as_name().ok())
         .map(|n| String::from_utf8_lossy(n).to_string())
         .or_else(|| {
             // Try descendant for Type0
@@ -628,6 +631,7 @@ pub(crate) fn font_info(doc: &Document, font: &lopdf::Dictionary) -> FontInfo {
                 .and_then(|o| deref(doc, o))
                 .and_then(|o| o.as_dict().ok())
                 .and_then(|d| d.get(b"BaseFont").ok())
+                .and_then(|o| deref(doc, o))
                 .and_then(|o| o.as_name().ok())
                 .map(|n| String::from_utf8_lossy(n).to_string())
         })
@@ -726,6 +730,17 @@ pub(crate) fn font_info(doc: &Document, font: &lopdf::Dictionary) -> FontInfo {
             // reachable by resolving the AFM name to Unicode and matching the
             // encoding's code -> Unicode map. Built in sorted-name order so a
             // Unicode collision resolves deterministically.
+            //
+            // Deterministic is NOT the same as correct, and the difference is worth
+            // knowing before trusting a width that came from here. This map is keyed
+            // by Unicode, so when several AFM glyphs share one character the code's
+            // OWN glyph is not necessarily the one that wins — the alphabetically
+            // first name does. Symbol's bracket build-up pieces are the live case:
+            // if the encoding maps `parenlefttp` to '(' then that code inherits
+            // `parenleft`'s advance. It stays a strictly better estimate than the
+            // invented default this path exists to avoid, but a code whose true
+            // advance is known should reach the exact-name lookup above instead of
+            // arriving here.
             let by_char: HashMap<char, f64> = {
                 let mut names: Vec<&String> = afm.keys().collect();
                 names.sort();
@@ -743,6 +758,19 @@ pub(crate) fn font_info(doc: &Document, font: &lopdf::Dictionary) -> FontInfo {
                     .cloned()
                     .or_else(|| base_names.get(&code).cloned())
                     .or_else(|| {
+                        // Last resort, and it runs for EVERY face — including Symbol
+                        // and ZapfDingbats, whose built-in encodings have nothing to
+                        // do with StandardEncoding. That makes this a cross-file
+                        // invariant with afm.rs, not a local choice: a Standard name
+                        // that an AFM table also defines AT A DIFFERENT CODE would be
+                        // charged here, silently, in preference to the encoding-derived
+                        // match below. r5-fontprog enumerated the collision set for
+                        // Symbol in R5 and it is EMPTY — Standard and Symbol share only
+                        // fraction, florin, bullet and ellipsis, at the same code in
+                        // both — so the guess is safe today. It is afm.rs's table
+                        // contents that keep it safe, so anyone ADDING rows there has
+                        // to re-check against `STANDARD_ENCODING`'s 0xA0-0xFF names,
+                        // and anyone reordering this chain has to re-check the reverse.
                         crate::type1::STANDARD_ENCODING
                             .iter()
                             .find(|(c, _)| *c as u32 == code)
@@ -819,7 +847,7 @@ fn type3_widths(doc: &Document, font: &lopdf::Dictionary, fm_scale: f64) -> (Has
     if let Some(Object::Array(arr)) = font.get(b"Widths").ok().and_then(|o| deref(doc, o)) {
         for (i, w) in arr.iter().enumerate() {
             if let Some(w) = deref(doc, w).and_then(num) {
-                widths.insert(first_char + i as u32, w * fm_scale);
+                widths.insert(first_char.saturating_add(i as u32), w * fm_scale);
             }
         }
     }
@@ -841,7 +869,11 @@ pub(crate) fn simple_widths(doc: &Document, font: &lopdf::Dictionary) -> (HashMa
     if let Some(Object::Array(arr)) = font.get(b"Widths").ok().and_then(|o| deref(doc, o)) {
         for (i, w) in arr.iter().enumerate() {
             if let Some(w) = deref(doc, w).and_then(num) {
-                widths.insert(first_char + i as u32, w / 1000.0);
+                // `/FirstChar` is file-controlled and `num`'s `as u32` saturates at
+                // u32::MAX, so `first_char + i` panics in debug and WRAPS in release
+                // — putting the whole /Widths table on codes 0.. and charging every
+                // glyph the wrong advance. Same hazard the `/W` array form carries.
+                widths.insert(first_char.saturating_add(i as u32), w / 1000.0);
             }
         }
     }
@@ -1131,7 +1163,10 @@ pub(crate) mod ttf {
                             let range_off = u16b(b, sh_off + 6) as usize;
                             let glyph: u16 = if range_off == 0 {
                                 let delta = u16b(b, sh_off + 4) as i16;
-                                (sbyte as i16 + delta) as u16
+                                // idDelta is modulo-65536 arithmetic (OpenType `cmap`,
+                                // format 2/4). A plain `+` panics in debug on a crafted
+                                // delta; format 4 below already wraps.
+                                (sbyte as i16).wrapping_add(delta) as u16
                             } else {
                                 let addr = ghi_off + range_off;
                                 u16b(b, addr)
@@ -1160,7 +1195,7 @@ pub(crate) mod ttf {
                     for low in 0u32..entry_count.min(256) {
                         let code = (hi << 8) | (first_code + low);
                         let gid = if range_off == 0 {
-                            ((first_code + low) as i16 + delta) as u16
+                            ((first_code + low) as i16).wrapping_add(delta) as u16
                         } else {
                             let addr = sub_header_off + sh_idx * 8 + 6 + range_off + (low as usize * 2);
                             u16b(b, addr)
@@ -1257,7 +1292,8 @@ pub(crate) mod ttf {
                 for i in 0..count.min(0x20000) {
                     let g = u16b(b, off + 20 + i * 2);
                     if g != 0 {
-                        out.push((first + i as u32, g));
+                        // `first` is a file-supplied u32: `first + i` panics in debug.
+                        out.push((first.saturating_add(i as u32), g));
                     }
                 }
             }
@@ -1275,7 +1311,10 @@ pub(crate) mod ttf {
                         continue;
                     }
                     for c in sc..=ec {
-                        out.push((c, (sg + (c - sc)) as u16));
+                        // `sg` is a file-supplied u32 and startGlyphID is modulo
+                        // arithmetic once truncated to a glyph id; a plain `+`
+                        // panics in debug near u32::MAX.
+                        out.push((c, sg.wrapping_add(c - sc) as u16));
                     }
                 }
             }
@@ -1473,6 +1512,50 @@ pub(crate) mod ttf {
             assert!(pairs.contains(&(0x41, 7)));
             assert!(pairs.contains(&(0x42, 8)));
         }
+
+        /// A `cmap` comes from an untrusted embedded font program, and the code
+        /// arithmetic in formats 2, 10 and 12 is all file-supplied. Debug builds
+        /// panic on integer overflow, so an unchecked `+` here is reachable by a
+        /// crafted (or merely corrupt) /FontFile2. Format 4 was already hardened
+        /// with `wrapping_add`; these three were not.
+        #[test]
+        fn hostile_cmap_subtables_do_not_overflow() {
+            // Format 10 with startCharCode = u32::MAX.
+            let mut b = Vec::new();
+            b.extend_from_slice(&be16(10));
+            b.extend_from_slice(&be16(0));
+            b.extend_from_slice(&be32(0));
+            b.extend_from_slice(&be32(0));
+            b.extend_from_slice(&be32(u32::MAX));
+            b.extend_from_slice(&be32(3));
+            for g in 1..=3u16 {
+                b.extend_from_slice(&be16(g));
+            }
+            assert!(!parse_subtable(&b, 0).is_empty());
+
+            // Format 12 with startGlyphID = u32::MAX over a multi-code group.
+            let mut b = Vec::new();
+            b.extend_from_slice(&be16(12));
+            b.extend_from_slice(&be16(0));
+            b.extend_from_slice(&be32(0));
+            b.extend_from_slice(&be32(0));
+            b.extend_from_slice(&be32(1));
+            b.extend_from_slice(&be32(0x41));
+            b.extend_from_slice(&be32(0x43));
+            b.extend_from_slice(&be32(u32::MAX));
+            assert_eq!(parse_subtable(&b, 0).len(), 3);
+
+            // Format 2 with an idDelta that overflows i16 for the mapped code.
+            let mut b = vec![0u8; 6];
+            b[0..2].copy_from_slice(&be16(2));
+            b.extend_from_slice(&[0u8; 512]); // subHeaderKeys: all single-byte
+            b.extend_from_slice(&be16(0));    // firstCode 0
+            b.extend_from_slice(&be16(0));    // entryCount
+            b.extend_from_slice(&be16(0x7FFF)); // idDelta
+            b.extend_from_slice(&be16(0));    // idRangeOffset
+            b.extend_from_slice(&[0u8; 8]);   // glyphIndexArray
+            let _ = parse_subtable(&b, 0);
+        }
     }
 }
 
@@ -1497,6 +1580,7 @@ pub(crate) mod encoding {
         let base_font = font
             .get(b"BaseFont")
             .ok()
+            .and_then(|o| deref(doc, o))
             .and_then(|o| o.as_name().ok())
             .map(|n| String::from_utf8_lossy(n).into_owned())
             .unwrap_or_default();
@@ -1508,6 +1592,7 @@ pub(crate) mod encoding {
             Some(Object::Dictionary(d)) => d
                 .get(b"BaseEncoding")
                 .ok()
+                .and_then(|o| deref(doc, o))
                 .and_then(|o| o.as_name().ok())
                 .map(|n| String::from_utf8_lossy(n).into_owned()),
             _ => None,
@@ -2122,6 +2207,129 @@ mod encoding_priority_tests {
         assert_eq!(map.get(&0x41).map(String::as_str), Some("a"));
         assert_eq!(map.get(&0x42).map(String::as_str), Some("b"));
         assert_eq!(map.get(&0x43), None, "the surplus entry is outside the range");
+    }
+}
+
+#[cfg(test)]
+mod blind_reaudit_r5_width_tests {
+    use super::*;
+
+    /// `/FirstChar` is file-controlled and `num`'s `as u32` SATURATES at u32::MAX,
+    /// so `first_char + i` panicked in debug and wrapped in release — silently
+    /// dropping the whole /Widths table onto codes 0.. and charging every glyph of
+    /// the string another glyph's advance. `/W`'s array form was hardened against
+    /// exactly this; `/Widths` and Type 3's `/Widths` were not.
+    #[test]
+    fn a_hostile_first_char_cannot_overflow_the_simple_width_table() {
+        let doc = Document::new();
+        let font = dictionary! {
+            "Type" => "Font", "Subtype" => "TrueType", "BaseFont" => "NotAStandardFace",
+            "FirstChar" => 4_294_967_295u32,
+            "Widths" => vec![500.into(), 600.into(), 700.into()],
+        };
+        let (widths, _) = simple_widths(&doc, &font);
+        // No wrap: nothing may land on a low code that a real glyph would use.
+        // The saturated entries collide on u32::MAX, which is harmless — a simple
+        // font's codes are single bytes, so no showing operator can ever ask for it.
+        assert_eq!(widths.get(&0), None, "an overflowed key would collide with code 0");
+        assert_eq!(widths.get(&1), None);
+        assert_eq!(widths.keys().copied().collect::<Vec<_>>(), vec![u32::MAX]);
+    }
+
+    #[test]
+    fn a_hostile_first_char_cannot_overflow_the_type3_width_table() {
+        let doc = Document::new();
+        let font = dictionary! {
+            "Type" => "Font", "Subtype" => "Type3",
+            "FirstChar" => 4_294_967_295u32,
+            "Widths" => vec![500.into(), 600.into()],
+        };
+        let (widths, _) = type3_widths(&doc, &font, 0.001);
+        assert_eq!(widths.get(&0), None);
+        assert_eq!(widths.keys().copied().collect::<Vec<_>>(), vec![u32::MAX]);
+    }
+
+    /// Any dictionary value may be an indirect reference (7.3.10). An unresolved
+    /// `/BaseFont` is not a missing name, it is the WRONG one: a non-embedded
+    /// Helvetica loses its Core-14 metrics and every glyph falls back to a flat
+    /// 0.5 em, so the line drifts against the rules and boxes drawn around it.
+    #[test]
+    fn an_indirect_base_font_still_resolves_its_standard_14_metrics() {
+        let mut doc = Document::new();
+        let name = doc.add_object(Object::Name(b"Helvetica".to_vec()));
+        let font = dictionary! {
+            "Type" => "Font", "Subtype" => "Type1",
+            "BaseFont" => Object::Reference(name),
+            "Encoding" => "WinAnsiEncoding",
+        };
+        let fi = font_info(&doc, &font);
+        assert_eq!(fi.widths.get(&65).copied(), Some(0.667), "Helvetica's real /A advance");
+        assert_eq!(fi.widths.get(&105).copied(), Some(0.222), "…and its narrow /i");
+    }
+
+    /// The standard-14 code->name chain ends in a StandardEncoding guess that runs
+    /// for EVERY face, including Symbol, whose built-in encoding has nothing to do
+    /// with StandardEncoding. It is safe only because no Symbol AFM name is also a
+    /// StandardEncoding name at a DIFFERENT code — a property of afm.rs's table
+    /// contents, not of this file, so a row added there could break it silently and
+    /// at a distance. This asserts the invariant instead of documenting it: wherever
+    /// the Standard guess and the font's own encoding both yield a width, they must
+    /// agree. r5-fontprog enumerated the collision set by hand in R5 and found it
+    /// empty; this keeps it empty.
+    #[test]
+    fn the_standard_encoding_guess_never_contradicts_symbols_own_encoding() {
+        let afm = crate::afm::standard_14_widths("Symbol").expect("Symbol is a Core-14 face");
+        let enc = crate::glyphlist::symbol();
+        // `by_char` exactly as `font_info` builds it: sorted names, first wins.
+        let by_char: HashMap<char, f64> = {
+            let mut names: Vec<&String> = afm.keys().collect();
+            names.sort();
+            let mut m = HashMap::new();
+            for n in names {
+                if let Some(c) = encoding::glyph_to_char(n) {
+                    m.entry(c).or_insert(afm[n]);
+                }
+            }
+            m
+        };
+        let mut checked = 0;
+        for (code, name) in crate::type1::STANDARD_ENCODING {
+            let Some(&guessed) = afm.get(*name) else { continue };
+            let Some(&derived) = enc.get(&(*code as u32)).and_then(|c| by_char.get(c)) else {
+                continue;
+            };
+            assert_eq!(
+                guessed, derived,
+                "code {code:#04x}: StandardEncoding names it {name:?} ({guessed}), but Symbol's \
+                 own encoding puts a {derived}-wide glyph there. The name guess runs FIRST, so \
+                 this code would be charged the wrong advance."
+            );
+            checked += 1;
+        }
+        assert!(checked > 20, "only {checked} codes compared — the fixture stopped working");
+    }
+
+    /// Likewise `/Subtype`: unresolved, a Type0 font parses as a simple one, so its
+    /// 2-byte codes are read one byte at a time and the entire string decodes to
+    /// unrelated glyphs at unrelated advances.
+    #[test]
+    fn an_indirect_subtype_is_resolved_before_choosing_the_code_width() {
+        let mut doc = Document::new();
+        let sub = doc.add_object(Object::Name(b"Type0".to_vec()));
+        let desc = doc.add_object(dictionary! {
+            "Type" => "Font", "Subtype" => "CIDFontType2", "DW" => 1000,
+        });
+        let font = dictionary! {
+            "Type" => "Font",
+            "Subtype" => Object::Reference(sub),
+            "BaseFont" => "Test",
+            "DescendantFonts" => vec![desc.into()],
+        };
+        let fi = font_info(&doc, &font);
+        assert!(fi.two_byte, "an indirect /Type0 must still be a composite font");
+        let mut codes = Vec::new();
+        fi.for_each_code(&[0x00, 0x41], |c, _| codes.push(c));
+        assert_eq!(codes, vec![0x0041], "one 2-byte code, not two 1-byte codes");
     }
 }
 

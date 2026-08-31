@@ -133,6 +133,58 @@ class DrawSafePageTextTest {
         )
     }
 
+    /** A fill covering the whole page in page space (y-up), used as the clip's victim. */
+    private fun pageFill() = PdfPrimitive.FillPath(
+        color = 0xFF000000.toInt(),
+        evenOdd = false,
+        contours = listOf(
+            listOf(
+                Offset(0f, 0f), Offset(pageWidth, 0f),
+                Offset(pageWidth, pageHeight), Offset(0f, pageHeight),
+            )
+        ),
+    )
+
+    /**
+     * Mode 7 paints nothing but MUST still contribute its glyph outlines to the clip
+     * (§9.3.6 Table 106 "clip only"; §9.4.3 intersects them at ET). Painting and clipping
+     * are separate halves of the mode and it is easy to suppress both together.
+     *
+     * This became load-bearing across the language boundary: `interpret.rs:118`
+     * `hidden_render_mode` routes an OC-hidden CLIPPING run to 7 rather than collapsing it
+     * to 3, precisely so the clip contribution survives. If this accumulator stopped taking
+     * mode 7, `TextClipApply` would open a level and narrow nothing, and the art meant to
+     * show only inside the letterforms would paint as a full opaque rectangle.
+     */
+    @Test
+    fun renderModeSevenStillNarrowsTheTextClip() {
+        val clipped = inkedPixels(
+            rasterize(
+                text(renderMode = 7),
+                PdfPrimitive.TextClipApply,
+                pageFill(),
+                PdfPrimitive.ClipPop,
+            )
+        )
+        val unclipped = inkedPixels(
+            rasterize(
+                PdfPrimitive.TextClipApply,
+                pageFill(),
+                PdfPrimitive.ClipPop,
+            )
+        )
+        assertEquals(
+            (pageWidth * pageHeight).toInt(),
+            unclipped,
+            "the control must cover the page, or the comparison below proves nothing",
+        )
+        assertTrue(clipped > 0, "mode 7 accumulated no outlines, so the clip kept nothing")
+        assertTrue(
+            clipped < unclipped / 2,
+            "the fill was not clipped to the glyphs: $clipped of $unclipped pixels survived",
+        )
+    }
+
     /**
      * The counterpart: the guard must be exactly modes 3 and 7 and nothing wider. A guard that
      * suppressed too much would blank out real text, so pin every painting mode.

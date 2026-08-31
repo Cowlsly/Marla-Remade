@@ -84,9 +84,16 @@ pub(crate) fn remap_object(obj: &Object, map: &HashMap<ObjectId, ObjectId>) -> O
 /// Append every page of the PDF in `bytes` to the document behind `handle`.
 /// Returns the number of pages added (0 on failure/encrypted source).
 pub(crate) fn append_pdf(handle: i64, bytes: &[u8]) -> i32 {
-    let src = match Document::load_mem(bytes) {
-        Ok(d) => d,
-        Err(_) => return 0,
+    // The same untrusted, user-picked bytes that `open_document_pw` takes, so the same
+    // door: raw `Document::load_mem` skips the §7.5.1 pre-scan that `load_document_lenient`
+    // performs, and both hazards it exists for are unrecoverable once lopdf is entered —
+    // unbounded recursion in the object parser is a guard-page fault, not an unwind, so
+    // the JNI `catch_unwind` cannot see it, and a degenerate `/W [0 0 0]` cross-reference
+    // stream is a multi-billion-iteration loop rather than an error. It also means a
+    // damaged file the viewer can open can now be appended too.
+    let src = match load_document_lenient(bytes) {
+        Some(d) => d,
+        None => return 0,
     };
     if src.trailer.get(b"Encrypt").is_ok() {
         return 0;
@@ -250,7 +257,11 @@ pub(crate) fn rotate_page(handle: i64, index: i32, delta: i32) -> bool {
         None => return false,
     };
     let cur = page_rotation(doc, page_id) as i32;
-    let new = (((cur + delta) % 360) + 360) % 360;
+    // `delta` arrives raw from the JNI boundary, so `cur + delta` can overflow i32:
+    // a debug panic WHILE HOLDING the registry mutex (poisoning it for every other
+    // caller), and a silent wrap in release, where overflow checks are off. Reducing
+    // both terms first keeps the sum below 720.
+    let new = (cur.rem_euclid(360) + delta.rem_euclid(360)).rem_euclid(360);
     if let Ok(pd) = doc.get_dictionary_mut(page_id) {
         pd.set("Rotate", Object::Integer(new as i64));
         true
@@ -401,18 +412,27 @@ pub(crate) fn save_compressed(handle: i64) -> Option<Vec<u8>> {
     Some(out)
 }
 
-/// Ensure page `page_id` has an inline `/Resources /XObject` mapping `name` -> `xid`.
-pub(crate) fn add_page_xobject(doc: &mut Document, page_id: ObjectId, name: &str, xid: ObjectId) {
+/// Ensure page `page_id` has an inline `/Resources` sub-dictionary `category`
+/// mapping `name` -> `id`.
+fn add_page_resource(
+    doc: &mut Document,
+    page_id: ObjectId,
+    category: &str,
+    name: &str,
+    id: ObjectId,
+) {
     // Resolve to an inline Resources dict on the page (copying a referenced one).
     let res_inline = matches!(
         doc.get_dictionary(page_id).ok().and_then(|d| d.get(b"Resources").ok()),
         Some(Object::Dictionary(_))
     );
     if !res_inline {
-        let copied = doc
-            .get_dictionary(page_id)
-            .ok()
-            .and_then(|d| d.get(b"Resources").ok())
+        // §7.7.3.4: /Resources is INHERITABLE, so a page that carries none is not a
+        // page without resources — `resources_dict`, the renderer's read path, walks
+        // /Parent for it. Seeding the inline copy from the page's OWN entry produced
+        // an empty dictionary that then SHADOWS the inherited one, so flattening a
+        // single annotation blanked every font and image on such a page.
+        let copied = inherited(doc, page_id, b"Resources")
             .and_then(|o| deref(doc, o))
             .and_then(|o| o.as_dict().ok())
             .cloned()
@@ -423,15 +443,20 @@ pub(crate) fn add_page_xobject(doc: &mut Document, page_id: ObjectId, name: &str
     }
     if let Ok(p) = doc.get_dictionary_mut(page_id) {
         if let Ok(Object::Dictionary(res)) = p.get_mut(b"Resources") {
-            let has_xo = matches!(res.get(b"XObject"), Ok(Object::Dictionary(_)));
-            if !has_xo {
-                res.set("XObject", Object::Dictionary(Dictionary::new()));
+            let has = matches!(res.get(category.as_bytes()), Ok(Object::Dictionary(_)));
+            if !has {
+                res.set(category, Object::Dictionary(Dictionary::new()));
             }
-            if let Ok(Object::Dictionary(xo)) = res.get_mut(b"XObject") {
-                xo.set(name, Object::Reference(xid));
+            if let Ok(Object::Dictionary(sub)) = res.get_mut(category.as_bytes()) {
+                sub.set(name, Object::Reference(id));
             }
         }
     }
+}
+
+/// Ensure page `page_id` has an inline `/Resources /XObject` mapping `name` -> `xid`.
+pub(crate) fn add_page_xobject(doc: &mut Document, page_id: ObjectId, name: &str, xid: ObjectId) {
+    add_page_resource(doc, page_id, "XObject", name, xid);
 }
 
 /// Prepend `content_id` (a content stream) before page `page_id`'s `/Contents`.
@@ -496,7 +521,7 @@ pub(crate) fn flatten_document(handle: i64) -> bool {
         if annot_ids.is_empty() {
             continue;
         }
-        let mut placements: Vec<(String, ObjectId, Mat)> = Vec::new();
+        let mut placements: Vec<(String, ObjectId, Mat, f64)> = Vec::new();
         for (i, aid) in annot_ids.iter().enumerate() {
             let dict = match doc.get_dictionary(*aid) {
                 Ok(d) => d,
@@ -562,16 +587,42 @@ pub(crate) fn flatten_document(handle: i64) -> bool {
             // `display_orientation`), so flattening one used to rotate it a
             // second time and translate it clean off its /Rect.
             let m = appearance_fit_matrix(rect, bbox, matrix);
-            placements.push((format!("Fl{}_{}", page_id.0, i), ap_id, m));
+            // §12.5.2 Table 164: /CA is the annotation's constant opacity, and the
+            // renderer honours it (`render_annotation`). A bare `cm ... Do` carries no
+            // alpha, so flattening turned a half-transparent highlight or stamp fully
+            // opaque — and /Annots is dropped below, so it cannot be undone. §12.5.2
+            // makes /CA govern stroking and non-stroking alike, so it is emitted as an
+            // /ExtGState setting BOTH /ca and /CA (§11.6.4.4).
+            let ca = dict
+                .get(b"CA")
+                .ok()
+                .and_then(|o| deref(doc, o).or(Some(o)))
+                .and_then(num)
+                .unwrap_or(1.0)
+                .clamp(0.0, 1.0);
+            placements.push((format!("Fl{}_{}", page_id.0, i), ap_id, m, ca));
         }
         if placements.is_empty() {
             continue;
         }
         let mut content = String::new();
-        for (name, _, m) in &placements {
+        let mut gstates: Vec<(String, ObjectId)> = Vec::new();
+        for (i, (name, _, m, ca)) in placements.iter().enumerate() {
+            let gs = if *ca < 1.0 {
+                let gid = doc.add_object(dictionary! {
+                    "Type" => name_obj("ExtGState"),
+                    "ca" => Object::Real(*ca as f32),
+                    "CA" => Object::Real(*ca as f32),
+                });
+                let gname = format!("FlG{}_{}", page_id.0, i);
+                gstates.push((gname.clone(), gid));
+                format!("/{gname} gs ")
+            } else {
+                String::new()
+            };
             content.push_str(&format!(
-                "q {:.4} {:.4} {:.4} {:.4} {:.4} {:.4} cm /{} Do Q ",
-                m[0], m[1], m[2], m[3], m[4], m[5], name
+                "q {:.4} {:.4} {:.4} {:.4} {:.4} {:.4} cm {}/{} Do Q ",
+                m[0], m[1], m[2], m[3], m[4], m[5], gs, name
             ));
         }
         let cid = doc.add_object(Stream::new(dictionary! {}, content.into_bytes()));
@@ -584,8 +635,11 @@ pub(crate) fn flatten_document(handle: i64) -> bool {
         prepend_content(doc, page_id, qid);
         append_content(doc, page_id, unqid);
         append_content(doc, page_id, cid);
-        for (name, ap_id, _) in &placements {
+        for (name, ap_id, _, _) in &placements {
             add_page_xobject(doc, page_id, name, *ap_id);
+        }
+        for (name, gid) in &gstates {
+            add_page_resource(doc, page_id, "ExtGState", name, *gid);
         }
         if let Ok(p) = doc.get_dictionary_mut(page_id) {
             p.remove(b"Annots");
@@ -698,6 +752,95 @@ pub(crate) fn redact_operations(
     out
 }
 
+/// Encode an operator list back into content-stream bytes.
+///
+/// Not `Content::encode` on its own: §8.9.7 inline images come out of lopdf's parser
+/// as a single `BI` operation whose one operand is an `Object::Stream`, and the writer
+/// serializes a stream in INDIRECT-object syntax — `<< ... >> stream <data> endstream`,
+/// with no `ID` and the `BI` keyword landing AFTER the data. That is not a content
+/// stream: the image is destroyed and every operator after it desynchronizes. So `BI`
+/// is re-emitted in inline syntax here and the rest is handed to `Content::encode`.
+fn encode_operations(ops: Vec<lopdf::content::Operation>) -> Option<Vec<u8>> {
+    fn flush(run: &mut Vec<lopdf::content::Operation>, out: &mut Vec<u8>) -> Option<()> {
+        if run.is_empty() {
+            return Some(());
+        }
+        let encoded = Content { operations: std::mem::take(run) }.encode().ok()?;
+        out.extend_from_slice(&encoded);
+        out.push(b'\n');
+        Some(())
+    }
+    let mut out = Vec::new();
+    let mut run: Vec<lopdf::content::Operation> = Vec::new();
+    for op in ops {
+        let inline = match (op.operator.as_str(), op.operands.first()) {
+            ("BI", Some(Object::Stream(s))) => Some(s.clone()),
+            _ => None,
+        };
+        match inline {
+            Some(s) => {
+                flush(&mut run, &mut out)?;
+                out.extend_from_slice(&encode_inline_image(&s)?);
+                out.push(b'\n');
+            }
+            None => run.push(op),
+        }
+    }
+    flush(&mut run, &mut out)?;
+    Some(out)
+}
+
+/// §8.9.7 `BI <key value>… ID <data> EI`.
+///
+/// The key/value pairs are emitted through `Content::encode` with `ID` as the operator,
+/// which is exactly the `/Key value … ID` text the inline-image syntax calls for, and
+/// keeps the operand writer (name escaping, number formatting) in one place.
+fn encode_inline_image(s: &Stream) -> Option<Vec<u8>> {
+    let mut operands = Vec::new();
+    for (k, v) in s.dict.iter() {
+        operands.push(Object::Name(k.clone()));
+        operands.push(v.clone());
+    }
+    let head = Content {
+        operations: vec![lopdf::content::Operation { operator: "ID".to_string(), operands }],
+    }
+    .encode()
+    .ok()?;
+    let mut out = b"BI ".to_vec();
+    out.extend_from_slice(&head);
+    // §8.9.7: exactly one white-space byte separates `ID` from the data.
+    out.push(b'\n');
+    out.extend_from_slice(&s.content);
+    out.extend_from_slice(b"\nEI");
+    Some(out)
+}
+
+/// Every object id referenced from the trailer or from any object in `doc`.
+///
+/// References are collected, not followed, so this cannot loop on a cyclic graph.
+/// Used to decide whether an object that has just been detached is now unreachable.
+fn referenced_object_ids(doc: &Document) -> std::collections::HashSet<ObjectId> {
+    fn walk(obj: &Object, out: &mut std::collections::HashSet<ObjectId>) {
+        match obj {
+            Object::Reference(id) => {
+                out.insert(*id);
+            }
+            Object::Array(a) => a.iter().for_each(|o| walk(o, out)),
+            Object::Dictionary(d) => d.iter().for_each(|(_, v)| walk(v, out)),
+            Object::Stream(s) => s.dict.iter().for_each(|(_, v)| walk(v, out)),
+            _ => {}
+        }
+    }
+    let mut out = std::collections::HashSet::new();
+    for (_, v) in doc.trailer.iter() {
+        walk(v, &mut out);
+    }
+    for obj in doc.objects.values() {
+        walk(obj, &mut out);
+    }
+    out
+}
+
 /// Whether the document has any redaction annotations pending.
 pub(crate) fn has_redactions(handle: i64) -> bool {
     let reg = registry().lock().unwrap_or_else(|e| e.into_inner());
@@ -731,11 +874,13 @@ pub(crate) fn has_redactions(handle: i64) -> bool {
 /// removes only text-showing operators whose ORIGIN falls inside a rect, using an
 /// approximate advance, so it does not remove images, inline images, form
 /// XObjects, shadings or vector artwork; nor text that starts outside the rect
-/// and runs into it; nor the pre-redaction content stream object, which
-/// `save_document` leaves in the file (only the separate `save_compressed` path
-/// prunes it). For all of those the black rectangle only COVERS the content,
-/// which remains extractable from the saved file. Anything relying on this for
-/// confidentiality needs content-level removal per §12.5.6.24 first.
+/// and runs into it. For all of those the black rectangle only COVERS the
+/// content, which remains extractable from the saved file. Anything relying on
+/// this for confidentiality needs content-level removal per §12.5.6.24 first.
+///
+/// What IS guaranteed: the operators this does drop are gone from the file, not
+/// merely hidden — the pre-redaction content stream is detached and, when nothing
+/// else references it, deleted, so `save_document` cannot ship it.
 ///
 /// Refuses the WHOLE operation, without touching the document, if any page's content
 /// stream can only be recovered by the lenient tokenizer — see the comment at the
@@ -801,9 +946,13 @@ pub(crate) fn apply_redactions(handle: i64) -> bool {
     }
 
     let mut applied = false;
+    // The pre-redaction content streams, detached below. §12.5.6.24 wants the content
+    // GONE, and `save_document` writes every object in the document — leaving them
+    // behind ships the redacted text inside the file for any object dumper to read.
+    let mut stale: Vec<ObjectId> = Vec::new();
     for (page_id, rects, redact_ids, ops) in work {
         let new_ops = redact_operations(ops, &rects);
-        let encoded = lopdf::content::Content { operations: new_ops }.encode().unwrap_or_default();
+        let encoded = encode_operations(new_ops).unwrap_or_default();
         // §7.8.2: the page content is one concatenated stream, and the redacted
         // operator list can end with an unbalanced `q ... cm` or an active clip.
         // Bracketing it in q/Q means the cover rectangles below are painted from
@@ -821,6 +970,7 @@ pub(crate) fn apply_redactions(handle: i64) -> bool {
             ));
         }
         bytes.extend_from_slice(cover.as_bytes());
+        stale.extend(doc.get_page_contents(page_id));
         let cid = doc.add_object(Stream::new(dictionary! {}, bytes));
         if let Ok(p) = doc.get_dictionary_mut(page_id) {
             p.set("Contents", Object::Reference(cid));
@@ -830,6 +980,17 @@ pub(crate) fn apply_redactions(handle: i64) -> bool {
             doc.objects.remove(&rid);
         }
         applied = true;
+    }
+    if applied {
+        // Only drop a detached stream nothing else still points at: a /Contents stream
+        // may legitimately be shared between pages (page imports duplicate the object
+        // graph, not the objects), and removing one of those would blank the other page.
+        let live = referenced_object_ids(doc);
+        for id in stale {
+            if !live.contains(&id) {
+                doc.objects.remove(&id);
+            }
+        }
     }
     applied
 }
@@ -937,6 +1098,77 @@ mod redaction_tests {
         }
     }
 
+    /// §12.5.2 Table 164: `/CA` is the annotation's constant opacity, and the
+    /// renderer honours it (`render_annotation` wraps the appearance in a group
+    /// with that alpha). A bare `cm … Do` carries no alpha, so flattening turned
+    /// a half-transparent highlight fully opaque — and `/Annots` is dropped, so
+    /// the original opacity is unrecoverable.
+    #[test]
+    fn flatten_carries_the_annotation_constant_opacity() {
+        let (dw, dh) = (40.0_f64, 20.0_f64);
+        let rect = [10.0, 20.0, 10.0 + dw, 20.0 + dh];
+        let (handle, page_id) = flattenable_doc(rect, [0.0, 0.0, dw, dh], IDENTITY);
+        {
+            let mut reg = registry().lock().unwrap_or_else(|e| e.into_inner());
+            let doc = reg.get_mut(&handle).expect("handle is registered");
+            let aid = doc
+                .get_dictionary(page_id)
+                .ok()
+                .and_then(|d| d.get(b"Annots").ok())
+                .and_then(|o| o.as_array().ok())
+                .and_then(|a| a.first().and_then(|o| o.as_reference().ok()))
+                .expect("the fixture has one annotation");
+            doc.get_dictionary_mut(aid)
+                .expect("annot")
+                .set("CA", Object::Real(0.5));
+        }
+        assert!(flatten_document(handle), "flatten failed");
+
+        let text = String::from_utf8_lossy(&page_bytes(handle, page_id)).into_owned();
+        let gs = text
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .windows(2)
+            .find(|w| w[1] == "gs")
+            .map(|w| w[0].trim_start_matches('/').to_string())
+            .unwrap_or_else(|| panic!("no `gs` in the flattened content: {text}"));
+
+        let reg = registry().lock().unwrap_or_else(|e| e.into_inner());
+        let doc = reg.get(&handle).expect("handle is registered");
+        let res = resources_dict(doc, page_id).expect("resources");
+        let egs = res
+            .get(b"ExtGState")
+            .ok()
+            .and_then(|o| deref(doc, o))
+            .and_then(|o| o.as_dict().ok())
+            .and_then(|d| d.get(gs.as_bytes()).ok())
+            .and_then(|o| deref(doc, o))
+            .and_then(|o| o.as_dict().ok())
+            .unwrap_or_else(|| panic!("/{gs} is not in /Resources /ExtGState: {res:?}"));
+        // §12.5.2 makes /CA govern stroking and non-stroking alike, so both must be set.
+        for key in [&b"ca"[..], &b"CA"[..]] {
+            let v = egs.get(key).ok().and_then(num).unwrap_or_else(|| {
+                panic!("/{} missing from the flatten ExtGState: {egs:?}", String::from_utf8_lossy(key))
+            });
+            assert!((v - 0.5).abs() < 1e-6, "expected 0.5, got {v}");
+        }
+        drop(reg);
+        close_document(handle);
+    }
+
+    /// A fully opaque annotation (the common case, and `/CA` absent) must not gain
+    /// an /ExtGState it does not need.
+    #[test]
+    fn flatten_emits_no_extgstate_for_an_opaque_annotation() {
+        let (dw, dh) = (40.0_f64, 20.0_f64);
+        let (handle, page_id) =
+            flattenable_doc([10.0, 20.0, 10.0 + dw, 20.0 + dh], [0.0, 0.0, dw, dh], IDENTITY);
+        assert!(flatten_document(handle));
+        let text = String::from_utf8_lossy(&page_bytes(handle, page_id)).into_owned();
+        assert!(!text.contains(" gs"), "unexpected /ExtGState: {text}");
+        close_document(handle);
+    }
+
     /// One-page document carrying a single annotation whose `/AP /N` has the
     /// given `/BBox` and `/Matrix`.
     fn flattenable_doc(rect: [f64; 4], bbox: [f64; 4], matrix: Mat) -> (i64, ObjectId) {
@@ -1021,6 +1253,140 @@ mod redaction_tests {
         );
         let after = page_bytes(handle, page_id);
         assert_eq!(after, content, "the content stream must be left untouched");
+        close_document(handle);
+    }
+
+    /// §12.5.6.24: redaction means the content is REMOVED, not covered. The
+    /// pre-redaction content stream still holds the text verbatim and
+    /// `save_document` writes every object in the document, so leaving it behind
+    /// ships a file the user believes is redacted with the text still in it —
+    /// recoverable with any object dumper.
+    #[test]
+    fn the_pre_redaction_content_stream_is_not_left_in_the_saved_file() {
+        let content = b"BT /F1 12 Tf 100 700 Td (secret) Tj ET\n";
+        let (handle, _page_id, _annot_id) = redactable_doc(content, [90, 690, 200, 720]);
+        assert!(apply_redactions(handle));
+        let saved = save_document(handle).expect("save");
+        assert!(
+            !saved.windows(6).any(|w| w == b"secret"),
+            "the redacted text is still in the saved file"
+        );
+        close_document(handle);
+    }
+
+    /// §8.9.7: lopdf represents `BI` as a single operation whose operand is an
+    /// `Object::Stream`, and `Content::encode` writes an `Object::Stream` in
+    /// INDIRECT-object syntax (`<<...>> stream ... endstream`) — there is no `ID`
+    /// and the `BI` lands after the data. Re-encoding such a page destroys the
+    /// image and desynchronises everything after it. The refusal at the
+    /// `page_operations` call only covers streams lopdf CANNOT parse, so a
+    /// perfectly good inline image took this path.
+    #[test]
+    fn redacting_a_page_with_an_inline_image_keeps_the_image_intact() {
+        let px: Vec<u8> = (1u8..=12).collect(); // 2x2, 3 components, 8 bpc
+        let mut content = b"BT /F1 12 Tf 100 700 Td (secret) Tj ET\n".to_vec();
+        content.extend_from_slice(b"q 10 0 0 10 300 300 cm BI /W 2 /H 2 /CS /RGB /BPC 8 ID ");
+        content.extend_from_slice(&px);
+        content.extend_from_slice(b" EI Q\n");
+        let (handle, page_id, _annot_id) = redactable_doc(&content, [90, 690, 200, 720]);
+        {
+            let reg = registry().lock().unwrap_or_else(|e| e.into_inner());
+            let doc = reg.get(&handle).expect("handle is registered");
+            assert!(
+                doc.get_and_decode_page_content(page_id).is_ok(),
+                "precondition: lopdf parses this inline image, so redaction proceeds"
+            );
+        }
+        assert!(apply_redactions(handle), "a healthy page must redact");
+
+        let after = page_bytes(handle, page_id);
+        assert!(
+            !after.windows(6).any(|w| w == b"secret"),
+            "the text under the rect must be gone: {}",
+            String::from_utf8_lossy(&after)
+        );
+        assert!(
+            !after.windows(9).any(|w| w == b"endstream"),
+            "an inline image must not be written back as an indirect stream: {}",
+            String::from_utf8_lossy(&after)
+        );
+        let ops = crate::content::parse_operations_lenient(&after);
+        let images: Vec<Vec<u8>> = ops
+            .iter()
+            .filter(|o| o.operator == "BI")
+            .filter_map(|o| match o.operands.first() {
+                Some(Object::Stream(s)) => Some(s.content.clone()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(images, vec![px], "the inline image data must survive verbatim");
+        // And the operators after the image must still be there.
+        let names: Vec<&str> = ops.iter().map(|o| o.operator.as_str()).collect();
+        assert!(names.contains(&"Q"), "content after the image was lost: {names:?}");
+        close_document(handle);
+    }
+
+    /// §7.7.3.4: `/Resources` is INHERITABLE. `resources_dict` (the renderer's
+    /// read path) walks `/Parent` for it, so a page that carries none is not a
+    /// page without resources. `add_page_xobject` wrote an inline `/Resources`
+    /// built only from the page's OWN entry, which on such a page is an empty
+    /// dictionary that then SHADOWS the inherited one — flattening a single
+    /// annotation blanked every font and image on the page.
+    #[test]
+    fn flatten_does_not_shadow_an_inherited_resources_dictionary() {
+        let mut doc = Document::with_version("1.7");
+        let ap_id = doc.add_object(Stream::new(
+            dictionary! {
+                "Type" => name_obj("XObject"),
+                "Subtype" => name_obj("Form"),
+                "BBox" => rect_obj([0.0, 0.0, 10.0, 10.0]),
+            },
+            b"0 0 1 rg 0 0 10 10 re f".to_vec(),
+        ));
+        let annot_id = doc.add_object(dictionary! {
+            "Type" => name_obj("Annot"),
+            "Subtype" => name_obj("Square"),
+            "Rect" => rect_obj([10.0, 10.0, 20.0, 20.0]),
+            "AP" => dictionary! { "N" => ap_id },
+        });
+        let pages_id = doc.new_object_id();
+        // No /Resources on the page: it inherits the /Pages node's.
+        let page_id = doc.add_object(dictionary! {
+            "Type" => name_obj("Page"),
+            "Parent" => Object::Reference(pages_id),
+            "MediaBox" => rect_obj([0.0, 0.0, 612.0, 792.0]),
+            "Annots" => Object::Array(vec![Object::Reference(annot_id)]),
+        });
+        doc.objects.insert(
+            pages_id,
+            Object::Dictionary(dictionary! {
+                "Type" => name_obj("Pages"),
+                "Kids" => Object::Array(vec![Object::Reference(page_id)]),
+                "Count" => 1,
+                "Resources" => Object::Dictionary(helvetica_resources()),
+            }),
+        );
+        let cat = doc.add_object(dictionary! {
+            "Type" => name_obj("Catalog"),
+            "Pages" => Object::Reference(pages_id),
+        });
+        doc.trailer.set("Root", cat);
+        let handle = next_handle();
+        registry().lock().unwrap_or_else(|e| e.into_inner()).insert(handle, doc);
+
+        assert!(flatten_document(handle));
+        let reg = registry().lock().unwrap_or_else(|e| e.into_inner());
+        let doc = reg.get(&handle).expect("handle is registered");
+        let res = resources_dict(doc, page_id).expect("the page must still resolve resources");
+        assert!(
+            res.get(b"Font").is_ok(),
+            "the inherited /Font was shadowed by the flatten overlay: {res:?}"
+        );
+        assert!(
+            res.get(b"XObject").is_ok(),
+            "the flattened appearance must still be reachable: {res:?}"
+        );
+        drop(reg);
         close_document(handle);
     }
 

@@ -292,6 +292,77 @@ mod geometry_tests {
         }
     }
 
+    /// The corner test above proves the box FILLS the canvas, which 90 and 270
+    /// both do — it cannot tell them apart, and neither can a determinant or a
+    /// round-trip through the inverse. This pins the DIRECTION by naming which
+    /// crop-box corner each rotation puts at the display origin, re-derived from
+    /// §7.7.3.3 (`/Rotate` is CLOCKWISE) in a y-up display space (`model.rs`:
+    /// Kotlin applies only the y-flip and the fit-to-width scale).
+    ///
+    /// Crop box [50,100]..[350,500], so w=300, h=400, and in page-local
+    /// coordinates (u,v) = (x-50, y-100) the spec maps are `(u,v)`, `(v, w-u)`,
+    /// `(w-u, h-v)`, `(h-v, u)`. Physically turning the sheet clockwise sends its
+    /// bottom-right corner to the bottom-left, which is why 90 puts the page's
+    /// BOTTOM-RIGHT corner on the display origin and 270 (a quarter turn the
+    /// other way) puts its TOP-LEFT corner there. Swapping the two arms swaps
+    /// exactly those two rows.
+    #[test]
+    fn quarter_turns_rotate_clockwise_not_anticlockwise() {
+        let (bl, br, tr, tl) = (
+            (50.0, 100.0),
+            (350.0, 100.0),
+            (350.0, 500.0),
+            (50.0, 500.0),
+        );
+        // (rotation, the page corner that must land on the display origin,
+        //  and the corner that must land at the far end of the display x axis).
+        for (rot, at_origin, at_x_max) in [
+            (0i64, bl, br),
+            (90, br, tr),
+            (180, tr, tl),
+            (270, tl, bl),
+        ] {
+            let doc = page_doc(
+                [0.0, 0.0, 612.0, 792.0],
+                Some([50.0, 100.0, 350.0, 500.0]),
+                Some(rot),
+                None,
+            );
+            let pid = nth_page_id(&doc, 0).expect("page 0");
+            let base = page_base_matrix(&doc, pid);
+            let (w, _h) = page_display_size(&doc, pid);
+            let (ox, oy) = transform(&base, at_origin.0, at_origin.1);
+            assert!(
+                ox.abs() < 1e-9 && oy.abs() < 1e-9,
+                "rot={rot}: {at_origin:?} must map to the display origin, got ({ox},{oy}) \
+                 — the 90 and 270 arms are swapped (anticlockwise)"
+            );
+            let (xx, xy) = transform(&base, at_x_max.0, at_x_max.1);
+            assert!(
+                (xx - w as f64).abs() < 1e-6 && xy.abs() < 1e-9,
+                "rot={rot}: {at_x_max:?} must map to ({w},0), got ({xx},{xy})"
+            );
+        }
+    }
+
+    /// The matrices must agree with the maps documented above `page_base_matrix`,
+    /// element by element, so a future edit to one without the other is caught.
+    #[test]
+    fn base_matrix_matches_the_documented_maps() {
+        let (w, h) = (300.0_f64, 400.0_f64);
+        for (rot, want) in [
+            (0i64, [1.0, 0.0, 0.0, 1.0, -50.0, -100.0]),
+            // (x,y) -> (y, w-x), composed with the translate(-50,-100).
+            (90, [0.0, -1.0, 1.0, 0.0, -100.0, w + 50.0]),
+            (180, [-1.0, 0.0, 0.0, -1.0, w + 50.0, h + 100.0]),
+            (270, [0.0, 1.0, -1.0, 0.0, h + 100.0, -50.0]),
+        ] {
+            let doc = page_doc([50.0, 100.0, 350.0, 500.0], None, Some(rot), None);
+            let pid = nth_page_id(&doc, 0).expect("page 0");
+            assert_mat_eq(&page_base_matrix(&doc, pid), &want, &format!("rot={rot}"));
+        }
+    }
+
     /// `page_base_inverse` must be the exact inverse of `page_base_matrix` for
     /// every rotation — it converts editor coordinates back into raw page space
     /// when storing annotations, so any drift writes them to the wrong place.

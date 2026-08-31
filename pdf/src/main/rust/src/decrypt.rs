@@ -9,6 +9,13 @@ type CryptFnFactory = Box<dyn Fn(ObjectId) -> CryptFn>;
 /// the empty password does not satisfy. Returns: 0 no, 1 needs password, 2
 /// unsupported encryption (e.g. AES).
 pub(crate) fn pdf_password_state(bytes: &[u8]) -> i32 {
+    // The same size guard `open_document_pw` applies, for the same bytes: this probe
+    // runs FIRST in the UI flow, so without it a 1 GB file is fully parsed here and
+    // only then refused at open. Reporting "no password needed" matches what open
+    // will do with it.
+    if bytes.len() > crate::registry::MAX_PDF_BYTES {
+        return 0;
+    }
     // Must match open_document_pw's loader: using the strict Document::load_mem here made a
     // damaged encrypted file report "no password needed" and then fail to open with no prompt.
     let mut doc = match crate::registry::load_document_lenient(bytes) {

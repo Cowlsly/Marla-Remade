@@ -310,9 +310,9 @@ pub(crate) fn cs_kind_ncomp(kind: &CsKind) -> u8 {
 /// [`cs_kind_ncomp`] except for Indexed, where one image sample is a single
 /// palette index (§8.6.6.3), not `base_ncomp` colour components.
 ///
-/// Deliberately separate from [`cs_kind_ncomp`], which `shading.rs` relies on
-/// returning `base_ncomp` for Indexed. Clamped to 1..=32 so a bogus `/N` or a
-/// 255-name `/DeviceN` cannot turn `w*h*ncomp` into a huge allocation; Pattern
+/// Deliberately separate from [`cs_kind_ncomp`], which reports the BASE arity for
+/// Indexed because that is what the palette decode needs. Clamped to 1..=32 so a bogus
+/// `/N` or a 255-name `/DeviceN` cannot turn `w*h*ncomp` into a huge allocation; Pattern
 /// (0 components, illegal for an image per §8.9.5.1) recovers as 1.
 pub(crate) fn cs_kind_image_ncomp(kind: &CsKind) -> u8 {
     let n = match kind {
@@ -463,10 +463,16 @@ pub(crate) fn eval_cs_to_rgb(doc: &Document, kind: &CsKind, comps: &[f64], cs_re
         }
         CsKind::Lab { white, range, .. } => {
             // PDF spec 8.6.5.4 Lab -> XYZ -> (D50->D65 adapt via Bradford) -> sRGB
-            let _ = range; // a*/b* already in comps; spec range clamp is done by caller via Decode
             let l = comps.first().copied().unwrap_or(0.0).clamp(0.0,100.0);
-            let a = comps.get(1).copied().unwrap_or(0.0);
-            let b = comps.get(2).copied().unwrap_or(0.0);
+            // §8.6.5.4 Table 66: /Range bounds a* and b*, and "values outside the
+            // range shall be adjusted to the nearest valid value". The image path
+            // already arrives in range via /Decode, but `sc`/`scn` operands and a
+            // tint transform whose own /Range is absent do NOT — and an unbounded
+            // a*/b* drives `fx`/`fz` far outside the cube-root branch and produces a
+            // saturated primary instead of the nearest in-gamut colour.
+            let clamp_pair = |v: f64, r: [f64; 2]| v.max(r[0].min(r[1])).min(r[0].max(r[1]));
+            let a = clamp_pair(comps.get(1).copied().unwrap_or(0.0), range[0]);
+            let b = clamp_pair(comps.get(2).copied().unwrap_or(0.0), range[1]);
             let fy = (l + 16.0)/116.0;
             let fx = a / 500.0 + fy;
             let fz = fy - b / 200.0;
@@ -649,13 +655,24 @@ pub(crate) fn eval_cs_to_rgb(doc: &Document, kind: &CsKind, comps: &[f64], cs_re
             if let Some(tf) = tint_fn {
                 // Evaluate the tint transform over all N input components.
                 let alt_comps = tf.eval(comps);
-                eval_cs_to_rgb(doc, alt, &alt_comps, cs_resources)
-            } else {
-                // No tint transform: treat each colorant as an independent subtractive
-                // ink so all components contribute (0 tint = white, full tint = darker).
-                let light: f64 = comps.iter().map(|c| 1.0 - c.clamp(0.0, 1.0)).product();
-                Some(gray_to_argb(light))
+                // Same arity check the Separation arm applies (§8.6.6.5 defers to
+                // §8.6.6.4 for the tint transform): the function shall yield one value
+                // per component of the alternate space. Without this the DeviceN arm
+                // returned whatever `eval_cs_to_rgb` made of a short tuple — `None` for
+                // an RGB/CMYK alternate, which leaves the PREVIOUS fill colour in place,
+                // and plain black for a Gray alternate. Falling through to the
+                // subtractive ramp below at least keeps the ink polarity right.
+                if alt_comps.len() >= cs_kind_ncomp(alt).max(1) as usize {
+                    if let Some(rgb) = eval_cs_to_rgb(doc, alt, &alt_comps, cs_resources) {
+                        return Some(rgb);
+                    }
+                }
             }
+            // No usable tint transform: treat each colorant as an independent
+            // subtractive ink so all components contribute (0 tint = white, full
+            // tint = darker).
+            let light: f64 = comps.iter().map(|c| 1.0 - c.clamp(0.0, 1.0)).product();
+            Some(gray_to_argb(light))
         }
         CsKind::Pattern { .. } => {
             // Pattern color handling: SCN may include base color, we already evaluated base if comps present
@@ -697,6 +714,22 @@ pub(crate) fn colorspace_info(
     doc: &Document,
     cs: Option<&Object>,
 ) -> (u8, Option<(u8, Vec<u8>)>) {
+    colorspace_info_at(doc, cs, 0)
+}
+
+/// `MAX_CS_DEPTH` applies here for exactly the reason given at its definition, which
+/// this second, parallel implementation of the same walk did not inherit:
+/// `[/Indexed 5 0 R 255 <00FF00>]` stored AS object 5 makes the `Indexed` arm below
+/// recurse on a reference that resolves back to the same array, forever. A Rust stack
+/// overflow is not a panic and cannot be caught, so it takes the process with it.
+fn colorspace_info_at(
+    doc: &Document,
+    cs: Option<&Object>,
+    depth: u32,
+) -> (u8, Option<(u8, Vec<u8>)>) {
+    if depth >= MAX_CS_DEPTH {
+        return (1, None);
+    }
     let cs = match cs.and_then(|o| deref(doc, o)) {
         Some(o) => o,
         None => return (1, None),
@@ -725,7 +758,7 @@ pub(crate) fn colorspace_info(
                     (n.max(1), None)
                 }
                 b"Indexed" | b"I" => {
-                    let (base_n, _) = colorspace_info(doc, a.get(1));
+                    let (base_n, _) = colorspace_info_at(doc, a.get(1), depth + 1);
                     let lookup = match a.get(3).and_then(|o| deref(doc, o)) {
                         Some(Object::String(s, _)) => s.clone(),
                         // Same reasoning as the `parse_cs_array` Indexed arm above: an
@@ -866,7 +899,8 @@ mod tests {
     }
 
     // An Indexed image sample is ONE palette index (§8.6.6.3), not base_ncomp colour
-    // components. cs_kind_ncomp deliberately still reports base_ncomp for shading.rs.
+    // components. cs_kind_ncomp still reports base_ncomp, which is what the palette
+    // decode below needs — mesh shadings special-case Indexed themselves.
     #[test]
     fn indexed_image_ncomp_is_one() {
         let cs = CsKind::Indexed {
@@ -876,7 +910,7 @@ mod tests {
             hival: 1,
         };
         assert_eq!(cs_kind_image_ncomp(&cs), 1, "one index per image sample");
-        assert_eq!(cs_kind_ncomp(&cs), 3, "shading.rs still sees the base arity");
+        assert_eq!(cs_kind_ncomp(&cs), 3, "the palette decode still needs the base arity");
     }
 
     // A named ICCBased colorspace stored as an INDIRECT array in the resource id
@@ -1027,6 +1061,110 @@ mod tests {
         let (base_n, palette) = indexed.expect("indexed info");
         assert_eq!(base_n, 3);
         assert_eq!(palette, vec![0x00, 0x00, 0xFF], "palette must be decoded");
+    }
+
+    // §8.6.6.5 defers to §8.6.6.4 for the tint transform, which "shall produce one
+    // value for each component of the alternate space". The Separation arm has checked
+    // that since a previous round; the DeviceN arm did not, so a broken transform fed
+    // `eval_cs_to_rgb` a short tuple. Over an RGB/CMYK alternate that returns None,
+    // which every caller reads as "leave the current colour alone" — the fill silently
+    // keeps whatever colour was set before, which is not a colour anyone chose.
+    #[test]
+    fn devicen_with_a_short_tint_output_falls_back_instead_of_vanishing() {
+        let doc = Document::with_version("1.7");
+        let cs = CsKind::DeviceN {
+            names: vec![b"A".to_vec(), b"B".to_vec()],
+            // DeviceCMYK needs 4 components; this Type 2 yields only 1.
+            alt: Box::new(CsKind::DeviceCMYK),
+            tint_fn: Some(PdfFunction::Exponential {
+                domain: [0.0, 1.0],
+                range: Vec::new(),
+                c0: vec![0.0],
+                c1: vec![1.0],
+                n: 1.0,
+            }),
+        };
+        let res = HashMap::new();
+        let full = eval_cs_to_rgb(&doc, &cs, &[1.0, 1.0], &res)
+            .expect("a broken tint transform must still yield a colour");
+        assert_eq!(full & 0xFF, 0, "full ink darkens");
+        let none = eval_cs_to_rgb(&doc, &cs, &[0.0, 0.0], &res).expect("resolves");
+        assert_eq!(none & 0xFF, 255, "no ink leaves the page white");
+
+        // A well-formed transform is untouched: 2 inks -> DeviceGray, t -> 1-t.
+        let ok = CsKind::DeviceN {
+            names: vec![b"A".to_vec(), b"B".to_vec()],
+            alt: Box::new(CsKind::DeviceGray),
+            tint_fn: Some(PdfFunction::Exponential {
+                domain: [0.0, 1.0],
+                range: Vec::new(),
+                c0: vec![1.0],
+                c1: vec![0.0],
+                n: 1.0,
+            }),
+        };
+        assert_eq!(eval_cs_to_rgb(&doc, &ok, &[0.0, 0.0], &res).unwrap() & 0xFF, 255);
+        assert_eq!(eval_cs_to_rgb(&doc, &ok, &[1.0, 1.0], &res).unwrap() & 0xFF, 0);
+    }
+
+    // §8.6.5.4 Table 66: /Range bounds a* and b*, and a value outside it "shall be
+    // adjusted to the nearest valid value". The image path arrives in range via
+    // /Decode, but `sc`/`scn` operands and a tint transform with no /Range of its own
+    // do not — and an unbounded a*/b* drives fx/fz far outside the cube-root branch,
+    // producing a saturated primary instead of the nearest in-gamut colour.
+    #[test]
+    fn lab_clamps_a_and_b_to_the_spaces_range() {
+        let doc = Document::with_version("1.7");
+        let cs = CsKind::Lab {
+            white: [0.9505, 1.0, 1.0890],
+            range: [[-20.0, 20.0], [-20.0, 20.0]],
+        };
+        let res = HashMap::new();
+        let at_edge = eval_cs_to_rgb(&doc, &cs, &[50.0, 20.0, 0.0], &res).unwrap();
+        let beyond = eval_cs_to_rgb(&doc, &cs, &[50.0, 90.0, 0.0], &res).unwrap();
+        assert_eq!(at_edge, beyond, "a* past /Range clamps to the edge of /Range");
+        let below = eval_cs_to_rgb(&doc, &cs, &[50.0, -90.0, 0.0], &res).unwrap();
+        assert_eq!(
+            below,
+            eval_cs_to_rgb(&doc, &cs, &[50.0, -20.0, 0.0], &res).unwrap()
+        );
+        // The clamp is not a blanket flattening: inside /Range the colour still varies.
+        let inside = eval_cs_to_rgb(&doc, &cs, &[50.0, 0.0, 0.0], &res).unwrap();
+        assert_ne!(inside, at_edge, "in-range a* is untouched");
+        // And the DEFAULT range (-100..100) leaves ordinary Lab values alone.
+        let wide = CsKind::Lab {
+            white: [0.9505, 1.0, 1.0890],
+            range: [[-100.0, 100.0], [-100.0, 100.0]],
+        };
+        assert_ne!(
+            eval_cs_to_rgb(&doc, &wide, &[50.0, 60.0, 0.0], &res).unwrap(),
+            eval_cs_to_rgb(&doc, &wide, &[50.0, 20.0, 0.0], &res).unwrap()
+        );
+    }
+
+    // `parse_cs_array_at`'s MAX_CS_DEPTH comment describes the exact cycle
+    // `[/Indexed 5 0 R 255 <..>]`-stored-as-object-5 creates. `colorspace_info` is a
+    // second, parallel walk of the same object graph and did NOT have the guard, so the
+    // same file that was safe through one entry point overflowed the stack through the
+    // other. A stack overflow is not catchable, so the process dies.
+    #[test]
+    fn colorspace_info_survives_a_self_referential_indexed_base() {
+        let mut doc = Document::with_version("1.7");
+        let id = doc.new_object_id();
+        doc.set_object(
+            id,
+            Object::Array(vec![
+                Object::Name(b"Indexed".to_vec()),
+                Object::Reference(id),
+                Object::Integer(255),
+                Object::String(vec![0, 0, 0], lopdf::StringFormat::Literal),
+            ]),
+        );
+        let (n, indexed) = colorspace_info(&doc, Some(&Object::Reference(id)));
+        assert_eq!(n, 1, "an Indexed image sample is still one index");
+        assert!(indexed.is_some());
+        // And the other entry point stays consistent.
+        assert!(parse_cs_kind(&doc, Some(&Object::Reference(id)), &HashMap::new()).is_some());
     }
 
     // A malformed Cal*/Lab entry must mean exactly what an ABSENT one means — the spec

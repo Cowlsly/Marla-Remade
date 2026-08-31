@@ -117,6 +117,94 @@ class SafePdfParserTest {
         }
     }
 
+    /**
+     * NaN is not caught by a range check — every comparison against it is false, so a NaN
+     * dimension passes both `<= 0f` and `> 20000f`. It then reaches `SafePdfPageCanvas`,
+     * where `Modifier.aspectRatio(width / height)` requires a ratio > 0 and throws from
+     * COMPOSITION, losing the whole viewer rather than the one page. Infinity is caught by
+     * the upper bound already; assert both so the guard cannot regress to a bare range test.
+     */
+    @Test
+    fun nonFinitePageDimensionsAreRejected() {
+        assertFailsWith<IllegalArgumentException> {
+            SafePdfParser.parse(WireWriter(width = Float.NaN).fill().build())
+        }
+        assertFailsWith<IllegalArgumentException> {
+            SafePdfParser.parse(WireWriter(height = Float.NaN).fill().build())
+        }
+        assertFailsWith<IllegalArgumentException> {
+            SafePdfParser.parse(WireWriter(width = Float.POSITIVE_INFINITY).fill().build())
+        }
+    }
+
+    /**
+     * A non-finite float must not reach a Paint or a selection rectangle. The usual Kotlin
+     * range guards do not stop them: `coerceIn`/`coerceAtLeast` are `if (this < min) ...
+     * else this`, and every comparison against NaN is false, so NaN passes straight through
+     * the renderer's clamps; infinity likewise survives `advance > 0f` and then scales a
+     * whole run's selection geometry to infinity.
+     *
+     * All three are reachable from ordinary PDF syntax via an overflowing real literal —
+     * `size` most directly, since an overflowed `Tf` times a zero-scale matrix is
+     * `inf * 0` = NaN — and all three are trivially reachable from a desynced buffer, which
+     * is the case the decoder actually has to survive.
+     */
+    @Test
+    fun nonFiniteTextScalarsFallBackToTheirDefaults() {
+        fun textOf(size: Float = 12f, advance: Float = 6f, hScale: Float = 1f, strokeArgb: Int? = null, strokeWidth: Float = 0f) =
+            assertIs<PdfPrimitive.Text>(
+                SafePdfParser.parse(
+                    WireWriter().text(
+                        size = size, advance = advance, hScale = hScale,
+                        strokeArgb = strokeArgb, strokeWidth = strokeWidth, text = "ab",
+                    ).build()
+                ).primitives.single()
+            )
+
+        assertEquals(1f, textOf(hScale = Float.NaN).hScale, "NaN must not reach Paint.textScaleX")
+        assertEquals(1f, textOf(hScale = Float.POSITIVE_INFINITY).hScale)
+        assertEquals(4f, textOf(hScale = 4f).hScale, "real anisotropy must pass through")
+
+        assertEquals(0f, textOf(size = Float.NaN).size, "NaN must not reach Paint.textSize")
+        // With size sanitized to 0 the pre-v7 advance heuristic derived from it is 0 too,
+        // which is inert rather than infectious.
+        assertEquals(0f, textOf(size = Float.NaN, advance = Float.NaN).advance)
+
+        // A non-finite advance falls back to the documented size*0.5*len heuristic, not to
+        // zero and not to infinity.
+        assertEquals(12f * 0.5f * 2, textOf(size = 12f, advance = Float.POSITIVE_INFINITY).advance)
+        assertEquals(12f * 0.5f * 2, textOf(size = 12f, advance = Float.NaN).advance)
+        assertEquals(6f, textOf(advance = 6f).advance, "a real advance must pass through")
+
+        assertEquals(
+            0f,
+            textOf(strokeArgb = 0xFF00FF00.toInt(), strokeWidth = Float.NaN).strokeWidth,
+            "NaN must not reach Paint.strokeWidth",
+        )
+    }
+
+    /**
+     * A non-finite ORIGIN has no sane default, so the primitive is dropped rather than
+     * defaulted — it would paint nothing yet still contribute a selection rectangle whose
+     * distance comparisons are all false. The neighbours must survive, proving the whole
+     * primitive was consumed and the stream stayed in sync.
+     */
+    @Test
+    fun aTextPrimitiveWithANonFiniteOriginIsDroppedWithoutDesyncingTheStream() {
+        val page = SafePdfParser.parse(
+            WireWriter()
+                .text(text = "before")
+                .text(x = Float.NaN, text = "bad")
+                .text(y = Float.POSITIVE_INFINITY, text = "alsobad")
+                .text(text = "after")
+                .build()
+        )
+        assertEquals(
+            listOf("before", "after"),
+            page.primitives.filterIsInstance<PdfPrimitive.Text>().map { it.text },
+        )
+    }
+
     @Test
     fun aBufferTooSmallForAHeaderIsRejected() {
         assertFailsWith<IllegalArgumentException> { SafePdfParser.parse(ByteArray(4)) }
@@ -786,5 +874,103 @@ class SafePdfParserTest {
         val v11 = WireWriter(version = 11).image(w = 1, h = 1, data = ByteArray(4)).build()
         assertEquals(1, v11.size - v10.size, "the v11 delta is the single interpolate byte")
         assertIs<PdfPrimitive.Image>(SafePdfParser.parse(v11).primitives.single())
+    }
+
+    /**
+     * The Kotlin half of `wire::tests::every_arm_has_the_byte_length_the_kotlin_parser_reads`.
+     *
+     * [theImageArmMatchesTheByteCountRustSerializes] names the residual it leaves: the other
+     * thirteen tags had no Rust-side length constant to pair with, so they were
+     * transcription-against-transcription — Rust's round-trip test only reads back what Rust
+     * wrote, and [WireWriter] is a second hand copy of `wire::serialize`. A field that changed
+     * width on ONE side only left both suites green while every real page desynced from that
+     * byte on, which is the "random shapes on the page" failure.
+     *
+     * Rust now pins every arm term by term; these are the same sums against [WireWriter], so a
+     * width or ordering change in either serializer fails one of the two tests. Written out
+     * field by field, not as totals: a bare total still matches when two fields change by
+     * offsetting amounts.
+     *
+     * VERSION 10, not [SafePdfParser.WIRE_VERSION] — Rust EMITS 10, so the v11 interpolate
+     * byte is not in the stream and must not be in the arithmetic.
+     */
+    @Test
+    fun everyArmMatchesTheByteCountRustSerializes() {
+        val header = 4 + 4 + 4 + 4 + 4
+        fun armLen(write: WireWriter.() -> Unit): Int =
+            WireWriter(version = 10).apply(write).build().size - header
+
+        // Text with an N-byte string: tag + x + y + size + argb + len + N + hasStroke +
+        // strokeArgb + strokeWidth + renderMode + blend + advance + fontFlags + hScale.
+        val textFixed = 1 + 4 + 4 + 4 + 4 + 2 + 1 + 4 + 4 + 1 + 1 + 4 + 1 + 4
+        assertEquals(textFixed + 2, armLen { text(text = "ab") }, "Text arm width")
+
+        // Fill: tag + argb + evenOdd + nContours + per contour (nPts + 8 per point) + blend.
+        assertEquals(
+            1 + 4 + 1 + 2 + (2 + 3 * 8) + 1,
+            armLen { fill(contours = listOf(listOf(0f to 0f, 1f to 0f, 1f to 1f))) },
+            "Fill arm width",
+        )
+
+        // Stroke: tag + argb + width + nDash + 4 per dash + phase + cap + join + miter +
+        // nPts + 8 per point + blend.
+        assertEquals(
+            1 + 4 + 4 + 1 + 2 * 4 + 4 + 1 + 1 + 4 + 2 + 2 * 8 + 1,
+            armLen { stroke(dash = floatArrayOf(3f, 2f), pts = listOf(0f to 0f, 1f to 1f)) },
+            "Stroke arm width",
+        )
+
+        // Image: tag + 6 ctm + w + h + format + alpha + blend + len + payload.
+        assertEquals(
+            1 + 24 + 4 + 4 + 1 + 4 + 1 + 4 + 4,
+            armLen { image(w = 1, h = 1, data = ByteArray(4)) },
+            "Image arm width",
+        )
+
+        // ImageTiled: tag + 6 ctm + w + h + xstep + ystep + i0 + j0 + nx + ny + alpha +
+        // blend + len + payload. No format byte — the cell is always RGBA8888.
+        assertEquals(
+            1 + 24 + 4 + 4 + 4 + 4 + 4 + 4 + 4 + 4 + 4 + 1 + 4 + 4,
+            armLen { imageTiled(w = 1, h = 1, data = ByteArray(4)) },
+            "ImageTiled arm width",
+        )
+
+        // ClipPush: tag + evenOdd + nPts + 8 per point + nPathOps, then the tagged ops:
+        // Move/Line 1 + 8, Cubic 1 + 24, Close 1.
+        assertEquals(
+            1 + 1 + 2 + 8 + 2,
+            armLen { clipPush(pts = listOf(0f to 0f)) },
+            "ClipPush arm width (no path ops)",
+        )
+        assertEquals(
+            1 + 1 + 2 + 8 + 2 + (1 + 8) + (1 + 8) + (1 + 24) + 1,
+            armLen {
+                clipPush(
+                    pts = listOf(0f to 0f),
+                    pathOps = listOf(
+                        PathOp.Move(0f, 0f),
+                        PathOp.Line(1f, 1f),
+                        PathOp.Cubic(1f, 2f, 3f, 4f, 5f, 6f),
+                        PathOp.Close,
+                    ),
+                )
+            },
+            "ClipPush path-ops section width",
+        )
+
+        // The empty-payload markers are one tag byte each.
+        assertEquals(1, armLen { clipPop() }, "ClipPop arm width")
+        assertEquals(1, armLen { textClipApply() }, "TextClipApply arm width")
+        assertEquals(1, armLen { groupPop() }, "GroupPop arm width")
+        assertEquals(1, armLen { softMaskContent() }, "SoftMaskContent arm width")
+        assertEquals(1, armLen { softMaskPop() }, "SoftMaskPop arm width")
+
+        assertEquals(1 + 1 + 1 + 4 + 1, armLen { groupPush() }, "GroupPush arm width")
+        assertEquals(1 + 1, armLen { softMaskPush() }, "SoftMaskPush arm width")
+        assertEquals(
+            1 + 256,
+            armLen { softMaskTransfer(ByteArray(256)) },
+            "SoftMaskTransfer arm width",
+        )
     }
 }

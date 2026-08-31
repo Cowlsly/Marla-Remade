@@ -1,5 +1,19 @@
 use crate::*;
 
+/// Everything on `Prim::Text` is derived from unvalidated file input (`Tf`, `Tz`,
+/// `/Widths`, the CTM), and a non-finite value can survive even validated operands:
+/// `f64 as f32` saturates to infinity above ~3.4e38. It cannot be left to the
+/// consumer, because Kotlin's `coerceIn`/`coerceAtLeast` are comparisons and every
+/// comparison against NaN is false — it passes straight through the clamp into
+/// `Paint`, and the glyph silently disappears rather than being visibly wrong.
+fn finite_or_zero(v: f32) -> f32 {
+    if v.is_finite() {
+        v
+    } else {
+        0.0
+    }
+}
+
 pub(crate) fn cubic_bezier(
     p0: (f64, f64),
     p1: (f64, f64),
@@ -56,6 +70,14 @@ pub(crate) fn emit_stroke(prims: &mut Vec<Prim>, subpaths: &[Vec<(f64, f64)>], g
     // stroker, because what the spec asks for here is a fill, not a stroke.
     let dot_radius = (width as f64 / 2.0).max(0.05);
     for sp in subpaths {
+        // One primitive PER SUBPATH, so the caller's single pre-call cap check
+        // cannot bound this loop: a path carrying MAX_SUBPATHS subpaths overshot
+        // MAX_PRIMITIVES by up to that many. `emit_fill` has no equivalent problem
+        // because it emits one Fill holding every contour. Reported by `r5-state`,
+        // whose doc on the constant states it is enforced at every emitting push.
+        if prims.len() >= MAX_PRIMITIVES {
+            break;
+        }
         if sp.is_empty() { continue; }
         let (fx, fy) = sp[0];
         if sp.iter().all(|&(x, y)| (x - fx).abs() < 1e-9 && (y - fy).abs() < 1e-9) {
@@ -150,7 +172,37 @@ pub(crate) fn show_string_in(
     // Device-space horizontal scale, used to convert glyph advances (user space)
     // into the device advance carried on the wire for text selection/search.
     let x_scale = (trm[0] * trm[0] + trm[1] * trm[1]).sqrt();
+    // Horizontal scale to put on the wire for the SUBSTITUTE face. Kotlin derives
+    // the glyph's em from `size` (= Tfs·y_scale) and multiplies its width by
+    // `h_scale`, so Th alone under-describes an anisotropic matrix: with
+    // x_scale != y_scale the outline path draws the glyph x_scale/y_scale wider
+    // than the substitute path does, and the two disagree about the SIZE of the
+    // same glyph. Folding the ratio in is exactly 1.0 for every isotropic matrix
+    // — including every pure rotation — so it changes nothing on ordinary pages.
+    // This is the only part of the mismatch expressible in the v8 wire; the glyph
+    // being axis-aligned under a rotated matrix needs a field that does not exist.
+    //
+    // Bounded here rather than at the consumer. A near-degenerate matrix makes the
+    // ratio enormous, and `th` is `Tz/100` whose product can overflow; the check is
+    // on the f32 that is actually serialized, because `f64 as f32` saturates to inf
+    // above ~3.4e38 and a finite f64 would otherwise sail through.
+    let aniso = if y_scale > 1e-9 { x_scale / y_scale } else { 1.0 };
+    let wire_h_scale = th * if aniso.is_finite() { aniso.clamp(0.01, 100.0) } else { 1.0 };
+    let wire_h_scale = {
+        let v = wire_h_scale as f32;
+        if v.is_finite() {
+            v
+        } else {
+            1.0
+        }
+    };
     let size = (tfs * y_scale) as f32;
+    // `Tf`'s operand and the CTM are file input, and `size` is their product, so a
+    // non-finite value is reachable even with both validated — an f64 above the f32
+    // range saturates to inf on the cast. NaN then survives Kotlin's
+    // `coerceAtLeast` (a comparison) into `Paint.textSize` and the glyph vanishes.
+    // Zero is the honest substitute: the consumer floors it to one pixel.
+    let size = finite_or_zero(size);
     // Modes 3 (invisible) and 7 (clip only) advance the pen but paint nothing.
     let drawable = gs.render_mode != 3 && gs.render_mode != 7;
     // Mode 3 is how a scan carries its OCR layer: nothing is painted, but the run
@@ -162,6 +214,7 @@ pub(crate) fn show_string_in(
         Some(fi) => fi,
         None => {
             // No font metrics: emit the run at the origin and estimate advance.
+            let run_advance = bytes.len() as f64 * 0.5 * tfs * th;
             if (drawable || invisible) && !bytes.is_empty() {
                 let (x, y) = transform(&trm, 0.0, gs.rise);
                 let text: String =
@@ -175,18 +228,24 @@ pub(crate) fn show_string_in(
                         text,
                         stroke_argb: None,
                         stroke_width: None,
-                        advance: size,
+                        // The DEVICE advance of the whole run, which is what the
+                        // wire contract says this field is and what the selection
+                        // layer rescales a non-painted run to. `size` was one
+                        // glyph's worth for a run of any length, so a mode-3 OCR
+                        // run with no font resource had every selection rectangle
+                        // piled onto its first character.
+                        advance: finite_or_zero((run_advance * x_scale) as f32).max(size * 0.1),
                         render_mode: gs.render_mode as u8,
                         blend: gs.blend_mode,
                         is_bold: false,
                         is_italic: false,
                         font_family: 0,
                         outline: false,
-                        h_scale: th as f32,
+                        h_scale: wire_h_scale,
                     });
                 }
             }
-            return bytes.len() as f64 * 0.5 * tfs * th;
+            return run_advance;
         }
     };
 
@@ -231,7 +290,11 @@ pub(crate) fn show_string_in(
                 .unwrap_or((fi.default_vertical.1, 0.5 * w0));
             let vy = fi.default_vertical.0;
             let extra = gs.char_spacing + if is_space { gs.word_spacing } else { 0.0 };
-            (-vx * tfs * th, pen - vy * tfs, w1y * tfs - extra)
+            // Trise is part of §9.4.4's text-space parameter matrix, which does not
+            // depend on the writing mode: it displaces the glyph in text-space y in
+            // vertical writing exactly as it does in horizontal. Dropping it here put
+            // super/subscripts in vertical CJK back on the baseline.
+            (-vx * tfs * th, pen - vy * tfs + gs.rise, w1y * tfs - extra)
         } else {
             (pen, gs.rise, glyph_advance_user)
         };
@@ -260,6 +323,11 @@ pub(crate) fn show_string_in(
                 } else {
                     (glyph_advance_user * x_scale) as f32
                 };
+                // Same reasoning as `size`. The selection layer rescales a
+                // non-painted run by `advance * scale / measured`, and its
+                // `advance > 0f` guard PASSES infinity, so one overflowed glyph
+                // would stretch every remaining glyph's rectangle in the run.
+                let glyph_device_adv = finite_or_zero(glyph_device_adv);
                 // Real embedded outline for pure paint modes (0/1/2). Clip modes
                 // (4-7) keep the substitute-glyph path so Kotlin can build the clip.
                 let outline = if has_program && matches!(gs.render_mode, 0..=2) {
@@ -332,7 +400,7 @@ pub(crate) fn show_string_in(
                                 is_italic: italic,
                                 font_family: family,
                                 outline: true,
-                                h_scale: th as f32,
+                                h_scale: wire_h_scale,
                             });
                         }
                     }
@@ -356,7 +424,7 @@ pub(crate) fn show_string_in(
                             is_italic: italic,
                             font_family: family,
                             outline: false,
-                            h_scale: th as f32,
+                            h_scale: wire_h_scale,
                         });
                     } else if has_stroke {
                         prims.push(Prim::Text {
@@ -374,7 +442,7 @@ pub(crate) fn show_string_in(
                             is_italic: italic,
                             font_family: family,
                             outline: false,
-                            h_scale: th as f32,
+                            h_scale: wire_h_scale,
                         });
                     } else if clip_only || invisible {
                         // Mode 7: no paint, but carry the glyph so Kotlin can add
@@ -399,7 +467,7 @@ pub(crate) fn show_string_in(
                             is_italic: italic,
                             font_family: family,
                             outline: false,
-                            h_scale: th as f32,
+                            h_scale: wire_h_scale,
                         });
                     }
                 }
@@ -465,7 +533,21 @@ fn show_string_type3(
     let trm = mat_mul(text_matrix, &gs.ctm);
     let x_scale = (trm[0] * trm[0] + trm[1] * trm[1]).sqrt();
     let y_scale = (trm[2] * trm[2] + trm[3] * trm[3]).sqrt();
-    let size = (tfs * y_scale) as f32;
+    // See `show_string_in`: Th alone under-describes an anisotropic matrix to the
+    // substitute face, is exactly right for every isotropic one, and is bounded on
+    // the serialized f32 so neither a degenerate matrix nor an overflowing cast can
+    // put a non-finite scale on the wire (NaN survives the consumer's clamp).
+    let aniso = if y_scale > 1e-9 { x_scale / y_scale } else { 1.0 };
+    let wire_h_scale = th * if aniso.is_finite() { aniso.clamp(0.01, 100.0) } else { 1.0 };
+    let wire_h_scale = {
+        let v = wire_h_scale as f32;
+        if v.is_finite() {
+            v
+        } else {
+            1.0
+        }
+    };
+    let size = finite_or_zero((tfs * y_scale) as f32);
     let mut pen = 0.0_f64;
     let mut glyphs = 0usize;
 
@@ -623,7 +705,8 @@ fn show_string_type3(
                     size,
                     argb: 0,
                     text: s,
-                    advance: ((fi.width(code) * tfs * th * x_scale) as f32).max(size * 0.1),
+                    advance: finite_or_zero((fi.width(code) * tfs * th * x_scale) as f32)
+                        .max(size * 0.1),
                     stroke_argb: None,
                     stroke_width: None,
                     render_mode: gs.render_mode as u8,
@@ -632,7 +715,7 @@ fn show_string_type3(
                     is_italic: false,
                     font_family: 0,
                     outline: false,
-                    h_scale: th as f32,
+                    h_scale: wire_h_scale,
                 });
             }
         }
@@ -771,6 +854,320 @@ mod degenerate_stroke_tests {
             );
             assert!(!out.iter().any(|p| matches!(p, Prim::Fill { .. })));
         }
+    }
+
+    /// `emit_stroke` emits one primitive PER SUBPATH, and every caller checks the
+    /// cap once BEFORE the call (`interpret.rs`: `else if prims.len() <
+    /// MAX_PRIMITIVES { emit_stroke(…) }`), so the loop has to bound itself or a
+    /// single `S` on a MAX_SUBPATHS-subpath path walks straight past the ceiling.
+    /// `MAX_PRIMITIVES` is the process's memory guard against an uncatchable Rust
+    /// OOM and its doc states it is enforced at every content-emitting push.
+    #[test]
+    fn emit_stroke_stops_at_the_primitive_cap() {
+        let gs = GraphicsState { line_width: 1.0, ..Default::default() };
+        let subpaths: Vec<Vec<(f64, f64)>> =
+            (0..64).map(|i| vec![(i as f64, 0.0), (i as f64, 10.0)]).collect();
+        let mut prims: Vec<Prim> = Vec::new();
+        // Start just under the cap, as the caller's own check guarantees. Built by
+        // `extend` rather than `resize` on purpose: `Vec::resize` needs `T: Clone`,
+        // and `Prim` must not be cloneable-by-habit — `Image`/`ImageTiled` carry the
+        // whole decoded payload. Nothing here should force a derive on model.rs.
+        prims.extend((0..MAX_PRIMITIVES - 4).map(|_| Prim::ClipPop));
+        emit_stroke(&mut prims, &subpaths, &gs);
+        assert_eq!(
+            prims.len(),
+            MAX_PRIMITIVES,
+            "the cap must bound the per-subpath loop, not just its entry"
+        );
+    }
+}
+
+#[cfg(test)]
+mod blind_reaudit_r5_text_tests {
+    use crate::outlines::GlyphProgram;
+    use crate::type1::Type1Font;
+    use crate::*;
+    use std::sync::Arc;
+
+    /// A 1000x1000 box on a 1000-unit em, reachable as glyph name "A" at code 65.
+    fn embedded_box_font(wmode: u8) -> FontInfo {
+        let t1 = Type1Font {
+            glyphs: [(
+                "A".to_string(),
+                vec![vec![(0.0, 0.0), (1000.0, 0.0), (1000.0, 1000.0), (0.0, 1000.0), (0.0, 0.0)]],
+            )]
+            .into_iter()
+            .collect(),
+            encoding: [(65u32, "A".to_string())].into_iter().collect(),
+            font_matrix: [0.001, 0.0, 0.0, 0.001, 0.0, 0.0],
+        };
+        FontInfo {
+            two_byte: false,
+            wmode,
+            vertical_metrics: Arc::default(),
+            default_vertical: (0.880, -1.0),
+            cid_to_gid: None,
+            to_unicode: None,
+            encoding: Arc::new([(65u32, 'A')].into_iter().collect()),
+            cmap_uni: Arc::default(),
+            cmap: None,
+            widths: Arc::new([(65u32, 0.5)].into_iter().collect()),
+            default_width: 0.5,
+            t3: None,
+            style: FontStyle::default(),
+            family: 0,
+            base_font: String::new(),
+            glyph_program: Some(Arc::new(GlyphProgram::Type1(t1))),
+            glyph_names: Arc::new([(65u32, "A".to_string())].into_iter().collect()),
+        }
+    }
+
+    fn show(fi: FontInfo, gs: GraphicsState) -> Vec<Prim> {
+        let doc = Document::with_version("1.7");
+        let mut fonts = HashMap::new();
+        fonts.insert(b"F1".to_vec(), fi);
+        let mut prims = Vec::new();
+        show_string(&doc, &mut prims, &gs, &fonts, &IDENTITY, b"A", 0);
+        prims
+    }
+
+    fn state(render_mode: i64) -> GraphicsState {
+        GraphicsState {
+            font_key: b"F1".to_vec(),
+            font_size: 100.0,
+            render_mode,
+            ..Default::default()
+        }
+    }
+
+    /// §9.3.6 Table 106: mode 3 is "Neither fill nor stroke text (invisible)" and
+    /// mode 7 is "Add to path for clipping" — neither marks the page. Mode 3 is how
+    /// every scanned document carries its OCR layer, so if it paints, the scan is
+    /// overprinted with a second copy of its own text.
+    ///
+    /// Asserted against an EMBEDDED font, because that is the path that can paint:
+    /// modes 0-2 emit real outlines as `Prim::Fill`/`Prim::Stroke`, which the Kotlin
+    /// side has no render-mode guard for (it skips `Prim::Text` for rm 3/7, and skips
+    /// `outline`-flagged Text entirely). Ink for mode 3 therefore has to be suppressed
+    /// HERE or not at all.
+    #[test]
+    fn render_mode_3_and_7_emit_no_ink_even_with_an_embedded_program() {
+        let ink = |p: &Prim| matches!(p, Prim::Fill { .. } | Prim::Stroke { .. });
+
+        // Precondition: this font really does paint in a painting mode.
+        assert!(
+            show(embedded_box_font(0), state(0)).iter().any(ink),
+            "precondition: mode 0 must emit outline ink, or the test proves nothing"
+        );
+
+        for rm in [3i64, 7] {
+            let prims = show(embedded_box_font(0), state(rm));
+            assert!(
+                !prims.iter().any(ink),
+                "render mode {rm} must paint nothing, got {} ink prim(s)",
+                prims.iter().filter(|p| ink(p)).count()
+            );
+            let texts: Vec<_> = prims
+                .iter()
+                .filter_map(|p| match p {
+                    Prim::Text { argb, render_mode, text, .. } => Some((*argb, *render_mode, text)),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(texts.len(), 1, "mode {rm} must still reach the text index");
+            assert_eq!(texts[0].0, 0, "mode {rm} text prim must carry no colour");
+            assert_eq!(texts[0].1, rm as u8);
+        }
+    }
+
+    /// The glyph-space -> text-space scale is the font program's units-per-em, and it
+    /// is applied exactly once: a 1000-unit box on a 1000-unit em at 100 Tf spans
+    /// 100 user-space units. Applying it twice (or not at all) is invisible in a
+    /// units-per-em-1000 font only if the second factor is 1, which is why this
+    /// asserts the absolute extent rather than a ratio.
+    #[test]
+    fn an_embedded_outline_is_scaled_by_units_per_em_exactly_once() {
+        let prims = show(embedded_box_font(0), state(0));
+        let contours = prims
+            .iter()
+            .find_map(|p| match p {
+                Prim::Fill { contours, .. } => Some(contours.clone()),
+                _ => None,
+            })
+            .expect("mode 0 with an embedded program must emit outline fills");
+        let xs: Vec<f32> = contours.iter().flatten().map(|p| p.0).collect();
+        let ys: Vec<f32> = contours.iter().flatten().map(|p| p.1).collect();
+        let max_x = xs.iter().cloned().fold(f32::MIN, f32::max);
+        let max_y = ys.iter().cloned().fold(f32::MIN, f32::max);
+        assert!((max_x - 100.0).abs() < 1e-3, "em box should span 100 user units, got {max_x}");
+        assert!((max_y - 100.0).abs() < 1e-3, "em box should span 100 user units, got {max_y}");
+    }
+
+    /// Horizontal scaling (Tz) scales the glyph and its advance horizontally only
+    /// (§9.4.4: Th multiplies the x column of the text-space parameter matrix).
+    #[test]
+    fn horizontal_scaling_widens_the_outline_without_stretching_it_vertically() {
+        let gs = GraphicsState { h_scale: 2.0, ..state(0) };
+        let prims = show(embedded_box_font(0), gs);
+        let contours = prims
+            .iter()
+            .find_map(|p| match p {
+                Prim::Fill { contours, .. } => Some(contours.clone()),
+                _ => None,
+            })
+            .expect("outline fill");
+        let max_x = contours.iter().flatten().map(|p| p.0).fold(f32::MIN, f32::max);
+        let max_y = contours.iter().flatten().map(|p| p.1).fold(f32::MIN, f32::max);
+        assert!((max_x - 200.0).abs() < 1e-3, "Tz 200 must double the width, got {max_x}");
+        assert!((max_y - 100.0).abs() < 1e-3, "Tz must not touch the height, got {max_y}");
+    }
+
+    /// §9.4.4: Trise is a row of the text-space parameter matrix, which does not
+    /// depend on the writing mode. The vertical branch built its placement point
+    /// from the position vector alone and dropped Trise, so a superscript in
+    /// vertical CJK sat on the baseline.
+    #[test]
+    fn text_rise_applies_in_vertical_writing_mode_too() {
+        let origin = |rise: f64| {
+            let gs = GraphicsState { rise, ..state(3) };
+            show(embedded_box_font(1), gs)
+                .into_iter()
+                .find_map(|p| match p {
+                    Prim::Text { y, .. } => Some(y),
+                    _ => None,
+                })
+                .expect("a text prim per glyph")
+        };
+        assert!(
+            (origin(20.0) - origin(0.0) - 20.0).abs() < 1e-3,
+            "Trise must displace a vertical glyph by 20 user units"
+        );
+    }
+
+    /// Substitute glyphs are sized by Kotlin as `size` (the em, taken from the
+    /// matrix's Y scale) times `h_scale` (Tz). Under an ANISOTROPIC matrix those
+    /// two do not describe the glyph the outline path draws: the outline is scaled
+    /// by x_scale horizontally and y_scale vertically, so the substitute came out
+    /// narrower or wider by exactly that ratio — the two paths disagreeing about
+    /// the size of the same glyph. The ratio is the only part of the mismatch the
+    /// current wire can carry (a rotation still needs a field that does not exist),
+    /// and it must be exactly 1 for every isotropic matrix, which is nearly all of
+    /// them — hence the second half of this test.
+    #[test]
+    fn the_substitute_face_is_told_the_matrixs_horizontal_scale() {
+        let h_scale_for = |ctm: Mat, th: f64| {
+            let mut fi = embedded_box_font(0);
+            fi.glyph_program = None; // force the substitute path
+            let gs = GraphicsState { ctm, h_scale: th, ..state(0) };
+            show(fi, gs)
+                .into_iter()
+                .find_map(|p| match p {
+                    Prim::Text { h_scale, size, .. } => Some((h_scale, size)),
+                    _ => None,
+                })
+                .expect("substitute path emits a text prim")
+        };
+
+        // Isotropic: unchanged, whatever the zoom. This is the case that must not move.
+        for s in [1.0, 3.0, 0.25] {
+            let (hs, _) = h_scale_for([s, 0.0, 0.0, s, 0.0, 0.0], 1.0);
+            assert!((hs - 1.0).abs() < 1e-5, "isotropic scale {s} must leave Tz alone, got {hs}");
+        }
+        // A pure rotation is isotropic too.
+        let (a, b) = (0.6_f64, 0.8_f64); // cos/sin of a 53-degree rotation
+        let (hs, _) = h_scale_for([a, b, -b, a, 0.0, 0.0], 1.0);
+        assert!((hs - 1.0).abs() < 1e-5, "a pure rotation must leave Tz alone, got {hs}");
+
+        // Anisotropic: x twice y. The em still comes from the Y scale, and the
+        // horizontal stretch rides on h_scale.
+        let (hs, size) = h_scale_for([2.0, 0.0, 0.0, 1.0, 0.0, 0.0], 1.0);
+        assert!((hs - 2.0).abs() < 1e-5, "x_scale/y_scale = 2 must reach the wire, got {hs}");
+        assert!((size - 100.0).abs() < 1e-3, "the em still follows the Y scale, got {size}");
+
+        // …and it composes with a real Tz rather than replacing it.
+        let (hs, _) = h_scale_for([2.0, 0.0, 0.0, 1.0, 0.0, 0.0], 0.5);
+        assert!((hs - 1.0).abs() < 1e-5, "Tz 50% under a 2:1 matrix, got {hs}");
+
+        // A near-degenerate matrix must not put a non-finite or absurd scale on the
+        // wire. y_scale sits just above the divide-by-zero guard, so the raw ratio
+        // is ~5e8; the producer bounds it rather than relying on the consumer.
+        let (hs, _) = h_scale_for([1.0, 0.0, 0.0, 2e-9, 0.0, 0.0], 1.0);
+        assert!(hs.is_finite() && (0.01..=100.0).contains(&hs), "unbounded scale {hs}");
+        // Fully degenerate (below the guard) falls back to plain Tz.
+        let (hs, _) = h_scale_for([1.0, 0.0, 0.0, 0.0, 0.0, 0.0], 0.75);
+        assert!((hs - 0.75).abs() < 1e-5, "degenerate matrix must yield plain Tz, got {hs}");
+
+        // A pathological Tz must not reach the wire either. NaN is the one that
+        // matters: Kotlin's `coerceIn` is two comparisons, both false against NaN,
+        // so it would sail through the consumer's clamp into `Paint.textScaleX` and
+        // the glyph would silently disappear rather than be the wrong width.
+        for bad_tz in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            for ctm in [[1.0, 0.0, 0.0, 1.0, 0.0, 0.0], [2.0, 0.0, 0.0, 1.0, 0.0, 0.0]] {
+                let (hs, _) = h_scale_for(ctm, bad_tz);
+                assert!(hs.is_finite(), "Tz {bad_tz} put {hs} on the wire");
+            }
+        }
+    }
+
+    /// `Tf`'s operand and the CTM are file input and `size` is their product, so a
+    /// non-finite value is reachable even with both validated upstream: `f64 as f32`
+    /// saturates to infinity above ~3.4e38, and `inf * 0` from a zero-scale matrix
+    /// is NaN. It matters because NaN is not merely a wrong number here — Kotlin
+    /// floors the size with `coerceAtLeast`, a comparison that is false against NaN,
+    /// so it reaches `Paint.textSize` and the glyph vanishes.
+    #[test]
+    fn a_pathological_font_size_cannot_put_nan_on_the_wire() {
+        let sizes = |tfs: f64, ctm: Mat| {
+            let mut fi = embedded_box_font(0);
+            fi.glyph_program = None;
+            let gs = GraphicsState { ctm, font_size: tfs, ..state(0) };
+            show(fi, gs)
+                .into_iter()
+                .filter_map(|p| match p {
+                    Prim::Text { size, advance, .. } => Some((size, advance)),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+        };
+        let zero_scale: Mat = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0];
+        let identity: Mat = [1.0, 0.0, 0.0, 1.0, 0.0, 0.0];
+        for (tfs, ctm) in [
+            (f64::INFINITY, zero_scale), // inf * 0 = NaN, the reachable case
+            (f64::INFINITY, identity),
+            (f64::NAN, identity),
+            (1e308, identity),
+        ] {
+            for (size, advance) in sizes(tfs, ctm) {
+                assert!(size.is_finite(), "Tf {tfs} produced size {size}");
+                assert!(advance.is_finite(), "Tf {tfs} produced advance {advance}");
+            }
+        }
+    }
+
+    /// The no-metrics fallback returns a run advance of `len * 0.5 * Tfs * Th` but
+    /// used to put ONE glyph's `size` on the wire as the run's device advance. A
+    /// non-painted run (mode 3 — the OCR layer of a scan with an unresolvable font
+    /// resource) is aligned to that field by the selection layer, so every glyph's
+    /// selection rectangle piled up on the first character.
+    #[test]
+    fn a_run_with_no_font_metrics_reports_the_whole_runs_advance() {
+        let doc = Document::with_version("1.7");
+        let fonts: HashMap<Vec<u8>, FontInfo> = HashMap::new();
+        let gs = GraphicsState { font_key: b"F1".to_vec(), font_size: 10.0, ..Default::default() };
+        let mut prims = Vec::new();
+        let pen = show_string(&doc, &mut prims, &gs, &fonts, &IDENTITY, b"ABCD", 0);
+        let advance = prims
+            .iter()
+            .find_map(|p| match p {
+                Prim::Text { advance, .. } => Some(*advance),
+                _ => None,
+            })
+            .expect("the run must still reach the text index");
+        assert!((pen - 20.0).abs() < 1e-9, "4 codes at 0.5 em of 10 Tf");
+        assert!(
+            (advance - pen as f32).abs() < 1e-3,
+            "the wire advance must span the whole run ({pen}), got {advance}"
+        );
     }
 }
 

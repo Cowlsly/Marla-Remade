@@ -67,9 +67,10 @@ pub(crate) fn build_index(doc: &Document) -> Vec<PageIndex> {
         let mut text = String::new();
         let mut text_orig = String::new();
         let mut spans = Vec::new();
-        // Trailing edge of the previous glyph: (x_end, baseline_y, size). Used to
-        // decide whether the next glyph is visually contiguous with it.
-        let mut prev: Option<(f32, f32, f32)> = None;
+        // Trailing edge of the previous glyph: (x, baseline_y, size, |advance|).
+        // The origin is kept rather than the precomputed end point because a
+        // rotated run advances along an axis this record cannot see.
+        let mut prev: Option<(f32, f32, f32, f32)> = None;
         for p in &prims {
             if let Prim::Text { x, y, size, text: t, advance, .. } = p {
                 // One Prim::Text is emitted per glyph, so without separators the
@@ -77,15 +78,49 @@ pub(crate) fn build_index(doc: &Document) -> Vec<PageIndex> {
                 // line break or a column gap can never match. Insert a break when
                 // the baseline moves or a horizontal gap opens up, unless the text
                 // already supplies its own whitespace.
-                if let Some((prev_end, prev_y, prev_size)) = prev {
+                if let Some((prev_x, prev_y, prev_size, prev_adv)) = prev {
                     let em = prev_size.max(*size);
                     let has_ws = text_orig.chars().next_back().map(|c| c.is_whitespace()).unwrap_or(true)
                         || t.chars().next().map(|c| c.is_whitespace()).unwrap_or(false);
-                    if !has_ws {
-                        if (*y - prev_y).abs() > em * 0.5 {
+                    // `Prim::Text` carries the advance's LENGTH but not its
+                    // direction (draw.rs also clamps it to `.max(size * 0.1)`, so
+                    // the sign is gone even for RTL), so a 90-degree text matrix
+                    // looks like a line break at every single glyph — a rotated
+                    // caption indexed as "V\nE\nR\nT" and could not be found by
+                    // searching for any word in it. Recognise the rotated case by
+                    // the glyph sitting one whole advance directly above or below
+                    // its predecessor: a real line break also moves x back to the
+                    // margin, and it never lands exactly one advance away. The x
+                    // window is deliberately tight — a rotated matrix puts the
+                    // next origin at dx == 0 — because the looser it is, the more
+                    // room there is for a narrow single-glyph column, whose
+                    // leading can be within a tolerance of that glyph's advance,
+                    // to lose a line break it needs. The distance tolerance has to
+                    // stay, because Tc/Tw/TJ move the pen without being counted in
+                    // `advance`.
+                    //
+                    // This test can only ever SUPPRESS a separator, never add one,
+                    // which is what bounds the risk: horizontal layout that was
+                    // separated correctly before still is.
+                    //
+                    // The `step < em` clause is what keeps a narrow single-glyph
+                    // column (which is geometrically identical to a rotated run —
+                    // same x, one advance apart) from losing its line breaks: a
+                    // line's leading is at least a full em or the two lines would
+                    // collide, while a glyph's advance is less than a full em for
+                    // all but a handful of glyphs. Without it, "W" above "W" at
+                    // 13pt leading indexed as "WW".
+                    let dx = *x - prev_x;
+                    let dy = *y - prev_y;
+                    let step = (dx * dx + dy * dy).sqrt();
+                    let same_baseline = dx.abs() <= em * 0.1
+                        && (step - prev_adv).abs() <= em * 0.25
+                        && step < em * 0.95;
+                    if !has_ws && !same_baseline {
+                        if dy.abs() > em * 0.5 {
                             text.push('\n');
                             text_orig.push('\n');
-                        } else if *x - prev_end > em * 0.25 {
+                        } else if *x - (prev_x + prev_adv) > em * 0.25 {
                             text.push(' ');
                             text_orig.push(' ');
                         }
@@ -97,7 +132,7 @@ pub(crate) fn build_index(doc: &Document) -> Vec<PageIndex> {
                 // byte-aligned and one span table indexes both.
                 text.push_str(&lower_aligned(t));
                 spans.push((start, text_orig.len(), *x, *y, *size, *advance));
-                prev = Some((*x + advance.abs(), *y, *size));
+                prev = Some((*x, *y, *size, advance.abs()));
             }
         }
         out.push(PageIndex { text, text_orig, spans });
@@ -258,6 +293,83 @@ mod tests {
         let idx = index_with("Foo foo");
         assert_eq!(search_document_inner(&idx, "foo", true).len(), 1);
         assert_eq!(search_document_inner(&idx, "foo", false).len(), 2);
+    }
+
+    fn doc_with_content(content: &str) -> Document {
+        let mut doc = Document::with_version("1.5");
+        let font_id = doc.add_object(dictionary! {
+            "Type" => "Font", "Subtype" => "Type1", "BaseFont" => "Helvetica",
+        });
+        let content_id = doc.add_object(Stream::new(dictionary! {}, content.as_bytes().to_vec()));
+        let pages_id = doc.new_object_id();
+        let page_id = doc.add_object(dictionary! {
+            "Type" => "Page",
+            "Parent" => pages_id,
+            "Contents" => content_id,
+            "MediaBox" => vec![0.into(), 0.into(), 612.into(), 792.into()],
+            "Resources" => dictionary! { "Font" => dictionary! { "F1" => font_id } },
+        });
+        doc.objects.insert(
+            pages_id,
+            Object::Dictionary(dictionary! {
+                "Type" => "Pages",
+                "Kids" => vec![page_id.into()],
+                "Count" => 1,
+            }),
+        );
+        let catalog_id = doc.add_object(dictionary! { "Type" => "Catalog", "Pages" => pages_id });
+        doc.trailer.set("Root", catalog_id);
+        doc
+    }
+
+    /// A 90-degree-rotated text run is one word, not one word per glyph.
+    ///
+    /// `Prim::Text` carries only the glyph origin and the advance's LENGTH, not
+    /// its direction, so the separator heuristic used the baseline `y` alone to
+    /// decide that a line had ended. Under a rotated text matrix every glyph in
+    /// the run sits a full advance above the previous one, so every glyph looked
+    /// like a new line and a rotated caption could never be found by searching
+    /// for any word in it.
+    #[test]
+    fn a_rotated_run_indexes_as_one_word() {
+        let doc = doc_with_content("BT /F1 12 Tf 0 1 -1 0 300 300 Tm (VERT) Tj ET\n");
+        let idx = build_index(&doc);
+        assert_eq!(
+            idx[0].text_orig, "VERT",
+            "rotated glyphs must not be split by the line-break heuristic"
+        );
+        assert_eq!(search_document_inner(&idx, "vert", false).len(), 1);
+    }
+
+    /// The separator heuristic still has to fire for real layout: two lines break,
+    /// and a wide gap on one line becomes a space. Asserted alongside the rotated
+    /// case because the fix for one is what could silently disable the other.
+    #[test]
+    fn line_breaks_and_word_gaps_still_separate() {
+        let two_lines = build_index(&doc_with_content(
+            "BT /F1 12 Tf 72 700 Td (one) Tj 0 -18 Td (two) Tj ET\n",
+        ));
+        assert_eq!(two_lines[0].text_orig, "one\ntwo");
+        assert_eq!(search_document_inner(&two_lines, "onetwo", false).len(), 0);
+
+        // A one-glyph line above a one-glyph line at the SAME x: the case the
+        // rotated-run exemption is most at risk of swallowing, because nothing but
+        // the tight x window and the advance distance distinguishes it from a
+        // rotated run. `W` is the widest glyph in the face, so its advance is as
+        // close to the leading as this can get.
+        let column = build_index(&doc_with_content(
+            "BT /F1 12 Tf 72 700 Td (W) Tj 0 -13 Td (W) Tj ET\n",
+        ));
+        assert_eq!(column[0].text_orig, "W\nW", "a narrow column still breaks");
+
+        let gap = build_index(&doc_with_content(
+            "BT /F1 12 Tf 72 700 Td (one) Tj 1 0 0 1 200 700 Tm (two) Tj ET\n",
+        ));
+        assert!(
+            gap[0].text_orig.contains("one two"),
+            "a horizontal gap must become a space, got {:?}",
+            gap[0].text_orig
+        );
     }
 
     fn doc_with_text(word: &str) -> Document {

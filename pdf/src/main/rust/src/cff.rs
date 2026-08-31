@@ -43,15 +43,21 @@ fn read_index(d: &[u8], pos: usize) -> Option<Index> {
     if count == 0 {
         return Some(Index { entries: Vec::new(), end: pos + 2 });
     }
-    // u16 max is 65535, but sanity cap to avoid DoS from huge counts
-    if count > 32767 {
-        return None;
-    }
+    // `count` is a u16, so the offset array is at most 65536 entries (~1 MB of
+    // `entries`); no further cap is needed and capping lower would reject the
+    // large CID-keyed CJK fonts that legitimately carry more than 32767 glyphs.
     let off_size = u8a(d, pos + 2)?;
     if off_size == 0 || off_size > 4 {
         return None;
     }
     let off_array = pos + 3;
+    // Size the allocations from what the file actually contains, not from the
+    // declared count: `count` is attacker-controlled and would otherwise reserve
+    // (count+1) offsets for a truncated INDEX. The offset array must be present.
+    let off_bytes = (count + 1).checked_mul(off_size as usize)?;
+    if off_array.checked_add(off_bytes)? > d.len() {
+        return None;
+    }
     let mut offs = Vec::with_capacity(count + 1);
     for i in 0..=count {
         offs.push(offat(d, off_array + i * off_size as usize, off_size)?);
@@ -560,7 +566,7 @@ fn parse(d: &[u8]) -> Option<HashMap<u32, char>> {
         let cs_off = *top.get(&17)?.first()? as usize;
         read_index(d, cs_off)?.entries.len()
     };
-    if nglyphs == 0 || nglyphs > 32767 {
+    if nglyphs == 0 || nglyphs > 65535 {
         return None;
     }
 
@@ -650,8 +656,9 @@ fn parse(d: &[u8]) -> Option<HashMap<u32, char>> {
     Some(out)
 }
 
-/// The 391 CFF standard strings (SID 0..390) — authoritative Adobe CFF2 list (Adobe TN #5176 + CFF2 extensions).
-// Full verified length 391, last entry bracketleftbt matches FreeType & fontTools.
+/// The 391 CFF standard strings (SID 0..390) — Adobe TN #5176 Appendix A.
+// SID 390 is "Semibold"; SIDs 379..390 are the version/weight strings
+// ("001.000" .. "Semibold"), which is the distinguishing tail of this table.
 const STD_STRINGS: &[&str] = &[
     ".notdef", "space", "exclam", "quotedbl", "numbersign", "dollar", "percent", "ampersand",
     "quoteright", "parenleft", "parenright", "asterisk", "plus", "comma", "hyphen", "period",
@@ -698,10 +705,10 @@ const STD_STRINGS: &[&str] = &[
     "threeinferior", "fourinferior", "fiveinferior", "sixinferior", "seveninferior", "eightinferior", "nineinferior", "centinferior",
     "dollarinferior", "periodinferior", "commainferior", "Agravesmall", "Aacutesmall", "Acircumflexsmall", "Atildesmall", "Adieresissmall",
     "Aringsmall", "AEsmall", "Ccedillasmall", "Egravesmall", "Eacutesmall", "Ecircumflexsmall", "Edieresissmall", "Igravesmall",
-    "Iacutesmall", "Icircumflexsmall", "Idieresissmall", "Ntildesmall", "Ogravesmall", "Oacutesmall", "Ocircumflexsmall", "Otildesmall",
-    "Odieresissmall", "Ugravesmall", "Uacutesmall", "Ucircumflexsmall", "Udieresissmall", "Emacronsmall", "Omacronsmall", "Umacronsmall",
-    "radicalex", "arrowvertex", "arrowhorizex", "registersans", "copyrightsans", "trademarksans", "parenlefttp", "parenrighttp",
-    "parenleftbt", "parenrightbt", "parenleftalt", "parenrightalt", "bracketlefttp", "bracketrighttp", "bracketleftbt",
+    "Iacutesmall", "Icircumflexsmall", "Idieresissmall", "Ethsmall", "Ntildesmall", "Ogravesmall", "Oacutesmall", "Ocircumflexsmall",
+    "Otildesmall", "Odieresissmall", "OEsmall", "Oslashsmall", "Ugravesmall", "Uacutesmall", "Ucircumflexsmall", "Udieresissmall",
+    "Yacutesmall", "Thornsmall", "Ydieresissmall", "001.000", "001.001", "001.002", "001.003", "Black",
+    "Bold", "Book", "Light", "Medium", "Regular", "Roman", "Semibold",
 ];
 
 
@@ -772,4 +779,64 @@ mod tests {
         assert_eq!(sids.get(&2), None);
     }
 
+    #[test]
+    fn std_strings_tail_is_the_version_and_weight_block() {
+        // Adobe TN #5176 Appendix A: SIDs 363..390 run Ethsmall .. Semibold and
+        // end with the version/weight strings. The tail previously held
+        // MacExpert/Symbol names (radicalex, arrowvertex, parenlefttp, …), which
+        // are not CFF standard strings at all, so every charset entry with a SID
+        // above 362 resolved to the wrong glyph name — and therefore, for a
+        // name-keyed CFF, to the wrong Unicode in the built-in encoding.
+        assert_eq!(STD_STRINGS[363], "Ethsmall");
+        assert_eq!(STD_STRINGS[378], "Ydieresissmall");
+        assert_eq!(STD_STRINGS[379], "001.000");
+        assert_eq!(STD_STRINGS[390], "Semibold");
+        for bogus in ["radicalex", "arrowvertex", "parenlefttp", "bracketleftbt", "Emacronsmall"] {
+            assert!(!STD_STRINGS.contains(&bogus), "{bogus} is not a CFF standard string");
+        }
+    }
+
+    /// An INDEX whose `count` entries are all empty, with 1-byte offsets.
+    fn empty_index(count: usize) -> Vec<u8> {
+        let mut d = vec![(count >> 8) as u8, count as u8, 1u8];
+        d.extend(std::iter::repeat(1u8).take(count + 1));
+        d
+    }
+
+    #[test]
+    fn index_count_is_bounded_by_the_format_not_by_a_lower_cap() {
+        // A CFF INDEX count is a u16, so 32768..=65535 entries are legal, and
+        // CID-keyed CJK fonts really do carry that many glyphs. Rejecting them
+        // made `cid_to_gid_map` return None, and the caller then falls back to
+        // CID==GID identity — silently drawing a different glyph per character.
+        let d = empty_index(40000);
+        let idx = read_index(&d, 0).expect("a 40000-entry INDEX is legal CFF");
+        assert_eq!(idx.entries.len(), 40000);
+        assert_eq!(idx.end, d.len());
+    }
+
+    #[test]
+    fn index_offset_array_must_fit_in_the_data() {
+        // `count` is attacker-controlled and sizes two allocations. A header
+        // claiming 65535 four-byte offsets over 8 bytes of file must be rejected
+        // before anything is reserved.
+        let d = [0xFFu8, 0xFF, 4, 0, 0, 0, 1, 0];
+        assert!(read_index(&d, 0).is_none());
+        let mut short = empty_index(500);
+        short.truncate(100);
+        assert!(read_index(&short, 0).is_none());
+    }
+
+    #[test]
+    fn charset_bounds_follow_the_string_index_size() {
+        // Format 0 at offset 1 (offset 0 means the predefined ISOAdobe charset),
+        // 3 glyphs, SIDs 391 and 392: legal only when the String INDEX supplies at
+        // least two custom strings.
+        let d = [0xFFu8, 0x00, 0x01, 0x87, 0x01, 0x88];
+        let with_strings = parse_charset(&d, 1, 3, 2, false).unwrap();
+        assert_eq!(with_strings.get(&1), Some(&391));
+        assert_eq!(with_strings.get(&2), Some(&392));
+        let without = parse_charset(&d, 1, 3, 0, false).unwrap();
+        assert_eq!(without.get(&1), None, "a SID past the standard strings is dropped");
+    }
 }

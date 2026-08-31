@@ -224,6 +224,12 @@ impl Default for GraphicsState {
 /// deliberately no fixed step constant here — a fixed count left large curves
 /// visibly faceted, which was finding E-16.
 pub(crate) const MAX_CLIP_DEPTH: usize = 64;
+/// NOT the enforced `q` nesting limit, despite the name. The interpreter's only
+/// use of it is to derive [`interpret::MAX_GRAPHICS_STACK_HARD`] (`* 16` = 2048),
+/// which is what the `q` arm actually checks; nothing checks 128. Left as the
+/// stated base because the hard cap is documented relative to it, but do not read
+/// this as "128 saved states" — §8.4.2 puts no limit on `q` nesting and the
+/// interpreter admits 2048 before it starts dropping saves.
 pub(crate) const MAX_GRAPHICS_STACK: usize = 128;
 /// Ceiling on primitives emitted for one page, and — since [`MAX_CONTENT_OPS`] was raised
 /// off 200_000 — the binding constraint on OUTPUT for every content shape rather than only
@@ -332,10 +338,22 @@ pub(crate) const MAX_TYPE3_PRIMS_PER_GLYPH: usize = 1000;
 pub(crate) const MAX_PATTERN_RECURSION: u32 = 4;
 pub(crate) const MAX_OC_STACK: usize = 32;
 pub(crate) const MAX_SUBPATHS: usize = 20000;
-/// Maximum dash-array entries. Held at 32 to match the Kotlin wire decoder's
-/// bound: a longer array used to make the parser reject the page outright, and
-/// even with that softened to a clamp, exceeding it silently truncates the dash
-/// pattern. Real dash arrays are almost never longer than 8.
+/// Maximum dash-array entries accepted from `d` or from an ExtGState `/D`.
+///
+/// The comment here used to justify 32 as matching "the Kotlin wire decoder's bound".
+/// That bound no longer exists: `SafePdfParser.kt`'s `TAG_STROKE` arm reads the count
+/// as a `u8` and never rejects or clamps below 255 — the `> 32` throw it describes was
+/// removed because it discarded a whole page over one stroke. (Its own comment there
+/// still says "Rust caps at MAX_DASH_LEN (64)", which is stale in the other direction;
+/// routed to the wire owner.) So nothing downstream requires 32.
+///
+/// What DOES bind: `wire.rs` writes the count as a `u8` and truncates at 255, and
+/// `draw::emit_stroke` duplicates an odd-length array (§8.4.3.6 needs an even number
+/// of on/off phases), so the emitted length can be twice what is stored here. 32 keeps
+/// that doubled worst case at 64, comfortably inside the `u8`, and is 4x the longest
+/// dash pattern seen in practice. §8.4.3.6 puts no limit on the array, so exceeding
+/// this silently truncates the pattern — which is why it is set well above real files
+/// rather than at the PostScript-era limit of 8.
 pub(crate) const MAX_DASH_LEN: usize = 32;
 /// Ceiling on operators READ from one content stream, via the `ops.iter().take(...)`
 /// in `interpret_content_seeded`.

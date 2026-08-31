@@ -15,9 +15,12 @@ const WIRE_MAGIC: u32 = 0x50444657; // 'PDFW'
 /// fields the Image arm actually writes.
 ///
 /// V11 means one thing only: a `u8 interpolate` in the Image arm, which the parser reads
-/// behind its `isV11` gate. Bumping to 11 without writing that byte makes the parser eat
-/// the first byte of the image's `u32 len` as interpolate and desync every primitive from
-/// there on, so the bump and the field must land in the same change.
+/// behind its `isV11` gate. That gate is a `>=`, so the hazard is ANY bump above 10, not
+/// just a bump to exactly 11: declaring 12 for some unrelated new field switches the
+/// interpolate gate on too. Without the byte the parser eats the first byte of the image's
+/// `u32 len` as interpolate and desyncs every primitive from there on, so the bump and the
+/// field must land in the same change — and a jump straight from 10 to 12 must write BOTH
+/// the interpolate byte and whatever v12 adds.
 /// `images::image_should_interpolate` already computes the value, but `Prim::Image` does
 /// not carry it yet, so nothing serializes it and the parser's pre-v11 default (smooth)
 /// applies.
@@ -572,6 +575,144 @@ mod tests {
         assert_eq!(
             WIRE_MAGIC, kotlin_magic,
             "the magic disagrees, so the parser takes every buffer for a headerless v1 one"
+        );
+    }
+
+    /// Header size: magic + version + width + height + count.
+    const HEADER_LEN: usize = 4 + 4 + 4 + 4 + 4;
+
+    /// Bytes `serialize` writes for a page holding exactly `prim`, header excluded.
+    fn arm_len(prim: Prim) -> usize {
+        let page = PageData { width: 10.0, height: 10.0, prims: vec![prim] };
+        serialize(&page).len() - HEADER_LEN
+    }
+
+    /// Every arm's on-wire width, pinned term by term.
+    ///
+    /// `wire_version_matches_the_image_payload_layout` does this for the Image arm only, and
+    /// `SafePdfParserTest.theImageArmMatchesTheByteCountRustSerializes` names the residual
+    /// explicitly: the other thirteen tags are transcription-against-transcription, because
+    /// Rust's round-trip test only reads back what Rust wrote and Kotlin's `WireWriter` is a
+    /// second hand transcription of this file. A field that changed width on ONE side only
+    /// would leave both suites green while every real page desynced from that byte on.
+    ///
+    /// This is the Rust half of the pairing. `SafePdfParserTest.everyArmMatchesTheByteCount\
+    /// RustSerializes` asserts the same arithmetic against `WireWriter`, so a width or
+    /// ordering change in either serializer fails one of the two.
+    ///
+    /// The sums are written out field by field rather than as totals: a bare total still
+    /// matches when two fields change by offsetting amounts.
+    #[test]
+    fn every_arm_has_the_byte_length_the_kotlin_parser_reads() {
+        // 1 Text, with an N-byte string: tag + x + y + size + argb + len + N + hasStroke +
+        // strokeArgb + strokeWidth + renderMode + blend + advance + fontFlags + hScale.
+        let text_fixed = 1 + 4 + 4 + 4 + 4 + 2 + 1 + 4 + 4 + 1 + 1 + 4 + 1 + 4;
+        assert_eq!(
+            arm_len(Prim::Text {
+                x: 0.0, y: 0.0, size: 1.0, argb: 0, text: "ab".to_string(),
+                stroke_argb: None, stroke_width: None, advance: 1.0, render_mode: 0,
+                blend: BlendMode::Normal, is_bold: false, is_italic: false,
+                font_family: 0, outline: false, h_scale: 1.0,
+            }),
+            text_fixed + 2,
+            "Text arm width changed",
+        );
+
+        // 2 Fill: tag + argb + evenOdd + nContours + per contour (nPts + 8 per point) + blend.
+        assert_eq!(
+            arm_len(Prim::Fill {
+                argb: 0, even_odd: false,
+                contours: vec![vec![(0.0, 0.0), (1.0, 0.0), (1.0, 1.0)]],
+                blend: BlendMode::Normal,
+            }),
+            1 + 4 + 1 + 2 + (2 + 3 * 8) + 1,
+            "Fill arm width changed",
+        );
+
+        // 3 Stroke: tag + argb + width + nDash + 4 per dash + phase + cap + join + miter +
+        // nPts + 8 per point + blend.
+        assert_eq!(
+            arm_len(Prim::Stroke {
+                argb: 0, width: 1.0, dash: vec![3.0, 2.0], dash_phase: 0.0,
+                cap: 0, join: 0, miter: 10.0, pts: vec![(0.0, 0.0), (1.0, 1.0)],
+                blend: BlendMode::Normal,
+            }),
+            1 + 4 + 4 + 1 + 2 * 4 + 4 + 1 + 1 + 4 + 2 + 2 * 8 + 1,
+            "Stroke arm width changed",
+        );
+
+        // 4 Image: tag + 6 ctm + w + h + format + alpha + blend + len + payload. No v11
+        // interpolate byte while WIRE_VERSION is 10 — see the note on that constant.
+        assert_eq!(
+            arm_len(Prim::Image {
+                ctm: [1.0, 0.0, 0.0, 1.0, 0.0, 0.0], w: 1, h: 1, format: 0,
+                data: vec![1, 2, 3, 4], alpha: 1.0, blend: BlendMode::Normal,
+            }),
+            1 + 24 + 4 + 4 + 1 + 4 + 1 + 4 + 4,
+            "Image arm width changed",
+        );
+
+        // 14 ImageTiled: tag + 6 ctm + w + h + xstep + ystep + i0 + j0 + nx + ny + alpha +
+        // blend + len + payload. No format byte: the cell is always RGBA8888.
+        assert_eq!(
+            arm_len(Prim::ImageTiled {
+                ctm: [1.0, 0.0, 0.0, 1.0, 0.0, 0.0], w: 1, h: 1, data: vec![1, 2, 3, 4],
+                xstep: 1.0, ystep: 1.0, i0: 0, j0: 0, nx: 1, ny: 1,
+                alpha: 1.0, blend: BlendMode::Normal,
+            }),
+            1 + 24 + 4 + 4 + 4 + 4 + 4 + 4 + 4 + 4 + 4 + 1 + 4 + 4,
+            "ImageTiled arm width changed",
+        );
+
+        // 5 ClipPush: tag + evenOdd + nPts + 8 per point + nPathOps, then the tagged ops:
+        // Move/Line 1 + 8, Cubic 1 + 24, Close 1.
+        assert_eq!(
+            arm_len(Prim::ClipPush { even_odd: false, pts: vec![(0.0, 0.0)], path_ops: None }),
+            1 + 1 + 2 + 8 + 2,
+            "ClipPush arm width changed (no path ops)",
+        );
+        assert_eq!(
+            arm_len(Prim::ClipPush {
+                even_odd: false,
+                pts: vec![(0.0, 0.0)],
+                path_ops: Some(vec![
+                    PathOp::Move(0.0, 0.0),
+                    PathOp::Line(1.0, 1.0),
+                    PathOp::Cubic(1.0, 2.0, 3.0, 4.0, 5.0, 6.0),
+                    PathOp::Close,
+                ]),
+            }),
+            1 + 1 + 2 + 8 + 2 + (1 + 8) + (1 + 8) + (1 + 24) + 1,
+            "ClipPush path-ops section width changed",
+        );
+
+        // The empty-payload markers are one tag byte each.
+        assert_eq!(arm_len(Prim::ClipPop), 1, "ClipPop arm width changed");
+        assert_eq!(arm_len(Prim::TextClipApply), 1, "TextClipApply arm width changed");
+        assert_eq!(arm_len(Prim::GroupPop), 1, "GroupPop arm width changed");
+        assert_eq!(arm_len(Prim::SoftMaskContent), 1, "SoftMaskContent arm width changed");
+        assert_eq!(arm_len(Prim::SoftMaskPop), 1, "SoftMaskPop arm width changed");
+
+        // 7 GroupPush: tag + isolated + knockout + alpha + blend.
+        assert_eq!(
+            arm_len(Prim::GroupPush {
+                isolated: true, knockout: false, alpha: 1.0, blend: BlendMode::Normal,
+            }),
+            1 + 1 + 1 + 4 + 1,
+            "GroupPush arm width changed",
+        );
+
+        // 10 SoftMaskPush: tag + maskType.
+        assert_eq!(
+            arm_len(Prim::SoftMaskPush { mask_type: 1 }), 1 + 1,
+            "SoftMaskPush arm width changed",
+        );
+
+        // 13 SoftMaskTransfer: tag + the LUT, raw and unprefixed.
+        assert_eq!(
+            arm_len(Prim::SoftMaskTransfer(Box::new([0u8; TRANSFER_LUT_SIZE]))),
+            1 + TRANSFER_LUT_SIZE,
+            "SoftMaskTransfer arm width changed",
         );
     }
 

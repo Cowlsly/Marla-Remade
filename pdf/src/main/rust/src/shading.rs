@@ -98,7 +98,20 @@ pub fn rasterize_shading_mesh(
         .unwrap_or(CsKind::DeviceRGB);
     // If the shading has a /Function, colors are 1-in scalars mapped through it.
     let func = dict.get(b"Function").ok().and_then(|o| PdfFunction::parse(doc, o));
-    let ncomp = if func.is_some() { 1 } else { cs_kind_ncomp(&cs_kind) as usize };
+    // Otherwise each vertex carries one value per component of the colour space —
+    // except for Indexed, where §8.6.6.3 makes a colour value a SINGLE palette index
+    // and `eval_cs_to_rgb`'s Indexed arm reads exactly one. `cs_kind_ncomp` reports
+    // the BASE arity (3 for an RGB base), so reading that many values per vertex
+    // consumed 3x the bits, desynchronising the packed stream from the second vertex
+    // onward — every later vertex decodes from the middle of its predecessor and the
+    // mesh becomes spectacular noise, on top of every colour resolving to index ~0.
+    let ncomp = if func.is_some() {
+        1
+    } else if matches!(cs_kind, CsKind::Indexed { .. }) {
+        1
+    } else {
+        cs_kind_ncomp(&cs_kind) as usize
+    };
     if ncomp == 0 {
         return None;
     }
@@ -183,29 +196,17 @@ pub fn rasterize_shading_mesh(
         eval_cs_to_rgb(doc, &cs_kind, use_comps, cs_resources).unwrap_or(0xFF80_8080)
     };
 
-    let triangles: Vec<(Vertex, Vertex, Vertex)> = match shading_type {
-        4 => parse_type4(data, bps_flag, bps_coord, bps_comp, ncomp, &decode),
-        5 => {
-            let vpr = dict.get(b"VerticesPerRow").ok().and_then(num).unwrap_or(0.0) as usize;
-            if vpr < 2 {
-                return None;
-            }
-            parse_type5(data, vpr, bps_coord, bps_comp, ncomp, &decode)
+    // `/VerticesPerRow` is read before the raster is allocated so a degenerate value
+    // still short-circuits without any allocation (§8.7.4.5.6 requires >= 2).
+    let vpr = if shading_type == 5 {
+        let v = dict.get(b"VerticesPerRow").ok().and_then(num).unwrap_or(0.0) as usize;
+        if v < 2 {
+            return None;
         }
-        6 | 7 => parse_type6_7(data, shading_type, bps_flag, bps_coord, bps_comp, ncomp, &decode),
-        _ => Vec::new(),
+        v
+    } else {
+        0
     };
-
-    if triangles.is_empty() {
-        // Nothing parseable. Do NOT fall back to flooding the area with
-        // /Background: per Table 78 /Background fills only the portions that lie
-        // OUTSIDE the shading's own extent and "shall be ignored by the sh
-        // operator", so painting it over the whole Decode box turned a failed
-        // mesh into an opaque rectangle covering the entire clip — hiding page
-        // content. With no triangles we cannot know the shading's extent, so the
-        // only correct answer is to paint nothing at all.
-        return None;
-    }
 
     // Size the raster to the shading's aspect ratio instead of forcing a square.
     // A wide, shallow gradient band used to allocate size*size regardless (up to
@@ -237,11 +238,44 @@ pub fn rasterize_shading_mesh(
     };
     let mut rgba = vec![0u8; w * h * 4];
 
-    for (v0, v1, v2) in triangles.into_iter().take(MAX_SHADING_TRIANGLES) {
-        let c0 = color_of(&v0.color);
-        let c1 = color_of(&v1.color);
-        let c2 = color_of(&v2.color);
-        fill_tri(&mut rgba, w, h, &bounds, (&v0, &v1, &v2), (c0, c1, c2));
+    // Rasterize each triangle as it is decoded rather than materialising the whole
+    // mesh first. The mesh types are the one place in this file where an allocation
+    // is sized purely from file values AND amplified: MAX_SHADING_PATCHES is 8000 and
+    // each Coons patch tessellates to 2*8*8 = 128 triangles, so 8000 patches * 29
+    // bytes = 232 KB of stream (a couple of KB once Flate-compressed) expanded into a
+    // MAX_SHADING_TRIANGLES-long `Vec<(Vertex, Vertex, Vertex)>` — ~120 bytes inline
+    // plus three heap `Vec<f64>` colour tuples per element, so hundreds of MB and
+    // millions of allocations. A Rust OOM is an uncatchable process abort, so this
+    // cannot be recovered from downstream. Streaming holds one patch at a time and
+    // paints in exactly the same order, so the raster is byte-identical.
+    let mut painted = 0usize;
+    {
+        let mut emit = |v0: &Vertex, v1: &Vertex, v2: &Vertex| {
+            let c0 = color_of(&v0.color);
+            let c1 = color_of(&v1.color);
+            let c2 = color_of(&v2.color);
+            fill_tri(&mut rgba, w, h, &bounds, (v0, v1, v2), (c0, c1, c2));
+            painted += 1;
+        };
+        match shading_type {
+            4 => parse_type4(data, bps_flag, bps_coord, bps_comp, ncomp, &decode, &mut emit),
+            5 => parse_type5(data, vpr, bps_coord, bps_comp, ncomp, &decode, &mut emit),
+            6 | 7 => parse_type6_7(
+                data, shading_type, bps_flag, bps_coord, bps_comp, ncomp, &decode, &mut emit,
+            ),
+            _ => {}
+        }
+    }
+
+    if painted == 0 {
+        // Nothing parseable. Do NOT fall back to flooding the area with
+        // /Background: per Table 78 /Background fills only the portions that lie
+        // OUTSIDE the shading's own extent and "shall be ignored by the sh
+        // operator", so painting it over the whole Decode box turned a failed
+        // mesh into an opaque rectangle covering the entire clip — hiding page
+        // content. With no triangles we cannot know the shading's extent, so the
+        // only correct answer is to paint nothing at all.
+        return None;
     }
 
     let ctm = placement_ctm(&bounds, base_ctm);
@@ -277,6 +311,11 @@ fn read_vertex(
     Some(Vertex { x, y, color })
 }
 
+/// A sink for decoded mesh triangles. Triangles are handed to the caller one at a
+/// time instead of being collected, so peak memory stays proportional to a single
+/// patch rather than to `MAX_SHADING_TRIANGLES`.
+type Emit<'a> = &'a mut dyn FnMut(&Vertex, &Vertex, &Vertex);
+
 /// Type 4: free-form Gouraud-shaded triangle mesh (flag-driven strips/fans).
 fn parse_type4(
     data: &[u8],
@@ -285,9 +324,10 @@ fn parse_type4(
     bps_comp: u32,
     ncomp: usize,
     decode: &[f64],
-) -> Vec<(Vertex, Vertex, Vertex)> {
+    emit: Emit,
+) {
     let mut br = BitReader::new(data);
-    let mut tris = Vec::new();
+    let mut emitted = 0usize;
     // `last` holds the most recently completed triangle so flag 1/2 continuation
     // vertices can form strips/fans; `pending` accumulates the three flag-0
     // vertices that begin a new independent triangle (PDF 8.7.4.5.5).
@@ -296,7 +336,7 @@ fn parse_type4(
     let mut guard = 0usize;
     while br.remaining_bits() >= (bps_flag + 2 * bps_coord + ncomp as u32 * bps_comp) as usize {
         guard += 1;
-        if guard > 2_000_000 || tris.len() >= MAX_SHADING_TRIANGLES { break; }
+        if guard > 2_000_000 || emitted >= MAX_SHADING_TRIANGLES { break; }
         let flag = br.read(bps_flag).unwrap_or(0);
         let v = match read_vertex(&mut br, bps_coord, bps_comp, ncomp, decode) { Some(v) => v, None => break };
         // Each vertex's data occupies a whole number of bytes; trailing padding
@@ -309,7 +349,8 @@ fn parse_type4(
                 pending.push(v);
                 if pending.len() == 3 {
                     let t = (pending[0].clone(), pending[1].clone(), pending[2].clone());
-                    tris.push(t.clone());
+                    emit(&t.0, &t.1, &t.2);
+                    emitted += 1;
                     last = Some(t);
                     pending.clear();
                 }
@@ -319,7 +360,8 @@ fn parse_type4(
                 pending.clear();
                 if let Some((_a, b, c)) = last.clone() {
                     let t = (b, c, v);
-                    tris.push(t.clone());
+                    emit(&t.0, &t.1, &t.2);
+                    emitted += 1;
                     last = Some(t);
                 }
             }
@@ -328,14 +370,14 @@ fn parse_type4(
                 pending.clear();
                 if let Some((a, _b, c)) = last.clone() {
                     let t = (a, c, v);
-                    tris.push(t.clone());
+                    emit(&t.0, &t.1, &t.2);
+                    emitted += 1;
                     last = Some(t);
                 }
             }
             _ => break,
         }
     }
-    tris
 }
 
 /// Type 5: lattice-form Gouraud mesh (row-major, `VerticesPerRow`).
@@ -346,31 +388,34 @@ fn parse_type5(
     bps_comp: u32,
     ncomp: usize,
     decode: &[f64],
-) -> Vec<(Vertex, Vertex, Vertex)> {
+    emit: Emit,
+) {
     let mut br = BitReader::new(data);
-    let mut verts = Vec::new();
-    while let Some(v) = read_vertex(&mut br, bps_coord, bps_comp, ncomp, decode) {
-        verts.push(v);
-        if verts.len() >= MAX_SHADING_TRIANGLES {
-            break;
+    // Only two rows are ever live at once, so the whole lattice never has to be
+    // resident even when the stream declares millions of vertices.
+    let read_row = |br: &mut BitReader| -> Option<Vec<Vertex>> {
+        let mut row = Vec::with_capacity(vpr.min(4096));
+        for _ in 0..vpr {
+            row.push(read_vertex(br, bps_coord, bps_comp, ncomp, decode)?);
         }
-    }
-    let rows = verts.len() / vpr;
-    let mut tris = Vec::new();
-    'rows: for r in 0..rows.saturating_sub(1) {
+        Some(row)
+    };
+    let mut prev = match read_row(&mut br) {
+        Some(r) => r,
+        None => return,
+    };
+    let mut emitted = 0usize;
+    while let Some(cur) = read_row(&mut br) {
         for c in 0..vpr - 1 {
-            if tris.len() >= MAX_SHADING_TRIANGLES {
-                break 'rows;
+            if emitted >= MAX_SHADING_TRIANGLES {
+                return;
             }
-            let i00 = r * vpr + c;
-            let i01 = r * vpr + c + 1;
-            let i10 = (r + 1) * vpr + c;
-            let i11 = (r + 1) * vpr + c + 1;
-            tris.push((verts[i00].clone(), verts[i01].clone(), verts[i10].clone()));
-            tris.push((verts[i10].clone(), verts[i01].clone(), verts[i11].clone()));
+            emit(&prev[c], &prev[c + 1], &cur[c]);
+            emit(&cur[c], &prev[c + 1], &cur[c + 1]);
+            emitted += 2;
         }
+        prev = cur;
     }
-    tris
 }
 
 fn bezier(p: [(f64, f64); 4], t: f64) -> (f64, f64) {
@@ -396,14 +441,15 @@ fn parse_type6_7(
     bps_comp: u32,
     ncomp: usize,
     decode: &[f64],
-) -> Vec<(Vertex, Vertex, Vertex)> {
+    emit: Emit,
+) {
     let n_pts = if shading_type == 6 { 12 } else { 16 };
     let mut br = BitReader::new(data);
     // Previous patch boundary (12 boundary points) + corner colors, for
     // edge-sharing when flag != 0.
     let mut prev_pts: Vec<(f64, f64)> = Vec::new();
     let mut prev_cols: Vec<Vec<f64>> = Vec::new();
-    let mut tris = Vec::new();
+    let mut emitted = 0usize;
     let mut patches = 0usize;
 
     let read_point = |br: &mut BitReader| -> Option<(f64, f64)> {
@@ -425,7 +471,7 @@ fn parse_type6_7(
     };
 
     loop {
-        if patches >= MAX_SHADING_PATCHES || tris.len() >= MAX_SHADING_TRIANGLES {
+        if patches >= MAX_SHADING_PATCHES || emitted >= MAX_SHADING_TRIANGLES {
             break;
         }
         if br.remaining_bits() < bps_flag as usize {
@@ -601,12 +647,13 @@ fn parse_type6_7(
         }
         for iv in 0..N {
             for iu in 0..N {
-                let a = grid[iv][iu].clone();
-                let b = grid[iv][iu + 1].clone();
-                let c = grid[iv + 1][iu].clone();
-                let d = grid[iv + 1][iu + 1].clone();
-                tris.push((a.clone(), b.clone(), c.clone()));
-                tris.push((c, b, d));
+                let a = &grid[iv][iu];
+                let b = &grid[iv][iu + 1];
+                let c = &grid[iv + 1][iu];
+                let d = &grid[iv + 1][iu + 1];
+                emit(a, b, c);
+                emit(c, b, d);
+                emitted += 2;
             }
         }
 
@@ -614,7 +661,6 @@ fn parse_type6_7(
         prev_cols = cols;
         patches += 1;
     }
-    tris
 }
 
 /// Select the shared edge (4 control points + 2 corner colors) from the
@@ -706,6 +752,17 @@ fn fill_tri(
 mod tests {
     use super::*;
 
+    /// Collect the triangles a streaming parser emits, for tests that want to make
+    /// assertions about the decoded mesh rather than the raster.
+    fn collect(f: impl FnOnce(Emit)) -> Vec<(Vertex, Vertex, Vertex)> {
+        let mut out = Vec::new();
+        let mut sink = |a: &Vertex, b: &Vertex, c: &Vertex| {
+            out.push((a.clone(), b.clone(), c.clone()));
+        };
+        f(&mut sink);
+        out
+    }
+
     /// Build a minimal Type 4 free-form Gouraud triangle: one triangle with
     /// three distinct RGB corner colors, packed at 8bpp coords/comps.
     fn type4_one_triangle() -> Vec<u8> {
@@ -730,7 +787,7 @@ mod tests {
     fn type4_produces_varied_pixels() {
         let data = type4_one_triangle();
         let decode = [0.0, 1.0, 0.0, 1.0, 0.0, 1.0, 0.0, 1.0, 0.0, 1.0];
-        let tris = parse_type4(&data, 8, 8, 8, 3, &decode);
+        let tris = collect(|e| parse_type4(&data, 8, 8, 8, 3, &decode, e));
         assert_eq!(tris.len(), 1);
         let bounds = [0.0, 0.0, 1.0, 1.0];
         let (w, h) = (32usize, 32usize);
@@ -777,7 +834,7 @@ mod tests {
         ];
         // x 0..255, y 0..255, colour 0..1 — coords map through as identity.
         let decode = [0.0, 255.0, 0.0, 255.0, 0.0, 1.0];
-        let tris = parse_type4(&data, 8, 8, 4, 1, &decode);
+        let tris = collect(|e| parse_type4(&data, 8, 8, 4, 1, &decode, e));
         assert_eq!(tris.len(), 1, "three flag-0 vertices form exactly one triangle");
         let (v0, v1, v2) = &tris[0];
         assert_eq!((v0.x, v0.y), (0.0, 0.0));
@@ -811,8 +868,8 @@ mod tests {
         // Flat/interpolated interior vs interior pulled hard to the corners.
         let flat = tensor_patch_bytes([(33, 33), (33, 66), (66, 66), (66, 33)]);
         let bulged = tensor_patch_bytes([(0, 0), (0, 100), (100, 100), (100, 0)]);
-        let a = parse_type6_7(&flat, 7, 8, 8, 8, 1, &decode);
-        let b = parse_type6_7(&bulged, 7, 8, 8, 8, 1, &decode);
+        let a = collect(|e| parse_type6_7(&flat, 7, 8, 8, 8, 1, &decode, e));
+        let b = collect(|e| parse_type6_7(&bulged, 7, 8, 8, 8, 1, &decode, e));
         assert!(!a.is_empty() && !b.is_empty(), "both patches should tessellate");
         let verts = |tris: &[(Vertex, Vertex, Vertex)]| -> Vec<(i64, i64)> {
             tris.iter().flat_map(|(p, q, r)| {
@@ -837,7 +894,7 @@ mod tests {
             2, 50, 51, 0, // flag 2 -> (vb, vd, ve)  [va of the PREVIOUS triangle is vb]
         ];
         let decode = [0.0, 255.0, 0.0, 255.0, 0.0, 1.0];
-        let tris = parse_type4(&data, 8, 8, 8, 1, &decode);
+        let tris = collect(|e| parse_type4(&data, 8, 8, 8, 1, &decode, e));
         assert_eq!(tris.len(), 3);
         let xy = |v: &Vertex| (v.x as i32, v.y as i32);
         assert_eq!(
@@ -878,7 +935,7 @@ mod tests {
         data.extend_from_slice(&[50, 60]);
 
         let decode = [0.0, 255.0, 0.0, 255.0, 0.0, 255.0];
-        let tris = parse_type6_7(&data, 6, 8, 8, 8, 1, &decode);
+        let tris = collect(|e| parse_type6_7(&data, 6, 8, 8, 8, 1, &decode, e));
         assert!(!tris.is_empty());
 
         // The second patch's tessellation starts after the first's (2*8*8 triangles).
@@ -890,6 +947,122 @@ mod tests {
         let corner = &tris[per_patch].0;
         assert_eq!((corner.x as i32, corner.y as i32), (0, 100), "p1 = previous p4");
         assert!((corner.color[0] - 20.0).abs() < 1e-6, "c1 = previous c2");
+    }
+
+    // §8.7.4.5.6: a lattice mesh is row-major with `/VerticesPerRow` vertices per row,
+    // and each cell splits into two triangles. This pins the triangulation and the row
+    // pairing directly, since `parse_type5` now streams a row at a time rather than
+    // materialising the whole lattice.
+    #[test]
+    fn type5_lattice_pairs_adjacent_rows() {
+        // Vertex = x(8) y(8) colour(8). Two rows of two.
+        let data: Vec<u8> = vec![
+            0, 0, 0, 10, 0, 0, // row 0: (0,0) (10,0)
+            0, 10, 0, 10, 10, 0, // row 1: (0,10) (10,10)
+        ];
+        let decode = [0.0, 255.0, 0.0, 255.0, 0.0, 1.0];
+        let tris = collect(|e| parse_type5(&data, 2, 8, 8, 1, &decode, e));
+        assert_eq!(tris.len(), 2, "one lattice cell = two triangles");
+        let xy = |v: &Vertex| (v.x as i32, v.y as i32);
+        assert_eq!(
+            (xy(&tris[0].0), xy(&tris[0].1), xy(&tris[0].2)),
+            ((0, 0), (10, 0), (0, 10))
+        );
+        assert_eq!(
+            (xy(&tris[1].0), xy(&tris[1].1), xy(&tris[1].2)),
+            ((0, 10), (10, 0), (10, 10))
+        );
+
+        // A trailing PARTIAL row contributes nothing rather than pairing with garbage.
+        let mut ragged = data.clone();
+        ragged.extend_from_slice(&[0, 20, 0]);
+        assert_eq!(collect(|e| parse_type5(&ragged, 2, 8, 8, 1, &decode, e)).len(), 2);
+        // And a single row alone yields no triangles at all.
+        assert!(collect(|e| parse_type5(&data[..6], 2, 8, 8, 1, &decode, e)).is_empty());
+    }
+
+    // §8.7.4.5.7 (Table 85) / §8.7.4.5.8: "All of the data for a patch shall occupy a
+    // whole number of bytes; if the total number of bits required is not divisible by
+    // 8, the last data byte for each patch is padded at the end with extra bits, which
+    // shall be ignored." The existing continuation test uses 8-bit everything, so every
+    // record is accidentally aligned and it cannot see a missing `align()`. Here a Coons
+    // patch is 8 + 24*8 + 4*1 = 204 bits, so each patch carries 4 padding bits; without
+    // the align the second patch's flag is read out of the padding and the whole rest of
+    // the stream decodes from the wrong bit offset — the "spectacular noise" failure.
+    #[test]
+    fn coons_patches_are_padded_to_a_byte_boundary() {
+        let boundary: [(u8, u8); 12] = [
+            (0, 0), (0, 33), (0, 66), (0, 100),
+            (33, 100), (66, 100), (100, 100),
+            (100, 66), (100, 33), (100, 0),
+            (66, 0), (33, 0),
+        ];
+        let mut data = vec![0u8]; // patch 1: flag 0
+        for (x, y) in boundary { data.push(x); data.push(y); }
+        data.push(0b1010_0000); // c1..c4 = 1,0,1,0 as single bits, then 4 pad bits
+        data.push(1u8); // patch 2: flag 1 — must start on a byte boundary
+        for i in 0..8u8 { data.push(200 + i); data.push(200 + i); }
+        data.push(0b0100_0000); // 2 new colours = 0,1, then 6 pad bits
+        assert_eq!(data.len(), 44);
+
+        // 1-bit components, so /Decode maps raw 0 -> 0.0 and raw 1 -> 1.0.
+        let decode = [0.0, 255.0, 0.0, 255.0, 0.0, 1.0];
+        let tris = collect(|e| parse_type6_7(&data, 6, 8, 8, 1, 1, &decode, e));
+        let per_patch = 2 * 8 * 8;
+        assert_eq!(tris.len(), 2 * per_patch, "both patches decode");
+
+        // Patch 2 inherits patch 1's p4 = (0,100) and patch 1's c2 = 0 (Table 85).
+        let corner = &tris[per_patch].0;
+        assert_eq!((corner.x as i32, corner.y as i32), (0, 100), "p1 = previous p4");
+        assert!(corner.color[0].abs() < 1e-9, "c1 = previous c2 = 0");
+        // Patch 1's own C00 carries c1 = 1, so the colours are not all collapsing to 0.
+        assert!((tris[0].0.color[0] - 1.0).abs() < 1e-9);
+    }
+
+    // §8.6.6.3: a colour value in an Indexed space is a SINGLE index, not `base_ncomp`
+    // components. `cs_kind_ncomp` reports the base arity (3 over DeviceRGB), and using
+    // that as the per-vertex component count made every vertex consume 3x the colour
+    // bits, so the packed stream desynchronised after the first vertex.
+    #[test]
+    fn an_indexed_mesh_reads_one_index_per_vertex() {
+        let mut doc = Document::with_version("1.7");
+        let palette = doc.add_object(Stream::new(
+            dictionary! {},
+            vec![0, 0, 0, 255, 0, 0, 0, 255, 0, 0, 0, 255],
+        ));
+        let dict = dictionary! {
+            "ShadingType" => 4,
+            "ColorSpace" => Object::Array(vec![
+                Object::Name(b"Indexed".to_vec()),
+                Object::Name(b"DeviceRGB".to_vec()),
+                Object::Integer(3),
+                Object::Reference(palette),
+            ]),
+            "BitsPerCoordinate" => 8,
+            "BitsPerComponent" => 8,
+            "BitsPerFlag" => 8,
+            // x 0..255, y 0..255, index 0..3.
+            "Decode" => vec![0.into(), 255.into(), 0.into(), 255.into(), 0.into(), 3.into()],
+        };
+        // flag, x, y, index-byte. 85/255 * 3 == 1 -> palette entry 1 == red.
+        let data: Vec<u8> = vec![
+            0, 0, 0, 85,
+            0, 255, 0, 85,
+            0, 0, 255, 85,
+        ];
+        let (_ctm, w, h, rgba) =
+            rasterize_shading_mesh(&doc, &dict, Some(&data), &IDENTITY, &HashMap::new(), 32)
+                .expect("four bytes per vertex is exactly three vertices = one triangle");
+        assert!(w > 0 && h > 0);
+        let red = rgba
+            .chunks_exact(4)
+            .filter(|px| px[3] == 255)
+            .collect::<Vec<_>>();
+        assert!(!red.is_empty(), "the triangle painted something");
+        assert!(
+            red.iter().all(|px| px[0] == 255 && px[1] == 0 && px[2] == 0),
+            "every covered pixel is palette entry 1 (red), not the 0xFF808080 fallback"
+        );
     }
 
     // A /Decode extent of +/-infinity makes `dmin + (raw/max)*(dmax-dmin)` NaN for
@@ -904,7 +1077,7 @@ mod tests {
             0, 255, 0, 255,
             0, 0, 255, 128,
         ];
-        let tris = parse_type4(&data, 8, 8, 8, 1, &inf_decode);
+        let tris = collect(|e| parse_type4(&data, 8, 8, 8, 1, &inf_decode, e));
         assert_eq!(tris.len(), 1);
         assert!(tris[0].0.x.is_nan(), "the NaN this guards against is reachable");
 

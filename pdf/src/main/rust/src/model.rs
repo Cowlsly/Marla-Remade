@@ -6,6 +6,14 @@ use crate::*;
 /// Y-flip and the fit-to-width scale — it must NOT re-apply a crop or rotation.
 /// Extended v3 adds GroupPush/Pop and blend. v8 adds font style flags for
 /// bold/italic synthesis.
+///
+/// Deliberately does NOT derive `Clone`. [`MAX_PRIMITIVES`] of these are already
+/// held live in one vector AND copied wholesale into the wire buffer, so a third
+/// copy is exactly what the size note below the enum exists to prevent — and the
+/// variants that would hurt (`Image`/`ImageTiled` carry the whole decoded payload,
+/// `Fill` its contour list) are the ones a careless `.clone()` reaches for. Move
+/// them. `Vec::resize` and `extend_from_slice` need `Clone` too, even for a unit
+/// variant; build padding with `extend((0..n).map(|_| Prim::ClipPop))` instead.
 pub(crate) enum Prim {
     Text {
         x: f32,
@@ -32,8 +40,14 @@ pub(crate) enum Prim {
         /// prims (embedded-font rendering); Kotlin then keeps this Text only for
         /// selection/search and does not paint it. Packed into fontFlags bit 4.
         outline: bool,
-        /// PDF text rise (Ts) and horizontal scale (Tz fraction) for verif; used for
-        /// spacing / synthetic slant debugging (not strictly needed on wire but helps).
+        /// Horizontal scale for a SUBSTITUTE typeface: `Tz` (as a fraction) multiplied
+        /// by the text matrix's x/y scale ratio, which is exactly 1.0 for every
+        /// isotropic matrix, rotations included. `size` carries only the matrix's Y
+        /// scale, so the ratio has nowhere else to ride and the substitute would
+        /// otherwise be drawn narrower or wider than the outline path draws the same
+        /// glyph. See `draw.rs`'s `show_string_in` (`wire_h_scale`). Text RISE (Ts) is
+        /// deliberately NOT a field: `show_string` bakes it into `y` through the text
+        /// rendering matrix, so carrying it as well would double-apply it.
         h_scale: f32,
     },
     Fill {

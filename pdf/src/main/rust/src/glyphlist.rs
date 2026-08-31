@@ -90,7 +90,10 @@ const MAC_ROMAN_HIGH: &[(u32, u32)] = &[
     (0xCB, 0x00C0), (0xCC, 0x00C3), (0xCD, 0x00D5), (0xCE, 0x0152), (0xCF, 0x0153),
     (0xD0, 0x2013), (0xD1, 0x2014), (0xD2, 0x201C), (0xD3, 0x201D), (0xD4, 0x2018),
     (0xD5, 0x2019), (0xD6, 0x00F7), (0xD7, 0x25CA), (0xD8, 0x00FF), (0xD9, 0x0178),
-    (0xDA, 0x2044), (0xDB, 0x20AC), (0xDC, 0x2039), (0xDD, 0x203A), (0xDE, 0xFB01),
+    // 0xDB is `currency` (U+00A4) in PDF 32000-1 Annex D.2 MacRomanEncoding, NOT
+    // the Euro that Mac OS Roman puts there from Mac OS 8.5 onward. This is the
+    // one code where the PDF table and the Apple charset disagree.
+    (0xDA, 0x2044), (0xDB, 0x00A4), (0xDC, 0x2039), (0xDD, 0x203A), (0xDE, 0xFB01),
     (0xDF, 0xFB02), (0xE0, 0x2021), (0xE1, 0x00B7), (0xE2, 0x201A), (0xE3, 0x201E),
     (0xE4, 0x2030), (0xE5, 0x00C2), (0xE6, 0x00CA), (0xE7, 0x00C1), (0xE8, 0x00CB),
     (0xE9, 0x00C8), (0xEA, 0x00CD), (0xEB, 0x00CE), (0xEC, 0x00CF), (0xED, 0x00CC),
@@ -137,20 +140,27 @@ const SYMBOL: &[(u32, u32)] = &[
     (0xAF, 0x2193), (0xB0, 0x00B0), (0xB1, 0x00B1), (0xB2, 0x2033), (0xB3, 0x2265),
     (0xB4, 0x00D7), (0xB5, 0x221D), (0xB6, 0x2202), (0xB7, 0x2022), (0xB8, 0x00F7),
     (0xB9, 0x2260), (0xBA, 0x2261), (0xBB, 0x2248), (0xBC, 0x2026), (0xBD, 0x23D0),
-    (0xBE, 0x23B1), (0xBF, 0x21B5), (0xC0, 0x2135), (0xC1, 0x2111), (0xC2, 0x211C),
+    (0xBE, 0x23AF), (0xBF, 0x21B5), (0xC0, 0x2135), (0xC1, 0x2111), (0xC2, 0x211C),
     (0xC3, 0x2118), (0xC4, 0x2297), (0xC5, 0x2295), (0xC6, 0x2205), (0xC7, 0x2229),
     (0xC8, 0x222A), (0xC9, 0x2283), (0xCA, 0x2287), (0xCB, 0x2284), (0xCC, 0x2282),
     (0xCD, 0x2286), (0xCE, 0x2208), (0xCF, 0x2209), (0xD0, 0x2220), (0xD1, 0x2207),
     (0xD2, 0x00AE), (0xD3, 0x00A9), (0xD4, 0x2122), (0xD5, 0x220F), (0xD6, 0x221A),
     (0xD7, 0x22C5), (0xD8, 0x00AC), (0xD9, 0x2227), (0xDA, 0x2228), (0xDB, 0x21D4),
     (0xDC, 0x21D0), (0xDD, 0x21D1), (0xDE, 0x21D2), (0xDF, 0x21D3), (0xE0, 0x25CA),
-    (0xE1, 0x2320), (0xE2, 0x2321), (0xE3, 0x25A0), (0xE4, 0x25A1), (0xE5, 0x25AA),
-    (0xE6, 0x25AB), (0xE7, 0x25AC), (0xE8, 0x25AD), (0xE9, 0x25AE), (0xEA, 0x25AF),
-    (0xEB, 0x25B0), (0xEC, 0x25B1), (0xED, 0x25B2), (0xEE, 0x25B3), (0xEF, 0x25B4),
-    (0xF0, 0x25B6), (0xF1, 0x25B7), (0xF2, 0x25BC), (0xF3, 0x25BD), (0xF4, 0x25BE),
-    (0xF5, 0x25BF), (0xF6, 0x25C0), (0xF7, 0x25C1), (0xF8, 0x25C2), (0xF9, 0x25C3),
-    (0xFA, 0x25C6), (0xFB, 0x25C7), (0xFC, 0x25CB), (0xFD, 0x25CF), (0xFE, 0x25A0),
-    (0xFF, 0x2212),
+    // 0xE1..0xFE are, in order: angleleft, the sans register/copyright/trademark,
+    // summation, then the paren / bracket / brace / integral EXTENDER pieces that
+    // a tall delimiter is built from, angleright and integral. They previously
+    // read as a run of geometric shapes (▪ ▫ ▬ ▲ ▼ …), which is neither the Adobe
+    // Symbol encoding nor anything on the page: an integral sign extracted as ▼.
+    // Each multi-piece delimiter maps to the base character it is a piece of, so
+    // a three-piece parenthesis extracts as "(((" — repetitive, but every
+    // character is one the page really shows, and it is searchable.
+    (0xE1, 0x2329), (0xE2, 0x00AE), (0xE3, 0x00A9), (0xE4, 0x2122), (0xE5, 0x2211),
+    (0xE6, 0x0028), (0xE7, 0x0028), (0xE8, 0x0028), (0xE9, 0x005B), (0xEA, 0x005B),
+    (0xEB, 0x005B), (0xEC, 0x007B), (0xED, 0x007B), (0xEE, 0x007B), (0xEF, 0x007C),
+    (0xF0, 0xF8FF), (0xF1, 0x232A), (0xF2, 0x222B), (0xF3, 0x2320), (0xF4, 0x23AE),
+    (0xF5, 0x2321), (0xF6, 0x0029), (0xF7, 0x0029), (0xF8, 0x0029), (0xF9, 0x005D),
+    (0xFA, 0x005D), (0xFB, 0x005D), (0xFC, 0x007D), (0xFD, 0x007D), (0xFE, 0x007D),
 ];
 
 /// ZapfDingbats encoding full (code -> Unicode) - 220+ entries.
@@ -301,7 +311,10 @@ const AGL_LATIN: &[(&str, u32)] = &[
     ("Chi", 0x03A7), ("Psi", 0x03A8), ("Omega", 0x03A9), ("alpha", 0x03B1),
     ("beta", 0x03B2), ("gamma", 0x03B3), ("delta", 0x03B4), ("epsilon", 0x03B5),
     ("zeta", 0x03B6), ("eta", 0x03B7), ("theta", 0x03B8), ("iota", 0x03B9),
-    ("kappa", 0x03BA), ("lambda", 0x03BB), ("mu", 0x03BC), ("nu", 0x03BD), ("xi", 0x03BE),
+    // No ("mu", 0x03BC) here: the AGL name for U+03BC is `mugreek`, and `mu` is
+    // U+00B5 MICRO SIGN (listed above with the Latin-1 names). A duplicate key
+    // here silently won, because later inserts overwrite earlier ones.
+    ("kappa", 0x03BA), ("lambda", 0x03BB), ("mugreek", 0x03BC), ("nu", 0x03BD), ("xi", 0x03BE),
     ("omicron", 0x03BF), ("pi", 0x03C0), ("rho", 0x03C1), ("sigma", 0x03C3),
     ("tau", 0x03C4), ("upsilon", 0x03C5), ("phi", 0x03C6), ("chi", 0x03C7),
     ("psi", 0x03C8), ("omega", 0x03C9),
@@ -317,8 +330,11 @@ const AGL_LATIN: &[(&str, u32)] = &[
     // Critical ligatures
     ("ff", 0xFB00), ("fi", 0xFB01), ("fl", 0xFB02), ("ffi", 0xFB03), ("ffl", 0xFB04),
     ("f_f", 0xFB00), ("f_i", 0xFB01), ("f_l", 0xFB02), ("f_f_i", 0xFB03), ("f_f_l", 0xFB04),
-    ("fb", 0xFB00), ("ft", 0xFB00), // common discretionary approximations
-    ("st", 0xFB06), ("ct", 0xFB00), // fallback to ff
+    // `st` is a real AGL-resolvable ligature (U+FB06). `fb`/`ft`/`ct` have no
+    // Unicode ligature, and mapping them to U+FB00 (ff) put a character in the
+    // extracted text that the page does not contain — it neither matches a
+    // search for "ft" nor renders as one. Omitted rather than approximated.
+    ("st", 0xFB06),
     ("longs", 0x017F), ("longs_s", 0xFB05),
     ("nbspace", 0x00A0), ("sfthyphen", 0x00AD), ("hyphenminus", 0x002D), ("apple", 0xF8FF),
     ("afii10017", 0x0410), ("afii10018", 0x0411), ("afii10019", 0x0412),
@@ -371,5 +387,54 @@ mod tests {
     fn zapf_full() {
         let z = zapf();
         assert!(z.len() >= 200, "zapf len {} < 200", z.len());
+    }
+
+    #[test]
+    fn mu_is_the_micro_sign_not_greek_mu() {
+        // AGL: `mu` is U+00B5 MICRO SIGN; U+03BC is `mugreek`. The table listed
+        // `mu` twice — once correctly with the Latin-1 names and again in the
+        // Greek block as U+03BC — and the later insert silently won, so every
+        // WinAnsi/Standard-encoded µ extracted as a Greek letter and a search for
+        // the micro sign missed it.
+        assert_eq!(agl("mu"), Some('\u{00B5}'));
+        assert_eq!(agl("mugreek"), Some('\u{03BC}'));
+    }
+
+    #[test]
+    fn mac_roman_db_is_currency() {
+        // PDF 32000-1 Annex D.2 puts `currency` at 0333 (0xDB). Mac OS Roman puts
+        // the Euro there, and this table is the PDF one.
+        assert_eq!(mac_roman().get(&0xDB), Some(&'\u{00A4}'));
+    }
+
+    #[test]
+    fn symbol_upper_range_is_the_symbol_encoding() {
+        let s = symbol();
+        assert_eq!(s.get(&0xE5), Some(&'\u{2211}'), "0xE5 is summation");
+        assert_eq!(s.get(&0xF2), Some(&'\u{222B}'), "0xF2 is integral");
+        assert_eq!(s.get(&0xE1), Some(&'\u{2329}'), "0xE1 is angleleft");
+        assert_eq!(s.get(&0xF1), Some(&'\u{232A}'), "0xF1 is angleright");
+        // The delimiter pieces resolve to the delimiter they are a piece of, not
+        // to the geometric shapes that used to sit here.
+        assert_eq!(s.get(&0xE6), Some(&'('));
+        assert_eq!(s.get(&0xFB), Some(&']'));
+        for code in 0xE1u32..=0xFE {
+            let c = s.get(&code).copied().expect("every Symbol code >= 0xE1 is defined");
+            assert!(
+                !('\u{25A0}'..='\u{25FF}').contains(&c),
+                "code {code:#X} still maps to a geometric shape ({c:?})"
+            );
+        }
+    }
+
+    #[test]
+    fn unmappable_ligature_names_are_not_faked() {
+        // `ft`, `fb` and `ct` have no Unicode ligature. They used to resolve to
+        // U+FB00 (ff), putting a character in the extracted text that the page
+        // does not contain.
+        assert_eq!(agl("ft"), None);
+        assert_eq!(agl("fb"), None);
+        assert_eq!(agl("ct"), None);
+        assert_eq!(agl("st"), Some('\u{FB06}'), "st really is a Unicode ligature");
     }
 }

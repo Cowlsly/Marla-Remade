@@ -200,6 +200,23 @@ object SafePdfParser {
         return PdfPrimitive.SoftMaskTransfer(gain.toFloat(), bias.toFloat(), affine)
     }
 
+    /**
+     * This value, or [fallback] when the wire carried a non-finite one.
+     *
+     * Every float here arrives as four arbitrary bytes across JNI, so NaN and infinity are
+     * always representable no matter what the producer guarantees — a desynced buffer alone
+     * produces NaN from any bit pattern in the quiet range. They are worth singling out
+     * because the usual Kotlin range guards do NOT stop them: `coerceIn` and `coerceAtLeast`
+     * are written as `if (this < min) ... else this`, and every comparison against NaN is
+     * false, so NaN passes through both untouched and lands in `Paint.textSize`,
+     * `Paint.textScaleX` or a selection rectangle. Infinity survives a `> 0f` guard for the
+     * same reason and then poisons the running geometry of a whole text run.
+     *
+     * `draw.rs` also bounds these at the producer, which is the right place for the
+     * geometry; this is the decoder refusing to depend on that promise.
+     */
+    private fun Float.orIfNonFinite(fallback: Float): Float = if (isFinite()) this else fallback
+
     fun parse(bytes: ByteArray): SafePdfPage {
         val buf = ByteBuffer.wrap(bytes).order(ByteOrder.LITTLE_ENDIAN)
         if (buf.remaining() < 12) throw IllegalArgumentException("Buffer too small")
@@ -224,8 +241,14 @@ object SafePdfParser {
             countRaw = buf.int
         }
 
-        // Safety guards: count caps, version enforcement, dimension sanity
-        if (width <= 0f || height <= 0f || width > 20000f || height > 20000f) {
+        // Safety guards: count caps, version enforcement, dimension sanity.
+        // NaN is checked explicitly: every comparison against it is false, so a NaN width
+        // passes `<= 0f` and `> 20000f` alike and reaches SafePdfPageCanvas, whose
+        // `Modifier.aspectRatio(width / height)` requires a ratio > 0 and throws on NaN —
+        // taking down the composition rather than the one page.
+        if (!width.isFinite() || !height.isFinite() ||
+            width <= 0f || height <= 0f || width > 20000f || height > 20000f
+        ) {
             throw IllegalArgumentException("Invalid page dimensions $width x $height")
         }
         if (countRaw < 0) {
@@ -277,7 +300,10 @@ object SafePdfParser {
                 TAG_TEXT -> {
                     val x = buf.float
                     val y = buf.float
-                    val size = buf.float
+                    // Reachable without exotic syntax: an overflowing `Tf` literal times a
+                    // zero-scale matrix is `inf * 0` = NaN. Zero here becomes one pixel via
+                    // the renderer's floor, rather than a NaN Paint.textSize.
+                    val size = buf.float.orIfNonFinite(0f)
                     val argb = buf.int
                     val len = buf.short.toInt() and 0xFFFF
                     // No upper-bound rejection: len is u16-bounded and Rust truncates at
@@ -295,7 +321,7 @@ object SafePdfParser {
                         val sWidth = buf.float
                         if (hasStroke) {
                             strokeColor = sArgb
-                            strokeWidth = sWidth
+                            strokeWidth = sWidth.orIfNonFinite(0f)
                         } else {
                             strokeColor = null
                             strokeWidth = 0f
@@ -314,12 +340,16 @@ object SafePdfParser {
                     } else BlendMode.Normal
                     val txt = String(strBytes, Charsets.UTF_8)
                     // v7 carries the true device-space glyph advance; older wires
-                    // fall back to the size*0.5*len heuristic.
+                    // fall back to the size*0.5*len heuristic, and so does a non-finite
+                    // one. buildEmbeddedGlyphs guards this with `advance > 0f`, which
+                    // INFINITY passes, and it then scales the whole run's selection
+                    // geometry to infinity off one overflowed glyph.
+                    val advHeuristic = size * 0.5f * txt.length.coerceAtLeast(1)
                     val adv = if (isV7) {
                         if (buf.remaining() < 4) throw IllegalArgumentException("Text v7 advance truncated")
-                        buf.float
+                        buf.float.orIfNonFinite(advHeuristic)
                     } else {
-                        size * 0.5f * txt.length.coerceAtLeast(1)
+                        advHeuristic
                     }
                     val isBold: Boolean
                     val isItalic: Boolean
@@ -335,13 +365,27 @@ object SafePdfParser {
                         fontFamily = (fontFlags shr 2) and 0x3
                         // Bit 4: glyph already drawn as outline fills (don't paint).
                         outline = fontFlags and 0x10 != 0
-                        hScale = buf.float
+                        // Fall back to the identity rather than trusting the producer to
+                        // have bounded this. Rust bounds the geometric half (draw.rs
+                        // `aniso.clamp`) but the Tz half is a bare `v / 100.0` at
+                        // interpret.rs, and these bytes are the trust boundary regardless.
+                        hScale = buf.float.orIfNonFinite(1f)
                     } else {
                         isBold = false
                         isItalic = false
                         fontFamily = 0
                         outline = false
                         hScale = 1f
+                    }
+                    // Unlike the scalars above there is no sane default for a position, and
+                    // a NaN origin is not harmless: it paints nothing but still produces a
+                    // selection rectangle whose distance comparisons are all false, which
+                    // breaks nearestGlyph for the page. Every byte of this primitive has
+                    // been consumed, so dropping it leaves the stream in sync, and Text
+                    // carries no bracket that a later primitive is paired with.
+                    if (!x.isFinite() || !y.isFinite()) {
+                        android.util.Log.w(TAG, "text primitive $primIndex has a non-finite origin, dropping it")
+                        continue
                     }
                     primitives.add(
                         PdfPrimitive.Text(
@@ -383,9 +427,14 @@ object SafePdfParser {
                 TAG_STROKE -> {
                     val argb = buf.int
                     val strokeWidth = buf.float
-                    // u8 on the wire, so the allocation is bounded at 255 regardless; Rust
-                    // caps at MAX_DASH_LEN (64). Never reject — the old `> 32` throw
-                    // discarded the whole page over one stroke's dash array.
+                    // u8 on the wire, so the allocation is bounded at 255 regardless.
+                    // Rust's `MAX_DASH_LEN` is 32 (graphics_state.rs), not 64 — but
+                    // `draw::emit_stroke` duplicates an odd-length array, since §8.4.3.6
+                    // needs an even number of on/off phases, so the count actually EMITTED
+                    // can be up to twice that. 64 is that doubled worst case, not the
+                    // constant. Never reject — the old `> 32` throw discarded the whole
+                    // page over one stroke's dash array, and nothing here depends on the
+                    // producer's bound anyway.
                     val nDash = buf.get().toInt() and 0xFF
                     if (buf.remaining() < nDash*4+4) throw IllegalArgumentException("Stroke dash truncated")
                     val dash = FloatArray(nDash) { buf.float }

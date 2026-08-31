@@ -238,6 +238,7 @@ fn parse_private(dec: &[u8]) -> (Vec<Vec<u8>>, HashMap<String, Vec<u8>>) {
     // thousand entries; without a cap, `/Subrs 2000000000 array` (or one oversized
     // `dup` index) asks for tens of gigabytes before a single charstring is read.
     const MAX_SUBRS: usize = 65536;
+    let charstrings_at = find(dec, b"/CharStrings");
     let mut subrs: Vec<Vec<u8>> = Vec::new();
     if let Some(sp) = find(dec, b"/Subrs") {
         if let Some((count, _)) = read_int(dec, sp + 6) {
@@ -245,11 +246,26 @@ fn parse_private(dec: &[u8]) -> (Vec<Vec<u8>>, HashMap<String, Vec<u8>>) {
         }
         let mut i = sp;
         let mut guard = 0;
+        // The Subrs array ends where CharStrings begins. Tested BEFORE the entry
+        // is stored, not after: a `dup <n> <len> RD` sequence occurring inside the
+        // CharStrings dict (or in a glyph's binary) was otherwise loaded as subr
+        // <n> — and could resize the subr table — before the loop noticed it had
+        // walked past the end. Hoisted out of the loop as well: re-scanning the
+        // whole decrypted font once per `dup` is quadratic, so a font with a few
+        // thousand subrs spends longer hunting for this marker than it does
+        // decrypting every charstring it has. Disabled entirely for the
+        // pathological layout where /Subrs follows /CharStrings.
+        let subrs_end = charstrings_at.filter(|&cs| cs > sp);
         while let Some(dp) = find_from(dec, b"dup ", i) {
             i = dp + 4;
             guard += 1;
             if guard > 100_000 {
                 break;
+            }
+            if let Some(cs) = subrs_end {
+                if dp > cs {
+                    break;
+                }
             }
             let (idx, j) = match read_int(dec, dp + 4) {
                 Some(v) => v,
@@ -266,20 +282,18 @@ fn parse_private(dec: &[u8]) -> (Vec<Vec<u8>>, HashMap<String, Vec<u8>>) {
                 }
                 subrs[idx as usize] = decrypt(&bytes, 4330, len_iv);
             }
-            // Stop once we hit CharStrings.
-            if let Some(cs) = find(dec, b"/CharStrings") {
-                if next > cs {
-                    break;
-                }
-            }
         }
     }
 
     // --- CharStrings: `/<name> <len> RD <bytes> ND` ---
     let mut glyphs: HashMap<String, Vec<u8>> = HashMap::new();
-    if let Some(cp) = find(dec, b"/CharStrings") {
+    if let Some(cp) = charstrings_at {
         // Advance past the `begin` that opens the dict.
         let mut i = find_from(dec, b"begin", cp).map(|p| p + 5).unwrap_or(cp + 12);
+        // `end` closes the dict. Hoisted: this is a fixed position, and searching
+        // for it inside the loop makes a font whose CharStrings dict holds many
+        // non-`RD` names quadratic in the size of the decrypted font.
+        let dict_end = find_token(dec, b"end", cp);
         let mut guard = 0;
         while i < dec.len() {
             guard += 1;
@@ -310,8 +324,7 @@ fn parse_private(dec: &[u8]) -> (Vec<Vec<u8>>, HashMap<String, Vec<u8>>) {
                 }
                 None => {
                     i = je;
-                    // `end` closes the dict.
-                    if let Some(ep) = find_token(dec, b"end", cp) {
+                    if let Some(ep) = dict_end {
                         if slash > ep {
                             break;
                         }
@@ -858,5 +871,20 @@ mod tests {
             c.iter().any(|&(x, y)| (x - 80.0).abs() < 1e-6 && (y - 60.0).abs() < 1e-6),
             "first flex curve must end at (80, 60)"
         );
+    }
+
+    #[test]
+    fn a_dup_inside_charstrings_is_not_loaded_as_a_subr() {
+        // The Subrs array ends at /CharStrings. A `dup <n> <len> RD` sequence
+        // after that point belongs to the glyph dict (or is a coincidence in a
+        // glyph's binary); loading it would both install a bogus subr and let a
+        // file-supplied index grow the table.
+        let dec = b"/lenIV 0 def\n/Subrs 2 array\ndup 0 3 RD abc NP\ndup 1 3 RD def NP\nND\n/CharStrings 1 dict dup begin\n/A 3 RD xyz ND\ndup 900 3 RD zzz NP\nend";
+        let (subrs, glyphs) = parse_private(dec);
+        assert_eq!(subrs.len(), 2, "the table must not grow past the declared count");
+        // Charstring bytes are eexec-decrypted, so only the lengths are stable.
+        assert_eq!(subrs[0].len(), 3);
+        assert_eq!(subrs[1].len(), 3);
+        assert_eq!(glyphs.get("A").map(|v| v.len()), Some(3));
     }
 }

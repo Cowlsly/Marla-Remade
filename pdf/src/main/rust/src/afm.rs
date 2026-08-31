@@ -72,10 +72,14 @@ fn resolve_face(base_font: &str) -> Option<Face> {
     if n.contains("symbol") {
         return Some(Face::Symbol);
     }
-    if n.contains("courier") || n.contains("mono") {
+    // "monotype" is a foundry name, not a monospaced face: Monotype Corsiva is a
+    // script font and must not be given Courier's uniform 600-unit advance.
+    if n.contains("courier") || (n.contains("mono") && !n.contains("monotype")) {
         return Some(Face::Courier);
     }
-    if n.contains("times") || n.contains("serif") {
+    // "sans" wins over "serif" because "sans-serif" contains both, and this test
+    // runs first: without the exclusion every sans-serif face took Times metrics.
+    if n.contains("times") || (n.contains("serif") && !n.contains("sans")) {
         return Some(match (bold, italic) {
             (true, true) => Face::TimesBoldItalic,
             (true, false) => Face::TimesBold,
@@ -482,6 +486,37 @@ static TIMES_BOLD_ITALIC: &[(&str, u16)] = &[
 ];
 
 // Symbol uses its own encoding; widths are keyed by the AFM glyph names.
+//
+// KNOWN GAP: this stops at code 0x7E ("similar"). Every Symbol code >= 0xA0 —
+// the math operators, arrows, card suits and the bracket/integral build-up
+// pieces — has no width here and falls to `default_width` (0.5 em) in
+// `fonts.rs`. The real values are far from uniform (build-up pieces ~274-384,
+// several operators 700+), so a line of Symbol math drifts both ways. Left
+// unfilled rather than guessed: these numbers cannot be verified against
+// Adobe's Symbol.afm from this tree, and a plausible-but-wrong advance for
+// every math glyph is worse than one uniform one. Needs `/Widths` to be absent
+// entirely to matter at all, which is legacy TeX/dvips-era files. The Greek
+// alphabet is unaffected — Symbol puts Alpha..Omega and alpha..omega in
+// 0x41-0x7A, inside the covered range.
+//
+// BEFORE ADDING ROWS, read this. `fonts.rs`'s code -> name chain ends in a
+// last-resort guess against `type1::STANDARD_ENCODING`, and that step runs for
+// every face, Symbol included, even though the two encodings are unrelated.
+// Today it is harmless precisely BECAUSE this table stops at 0x7E: above it the
+// Standard-guessed name ("section" for 0xA7, where Symbol has `club`) finds no
+// row, so the lookup falls through to the code -> Unicode -> width path that
+// does know about Symbol. Add a row whose name StandardEncoding also uses at a
+// DIFFERENT code and the guess starts winning, silently charging that glyph the
+// other encoding's width. The two encodings share exactly four names above
+// 0xA0 — `fraction` (164), `florin` (166), `bullet` (183) and `ellipsis` (188)
+// — and all four sit at the SAME code in both, so those are safe. Any name
+// outside that set must be checked against `STANDARD_ENCODING` first.
+//
+// That check is ENFORCED, not just documented: `fonts.rs`'s
+// `blind_reaudit_r5_width_tests::the_standard_encoding_guess_never_contradicts_symbols_own_encoding`
+// walks every `STANDARD_ENCODING` entry and asserts that wherever the Standard
+// guess and Symbol's own encoding both produce a width for a code, they agree.
+// A colliding row added here fails that test with the code and both widths.
 static SYMBOL: &[(&str, u16)] = &[
     ("space", 250), ("exclam", 333), ("universal", 713), ("numbersign", 500),
     ("existential", 549), ("percent", 833), ("ampersand", 778), ("suchthat", 439),
@@ -586,5 +621,19 @@ mod tests {
         assert!(standard_14_widths("Symbol").is_some());
         assert!(standard_14_widths("ZapfDingbats").is_some());
         assert!(standard_14_widths("SomeRandomFont").is_none());
+    }
+
+    #[test]
+    fn foundry_and_family_names_do_not_hijack_a_face() {
+        // "Monotype Corsiva" is a script face; it contains "mono" but is not
+        // monospaced, and Courier's flat 600 would mis-space every glyph.
+        let corsiva = standard_14_widths("MonotypeCorsiva");
+        assert!(corsiva.is_none() || corsiva.as_ref().unwrap()["i"] != 0.6);
+        // "sans-serif" contains "serif"; the serif test runs first, so without the
+        // exclusion a sans face was given Times metrics.
+        let sans = standard_14_widths("Some-Sans-Serif").expect("resolves to Helvetica");
+        assert_eq!(sans["space"], 0.278, "sans-serif must not take Times' 250");
+        // A real serif name still resolves to Times.
+        assert_eq!(standard_14_widths("NimbusSerif").unwrap()["space"], 0.25);
     }
 }

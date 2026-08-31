@@ -371,6 +371,21 @@ fn annot_border_dash(doc: &Document, dict: &lopdf::Dictionary) -> Vec<f64> {
     Vec::new()
 }
 
+/// Numbers of an annotation's coordinate array (`/QuadPoints`, `/L`,
+/// `/Vertices`, one `/InkList` path), or `None` when any of them is non-finite.
+///
+/// §7.3.3 numbers are finite, but a real with more digits than `f32` can hold
+/// parses to an infinity, and one poisoned coordinate propagates through every
+/// primitive derived from it — the rasterizer drops a path containing a
+/// non-finite point silently, so the annotation vanishes with no error
+/// anywhere. Rejecting the whole array matches `read_rect`'s treatment of a
+/// non-finite `/Rect`, and matches this function's rule for missing geometry:
+/// draw nothing rather than a shape the file did not actually give.
+fn finite_coords(doc: &Document, obj: &Object) -> Option<Vec<f64>> {
+    let v: Vec<f64> = deref(doc, obj)?.as_array().ok()?.iter().filter_map(num).collect();
+    v.iter().all(|n| n.is_finite()).then_some(v)
+}
+
 /// Synthesize a basic appearance for annotation types that lack an `/AP` stream.
 ///
 /// Only shapes the file actually specifies are drawn: Square/Circle from `/Rect`,
@@ -431,9 +446,8 @@ pub(crate) fn synthesize_annotation_appearance(
 
     // QuadPoints (text markup): 8 numbers per quad.
     let quads: Vec<[(f64,f64);4]> = dict.get(b"QuadPoints").ok()
-        .and_then(|o| deref(doc, o)).and_then(|o| o.as_array().ok())
-        .map(|a| {
-            let v: Vec<f64> = a.iter().filter_map(num).collect();
+        .and_then(|o| finite_coords(doc, o))
+        .map(|v| {
             v.chunks_exact(8).map(|q| [(q[0],q[1]),(q[2],q[3]),(q[4],q[5]),(q[6],q[7])]).collect()
         }).unwrap_or_default();
 
@@ -467,7 +481,7 @@ pub(crate) fn synthesize_annotation_appearance(
             }
         }
         b"Line" => {
-            let l_arr: Option<Vec<f64>> = dict.get(b"L").ok().and_then(|o| deref(doc, o)).and_then(|o| o.as_array().ok()).map(|a| a.iter().filter_map(num).collect());
+            let l_arr: Option<Vec<f64>> = dict.get(b"L").ok().and_then(|o| finite_coords(doc, o));
             if let Some(n) = l_arr {
                 if n.len() >= 4 {
                     let (p0, p1) = ((n[0], n[1]), (n[2], n[3]));
@@ -507,7 +521,10 @@ pub(crate) fn synthesize_annotation_appearance(
                 let d = annot_border_dash(doc, dict);
                 if !d.is_empty() { sgs.dash = d; }
                 for p in paths {
-                    let n: Vec<f64> = p.as_array().map(|a| a.iter().filter_map(num).collect()).unwrap_or_default();
+                    let n = match finite_coords(doc, p) {
+                        Some(n) => n,
+                        None => continue,
+                    };
                     let pts: Vec<(f64,f64)> = n.chunks_exact(2).map(|c| dev(c[0], c[1])).collect();
                     if pts.len() >= 2 { emit_stroke(prims, std::slice::from_ref(&pts), &sgs); }
                 }
@@ -584,8 +601,7 @@ pub(crate) fn synthesize_annotation_appearance(
             // draw nothing rather than the /Rect outline the old code fell back
             // to — a rectangle is indistinguishable from a Square annotation and
             // claims a geometry the file never gave.
-            if let Some(Object::Array(verts)) = dict.get(b"Vertices").ok().and_then(|o| deref(doc, o)) {
-                let n: Vec<f64> = verts.iter().filter_map(num).collect();
+            if let Some(n) = dict.get(b"Vertices").ok().and_then(|o| finite_coords(doc, o)) {
                 let pts: Vec<(f64,f64)> = n.chunks_exact(2).map(|c| dev(c[0], c[1])).collect();
                 if pts.len() >= 2 {
                     let closed = subtype == b"Polygon";
@@ -2573,5 +2589,58 @@ mod synthesis_tests {
             .find_map(|p| if let Prim::Stroke { argb, .. } = p { Some(*argb) } else { None })
             .expect("no stroke");
         assert_eq!(argb, 0xFFFF_0000, "indirect /C ignored, fell back to black");
+    }
+
+    /// §7.3.3 numbers are finite, but a real with more digits than `f32` holds
+    /// parses to an infinity. One such coordinate reaches every primitive built
+    /// from it, and the rasterizer drops a path containing a non-finite point
+    /// silently — so the annotation disappears with no error rather than being
+    /// visibly malformed. Draw nothing instead, as for absent geometry.
+    #[test]
+    fn non_finite_geometry_draws_nothing_rather_than_a_poisoned_path() {
+        // A real with more digits than f32 can hold parses to this.
+        let bad = Object::Real(f32::INFINITY);
+        let ok = |v: f64| Object::Real(v as f32);
+
+        let mut line = annot("Line");
+        line.set("C", Object::Array(vec![1.into(), 0.into(), 0.into()]));
+        line.set("L", Object::Array(vec![ok(0.0), ok(0.0), bad.clone(), ok(10.0)]));
+        assert!(synth(&line, [0.0, 0.0, 100.0, 20.0]).is_empty(), "/L");
+
+        let mut poly = annot("Polygon");
+        poly.set("C", Object::Array(vec![1.into(), 0.into(), 0.into()]));
+        poly.set(
+            "Vertices",
+            Object::Array(vec![ok(0.0), ok(0.0), ok(10.0), bad.clone(), ok(5.0), ok(9.0)]),
+        );
+        assert!(synth(&poly, [0.0, 0.0, 100.0, 20.0]).is_empty(), "/Vertices");
+
+        let mut ink = annot("Ink");
+        ink.set("C", Object::Array(vec![1.into(), 0.into(), 0.into()]));
+        ink.set(
+            "InkList",
+            Object::Array(vec![
+                Object::Array(vec![ok(0.0), ok(0.0), bad.clone(), ok(1.0)]),
+                Object::Array(vec![ok(0.0), ok(0.0), ok(9.0), ok(9.0)]),
+            ]),
+        );
+        let strokes = synth(&ink, [0.0, 0.0, 100.0, 20.0]);
+        assert_eq!(strokes.len(), 1, "the poisoned /InkList path drops, the clean one stays");
+
+        let mut hl = annot("Highlight");
+        hl.set(
+            "QuadPoints",
+            Object::Array(vec![
+                ok(0.0), ok(10.0), bad, ok(10.0), ok(0.0), ok(0.0), ok(100.0), ok(0.0),
+            ]),
+        );
+        // Falls back to the /Rect quad, which `read_rect` has already proven finite.
+        for p in synth(&hl, [0.0, 0.0, 100.0, 10.0]) {
+            if let Prim::Fill { contours, .. } = p {
+                for (x, y) in contours.iter().flatten() {
+                    assert!(x.is_finite() && y.is_finite(), "non-finite point reached a Fill");
+                }
+            }
+        }
     }
 }

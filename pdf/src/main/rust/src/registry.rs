@@ -16,7 +16,7 @@ use indexmap::IndexMap;
 
 const MAX_REG_DOCS: usize = 8;
 /// Max PDF size accepted to prevent zip-bomb / OOM DoS (200 MB).
-const MAX_PDF_BYTES: usize = 200 * 1024 * 1024;
+pub(crate) const MAX_PDF_BYTES: usize = 200 * 1024 * 1024;
 
 /// Nesting-depth ceiling for the raw pre-scan (see [`nesting_exceeds`]).
 ///
@@ -401,7 +401,16 @@ fn scan_indirect_objects(bytes: &[u8]) -> std::collections::BTreeMap<u32, (u16, 
     let mut i = 0usize;
     while i + 3 <= n {
         // Jump over a stream body so its bytes cannot be mistaken for object headers.
-        if bytes[i..].starts_with(b"stream") {
+        //
+        // 7.3.8 puts the `stream` keyword straight after the dictionary's `>>`, so
+        // requiring that boundary (as [`nesting_exceeds`] already does) keeps a name
+        // like `/Substream`, or the word inside a literal string, from being taken for
+        // the start of a body — which would skip forward to the next `endstream` and
+        // lose every object header in between from the rebuilt table.
+        if bytes[i..].starts_with(b"stream")
+            && i > 0
+            && (is_pdf_ws(bytes[i - 1]) || bytes[i - 1] == b'>')
+        {
             let after = i + 6;
             match find_subsequence(bytes, b"endstream", after) {
                 Some(end) => {
@@ -529,8 +538,11 @@ fn last_trailer_dict(bytes: &[u8]) -> Option<Vec<u8>> {
 
 /// Locate the object id whose body declares `/Type /Catalog` (the document root),
 /// used to synthesize a trailer when none is recoverable. Scans highest id first: an
-/// incrementally-updated file keeps its superseded catalogs at lower ids, and requires
-/// `/Type` adjacent to `/Catalog` so a literal `(/Catalog)` string does not match.
+/// incrementally-updated file keeps its superseded catalogs at lower ids. An object
+/// whose opening window holds both `/Catalog` and `/Type` wins outright; one holding
+/// only `/Catalog` (a name used somewhere other than as the type) is kept as a
+/// last-resort fallback. This is the last of three ways to recover `/Root`, reached
+/// only when neither a `trailer` dictionary nor a cross-reference stream yielded one.
 fn find_catalog_id(objs: &std::collections::BTreeMap<u32, (u16, usize)>, bytes: &[u8]) -> Option<(u32, u16)> {
     let mut fallback = None;
     for (id, (gen, off)) in objs.iter().rev() {
@@ -691,6 +703,31 @@ pub(crate) fn close_document(handle: i64) {
 #[cfg(test)]
 mod recovery_tests {
     use super::*;
+
+    /// 7.3.8: the `stream` keyword follows the dictionary's `>>`, so a NAME that
+    /// merely ends in `stream` is not the start of a body. Without that boundary
+    /// check the scan jumps to the next `endstream` and every object header in
+    /// between is missing from the rebuilt cross-reference table.
+    #[test]
+    fn a_name_ending_in_stream_does_not_hide_the_objects_after_it() {
+        let bytes: &[u8] = b"%PDF-1.7\n\
+            1 0 obj\n<< /Type /Catalog /Substream 1 /Pages 2 0 R >>\nendobj\n\
+            2 0 obj\n<< /Type /Pages /Kids [] /Count 0 >>\nendobj\n\
+            3 0 obj\n<< /Len 1 >>\nstream\nx\nendstream\nendobj\n";
+        let objs = scan_indirect_objects(bytes);
+        assert!(objs.contains_key(&1), "object 1 must be found: {objs:?}");
+        assert!(
+            objs.contains_key(&2),
+            "`/Substream` must not be taken for a stream body, hiding object 2: {objs:?}"
+        );
+        assert!(objs.contains_key(&3), "object 3 must be found: {objs:?}");
+        // And a real stream body is still skipped: `4 0 obj` inside one is not a header.
+        let mut body = Vec::from(&b"%PDF-1.7\n1 0 obj\n<< /Length 30 >>\nstream\n"[..]);
+        body.extend_from_slice(b"junk 4 0 obj << >> endobj junk\nendstream\nendobj\n");
+        let objs = scan_indirect_objects(&body);
+        assert!(objs.contains_key(&1));
+        assert!(!objs.contains_key(&4), "a header inside a stream body must be skipped");
+    }
 
     /// A19: an xref-stream file has no `trailer` keyword, so /Root must be read from
     /// the cross-reference stream's own dictionary or recovery fails outright.

@@ -1969,7 +1969,7 @@ fn tiling_pattern_with_a_small_step_covers_the_whole_region() {
     let mut prims = Vec::new();
     paint_pattern_fill(
         &doc, pid, &region, false, &IDENTITY, 0xFF00_0000, 1.0, BlendMode::Normal,
-        &mut prims, 0, 0,
+        &HashMap::new(), &mut prims, 0, 0,
     );
     assert!(
         prims.iter().any(is_ink),
@@ -1996,7 +1996,7 @@ fn tiling_pattern_with_a_negative_step_still_paints() {
     let mut prims = Vec::new();
     paint_pattern_fill(
         &doc, pid, &region, false, &IDENTITY, 0xFF00_0000, 1.0, BlendMode::Normal,
-        &mut prims, 0, 0,
+        &HashMap::new(), &mut prims, 0, 0,
     );
     assert!(
         prims.iter().any(is_ink),
@@ -2401,7 +2401,7 @@ fn tiling_pattern_cell_raster_is_not_vertically_flipped() {
     let mut prims = Vec::new();
     paint_pattern_fill(
         &doc, pid, &region, false, &IDENTITY, 0xFF00_0000, 1.0, BlendMode::Normal,
-        &mut prims, 0, 0,
+        &HashMap::new(), &mut prims, 0, 0,
     );
 
     // The periodic path emits one ImageTiled cell raster; the per-tile path emits
@@ -3153,7 +3153,7 @@ fn inline_image_inside_a_tiling_pattern_cell_keeps_the_rest_of_the_cell() {
     let mut prims = Vec::new();
     paint_pattern_fill(
         &doc, pid, &region, false, &IDENTITY, 0xFF00_0000, 1.0, BlendMode::Normal,
-        &mut prims, 0, 0,
+        &HashMap::new(), &mut prims, 0, 0,
     );
     let inked = prims.iter().filter(|p| is_ink(p)).count();
     assert!(

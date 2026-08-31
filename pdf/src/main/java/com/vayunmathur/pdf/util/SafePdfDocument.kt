@@ -93,7 +93,14 @@ class SafePdfDocument private constructor(
                     cachedBytes = (cachedBytes - pageWeightBytes(evicted)).coerceAtLeast(0L)
                 }
             }
-            cache[index] = page
+            // The cache lookup at the top of renderPage is outside this lock, so two
+            // coroutines can both miss for the same index and both insert. A replacing put
+            // does not call removeEldestEntry, so the displaced page's weight was never
+            // subtracted and cachedBytes drifted upward for the rest of the session —
+            // permanently over-budget, evicting pages that fit and re-decoding them.
+            cache.put(index, page)?.let { displaced ->
+                cachedBytes = (cachedBytes - pageWeightBytes(displaced)).coerceAtLeast(0L)
+            }
         }
         page
     }

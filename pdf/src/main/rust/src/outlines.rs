@@ -318,7 +318,23 @@ fn resolve_cff_gid(fi: &FontInfo, table: &ttf_parser::cff::Table, code: u32, cff
             return Some(gid);
         }
     }
-    as_gid(code)
+    // A CID-keyed CFF has no 8-bit encoding at all — `glyph_index` answers None
+    // structurally, not because the code is uncovered — so read the code as a CID
+    // through the charset exactly as the Type0 path above does.
+    if let Some(m) = cff_cid_to_gid {
+        return as_gid(m.get(&code).copied().map_or(code, u32::from));
+    }
+    // A name-keyed CFF always HAS an encoding: ttf-parser falls back to the format's
+    // own StandardEncoding when the font declares none, so reaching here means the
+    // code genuinely selects no glyph in this program. Report None and let the
+    // caller substitute. Treating the code as a glyph id was the one thing left
+    // here that could not be right: CFF glyph ids are ordered by the charset and
+    // never by character code, so `as_gid(code)` painted an unrelated letter at the
+    // correct position — text that reads as nonsense rather than text that is
+    // missing — and suppressed the substitute-font fallback that would have drawn
+    // the right one. `resolve_gid` already refuses the same shortcut for an sfnt
+    // that has a cmap; the two paths now agree.
+    None
 }
 
 /// Map a content-stream code to an sfnt glyph id, trying the strategies that
@@ -426,7 +442,15 @@ pub(crate) fn encoding_differences(doc: &lopdf::Document, font: &lopdf::Dictiona
     for item in diffs {
         let obj = crate::deref(doc, item).cloned().unwrap_or_else(|| item.clone());
         match obj {
-            lopdf::Object::Integer(n) => code = n.max(0) as u32,
+            // Real is accepted alongside Integer so this parser and the Unicode
+            // one in `fonts::encoding::build` segment the array IDENTICALLY. They
+            // disagreed: a `/Differences [65 /A 200.0 /B]` set code 200 there and
+            // was ignored here, leaving the counter at 66 — so `glyph_names`
+            // (which picks the OUTLINE) and `encoding` (which picks the substitute
+            // glyph and the text) named different codes, and code 66 drew B.
+            lopdf::Object::Integer(_) | lopdf::Object::Real(_) => {
+                code = crate::num(&obj).unwrap_or(0.0).max(0.0) as u32;
+            }
             lopdf::Object::Name(n) => {
                 names.insert(code, String::from_utf8_lossy(&n).to_string());
                 code += 1;
@@ -552,5 +576,38 @@ mod tests {
         let fi = type1_font_info(&[("A", square())], &[(65, "A")], &[]);
         assert!(glyph_outline(&fi, 65).is_some());
         assert!(glyph_outline(&fi, 66).is_none(), "unmapped code substitutes");
+    }
+
+    /// The two /Differences parsers must segment the array IDENTICALLY. This one
+    /// feeds `glyph_names`, which picks the OUTLINE; `fonts::encoding::build` feeds
+    /// `encoding`, which picks the substitute glyph and the extracted text. This
+    /// one ignored a Real code where that one accepted it, so after a malformed
+    /// `200.0` the two disagreed about every following code — and a disagreement
+    /// here draws a real glyph, at the right position, for the wrong character.
+    #[test]
+    fn a_real_valued_differences_code_is_read_like_the_unicode_parser_reads_it() {
+        let mut doc = lopdf::Document::with_version("1.7");
+        let enc = doc.add_object(lopdf::Object::Dictionary(lopdf::Dictionary::from_iter([
+            ("Type", lopdf::Object::Name(b"Encoding".to_vec())),
+            (
+                "Differences",
+                lopdf::Object::Array(vec![
+                    65.into(),
+                    lopdf::Object::Name(b"A".to_vec()),
+                    lopdf::Object::Real(200.0),
+                    lopdf::Object::Name(b"B".to_vec()),
+                ]),
+            ),
+        ])));
+        let font = lopdf::Dictionary::from_iter([
+            ("Type", lopdf::Object::Name(b"Font".to_vec())),
+            ("Subtype", lopdf::Object::Name(b"Type1".to_vec())),
+            ("Encoding", lopdf::Object::Reference(enc)),
+        ]);
+        let names = encoding_differences(&doc, &font);
+        let (uni, _) = crate::fonts::encoding::build(&doc, &font);
+        assert_eq!(names.get(&200).map(String::as_str), Some("B"));
+        assert_eq!(names.get(&66), None, "the counter must jump to 200, not run on from 66");
+        assert_eq!(uni.get(&200), Some(&'B'), "and the Unicode parser must agree");
     }
 }
