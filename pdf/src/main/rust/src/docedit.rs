@@ -316,6 +316,18 @@ pub(crate) fn extract_page(handle: i64, index: i32) -> Option<Vec<u8>> {
     Some(buf)
 }
 
+/// Stack for the page-interpretation worker (see [`render_page`]).
+///
+/// Smaller than `registry::OPEN_STACK_BYTES` because the interpreter's recursion
+/// is already bounded by a small constant (`MAX_GROUP_DEPTH`,
+/// `MAX_PATTERN_RECURSION` and the form-XObject depth), unlike lopdf's object
+/// parser which is bounded only by the pre-scan.
+///
+/// Shared by every entry point that enters the interpreter — `render_page` here,
+/// `forms::document_text` and `search::ensure_index` — so the three cannot drift
+/// apart and leave one path with less headroom than the others.
+pub(crate) const RENDER_STACK_BYTES: usize = 8 * 1024 * 1024;
+
 /// Serialize page `index` (0-based) of the document behind `handle` into the
 /// wire buffer, or `None` on any error.
 pub(crate) fn render_page(handle: i64, index: i32) -> Option<Vec<u8>> {
@@ -328,7 +340,13 @@ pub(crate) fn render_page(handle: i64, index: i32) -> Option<Vec<u8>> {
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     let doc = reg.get(&handle)?;
     let pages = doc.get_pages();
-    let page_id = *pages.get(&((index as u32) + 1))?;
+    // `index` arrives unvalidated from the JNI boundary as a `jint`, so it may be
+    // negative. `(index as u32) + 1` panicked in debug for -1, and this panics WHILE
+    // HOLDING the registry mutex, which poisons it — recoverable in production because
+    // every lock here is poison-tolerant, but it takes out unrelated callers that are
+    // not. Reject negatives up front, as `annotations::nth_page_id` does.
+    let page_number = u32::try_from(index).ok()?.checked_add(1)?;
+    let page_id = *pages.get(&page_number)?;
     // Content stream size guard (DoS mitigation per plan §18): reject absurdly large page contents before full interpretation.
     if let Ok(dict) = doc.get_dictionary(page_id) {
         if let Ok(cont) = dict.get(b"Contents") {
@@ -343,7 +361,28 @@ pub(crate) fn render_page(handle: i64, index: i32) -> Option<Vec<u8>> {
             }
         }
     }
-    let page = interpret_page(doc, page_id).ok()?;
+    // Interpretation recurses for form XObjects, tiling/shading patterns, soft-mask
+    // groups and Type 3 glyphs. Each of those is depth-capped, but the frames are
+    // large and the total headroom is otherwise a property of whichever thread
+    // called in — on Android a JNI thread with a fraction of a desktop stack. Pin
+    // it here for the same reason `registry::load_mem_on_big_stack` does at open:
+    // a guard-page fault is not an unwind, so the JNI `catch_unwind` cannot turn it
+    // into a failed render. A panic is re-raised with its payload so that boundary
+    // still sees it, and a spawn failure falls back to the calling thread.
+    let interpreted = std::thread::scope(|s| {
+        match std::thread::Builder::new()
+            .name("pdf-render".to_owned())
+            .stack_size(RENDER_STACK_BYTES)
+            .spawn_scoped(s, || interpret_page(doc, page_id))
+        {
+            Ok(h) => match h.join() {
+                Ok(r) => r,
+                Err(payload) => std::panic::resume_unwind(payload),
+            },
+            Err(_) => interpret_page(doc, page_id),
+        }
+    });
+    let page = interpreted.ok()?;
     Some(wire::serialize(&page))
 }
 
@@ -437,6 +476,12 @@ pub(crate) fn flatten_document(handle: i64) -> bool {
         None => return false,
     };
     let page_ids: Vec<ObjectId> = doc.get_pages().values().copied().collect();
+    // Built ONCE: `OcConfig::from_doc` reads the catalog and builds both membership sets,
+    // and `annot_visible_on_screen` (the convenience wrapper) does that per call. Inside
+    // this per-page, per-annotation loop that rebuilt the whole config for every
+    // annotation in the document — the same trap the renderer's `Do` arm hit. The config
+    // is document-level and immutable, so one is correct for the whole flatten.
+    let oc = crate::images::OcConfig::from_doc(doc);
     for page_id in page_ids {
         // Collect (xobject name, appearance id, placement matrix) for each annot.
         let annot_ids: Vec<ObjectId> = match doc
@@ -461,7 +506,7 @@ pub(crate) fn flatten_document(handle: i64) -> bool {
             // /OC-disabled (§8.11.2) or /Popup (§12.5.6.14) annotation into page
             // content makes it permanently visible, and /Annots is dropped below
             // so it cannot be undone.
-            if !annot_visible_on_screen(doc, dict) {
+            if !annot_visible_on_screen_with(&oc, doc, dict) {
                 continue;
             }
             let rect = match dict.get(b"Rect").ok().and_then(|o| read_rect(doc, o)) {

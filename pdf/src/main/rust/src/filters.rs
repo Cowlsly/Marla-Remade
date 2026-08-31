@@ -592,7 +592,22 @@ fn apply_png_predictor(data: Vec<u8>, cols: usize, colors: usize, bpc: usize) ->
     // Byte offset of the "left" sample. PNG defines this as ceil(bits per pixel / 8),
     // minimum 1, so sub-byte pixel depths filter on adjacent bytes.
     let bpp = (colors * bpc).div_ceil(8).max(1);
-    let row_bytes = (cols * colors * bpc).div_ceil(8);
+    // The FACTORS are clamped by the caller, but their PRODUCT is not bounded by
+    // anything the file has to back up: at the clamp ceilings,
+    // (1<<24 * 32 * 16).div_ceil(8) is a 1 GiB row, and the two row buffers below
+    // plus `out` then allocate ~3 GiB from a 512-byte stream. `MAX_DECODED_BYTES`
+    // cannot help - this happens after decompression.
+    //
+    // 7.4.4.4 gives the row length as ceil(Columns x Colors x BitsPerComponent / 8),
+    // so the honest bound is the decoded stream itself: a row that does not fit in
+    // the data cannot be a row the data describes. Truncated final rows are still
+    // zero-filled below, so this only bites when not even one row is present - a
+    // case whose output is unusable regardless.
+    let row_bytes = cols
+        .saturating_mul(colors)
+        .saturating_mul(bpc)
+        .div_ceil(8)
+        .min(data.len());
     if row_bytes == 0 {
         return data;
     }
@@ -627,12 +642,23 @@ fn apply_tiff_predictor2(mut data: Vec<u8>, cols: usize, colors: usize, bpc: usi
     if cols == 0 || colors == 0 {
         return data;
     }
-    let samples_per_row = cols * colors;
-    let row_bits = samples_per_row * bpc;
-    let row_bytes = row_bits.div_ceil(8);
+    // Bounded by the decoded stream for the same reason as the PNG path above: the
+    // declared factors are attacker-controlled and their product is not. `rows`
+    // already came out as 0 for an over-long row on a 64-bit target, but the
+    // multiplications themselves wrap (unchecked in release), and the per-row
+    // `samples` buffer in the 1/2/4-bit arm below is sized from `samples_per_row`.
+    let row_bytes = cols
+        .saturating_mul(colors)
+        .saturating_mul(bpc)
+        .div_ceil(8)
+        .min(data.len());
     if row_bytes == 0 {
         return data;
     }
+    // A row cannot hold more samples than it has bits for; equal to
+    // `cols * colors` whenever the two agree, and smaller only when the clamp above
+    // took effect.
+    let samples_per_row = cols.saturating_mul(colors).min(row_bytes * 8 / bpc);
     let rows = data.len() / row_bytes;
     match bpc {
         8 => {

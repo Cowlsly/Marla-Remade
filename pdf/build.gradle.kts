@@ -13,6 +13,14 @@ android {
     defaultConfig {
         applicationId = "com.vayunmathur.pdf"
     }
+    // The wire parser logs via android.util.Log on its clamp/desync/non-affine paths, and the
+    // structural rasterizer tests drive drawSafePage through a spy android.graphics.Canvas. Both
+    // need the stub android.jar to return defaults instead of throwing "not mocked" (same as
+    // :cast, :maps). Robolectric-run tests are unaffected: they replace android.jar outright.
+    testOptions.unitTests.isReturnDefaultValues = true
+    // Robolectric reads the merged manifest and resources through the AGP-generated
+    // com/android/tools/test_config.properties, which only exists when this is on.
+    testOptions.unitTests.isIncludeAndroidResources = true
 }
 
 androidComponents {
@@ -38,4 +46,10 @@ dependencies {
     implementation(libs.androidx.camera.view)
     implementation(project(":library:image"))
     implementation(project(":library:ocr"))
+
+    // drawSafePage paints straight onto an android.graphics.Canvas via Typeface/Paint/Matrix,
+    // none of which the unit-test stub android.jar implements — Typeface.create returns null, so
+    // every Text primitive throws before it reaches the render-mode-3 paint guard. Robolectric
+    // supplies a real Skia-backed graphics stack so those tests can assert actual pixels.
+    testImplementation(libs.robolectric)
 }

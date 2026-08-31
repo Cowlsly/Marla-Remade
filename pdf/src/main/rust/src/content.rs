@@ -103,25 +103,117 @@ pub(crate) fn parse_operations_lenient(data: &[u8]) -> Vec<Operation> {
     Lexer { d: data, p: 0 }.run()
 }
 
+/// Whether array/dictionary nesting in `data` ever exceeds [`MAX_DEPTH`].
+///
+/// `lopdf::content::Content::decode` recurses per nesting level with no bound, so
+/// `BT [[[[…(x)…]]]] TJ ET` overflows the stack — measured at N≈360 on an 8 MiB stack and
+/// N≈48 on the 1 MiB an Android render thread gets. That is a guard-page fault, not an
+/// unwind, so the `catch_unwind` at the JNI boundary cannot catch it and the whole process
+/// dies. The lenient tokenizer already bounds itself at [`MAX_DEPTH`] and survives, but it
+/// only runs when the strict parser *returns*.
+///
+/// So this is a pre-check, not a parser: it decides only whether the strict parser is safe
+/// to call. It deliberately errs toward "too deep" — a false positive costs one pass of the
+/// lenient tokenizer, which handles valid content identically, while a false negative is a
+/// process kill. §7.3.4.2 literal strings (balanced unescaped parens, backslash escapes),
+/// §7.3.4.3 hex strings and §7.2.4 comments are skipped so a `[` inside them cannot count.
+fn nesting_is_too_deep(data: &[u8], max: u32) -> bool {
+    let mut depth: u32 = 0;
+    let mut i = 0usize;
+    while i < data.len() {
+        match data[i] {
+            b'%' => {
+                while i < data.len() && data[i] != b'\n' && data[i] != b'\r' {
+                    i += 1;
+                }
+            }
+            b'(' => {
+                let mut nest = 1usize;
+                i += 1;
+                while i < data.len() && nest > 0 {
+                    match data[i] {
+                        b'\\' => i += 1,
+                        b'(' => nest += 1,
+                        b')' => nest -= 1,
+                        _ => {}
+                    }
+                    i += 1;
+                }
+            }
+            b'<' if data.get(i + 1) == Some(&b'<') => {
+                depth += 1;
+                if depth > max {
+                    return true;
+                }
+                i += 2;
+            }
+            b'<' => {
+                i += 1;
+                while i < data.len() && data[i] != b'>' {
+                    i += 1;
+                }
+                i += 1;
+            }
+            b'>' if data.get(i + 1) == Some(&b'>') => {
+                depth = depth.saturating_sub(1);
+                i += 2;
+            }
+            b'[' => {
+                depth += 1;
+                if depth > max {
+                    return true;
+                }
+                i += 1;
+            }
+            b']' => {
+                depth = depth.saturating_sub(1);
+                i += 1;
+            }
+            _ => i += 1,
+        }
+    }
+    false
+}
+
+/// Strict parse first, lenient tokenizer only if that fails, yields nothing, or is
+/// unsafe to attempt at all.
+fn strict_operations(bytes: &[u8]) -> Option<Vec<Operation>> {
+    if nesting_is_too_deep(bytes, MAX_DEPTH) {
+        return None;
+    }
+    match Content::decode(bytes) {
+        Ok(content) if !content.operations.is_empty() => Some(content.operations),
+        _ => None,
+    }
+}
+
 /// Operations for a page's content, preferring lopdf's strict parser and falling
 /// back to [`parse_operations_lenient`] when it fails or recovers nothing.
 ///
 /// The `bool` is true when the fallback produced the result (for logging/tests).
 pub(crate) fn page_operations(doc: &Document, page_id: ObjectId) -> (Vec<Operation>, bool) {
-    // Try lopdf first and return its result untouched, so files that render today
-    // are completely unaffected.
-    if let Ok(content) = doc.get_and_decode_page_content(page_id) {
-        if !content.operations.is_empty() {
-            return (content.operations, false);
-        }
-    }
-    // Either the parse failed (the inline-image `cut` case) or it recovered nothing.
-    // Both render a blank page today, so the lenient path can only improve matters.
+    // Decode with OUR filter chain, then parse strictly first so files that render
+    // today are unaffected by the parse, falling back to the lenient tokenizer.
+    //
+    // NOT `get_and_decode_page_content`: that decodes through lopdf, whose ASCII85
+    // decoder adds a base-85 5-tuple into a `u32` unchecked (lopdf/src/object.rs:777),
+    // so a stream containing `uuuuu` panics with "attempt to add with overflow" in
+    // debug and wraps silently in release. A panic here is fatal at the JNI boundary:
+    // one malformed content stream kills the whole document. `page_content_bytes` is
+    // also the more correct decode — it joins every /Contents stream with intervening
+    // white space per §7.8.2, and yields nothing rather than ciphertext when a decoder
+    // fails.
     let bytes = page_content_bytes(doc, page_id);
     if bytes.is_empty() {
         return (Vec::new(), false);
     }
-    (operations_from_bytes(&bytes), true)
+    if let Some(ops) = strict_operations(&bytes) {
+        return (ops, false);
+    }
+    // Either the parse failed (the inline-image `cut` case), it recovered nothing, or the
+    // nesting was too deep to hand to lopdf at all.
+    // All three render a blank page today, so the lenient path can only improve matters.
+    (parse_operations_lenient(&bytes), true)
 }
 
 /// Operations for a NESTED content stream: a form XObject (`Do`), a soft-mask
@@ -137,10 +229,8 @@ pub(crate) fn stream_operations(doc: &Document, stream: &Stream) -> Vec<Operatio
 
 /// Strict parse first, lenient tokenizer only if that fails or yields nothing.
 fn operations_from_bytes(bytes: &[u8]) -> Vec<Operation> {
-    if let Ok(content) = Content::decode(bytes) {
-        if !content.operations.is_empty() {
-            return content.operations;
-        }
+    if let Some(ops) = strict_operations(bytes) {
+        return ops;
     }
     parse_operations_lenient(bytes)
 }
@@ -1378,6 +1468,43 @@ mod tests {
         for op in ["q", "rg", "BI", "Q", "re", "f"] {
             assert!(names.contains(&op.to_string()), "lost `{op}`: {names:?}");
         }
+    }
+
+    #[test]
+    fn the_depth_pre_check_only_counts_real_nesting() {
+        // The guard decides whether lopdf's unbounded strict parser is safe to call, so a
+        // false negative is a process kill. But a false POSITIVE silently demotes healthy
+        // content to the lenient tokenizer, so brackets inside strings and comments must
+        // not count.
+        assert!(!nesting_is_too_deep(b"BT [(x)] TJ ET", MAX_DEPTH));
+        let deep = |n: usize| {
+            let mut v = b"BT ".to_vec();
+            v.extend(std::iter::repeat_n(b'[', n));
+            v.extend_from_slice(b"(x)");
+            v.extend(std::iter::repeat_n(b']', n));
+            v.extend_from_slice(b" TJ ET");
+            v
+        };
+        assert!(!nesting_is_too_deep(&deep(MAX_DEPTH as usize), MAX_DEPTH));
+        assert!(nesting_is_too_deep(&deep(MAX_DEPTH as usize + 1), MAX_DEPTH));
+        // §7.3.4.2: a literal string may contain unescaped balanced parens and escaped
+        // anything. None of these brackets are nesting.
+        let mut s = b"BT (".to_vec();
+        s.extend(std::iter::repeat_n(b'[', 200));
+        s.extend_from_slice(b"(nested) \\) \\( ");
+        s.extend_from_slice(b") Tj ET");
+        assert!(!nesting_is_too_deep(&s, MAX_DEPTH));
+        // §7.2.4 comment, and a §7.3.4.3 hex string.
+        let mut c = b"% ".to_vec();
+        c.extend(std::iter::repeat_n(b'[', 200));
+        c.extend_from_slice(b"\nBT <");
+        c.extend(std::iter::repeat_n(b'A', 40));
+        c.extend_from_slice(b"> Tj ET");
+        assert!(!nesting_is_too_deep(&c, MAX_DEPTH));
+        // Dictionaries count, and an unterminated construct must not run past the end.
+        assert!(nesting_is_too_deep(&b"<<".repeat(MAX_DEPTH as usize + 1), MAX_DEPTH));
+        assert!(!nesting_is_too_deep(b"BT (unterminated", MAX_DEPTH));
+        assert!(!nesting_is_too_deep(b"BT <unterminated", MAX_DEPTH));
     }
 
     #[test]

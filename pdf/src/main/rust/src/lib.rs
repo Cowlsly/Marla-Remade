@@ -87,3 +87,9 @@ mod golden_tests;
 mod debug_ishi_test;
 #[cfg(test)]
 mod issue321_tests;
+#[cfg(test)]
+mod differential_tests;
+#[cfg(test)]
+mod perf_tests;
+#[cfg(test)]
+mod robustness_tests;

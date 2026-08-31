@@ -801,7 +801,12 @@ pub extern "system" fn Java_com_vayunmathur_pdf_util_PdfNative_movePage<'local>(
 ) -> jboolean {
     let _invalidate = InvalidateSearchIndex(handle);
     match catch_unwind(AssertUnwindSafe(|| {
-        move_page(handle, from.max(0) as usize, to.max(0) as usize) as jboolean
+        // A negative jint is reachable input. `from.max(0) as usize` silently moved
+        // page 0 instead, i.e. edited the wrong page rather than refusing.
+        match (usize::try_from(from), usize::try_from(to)) {
+            (Ok(from), Ok(to)) => move_page(handle, from, to) as jboolean,
+            _ => 0,
+        }
     })) {
         Ok(v) => v,
         Err(_) => {
@@ -821,7 +826,11 @@ pub extern "system" fn Java_com_vayunmathur_pdf_util_PdfNative_removePage<'local
 ) -> jboolean {
     let _invalidate = InvalidateSearchIndex(handle);
     match catch_unwind(AssertUnwindSafe(|| {
-        remove_page(handle, index.max(0) as usize) as jboolean
+        // As in `movePage`: refuse a negative index rather than deleting page 0.
+        match usize::try_from(index) {
+            Ok(index) => remove_page(handle, index) as jboolean,
+            Err(_) => 0,
+        }
     })) {
         Ok(v) => v,
         Err(_) => {

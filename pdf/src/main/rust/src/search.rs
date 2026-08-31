@@ -115,7 +115,30 @@ pub(crate) fn ensure_index(handle: i64) -> Option<std::sync::Arc<Vec<PageIndex>>
     let built = {
         let reg = registry().lock().unwrap_or_else(|e| e.into_inner());
         let doc = reg.get(&handle)?;
-        std::sync::Arc::new(build_index(doc))
+        // Same hazard as `docedit::render_page`: `build_index` runs `page_operations`
+        // and `interpret_content`, which recurse for form XObjects, tiling patterns,
+        // soft-mask groups and Type 3 glyphs. Those caps bound the DEPTH but not the
+        // frame SIZE, so the headroom is whatever the calling thread has — a JNI
+        // thread on Android. A guard-page fault is not an unwind, so the JNI
+        // `catch_unwind` cannot turn it into a failed search; it kills the process.
+        // Pinned here rather than at the boundary because `JNIEnv` is not `Send`.
+        // `build_index`'s `FontCacheScope` is thread-local and is created inside
+        // `build_index`, so it lands on the worker and still serves the whole build.
+        // A panic is re-raised with its payload; a spawn failure falls back to the
+        // calling thread.
+        std::sync::Arc::new(std::thread::scope(|s| {
+            match std::thread::Builder::new()
+                .name("pdf-index".to_owned())
+                .stack_size(crate::docedit::RENDER_STACK_BYTES)
+                .spawn_scoped(s, || build_index(doc))
+            {
+                Ok(h) => match h.join() {
+                    Ok(r) => r,
+                    Err(payload) => std::panic::resume_unwind(payload),
+                },
+                Err(_) => build_index(doc),
+            }
+        }))
     };
     index_cache().lock().unwrap_or_else(|e| e.into_inner()).insert(handle, built.clone());
     Some(built)
@@ -265,14 +288,23 @@ mod tests {
         doc
     }
 
-    /// `ensure_index` caches per handle and never re-checks, so every document-mutating
-    /// entry point has to drop the entry or search answers from the pre-edit text —
-    /// including, after `applyRedactions`, text that is no longer in the document.
-    /// The stale assertion in the middle is the point of the test: it proves the cache
-    /// really does survive an edit, so the invalidation is load-bearing rather than
-    /// belt-and-braces. `invalidate_index` had ZERO callers when this was written.
+    /// The contract: a search must answer from the CURRENT document. `ensure_index`
+    /// is a pure memo keyed by handle — it never re-reads the document to check —
+    /// so the contract holds only because every document-mutating entry point drops
+    /// the entry. That is `InvalidateSearchIndex` in `jni_bindings.rs`, held across
+    /// each mutating `extern` fn (including its `catch_unwind` arm, so a panic that
+    /// leaves the document half-edited cannot leave a matching index behind).
+    ///
+    /// Both halves are asserted here because each is load-bearing: the memo really
+    /// does hand back the same build (so invalidation is required, not decorative),
+    /// and invalidating really does produce the edited text.
+    ///
+    /// This test previously asserted that a search after an edit returns the
+    /// PRE-EDIT text, described as "expected", which stated the bug as the intended
+    /// behaviour. It now asserts the contract instead; the memo is pinned by
+    /// identity (`Arc::ptr_eq`) rather than by the stale string it produced.
     #[test]
-    fn editing_a_document_leaves_a_stale_index_until_it_is_invalidated() {
+    fn a_search_after_an_edit_sees_the_edit_once_the_mutator_invalidates() {
         // Far from `next_handle()`'s counter so a parallel test cannot collide.
         let handle = i64::MAX - 777;
         {
@@ -290,18 +322,25 @@ mod tests {
             let mut reg = registry().lock().unwrap_or_else(|e| e.into_inner());
             *reg.get_mut(&handle).expect("still registered") = doc_with_text("AFTER");
         }
-        let stale = ensure_index(handle).expect("index");
+        let memoized = ensure_index(handle).expect("index");
         assert!(
-            stale[0].text_orig.contains("BEFORE"),
-            "the cache is expected to be stale here — if this ever fails, ensure_index \
-             started re-checking and the invalidation guards may be redundant"
+            std::sync::Arc::ptr_eq(&first, &memoized),
+            "ensure_index must hand back the index it already built rather than \
+             re-reading the document — that is why invalidation on mutation is \
+             mandatory rather than belt-and-braces"
         );
 
+        // What every mutating entry point does, via the InvalidateSearchIndex guard.
         invalidate_index(handle);
         let fresh = ensure_index(handle).expect("index rebuilds after invalidation");
         assert!(
             fresh[0].text_orig.contains("AFTER"),
-            "after invalidation the index must reflect the edited document, got {:?}",
+            "a search after an edit must see the edited document, got {:?}",
+            fresh[0].text_orig
+        );
+        assert!(
+            !fresh[0].text_orig.contains("BEFORE"),
+            "and must not still see the pre-edit text, got {:?}",
             fresh[0].text_orig
         );
 

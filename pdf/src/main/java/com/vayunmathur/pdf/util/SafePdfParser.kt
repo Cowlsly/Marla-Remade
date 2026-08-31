@@ -252,6 +252,16 @@ object SafePdfParser {
         var outermostSoftMaskStart = -1
         for (primIndex in 0 until count) {
             if (!buf.hasRemaining()) break
+            val primStart = buf.position()
+            // The robustness contract above: a primitive cut short must keep the clean prefix,
+            // never discard the page, because renderPage can only turn a throw into a null page
+            // and the UI shows that as an indefinite spinner. The per-field `throw`s below
+            // predate that contract and each one killed a whole page over its last primitive;
+            // catching here converts every one of them — plus any unguarded relative get that
+            // raises BufferUnderflowException — into the same `break` tag 13 already chose.
+            // Deliberately not reindented: this wraps the `when` untouched so the guard is a
+            // reviewable seven lines rather than a whole-body reindent.
+            try {
             when (val tag = buf.get().toInt() and 0xFF) {
                 TAG_TEXT -> {
                     val x = buf.float
@@ -544,6 +554,15 @@ object SafePdfParser {
                     )
                     break
                 }
+            }
+            } catch (e: RuntimeException) {
+                android.util.Log.w(
+                    TAG,
+                    "primitive $primIndex of $count failed to decode at offset $primStart " +
+                        "(wire v$wireVersion), keeping the ${primitives.size} that decoded cleanly",
+                    e,
+                )
+                break
             }
         }
 

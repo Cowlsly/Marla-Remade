@@ -278,6 +278,45 @@ fn visible_ocg_region_paints_all_of_its_content() {
     }
 }
 
+/// §8.11.4.3 Table 101 lists `/BaseState`, then `/ON`, then `/OFF`, and applying
+/// them in that order means `/OFF` wins for a group named by both arrays — which
+/// is also what mainstream viewers do, so a file authored against them hides what
+/// its author expected to be hidden.
+#[test]
+fn a_group_in_both_on_and_off_is_hidden() {
+    let mut doc = Document::with_version("1.6");
+    let ocg_id = doc.add_object(dictionary! { "Type" => "OCG", "Name" => Object::string_literal("L") });
+    let mut ops = vec![Operation::new(
+        "BDC",
+        vec![Object::Name(b"OC".to_vec()), Object::Name(b"OC0".to_vec())],
+    )];
+    ops.extend(rect_ops(10, 10, 40, 40));
+    ops.push(Operation::new("EMC", vec![]));
+    ops.extend(rect_ops(300, 300, 40, 40));
+    let bytes = Content { operations: ops }.encode().unwrap();
+    let catalog = dictionary! {
+        "OCProperties" => dictionary! {
+            "OCGs" => vec![ocg_id.into()],
+            "D" => dictionary! {
+                "ON" => vec![ocg_id.into()],
+                "OFF" => vec![ocg_id.into()],
+            },
+        },
+    };
+    let resources = dictionary! { "Properties" => dictionary! { "OC0" => ocg_id } };
+    let page_id = assemble(&mut doc, bytes, resources, dictionary! {}, catalog);
+
+    let page = interpret_page(&doc, page_id).expect("interpret");
+    assert!(
+        !ink_in_region(&page.prims, 0.0, 0.0, 60.0, 60.0),
+        "/OFF is applied after /ON, so a group in both must be hidden"
+    );
+    assert!(
+        ink_in_region(&page.prims, 300.0, 300.0, 341.0, 341.0),
+        "content outside the OCG region must still paint"
+    );
+}
+
 /// §14.6.2: an unbalanced `EMC` must be discarded, not allowed to pop a frame it
 /// does not own — otherwise a stray EMC un-hides the hidden region that follows.
 #[test]

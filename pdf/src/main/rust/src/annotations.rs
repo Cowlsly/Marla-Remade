@@ -39,7 +39,19 @@ pub(crate) fn appearance_matrix(rect: [f64; 4], bbox: [f64; 4], matrix: Mat) -> 
 /// position 2 (value 2), NoView is bit position 6 (value 32). Also honors
 /// optional content (§8.11.2) and skips `/Popup`, whose appearance is shown only
 /// via its parent's open state (§12.5.6.14).
-pub(crate) fn annot_visible_on_screen(doc: &Document, dict: &lopdf::Dictionary) -> bool {
+///
+/// The `OcConfig` is a PARAMETER, deliberately. There was a `annot_visible_on_screen(doc,
+/// dict)` convenience wrapper that called `OcConfig::from_doc` itself, and both callers
+/// walk an `/Annots` array — so it rebuilt the catalog's whole membership configuration
+/// once per annotation. It is deleted rather than left for the next caller to reach for,
+/// because that shape is what silently undid a measured 8.8x win twice: once in the
+/// renderer's `Do` arm and once here in `flatten_document`. Resolve the config once, at
+/// the outermost point that has the document, and pass it down.
+pub(crate) fn annot_visible_on_screen_with(
+    oc: &OcConfig,
+    doc: &Document,
+    dict: &lopdf::Dictionary,
+) -> bool {
     let flags = dict
         .get(b"F")
         .ok()
@@ -49,7 +61,7 @@ pub(crate) fn annot_visible_on_screen(doc: &Document, dict: &lopdf::Dictionary) 
     if flags & 0b10 != 0 || flags & 0b10_0000 != 0 {
         return false;
     }
-    if dict.get(b"OC").ok().map(|oc| crate::oc_object_hidden(doc, oc)).unwrap_or(false) {
+    if dict.get(b"OC").ok().map(|o| oc.object_hidden(doc, o)).unwrap_or(false) {
         return false;
     }
     dict.get(b"Subtype")
@@ -73,15 +85,28 @@ pub(crate) fn render_annotations(doc: &Document, page_id: ObjectId, base: &Mat, 
         _ => return,
     };
 
-    for a in &annots {
+    let oc = OcConfig::from_doc(doc);
+    for a in annots.iter().take(MAX_ANNOTATIONS) {
         let dict = match deref(doc, a).and_then(|o| o.as_dict().ok()) {
             Some(d) => d,
             None => continue,
         };
-        if !annot_visible_on_screen(doc, dict) {
+        if !annot_visible_on_screen_with(&oc, doc, dict) {
             continue;
         }
         render_annotation(doc, dict, base, prims);
+    }
+    if annots.len() > MAX_ANNOTATIONS {
+        // Each annotation can emit an appearance stream's worth of primitives, so an
+        // /Annots array with a hostile number of entries is an unbounded amount of work
+        // even though the array itself is bounded by the file size.
+        if cfg!(debug_assertions) {
+            eprintln!(
+                "[pdf_render/annotations] page has {} annotations - only the first {} are rendered",
+                annots.len(),
+                MAX_ANNOTATIONS
+            );
+        }
     }
 }
 
@@ -172,19 +197,42 @@ pub(crate) fn render_annotation(doc: &Document, dict: &lopdf::Dictionary, base: 
     // fit — the latter is too loose and lets a rotated appearance spill. The
     // same `ctm` is reused for the clip and the content, so the form's /Matrix
     // (already folded into it by appearance_matrix) cannot be applied twice.
-    // A degenerate BBox is skipped: a collapsed quad would swallow the whole
-    // annotation, turning a spill into a vanish.
-    let clip = bbox_raw
+    //
+    // A degenerate BBox cannot clip — a collapsed quad would swallow the whole
+    // annotation, turning a spill into a vanish — but emitting NO clip is not safe
+    // either: `sh` fills the whole of the current clip region (§8.7.4.3), so an
+    // appearance stream containing one floods the entire page. Fall back to the
+    // annotation's own /Rect, which bounds it per §12.5.5 regardless of the /BBox.
+    // /Rect is in default user space, so it maps through `base`, not `ctm`.
+    let (clip, clip_ctm) = match bbox_raw
         .map(normalize_rect)
-        .filter(|b| b[2] - b[0] > 0.0 && b[3] - b[1] > 0.0);
+        .filter(|b| b[2] - b[0] > 0.0 && b[3] - b[1] > 0.0)
+    {
+        Some(b) => (Some(b), ctm),
+        None => {
+            let r = normalize_rect(rect);
+            let usable = (r[2] - r[0] > 0.0 && r[3] - r[1] > 0.0).then_some(r);
+            (usable, *base)
+        }
+    };
+    let mut clip_bbox_device: Option<[f64; 4]> = None;
     if let Some(b) = clip {
-        let pts: Vec<(f32, f32)> = [(b[0], b[1]), (b[2], b[1]), (b[2], b[3]), (b[0], b[3])]
+        let dev: Vec<(f64, f64)> = [(b[0], b[1]), (b[2], b[1]), (b[2], b[3]), (b[0], b[3])]
             .iter()
-            .map(|&(x, y)| {
-                let (dx, dy) = transform(&ctm, x, y);
-                (dx as f32, dy as f32)
-            })
+            .map(|&(x, y)| transform(&clip_ctm, x, y))
             .collect();
+        let xs = dev.iter().map(|p| p.0);
+        let ys = dev.iter().map(|p| p.1);
+        let bb = [
+            xs.clone().fold(f64::INFINITY, f64::min),
+            ys.clone().fold(f64::INFINITY, f64::min),
+            xs.fold(f64::NEG_INFINITY, f64::max),
+            ys.fold(f64::NEG_INFINITY, f64::max),
+        ];
+        if bb.iter().all(|v| v.is_finite()) && bb[2] > bb[0] && bb[3] > bb[1] {
+            clip_bbox_device = Some(bb);
+        }
+        let pts: Vec<(f32, f32)> = dev.iter().map(|&(x, y)| (x as f32, y as f32)).collect();
         let mut path_ops = vec![PathOp::Move(pts[0].0, pts[0].1)];
         path_ops.extend(pts[1..].iter().map(|&(x, y)| PathOp::Line(x, y)));
         path_ops.push(PathOp::Close);
@@ -196,14 +244,53 @@ pub(crate) fn render_annotation(doc: &Document, dict: &lopdf::Dictionary, base: 
         ..Default::default()
     };
     let start = prims.len();
-    interpret_content(doc, &ops, res.as_ref(), gs, prims, 1, false);
+    // Seed the device clip extent rather than using `interpret_content`, which passes
+    // `None`. §8.7.4.1 requires `sh` to cover the entire clipping region, so when a
+    // shading has no `/BBox` of its own `rasterize_shading` needs that extent to know
+    // what to cover — and with `None` it returns `None` and pushes no prim at all, so a
+    // gradient painted with `sh` inside an appearance stream was INVISIBLE. The comment
+    // on that early return assumed the page-level caller always seeds it; an annotation
+    // appearance is the caller that does not. The extent is the same BBox-or-Rect quad
+    // clipped above, which is exactly the region such an `sh` may cover.
+    interpret_content_seeded(
+        doc,
+        &ops,
+        res.as_ref(),
+        gs,
+        prims,
+        1,
+        false,
+        clip_bbox_device,
+    );
 
-    // Honor the annotation's constant opacity (/CA) over its rendered prims.
+    // §12.5.2: /CA is the constant opacity the WHOLE annotation is painted with, so
+    // §11.6.6 applies it once to the composited appearance — exactly what a
+    // GroupPush/GroupPop layer does, and the same mechanism the `Do` arm uses for /ca on
+    // a form XObject.
+    //
+    // This used to walk `prims[start..]` calling `scale_prim_alpha` on each, which
+    // conflicts with two other fixes:
+    //   * a transparency group inside the appearance already carries its alpha on
+    //     `GroupPush`, and the loop scaled BOTH the GroupPush and every prim inside it,
+    //     so /CA landed twice (CA² on the group's contents);
+    //   * `wrap_with_soft_mask` appends the mask group's own prims after
+    //     `SoftMaskContent`, inside this same range, so the loop faded the MASK rather
+    //     than the content — for a luminosity mask that changes the mask's shape, not
+    //     its opacity.
+    // Wrapping instead of scaling cannot reach either: the layer's alpha is applied to
+    // the composite, and nothing inside is rewritten.
     let ca = dict.get(b"CA").ok().and_then(|o| deref(doc, o).or(Some(o))).and_then(num).unwrap_or(1.0);
-    if ca < 1.0 {
-        for p in prims[start..].iter_mut() {
-            scale_prim_alpha(p, ca);
-        }
+    if ca < 1.0 && prims.len() > start {
+        prims.insert(
+            start,
+            Prim::GroupPush {
+                isolated: true,
+                knockout: false,
+                alpha: ca.clamp(0.0, 1.0) as f32,
+                blend: BlendMode::Normal,
+            },
+        );
+        prims.push(Prim::GroupPop);
     }
     // Unconditional pop (mirrors the `Do` arm): interpret_content always returns
     // with a balanced clip depth, so this keeps the canvas clip stack balanced
@@ -741,8 +828,15 @@ pub(crate) fn decode_id(v: i64) -> ObjectId {
     (((v >> 16) & 0xFFFF_FFFF) as u32, (v & 0xFFFF) as u16)
 }
 
+/// Object id of the `index`-th page (0-based), or `None` when out of range.
+///
+/// `index` arrives unvalidated from the JNI boundary as a `jint`, so it may be negative.
+/// `(index as u32) + 1` overflowed for `-1`: a debug panic, and in release a silent wrap
+/// to 0, which page keys being 1-based made accidentally harmless. Reject negatives up
+/// front instead of relying on that.
 pub(crate) fn nth_page_id(doc: &Document, index: i32) -> Option<ObjectId> {
-    doc.get_pages().get(&((index as u32) + 1)).copied()
+    let page_number = u32::try_from(index).ok()?.checked_add(1)?;
+    doc.get_pages().get(&page_number).copied()
 }
 
 pub(crate) fn name_obj(s: &str) -> Object {
@@ -1843,6 +1937,149 @@ mod synthesis_tests {
     use super::stamp_label;
     use crate::*;
 
+    // A page index arrives from the JNI boundary as a `jint` and is not validated there,
+    // so `nth_page_id` must treat a negative one as out of range. `(index as u32) + 1`
+    // panicked in debug for -1 and wrapped to 0 in release, which page keys being 1-based
+    // made harmless by luck rather than by design.
+    #[test]
+    fn a_negative_page_index_is_out_of_range_not_an_overflow() {
+        let mut doc = Document::with_version("1.7");
+        let pages_id = doc.new_object_id();
+        let page = doc.add_object(dictionary! {
+            "Type" => name_obj("Page"),
+            "Parent" => Object::Reference(pages_id),
+            "MediaBox" => rect_obj([0.0, 0.0, 100.0, 100.0]),
+        });
+        doc.objects.insert(
+            pages_id,
+            Object::Dictionary(dictionary! {
+                "Type" => name_obj("Pages"),
+                "Kids" => Object::Array(vec![Object::Reference(page)]),
+                "Count" => 1,
+            }),
+        );
+        let catalog_id = doc.add_object(dictionary! {
+            "Type" => name_obj("Catalog"),
+            "Pages" => Object::Reference(pages_id),
+        });
+        doc.trailer.set("Root", catalog_id);
+        assert_eq!(nth_page_id(&doc, 0), Some(page), "page 0 is the first page");
+        for bad in [-1, -2, -1000, i32::MIN, i32::MIN + 1] {
+            assert_eq!(nth_page_id(&doc, bad), None, "index {bad} must be out of range");
+        }
+        assert_eq!(nth_page_id(&doc, i32::MAX), None, "past the end is out of range");
+    }
+
+    // §8.7.4.3: `sh` fills the whole of the CURRENT CLIP. An appearance stream is a form
+    // XObject (§12.5.5) and is normally clipped to its /BBox, but a missing or degenerate
+    // /BBox used to emit no clip at all — so one `sh` inside such an appearance flooded
+    // the entire page instead of the annotation. The /Rect bounds the annotation whatever
+    // the /BBox says, so it is the fallback.
+    #[test]
+    fn an_appearance_without_a_usable_bbox_still_clips_shadings_to_the_rect() {
+        let rect = [10.0, 20.0, 40.0, 60.0];
+        for bbox in [None, Some(vec![0.into(), 0.into(), 0.into(), 0.into()])] {
+            let mut doc = Document::with_version("1.7");
+            let mut ap_dict = dictionary! {
+                "Type" => name_obj("XObject"),
+                "Subtype" => name_obj("Form"),
+            };
+            if let Some(b) = bbox.clone() {
+                ap_dict.set("BBox", Object::Array(b));
+            }
+            let ap = doc.add_object(Stream::new(ap_dict, b"0 0 1 rg 0 0 100 100 re f".to_vec()));
+            let annot = dictionary! {
+                "Type" => name_obj("Annot"),
+                "Subtype" => name_obj("Square"),
+                "Rect" => rect_obj(rect),
+                "AP" => dictionary! { "N" => ap },
+            };
+            let mut prims = Vec::new();
+            render_annotation(&doc, &annot, &IDENTITY, &mut prims);
+
+            let clips: Vec<&Prim> = prims
+                .iter()
+                .filter(|p| matches!(p, Prim::ClipPush { .. }))
+                .collect();
+            assert_eq!(clips.len(), 1, "an unusable /BBox must still emit one clip");
+            let Prim::ClipPush { pts, .. } = clips[0] else {
+                unreachable!()
+            };
+            let xs = pts.iter().map(|p| p.0);
+            let ys = pts.iter().map(|p| p.1);
+            let (x0, x1) = (xs.clone().fold(f32::MAX, f32::min), xs.fold(f32::MIN, f32::max));
+            let (y0, y1) = (ys.clone().fold(f32::MAX, f32::min), ys.fold(f32::MIN, f32::max));
+            for (got, want) in [(x0, 10.0), (y0, 20.0), (x1, 40.0), (y1, 60.0)] {
+                assert!(
+                    (got - want).abs() < 0.01,
+                    "clip must be the /Rect, got [{x0} {y0} {x1} {y1}]"
+                );
+            }
+            // The clip is still balanced.
+            assert_eq!(
+                prims.iter().filter(|p| matches!(p, Prim::ClipPop)).count(),
+                1,
+                "the fallback clip must be popped exactly once"
+            );
+        }
+    }
+
+    // The OPPOSITE failure to the clip test above, and a separate bug: §8.7.4.1 makes `sh`
+    // cover the whole clipping region, so a shading with no `/BBox` of its own needs the
+    // device clip extent to know what to cover. `render_annotation` used `interpret_content`,
+    // which seeds that extent as `None`, and `rasterize_shading` then returns `None` and
+    // pushes nothing — so a gradient painted with `sh` inside an appearance stream was
+    // INVISIBLE. Too little painted, where the clip bug was too much.
+    #[test]
+    fn a_shading_with_no_bbox_still_paints_inside_an_appearance_stream() {
+        let mut doc = Document::with_version("1.7");
+        let func = doc.add_object(dictionary! {
+            "FunctionType" => 2,
+            "Domain" => Object::Array(vec![0.into(), 1.into()]),
+            "C0" => Object::Array(vec![1.into(), 0.into(), 0.into()]),
+            "C1" => Object::Array(vec![0.into(), 0.into(), 1.into()]),
+            "N" => 1,
+        });
+        // Deliberately no /BBox on the shading: that is the case that needs the seed.
+        let shading = doc.add_object(dictionary! {
+            "ShadingType" => 2,
+            "ColorSpace" => name_obj("DeviceRGB"),
+            "Coords" => Object::Array(vec![0.into(), 0.into(), 40.into(), 0.into()]),
+            "Function" => Object::Reference(func),
+        });
+        let ap = doc.add_object(Stream::new(
+            dictionary! {
+                "Type" => name_obj("XObject"),
+                "Subtype" => name_obj("Form"),
+                "BBox" => Object::Array(vec![0.into(), 0.into(), 40.into(), 40.into()]),
+                "Resources" => dictionary! { "Shading" => dictionary! { "Sh0" => shading } },
+            },
+            b"/Sh0 sh".to_vec(),
+        ));
+        let annot = dictionary! {
+            "Type" => name_obj("Annot"),
+            "Subtype" => name_obj("Square"),
+            "Rect" => rect_obj([0.0, 0.0, 40.0, 40.0]),
+            "AP" => dictionary! { "N" => ap },
+        };
+        let mut prims = Vec::new();
+        render_annotation(&doc, &annot, &IDENTITY, &mut prims);
+        let images = prims.iter().filter(|p| matches!(p, Prim::Image { .. })).count();
+        assert_eq!(
+            images, 1,
+            "the shading must rasterize: got {:?}",
+            prims
+                .iter()
+                .map(|p| match p {
+                    Prim::Image { .. } => "Image",
+                    Prim::ClipPush { .. } => "ClipPush",
+                    Prim::ClipPop => "ClipPop",
+                    _ => "other",
+                })
+                .collect::<Vec<_>>()
+        );
+    }
+
     fn annot(subtype: &str) -> Dictionary {
         let mut d = Dictionary::new();
         d.set("Type", name_obj("Annot"));
@@ -1856,6 +2093,77 @@ mod synthesis_tests {
         let mut prims = Vec::new();
         synthesize_annotation_appearance(&doc, dict, rect, &IDENTITY, &mut prims);
         prims
+    }
+
+    /// §12.5.2 /CA is the opacity of the WHOLE annotation, and §11.6.6 applies a group's
+    /// alpha once, to the composited result. Round 1 put that alpha on `GroupPush`; round 2
+    /// added a `/CA` pass that walked the emitted prims and scaled each one — so an
+    /// appearance containing a transparency group got `/CA` on the group AND on everything
+    /// inside it, i.e. CA² on the contents. This pins one application per layer.
+    #[test]
+    fn annotation_ca_is_applied_once_over_a_transparency_group() {
+        let mut doc = Document::with_version("1.7");
+        let form = doc.add_object(Stream::new(
+            dictionary! {
+                "Type" => name_obj("XObject"),
+                "Subtype" => name_obj("Form"),
+                "BBox" => Object::Array(vec![0.into(), 0.into(), 10.into(), 10.into()]),
+                "Group" => dictionary! { "S" => name_obj("Transparency") },
+            },
+            b"0 0 1 rg 0 0 10 10 re f".to_vec(),
+        ));
+        let gstate = doc.add_object(dictionary! { "Type" => name_obj("ExtGState"), "ca" => 0.5 });
+        let ap = doc.add_object(Stream::new(
+            dictionary! {
+                "Type" => name_obj("XObject"),
+                "Subtype" => name_obj("Form"),
+                "BBox" => Object::Array(vec![0.into(), 0.into(), 10.into(), 10.into()]),
+                "Resources" => dictionary! {
+                    "XObject" => dictionary! { "Fm1" => form },
+                    "ExtGState" => dictionary! { "GS1" => gstate },
+                },
+            },
+            b"/GS1 gs /Fm1 Do".to_vec(),
+        ));
+        let annot = dictionary! {
+            "Type" => name_obj("Annot"),
+            "Subtype" => name_obj("Square"),
+            "Rect" => Object::Array(vec![0.into(), 0.into(), 10.into(), 10.into()]),
+            "AP" => dictionary! { "N" => ap },
+            "CA" => 0.5,
+        };
+        let mut prims = Vec::new();
+        render_annotation(&doc, &annot, &IDENTITY, &mut prims);
+
+        let group_alphas: Vec<f32> = prims
+            .iter()
+            .filter_map(|p| match p {
+                Prim::GroupPush { alpha, .. } => Some(*alpha),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(group_alphas.len(), 2, "one layer for /CA, one for the form's own group");
+        for a in &group_alphas {
+            assert!((a - 0.5).abs() < 1e-6, "each layer carries its own alpha once, got {a}");
+        }
+        let fills: Vec<u32> = prims
+            .iter()
+            .filter_map(|p| match p {
+                Prim::Fill { argb, .. } => Some(*argb),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(fills.len(), 1, "expected the form's single fill");
+        assert_eq!(
+            fills[0] >> 24,
+            0xFF,
+            "the fill inside the group must stay opaque: both /ca and /CA belong to the \
+             composited layers, not to each element inside them"
+        );
+        // Every push is closed.
+        let pushes = prims.iter().filter(|p| matches!(p, Prim::GroupPush { .. })).count();
+        let pops = prims.iter().filter(|p| matches!(p, Prim::GroupPop)).count();
+        assert_eq!(pushes, pops, "group brackets must balance");
     }
 
     /// `Prim` has no `Debug`, so failures report the primitive kinds instead.

@@ -148,21 +148,54 @@ impl Default for GraphicsState {
 /// visibly faceted, which was finding E-16.
 pub(crate) const MAX_CLIP_DEPTH: usize = 64;
 pub(crate) const MAX_GRAPHICS_STACK: usize = 128;
-/// Ceiling on primitives emitted for one page. This is the real MEMORY budget and, since
-/// [`MAX_CONTENT_OPS`] was raised off 200_000, the binding constraint for every content
-/// shape rather than only for text-heavy ones.
+/// Ceiling on primitives emitted for one page, and — since [`MAX_CONTENT_OPS`] was raised
+/// off 200_000 — the binding constraint on OUTPUT for every content shape rather than only
+/// for text-heavy ones.
 ///
-/// Both shapes can reach it, which is worth knowing before anyone moves it: a path page
-/// emits roughly one prim per two operators, while `show_string` emits one Text prim PER
-/// GLYPH, so a single 60-character `Tj` is one operator and sixty primitives. A dense
+/// It is NOT the page's memory budget, despite what this comment used to claim. `bench`
+/// measured net live bytes through the global allocator (release, median of 5+ runs) and
+/// the primitive vector is a small minority of the heap. RETAINED and PEAK are separated
+/// because they answer different questions — peak-during-parse includes transient parser
+/// scratch and so must NOT be attributed to the operator vector:
+///
+/// | rects requested | ops parsed | ops RETAINED | ops peak | FULL peak | prims retained | prims bytes |
+/// |---|---|---|---|---|---|---|
+/// | 50_000 | 100_001 | 51.92 MiB | 53.87 MiB | 66.69 MiB | 50_000 | 5.34 MiB |
+/// | 200_000 | 400_001 | 207.68 MiB | 215.56 MiB | 266.69 MiB | 200_000 | 21.36 MiB |
+/// | 400_000 | 800_001 | 415.36 MiB | 431.11 MiB | 533.37 MiB | 300_000 (CAPPED) | 32.04 MiB |
+///
+/// So at the cap: 32 MiB of primitives against 415 MiB genuinely RETAINED in the
+/// `Vec<Operation>` that `content::page_operations` materialises in full BEFORE the
+/// interpreter loop starts, inside a 533 MiB peak. That vector costs a measured floor of
+/// ~544 bytes PER OPERATOR regardless of how many operands the operator carries, so it
+/// scales with operator COUNT alone and cannot be reduced by simplifying content.
+///
+/// Neither this cap nor [`MAX_CONTENT_OPS`] bounds that vector — see the note there on why
+/// `take` frees nothing. Anyone trying to reduce peak memory has to attack the operator
+/// vector (streaming the content parse), not this number; lowering this only discards
+/// output.
+///
+/// Both content shapes can reach it, which is worth knowing before anyone moves it: a path
+/// page emits roughly one prim per two operators, while `show_string` emits one Text prim
+/// PER GLYPH, so a single 60-character `Tj` is one operator and sixty primitives. A dense
 /// table or a phone-book page therefore reaches this from a few thousand operators.
 ///
-/// Sizing: `size_of::<Prim>()` is ~88 bytes and a simple Fill or Text adds two heap
-/// allocations, so ~120-180 bytes each in practice — 300_000 is roughly 40-55 MB in
-/// `prims`, held simultaneously with the ~15 MB serialised copy in the wire buffer. Raising
-/// it scales both. A Rust OOM is an uncatchable process abort, so this is a floor the
-/// Kotlin-side bitmap/primitive caps cannot substitute for; the Kotlin bound should sit
-/// ABOVE this as a backstop against a corrupt count field, never below.
+/// Sizing: `size_of::<Prim>()` is 112 bytes — measured by `bench` on this tree, i.e. AFTER
+/// `SoftMaskTransfer` was boxed, so the boxing is already reflected. `SoftMaskTransfer` is
+/// consequently no longer the widest variant; `Image`/`ImageTiled` are, carrying a `Mat`
+/// (48 B) plus a `Vec<u8>` (24 B). A const assertion in `model.rs` pins this. A simple Fill
+/// or Text adds two heap allocations on top, so ~150-200 bytes each in practice — the
+/// 32 MiB above.
+///
+/// The serialised copy in the wire buffer is held simultaneously with `prims` and costs a
+/// measured ~51 bytes per primitive (`bench`, allocator delta across the serialise call
+/// itself — NOT derived by subtracting the columns above, which would also capture every
+/// other render-path allocation and overstate it). At this cap that is ~14.6 MiB, so
+/// raising the cap scales both terms and the wire copy is the smaller one by roughly 2x.
+///
+/// A Rust OOM is an uncatchable process abort, so this remains a floor the Kotlin-side
+/// bitmap/primitive caps cannot substitute for; the Kotlin bound should sit ABOVE this as a
+/// backstop against a corrupt count field, never below.
 pub(crate) const MAX_PRIMITIVES: usize = 300000;
 pub(crate) const MAX_ANNOTATIONS: usize = 10000;
 pub(crate) const MAX_IMAGE_DIM: u32 = 20000;
@@ -235,6 +268,16 @@ pub(crate) const MAX_DASH_LEN: usize = 32;
 /// stops work. The memory guard is [`MAX_PRIMITIVES`], which is enforced at every single
 /// content-emitting push.
 ///
+/// MEASURED CAVEAT (`bench`, release, allocator-instrumented): that operator vector is the
+/// DOMINANT term in the page's memory — 415.36 MiB genuinely RETAINED on an 800_000-operator
+/// page, inside a 533 MiB peak, against 32 MiB of primitives. Its cost is a measured floor
+/// of ~544 bytes PER OPERATOR irrespective of operand count, so it tracks operator COUNT
+/// alone. Neither cap bounds it: this one cannot, because the vector already exists in full
+/// when it is applied, and [`MAX_PRIMITIVES`] bounds only the output. Bounding it for real
+/// needs a streaming content parse. Do not read "the memory guard is MAX_PRIMITIVES" as
+/// "the page's memory is bounded" — raising THIS constant raises retained memory linearly
+/// at ~544 B per operator, which is the one real cost of having raised it off 200_000.
+///
 /// At the old 200_000 this was nonetheless the SMALLEST of the three caps in series
 /// (here, `MAX_PRIMITIVES`, and the Kotlin decoder's own bound), so it silently bound
 /// first and made the other two unreachable. One `re f` pair is two operators, so a plain
@@ -243,8 +286,34 @@ pub(crate) const MAX_DASH_LEN: usize = 32;
 /// not possibly help while this one truncated the stream first, which is why a dense
 /// vector page stopped rendering part-way through.
 ///
-/// Sized so [`MAX_PRIMITIVES`] is the binding constraint for the densest realistic shape
-/// (2 operators per primitive needs 600_000, leaving ~40% headroom) and this one only
-/// catches genuinely pathological streams. Note this does NOT raise the memory ceiling by
-/// one byte: `MAX_PRIMITIVES` was always the budget, it just could not be reached.
-pub(crate) const MAX_CONTENT_OPS: usize = 1_000_000;
+/// Sized from [`MAX_PRIMITIVES`] plus headroom for the operators that paint nothing. At the
+/// densest realistic shape of 2 operators per primitive, 600_000 operators is where a path
+/// page saturates the 300_000-prim cap — but a page also spends operators on colour,
+/// `q`/`Q`, `cm` and clip setup, so exactly 2x leaves `MAX_PRIMITIVES` unreachable by
+/// however many of those it has (at exactly 600_000,
+/// `exceeding_the_primitive_cap_keeps_the_bracket_structure_intact` fell ~7 prims short of
+/// its own cap). 660_000 is that floor plus 10%.
+///
+/// It was 1_000_000, and that headroom was not free: the operators above ~660_000 could only
+/// ever be read AFTER `MAX_PRIMITIVES` had stopped emitting, so at `bench`'s measured
+/// 544 B/op they cost ~176 MiB to admit content that by construction cannot reach the
+/// canvas. The admitted worst case drops from ~519 MiB to ~342 MiB without discarding a
+/// single primitive the old value would have produced.
+///
+/// What it does cost: no value here makes `MAX_PRIMITIVES` reachable for EVERY page, because
+/// operators-per-primitive is unbounded — a CAD or map export at `q cm … Q` per element runs
+/// ~5 operators per primitive and now truncates around 130_000 prims. That is a deliberate
+/// trade, not an oversight. Truncation loses the tail of a page; an OOM is an uncatchable
+/// process abort that loses the page, the document and the process. It is also still 3x what
+/// the old 200_000 admitted, which is the value that caused the original
+/// stops-rendering-part-way bug.
+///
+/// This cap CANNOT be the whole answer, and the reason is worth stating so nobody assumes it
+/// is: `content::MAX_OPERATIONS` ties the lenient recovery tokenizer to this number, so for a
+/// stream that took the recovery path the bound is real. The STRICT `lopdf` parse — which is
+/// the path a well-formed heavy page takes, and the path `bench` measured at 533 MiB — is
+/// not bounded by it, because the vector is complete before `take` is ever applied. Making
+/// this cap bind there needs a `truncate` plus `shrink_to_fit` immediately after the strict
+/// parse in `content.rs` (truncate alone drops the length and keeps the allocation), or a
+/// streaming parse. Both live in `content.rs`.
+pub(crate) const MAX_CONTENT_OPS: usize = 660_000;

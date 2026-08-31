@@ -26,14 +26,18 @@ pub(crate) enum CsKind {
     DeviceGray,
     DeviceRGB,
     DeviceCMYK,
-    Lab { white: [f64;3], range: [[f64;2];2], black: Option<[f64;3]> },
+    Lab { white: [f64;3], range: [[f64;2];2] },
     Separation { name: Vec<u8>, alt: Box<CsKind>, tint_fn: Option<PdfFunction> },
     DeviceN { names: Vec<Vec<u8>>, alt: Box<CsKind>, tint_fn: Option<PdfFunction> },
     Pattern { base: Option<Box<CsKind>> },
     Indexed { base: Box<CsKind>, lookup: Vec<u8>, base_ncomp: u8, hival: u16 },
     ICCBased { n: u8, alt: Option<Box<CsKind>> },
     CalRGB { white: [f64;3], gamma: [f64;3], matrix: [[f64;3];3] },
-    CalGray { white: [f64;3], gamma: f64, black: Option<[f64;3]> },
+    /// CIE-based grey (§8.6.5.2). `/BlackPoint` is parsed by nobody and ignored: the
+    /// conversion below adapts from `/WhitePoint` only, so a non-default black point
+    /// shifts the darkest tones slightly. Recorded here rather than kept as an
+    /// always-`None` field that reads as if the support were half-written.
+    CalGray { white: [f64;3], gamma: f64 },
 }
 
 pub(crate) fn colorspaces_from_resources(doc: &Document, res_dict: &lopdf::Dictionary) -> HashMap<Vec<u8>, ObjectId> {
@@ -76,7 +80,22 @@ pub(crate) fn patterns_from_resources(doc: &Document, res_dict: &lopdf::Dictiona
 }
 
 // Parse a colorspace object (Name or Array) into CsKind, using resources map for named entries
+/// Depth ceiling for colour-space nesting. §8.6 nests only a handful of levels deep in
+/// practice (Indexed over ICCBased over an /Alternate, say), so this only ever stops a
+/// cycle. `[/Indexed 5 0 R 255 <00FF00>]` stored AS object 5 makes the base resolve back
+/// to the same array, and the plain per-name self-reference guard cannot see it because
+/// the cycle runs through the array element rather than a name. That recursed until the
+/// stack overflowed, which unlike a panic cannot be caught and takes the process with it.
+const MAX_CS_DEPTH: u32 = 16;
+
 pub(crate) fn parse_cs_kind(doc: &Document, cs_obj: Option<&Object>, cs_resources: &HashMap<Vec<u8>, ObjectId>) -> Option<CsKind> {
+    parse_cs_kind_at(doc, cs_obj, cs_resources, 0)
+}
+
+fn parse_cs_kind_at(doc: &Document, cs_obj: Option<&Object>, cs_resources: &HashMap<Vec<u8>, ObjectId>, depth: u32) -> Option<CsKind> {
+    if depth >= MAX_CS_DEPTH {
+        return None;
+    }
     let obj = cs_obj?;
     // If Name, check if it's a resource reference
     if let Object::Name(name) = obj {
@@ -87,10 +106,10 @@ pub(crate) fn parse_cs_kind(doc: &Document, cs_obj: Option<&Object>, cs_resource
         if let Some(&id) = cs_resources.get(name) {
             if let Ok(resolved) = doc.get_object(id) {
                 match resolved {
-                    Object::Array(arr) => return parse_cs_array(doc, arr, cs_resources),
+                    Object::Array(arr) => return parse_cs_array_at(doc, arr, cs_resources, depth + 1),
                     // Guard against a name that resolves to itself.
                     Object::Name(n2) if n2 != name => {
-                        return parse_cs_kind(doc, Some(resolved), cs_resources);
+                        return parse_cs_kind_at(doc, Some(resolved), cs_resources, depth + 1);
                     }
                     _ => {}
                 }
@@ -106,11 +125,11 @@ pub(crate) fn parse_cs_kind(doc: &Document, cs_obj: Option<&Object>, cs_resource
         }
     }
     if let Object::Array(arr) = obj {
-        return parse_cs_array(doc, arr, cs_resources);
+        return parse_cs_array_at(doc, arr, cs_resources, depth + 1);
     }
     // If Reference, deref
     if let Some(deref_obj) = deref(doc, obj) {
-        return parse_cs_kind(doc, Some(deref_obj), cs_resources);
+        return parse_cs_kind_at(doc, Some(deref_obj), cs_resources, depth + 1);
     }
     None
 }
@@ -148,7 +167,15 @@ pub(crate) fn parse_named_cs(
     parse_cs_kind(doc, Some(cs_obj), cs_resources)
 }
 
-pub(crate) fn parse_cs_array(doc: &Document, arr: &[Object], cs_resources: &HashMap<Vec<u8>, ObjectId>) -> Option<CsKind> {
+fn parse_cs_array_at(doc: &Document, arr: &[Object], cs_resources: &HashMap<Vec<u8>, ObjectId>, depth: u32) -> Option<CsKind> {
+    if depth >= MAX_CS_DEPTH {
+        return None;
+    }
+    // Every nested colour space below goes through `parse_cs_kind_at` so the depth keeps
+    // accumulating across the array/kind boundary; a cycle alternates between the two.
+    let parse_cs_kind = |doc: &Document, o: Option<&Object>, r: &HashMap<Vec<u8>, ObjectId>| {
+        parse_cs_kind_at(doc, o, r, depth + 1)
+    };
     // arr head is name
     let head = arr.first().and_then(|o| o.as_name().ok()).unwrap_or(b"");
     match head {
@@ -176,7 +203,7 @@ pub(crate) fn parse_cs_array(doc: &Document, arr: &[Object], cs_resources: &Hash
             if let Some(d) = dict {
                 let white = read_white_point(d).unwrap_or([0.9505,1.0,1.0890]);
                 let gamma = d.get(b"Gamma").ok().and_then(num).unwrap_or(1.0);
-                Some(CsKind::CalGray { white, gamma, black: None })
+                Some(CsKind::CalGray { white, gamma })
             } else {
                 Some(CsKind::DeviceGray)
             }
@@ -187,9 +214,9 @@ pub(crate) fn parse_cs_array(doc: &Document, arr: &[Object], cs_resources: &Hash
             if let Some(d) = dict {
                 let white = read_white_point(d).unwrap_or([0.9505,1.0,1.0890]);
                 let range = read_lab_range(d).unwrap_or([[ -100.0, 100.0],[ -100.0, 100.0]]);
-                Some(CsKind::Lab { white, range, black: None })
+                Some(CsKind::Lab { white, range })
             } else {
-                Some(CsKind::Lab { white: [0.9505,1.0,1.0890], range: [[ -100.0,100.0],[ -100.0,100.0]], black: None })
+                Some(CsKind::Lab { white: [0.9505,1.0,1.0890], range: [[ -100.0,100.0],[ -100.0,100.0]] })
             }
         }
         b"ICCBased" => {
@@ -447,11 +474,9 @@ pub(crate) fn eval_cs_to_rgb(doc: &Document, kind: &CsKind, comps: &[f64], cs_re
                 [ 0.4323053,  0.5183603,  0.0492912],
                 [-0.0085287,  0.0400428,  0.9684867],
             ];
-            // CIE reference white points. The Lab source white is the space's
-            // /WhitePoint (`white`) per PDF 8.6.5.4; D65 is the sRGB destination.
-            const LMS_D50_X: f64 = 0.96422;
-            const LMS_D50_Y: f64 = 1.0;
-            const LMS_D50_Z: f64 = 0.82521;
+            // CIE reference white point of the DESTINATION. The Lab source white is the
+            // space's own /WhitePoint (`white`) per §8.6.5.4, not a fixed D50, which is
+            // why only the D65 trio is needed here.
             const LMS_D65_X: f64 = 0.95047;
             const LMS_D65_Y: f64 = 1.0;
             const LMS_D65_Z: f64 = 1.08883;
@@ -811,7 +836,7 @@ mod tests {
         ));
         let arr = vec![Object::Name(b"ICCBased".to_vec()), Object::Reference(icc_id)];
         let empty = HashMap::new();
-        let kind = parse_cs_array(&doc, &arr, &empty).expect("iccbased");
+        let kind = parse_cs_array_at(&doc, &arr, &empty, 0).expect("iccbased");
         assert_eq!(cs_kind_ncomp(&kind), 3, "must infer 3 from /Alternate, not default to 1");
     }
 
@@ -915,7 +940,7 @@ mod tests {
             Object::Name(b"DeviceCMYK".to_vec()),
         ];
         let empty = HashMap::new();
-        let kind = parse_cs_array(&doc, &arr, &empty).expect("pattern cs");
+        let kind = parse_cs_array_at(&doc, &arr, &empty, 0).expect("pattern cs");
         match kind {
             CsKind::Pattern { base: Some(b) } => {
                 assert!(matches!(*b, CsKind::DeviceCMYK), "base must be DeviceCMYK");
@@ -943,7 +968,7 @@ mod tests {
             Object::Reference(lookup),
         ];
         let empty = HashMap::new();
-        let kind = parse_cs_array(&doc, &arr, &empty).expect("indexed cs");
+        let kind = parse_cs_array_at(&doc, &arr, &empty, 0).expect("indexed cs");
         match kind {
             CsKind::Indexed { lookup, base_ncomp, .. } => {
                 assert_eq!(base_ncomp, 3);

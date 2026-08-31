@@ -180,7 +180,9 @@ pub(crate) fn interpret_content_seeded(
     text_only: bool,
     init_clip_bbox: Option<[f64; 4]>,
 ) {
-    let fonts = resources
+    // `mut` for the ExtGState `/Font` arm (§8.4.5 Table 58), which references a font
+    // dictionary directly instead of through a resource name and so has to register it.
+    let mut fonts = resources
         .map(|r| fonts_from_resources(doc, r))
         .unwrap_or_default();
     let xobjects = resources
@@ -267,16 +269,53 @@ pub(crate) fn interpret_content_seeded(
     // one. Tracks the last bracket emitted so a run of paints under the same mask
     // expands the mask group once instead of once per painting operator.
     let mut mask_bracket: Option<MaskBracket> = None;
-    // `oc_object_hidden` re-reads the catalog's /OCProperties and clones its /ON
-    // and /OFF arrays on every call, and a layer is opened and closed many times
-    // per page. Within one content stream the /Properties resource is fixed, so
-    // each distinct property list resolves to the same answer every time.
+    // Memo for optional-content answers within this stream. Distinct from
+    // `oc_config` below: that holds the /ON and /OFF membership sets, while this
+    // memoizes the work AROUND a lookup — resolving a /Properties resource NAME to
+    // its OCG, and evaluating an OCMD's /OCGs + /P policy — neither of which the
+    // membership sets cover. A layer is opened and closed many times per page, and
+    // within one content stream the /Properties resource is fixed, so each distinct
+    // property list resolves to the same answer every time.
+    //
+    // Deliberately NOT shared with nested streams, even though a nested form
+    // starts with an empty memo and pays the re-read again. `OcKey::Named` is a
+    // /Properties resource NAME, and resource dictionaries are per-stream: `/P1`
+    // in a form's /Properties may name a different OCG than the page's `/P1`, so
+    // a shared memo would answer the wrong question. Only `OcKey::Ref` is
+    // stream-independent, and splitting the memo to share half of it buys a
+    // dictionary lookup on a path that is already off the hot loop.
     #[derive(PartialEq, Eq, Hash)]
     enum OcKey {
         Named(Vec<u8>),
         Ref(ObjectId),
     }
     let mut oc_cache: HashMap<OcKey, bool> = HashMap::new();
+    // The `/ON` and `/OFF` membership sets, built AT MOST ONCE per content stream and
+    // only if an optional-content lookup actually happens.
+    //
+    // Held rather than resolved per call because `OcConfig::from_doc` builds both
+    // HashSets from the catalog, which is O(N) in the document's OCG count. There used
+    // to be a free `oc_object_hidden(doc, obj)` wrapper in images.rs that called it
+    // internally, and these call sites were on it: that silently threw away a measured
+    // 8.8x speedup (`bench`: 111 ms -> 12.6 ms over 1600 distinct OCGs) by relocating
+    // the same O(N) work out of four `clone()`s and into two set builds — identical
+    // asymptotics, no win. That wrapper has since been DELETED precisely so the trap
+    // cannot be re-entered; `OcConfig::object_hidden` is now the only way in, and it
+    // requires you to have hoisted the config first.
+    //
+    // Lazy rather than eager because the overwhelming majority of content streams
+    // contain no optional content at all, and this runs for every form XObject, every
+    // tiling-pattern cell replay and every soft-mask group — building it unconditionally
+    // would turn a measured win into a per-stream tax. `oc_cache` above still earns its
+    // keep: it memoizes the /Properties NAME resolution and the OCMD `/OCGs` + `/P`
+    // evaluation, neither of which the membership sets cover.
+    let mut oc_config: Option<OcConfig> = None;
+    macro_rules! oc_hidden {
+        ($obj:expr) => {{
+            let cfg = oc_config.get_or_insert_with(|| OcConfig::from_doc(doc));
+            cfg.object_hidden(doc, $obj)
+        }};
+    }
     // Device-space bbox of the accumulated (committed) clip region, tracked so the
     // `sh` operator can fill the current clip even after `W n` clears pending_clip.
     let mut current_clip_bbox: Option<[f64; 4]> = init_clip_bbox;
@@ -381,6 +420,17 @@ pub(crate) fn interpret_content_seeded(
                         if let Some(v) = dict.get(b"ML").ok().and_then(num) {
                             gs.miter_limit = v;
                         }
+                        // §8.4.5 Table 58 `/FL` is the flatness tolerance, i.e. the
+                        // graphics-state form of the `i` operator (§10.6.2), and it is
+                        // what `bezier_steps_for_flatness` consumes. It was the one
+                        // Table 58 key with existing plumbing and no parser, so a
+                        // document that set flatness via `gs` instead of `i` got the
+                        // default tolerance and visibly faceted large curves. The clamp
+                        // is the `i` arm's; the operand is read WITHOUT `deref`, matching
+                        // every other Table 58 scalar here rather than the `i` arm.
+                        if let Some(v) = dict.get(b"FL").ok().and_then(num) {
+                            gs.flatness = v.clamp(0.0, 100.0);
+                        }
                         if let Some(d_obj) = dict.get(b"D").ok().and_then(|obj| deref(doc, obj).or(Some(obj))) {
                             // P1 fix: /D [] 0 must reset to solid (was previously ignored)
                             let (dashes, phase) = parse_dash_extgstate(doc, d_obj);
@@ -403,10 +453,61 @@ pub(crate) fn interpret_content_seeded(
                                 }
                             }
                         }
-                        // /OP, /op and /OPM are deliberately not parsed. §8.6.7
-                        // scopes overprint to devices with separable colorants; an
-                        // additive RGB compositor has none, so there is nothing to
-                        // record and no consumer for it.
+                        // ---------------------------------------------------------
+                        // Table 58 keys that are DELIBERATELY not parsed. Recorded
+                        // here so the next audit can tell a decision from an
+                        // oversight, and because for several of them a partial
+                        // simulation is measurably WORSE than ignoring them — the
+                        // lesson of the overprint approximation that had to be
+                        // removed, where `white MULTIPLY dst == dst` turned white
+                        // knockout rectangles into no-ops and let covered content
+                        // reappear.
+                        //
+                        // /OP /op /OPM — §8.6.7 scopes overprint to devices with
+                        //   separable colorants. An additive RGB compositor has none,
+                        //   so there is nothing to record and no consumer for it.
+                        // /TR /TR2 — §10.4. A transfer function maps DEVICE colour
+                        //   components after conversion into the device colour space,
+                        //   which is Clause 10 "Rendering", i.e. device-dependent
+                        //   calibration for a specific press. It is not the same
+                        //   parameter as the soft-mask /TR of §11.6.5.2, which is a
+                        //   mask-SHAPE function, is device-independent, and IS
+                        //   implemented (see the /SMask arm and `read_transfer_lut`).
+                        //   Honouring this one would also have to be all-or-nothing:
+                        //   fill/stroke/text colours are computed here and could be
+                        //   remapped, but a DCTDecode image is passed through to the
+                        //   renderer as JPEG bytes and cannot be, so an inverting /TR
+                        //   would invert the vector layer and leave the photographs
+                        //   alone. A uniformly wrong page beats a half-inverted one.
+                        // /HT — §10.5 halftones. A halftone screen exists to render
+                        //   continuous tone on a bilevel device; the output here is
+                        //   8-bit-per-channel antialiased RGB, which represents the
+                        //   requested tone directly. Applying a screen could only
+                        //   throw tonal resolution away.
+                        // /BG /BG2 /UCR /UCR2 — §10.3 black generation and undercolour
+                        //   removal, defined only for the DeviceGray -> DeviceCMYK
+                        //   conversion. Nothing here converts to CMYK.
+                        // /RI — §8.6.5.8 rendering intent. Selects a gamut-mapping
+                        //   policy for an ICC transform; colour here goes through each
+                        //   space's defining formulae rather than an ICC engine, so
+                        //   there is no transform for it to parameterise. The `ri`
+                        //   operator is a documented no-op for the same reason.
+                        // /SM — §10.6.3 smoothness tolerance: a shading-quality hint,
+                        //   with the raster resolution already derived from the device
+                        //   footprint of the clip region.
+                        // /SA — §10.6 automatic stroke adjustment: quantises stroke
+                        //   edges to the pixel grid for crispness at low resolution.
+                        //   That is the renderer's own scan conversion, not something
+                        //   expressible in the primitive stream.
+                        // /TK — §9.3.8 text knockout, and /AIS — §11.6.4.3 alpha-is-
+                        //   shape. Both change how overlapping marks composite INSIDE
+                        //   one text object / group. The primitive stream composites
+                        //   marks in order against the running result, and neither
+                        //   alternative is expressible with Canvas layers (the same
+                        //   reason /I and /K on a transparency group are approximated
+                        //   as isolated non-knockout). Faking either would change the
+                        //   common case to fix the rare one.
+                        // ---------------------------------------------------------
                         // Soft mask: /SMask /None clears; dict may have /G as Ref OR direct Stream (P0 fix)
                         if let Ok(sm_raw) = dict.get(b"SMask") {
                             if let Ok(n) = sm_raw.as_name() {
@@ -446,15 +547,65 @@ pub(crate) fn interpret_content_seeded(
                             }
                         }
                     };
-                    if let Some(&id) = extgstates.get(name) {
-                        if let Ok(dict) = doc.get_dictionary(id) {
-                            // Clone dict data to avoid borrow across closure capture mutable gs
-                            let dict_clone = dict.clone();
-                            apply_dict(&dict_clone, &mut gs, doc);
-                        }
-                    } else if let Some(dict) = inline_dict {
-                        let dict_clone = dict.clone();
+                    let chosen: Option<lopdf::Dictionary> = if let Some(&id) = extgstates.get(name) {
+                        // Cloned rather than borrowed: `apply_dict` needs `&mut gs`
+                        // while `doc` is still borrowed by the dictionary.
+                        doc.get_dictionary(id).ok().cloned()
+                    } else {
+                        inline_dict.cloned()
+                    };
+                    if let Some(dict_clone) = chosen {
                         apply_dict(&dict_clone, &mut gs, doc);
+                        // §8.4.5 Table 58 `/Font` is `[font size]`, where `font` is an
+                        // INDIRECT REFERENCE to a font dictionary rather than a
+                        // resource name — it is the graphics-state equivalent of `Tf`
+                        // and is saved and restored by q/Q like the rest of the text
+                        // state (§9.3.1). Unparsed, `gs.font_key` stayed empty and
+                        // `show_string` fell through to its no-metrics branch: the run
+                        // was emitted as ONE primitive at the origin with a guessed
+                        // 0.5-em-per-byte advance and the bytes read as Latin-1, so the
+                        // text appeared but at the wrong place, spacing and encoding.
+                        //
+                        // The font is registered under a key derived from its object id
+                        // rather than a resource name, because it deliberately has no
+                        // name: `/Font` exists precisely to reference a font that the
+                        // resource dictionary need not list.
+                        //
+                        // Two known limits of that, neither a regression on the
+                        // no-metrics branch this replaces. The registration bypasses
+                        // fonts.rs's `FontCacheScope` (its cache helpers are private to
+                        // that module), so a `/Font` inside a stream that is REPLAYED —
+                        // a tiling-pattern cell — re-parses the font program per
+                        // replay. And a nested stream rebuilds `fonts` from its own
+                        // resources, which cannot contain this key, so a form XObject
+                        // that shows text under an INHERITED `/Font` selection still
+                        // falls through to the no-metrics branch — exactly as it
+                        // already does for an inherited `Tf` resource name.
+                        if let Some(farr) = dict_clone
+                            .get(b"Font")
+                            .ok()
+                            .and_then(|o| deref(doc, o))
+                            .and_then(|o| o.as_array().ok())
+                        {
+                            if let Some(fid) = farr.first().and_then(|o| o.as_reference().ok()) {
+                                let key = format!("\u{0}gsfont{}_{}", fid.0, fid.1).into_bytes();
+                                if !fonts.contains_key(&key) {
+                                    if let Ok(Object::Dictionary(fd)) = doc.get_object(fid) {
+                                        let fd = fd.clone();
+                                        fonts.insert(key.clone(), font_info(doc, &fd));
+                                    }
+                                }
+                                // Only adopt it once there really are metrics behind
+                                // the key: a dangling reference must leave whatever
+                                // `Tf` last selected alone rather than blanking it.
+                                if fonts.contains_key(&key) {
+                                    gs.font_key = key;
+                                    if let Some(sz) = farr.get(1).and_then(|o| deref(doc, o).and_then(num).or_else(|| num(o))) {
+                                        gs.font_size = sz;
+                                    }
+                                }
+                            }
+                        }
                     }
                 }
             }
@@ -668,7 +819,7 @@ pub(crate) fn interpret_content_seeded(
                     if let Some(&id) = xobjects.get(name) {
                         if let Ok(Object::Stream(stream)) = doc.get_object(id) {
                             // Skip the whole XObject if its optional-content group is OFF.
-                            if stream.dict.get(b"OC").ok().map(|oc| oc_object_hidden(doc, oc)).unwrap_or(false) {
+                            if stream.dict.get(b"OC").ok().map(|oc| oc_hidden!(oc)).unwrap_or(false) {
                                 continue;
                             }
                             let subtype = stream
@@ -684,7 +835,25 @@ pub(crate) fn interpret_content_seeded(
                                         if let Some(m) = gs.soft_mask.clone() { wrap_with_soft_mask(prims, sm_start, doc, resources, &m, depth, &mut mask_bracket); }
                                     }
                                 }
-                            } else if subtype == Some(b"Form") && depth < 10 {
+                            } else if subtype == Some(b"Form")
+                                && depth < 10
+                                // §8.11.2: content in a disabled optional-content group
+                                // shall not be drawn. The Image branch above is gated on
+                                // this; the form recursion was NOT, and `oc_stack` is a
+                                // local that no nested stream inherits, so
+                                // `/OC1 BDC /Fm0 Do EMC` with OC1 OFF painted the form's
+                                // ENTIRE contents. Worse, it painted them UNCLIPPED,
+                                // because the `/BBox` ClipPush and the `GroupPush` below
+                                // are both gated on this same flag while the recursion
+                                // that needed them was not.
+                                //
+                                // `text_only` deliberately still descends. That caller is
+                                // `search::build_index`, and the policy set in the `Tj`
+                                // arm is that an OC-hidden layer is hidden, not absent:
+                                // its text has to stay searchable. Suppressing ink and
+                                // keeping the index is exactly what mode 3 achieves there.
+                                && !(oc_stack.last().copied().unwrap_or(false) && !text_only)
+                            {
                                 let form_matrix = stream
                                     .dict
                                     .get(b"Matrix")
@@ -711,8 +880,7 @@ pub(crate) fn interpret_content_seeded(
                                 };
                                 // ExtGState soft mask active at this Do: bracket
                                 // the form as the masked content and emit the /G
-                                // group as the mask. The soft-mask layer provides
-                                // isolation, so skip the form's own group push.
+                                // group as the mask.
                                 let active_smask = gs.soft_mask.clone();
                                 let use_smask = active_smask.is_some()
                                     && !text_only
@@ -720,7 +888,20 @@ pub(crate) fn interpret_content_seeded(
                                     && prims.len() < crate::MAX_PRIMITIVES
                                     && depth < MAX_GROUP_DEPTH;
                                 let sm_start = prims.len();
-                                let should_emit_group = is_transparency_group && !use_smask && !text_only && !oc_stack.last().copied().unwrap_or(false) && depth < MAX_GROUP_DEPTH;
+                                // The group push is NOT mutually exclusive with the
+                                // soft-mask bracket. Making it so silently disabled the
+                                // §11.6.6 alpha reset below, which is gated on
+                                // `pushed_group`: a form carrying BOTH `/ca` < 1 and an
+                                // `/SMask` then applied `ca` to every element inside
+                                // instead of once to the composited group, over-darkening
+                                // wherever that content overlaps itself.
+                                //
+                                // Both fit because `sm_start` is captured ABOVE the push,
+                                // so `wrap_with_soft_mask` inserts `SoftMaskPush` outside
+                                // the group: the group composites (applying `ca` once)
+                                // inside the masked layer, then the mask applies to that
+                                // result, which is the §11.6.5.1 order.
+                                let should_emit_group = is_transparency_group && !text_only && !oc_stack.last().copied().unwrap_or(false) && depth < MAX_GROUP_DEPTH;
                                 let pushed_group = should_emit_group
                                     && prims.len() < crate::MAX_PRIMITIVES
                                     && group_depth < 32;
@@ -733,6 +914,49 @@ pub(crate) fn interpret_content_seeded(
                                 // Form content shall be clipped to /BBox (transformed by
                                 // /Matrix), per PDF 8.10.1, so it can't bleed past its box.
                                 let form_ctm = mat_mul(&form_matrix, &gs.ctm);
+                                // §8.7.4.1 requires `sh` to cover the ENTIRE current
+                                // clipping region, so `rasterize_shading` refuses to guess:
+                                // handed no clip extent, a shading with no `/BBox` of its own
+                                // paints NOTHING at all. Only the page-level caller seeded
+                                // that extent, and every nested stream reaches the
+                                // interpreter through `interpret_content`, which passes
+                                // `None` — so `/Sh sh` inside a form XObject silently
+                                // vanished, which is one of the few ways a fully-implemented
+                                // operator can still render nothing.
+                                //
+                                // §8.10.1 clips a form's content to `/BBox` transformed by
+                                // `/Matrix`, so that box — intersected with the clip already
+                                // in force — IS the region a nested `sh` has to fill. It is
+                                // the same quantity the `ClipPush` below is built from.
+                                let form_clip_bbox = {
+                                    let own = stream
+                                        .dict
+                                        .get(b"BBox")
+                                        .ok()
+                                        .and_then(|o| read_rect(doc, o))
+                                        .and_then(|bb| {
+                                            quad_device_bbox(&[
+                                                transform(&form_ctm, bb[0], bb[1]),
+                                                transform(&form_ctm, bb[2], bb[1]),
+                                                transform(&form_ctm, bb[2], bb[3]),
+                                                transform(&form_ctm, bb[0], bb[3]),
+                                            ])
+                                        });
+                                    // No `/BBox` (malformed, §8.10.2 makes it required) means
+                                    // no extra bound, not an empty one: inherit the caller's.
+                                    match (own, current_clip_bbox) {
+                                        (Some(b), Some(cur)) => Some([
+                                            b[0].max(cur[0]),
+                                            b[1].max(cur[1]),
+                                            b[2].min(cur[2]),
+                                            b[3].min(cur[3]),
+                                        ]),
+                                        (Some(b), None) => Some(b),
+                                        (None, cur) => cur,
+                                    }
+                                    // The intersection itself can come out empty.
+                                    .filter(|b| b[2] > b[0] && b[3] > b[1])
+                                };
                                 let mut bbox_clipped = false;
                                 if !text_only && !oc_stack.last().copied().unwrap_or(false) {
                                     if let Some(bb) = stream.dict.get(b"BBox").ok().and_then(|o| read_rect(doc, o)) {
@@ -778,13 +1002,21 @@ pub(crate) fn interpret_content_seeded(
                                         // are applied when the group's result is composited (via
                                         // GroupPush), not again to each element inside. Without
                                         // this, ca is double-applied and low-alpha groups vanish.
+                                        //
+                                        // Deliberately still gated on `pushed_group`, so when
+                                        // `MAX_PRIMITIVES` or the group-depth cap demotes the push
+                                        // the alpha keeps being applied per element. There is no
+                                        // composite to apply it to once in that case, and resetting
+                                        // anyway would drop `ca` entirely and paint the form fully
+                                        // opaque — wrong for all content, where per-element is
+                                        // wrong only where content overlaps itself.
                                         if pushed_group {
                                             sub_gs.alpha_fill = 1.0;
                                             sub_gs.alpha_stroke = 1.0;
                                             sub_gs.blend_mode = BlendMode::Normal;
                                         }
                                         let res_ref = form_res.as_ref().or(resources);
-                                        interpret_content(
+                                        interpret_content_seeded(
                                             doc,
                                             &sub_ops,
                                             res_ref,
@@ -792,6 +1024,7 @@ pub(crate) fn interpret_content_seeded(
                                             prims,
                                             depth + 1,
                                             text_only,
+                                            form_clip_bbox,
                                         );
                                 }
                                 if bbox_clipped {
@@ -980,17 +1213,24 @@ pub(crate) fn interpret_content_seeded(
                                 } else if let Some(res_dict) = resources {
                                     if let Some(prop_dict) = res_dict.get(b"Properties").ok().and_then(|ob| deref(doc, ob)).and_then(|ob| ob.as_dict().ok()) {
                                         if let Ok(oc_ref) = prop_dict.get(n) {
-                                            should_hide = oc_object_hidden(doc, oc_ref);
+                                            should_hide = oc_hidden!(oc_ref);
                                             oc_cache.insert(OcKey::Named(n.clone()), should_hide);
                                         }
                                     }
                                 }
                             }
                             Object::Reference(id) => {
-                                should_hide = *oc_cache.entry(OcKey::Ref(*id)).or_insert_with(|| oc_object_hidden(doc, prop_obj));
+                                should_hide = match oc_cache.get(&OcKey::Ref(*id)) {
+                                    Some(&cached) => cached,
+                                    None => {
+                                        let v = oc_hidden!(prop_obj);
+                                        oc_cache.insert(OcKey::Ref(*id), v);
+                                        v
+                                    }
+                                };
                             }
                             other => {
-                                should_hide = oc_object_hidden(doc, other);
+                                should_hide = oc_hidden!(other);
                             }
                         }
                     }
@@ -1397,7 +1637,34 @@ pub(crate) fn render_soft_mask_group(
             ..Default::default()
         };
         let mres_ref = mres.as_ref().or(resources);
-        interpret_content(doc, &msub_ops, mres_ref, mgs, prims, depth + 1, false);
+        // Same §8.7.4.1 hazard as the `Do` arm: a mask group is a form XObject
+        // (§11.6.5.2), so its `/BBox` is the clip its content is drawn under, and a
+        // `sh` inside it paints nothing at all without that extent. A mask that
+        // paints nothing is uniformly black, which for a luminosity mask hides
+        // ALL of the masked content rather than merely mis-toning it.
+        let mask_clip_bbox = mstream
+            .dict
+            .get(b"BBox")
+            .ok()
+            .and_then(|o| read_rect(doc, o))
+            .and_then(|bb| {
+                quad_device_bbox(&[
+                    transform(&group_ctm, bb[0], bb[1]),
+                    transform(&group_ctm, bb[2], bb[1]),
+                    transform(&group_ctm, bb[2], bb[3]),
+                    transform(&group_ctm, bb[0], bb[3]),
+                ])
+            });
+        interpret_content_seeded(
+            doc,
+            &msub_ops,
+            mres_ref,
+            mgs,
+            prims,
+            depth + 1,
+            false,
+            mask_clip_bbox,
+        );
     }
 }
 
@@ -1464,6 +1731,30 @@ pub(crate) fn wrap_with_soft_mask(
     render_soft_mask_group(doc, resources, mask, prims, depth);
     prims.push(Prim::SoftMaskPop);
     *bracket = Some(MaskBracket { key, push: start, content, end: prims.len() });
+}
+
+/// Axis-aligned device-space bbox of a transformed `/BBox` quad, or `None` when the
+/// quad is degenerate or non-finite.
+///
+/// §8.7.4.1 makes `sh` fill the whole current clip, and `rasterize_shading` paints
+/// nothing rather than guess an extent, so every nested content stream has to hand
+/// down the box its content is clipped to. Shared by the three that have one: a form
+/// XObject's `/BBox` (§8.10.1), a soft-mask group's (§11.6.5.2), a tiling-pattern
+/// cell's (§8.7.3.1) and an annotation appearance stream's (§12.5.5).
+pub(crate) fn quad_device_bbox(c: &[(f64, f64); 4]) -> Option<[f64; 4]> {
+    let xs = c.iter().map(|p| p.0);
+    let ys = c.iter().map(|p| p.1);
+    let b = [
+        xs.clone().fold(f64::INFINITY, f64::min),
+        ys.clone().fold(f64::INFINITY, f64::min),
+        xs.fold(f64::NEG_INFINITY, f64::max),
+        ys.fold(f64::NEG_INFINITY, f64::max),
+    ];
+    if b.iter().all(|v| v.is_finite()) && b[2] > b[0] && b[3] > b[1] {
+        Some(b)
+    } else {
+        None
+    }
 }
 
 /// Bounding box (device space) of a set of polygons, or `None` if empty.
@@ -1666,6 +1957,18 @@ fn paint_tiling_pattern(
     // i0 > i1 so the loop body never ran and the pattern painted nothing.
     let xstep = xstep.abs();
     let ystep = ystep.abs();
+    // §8.7.4.1: `sh` fills the whole current clip, and `rasterize_shading` paints NOTHING
+    // for a shading with no `/BBox` of its own when handed no clip extent. §8.7.3.1 clips a
+    // cell to the pattern `/BBox`, so that box is the extent for every path below that
+    // interprets the cell. Two of them are the malformed-pattern fallbacks, which paint the
+    // cell once at `pmat`; the third (the periodic-raster path) works in cell space and
+    // needs the box unmapped, computed separately at its own site.
+    let cell_bbox_device = quad_device_bbox(&[
+        transform(pmat, bbox[0], bbox[1]),
+        transform(pmat, bbox[2], bbox[1]),
+        transform(pmat, bbox[2], bbox[3]),
+        transform(pmat, bbox[0], bbox[3]),
+    ]);
     // Zero-step pattern is malformed — show bbox once instead of blanking
     if xstep.abs() < 1e-6 || ystep.abs() < 1e-6 {
         let res = dict
@@ -1680,7 +1983,7 @@ fn paint_tiling_pattern(
         if !cell_ops.is_empty() {
             let mut tile_gs = GraphicsState { ctm: *pmat, alpha_fill: alpha as f64, alpha_stroke: alpha as f64, blend_mode: blend, ..GraphicsState::default() };
             if paint_type == 2 { tile_gs.fill = base_argb; tile_gs.stroke = base_argb; }
-            interpret_content(doc, &cell_ops, res.as_ref(), tile_gs, prims, depth + 1, false);
+            interpret_content_seeded(doc, &cell_ops, res.as_ref(), tile_gs, prims, depth + 1, false, cell_bbox_device);
         }
         return;
     }
@@ -1715,7 +2018,7 @@ fn paint_tiling_pattern(
     if (inv[0]*inv[3] - inv[1]*inv[2]).abs() < 1e-12 {
         let mut tile_gs = GraphicsState { ctm: *pmat, alpha_fill: alpha as f64, alpha_stroke: alpha as f64, blend_mode: blend, ..GraphicsState::default() };
         if paint_type == 2 { tile_gs.fill = base_argb; tile_gs.stroke = base_argb; }
-        interpret_content(doc, &content_ops, res.as_ref(), tile_gs, prims, depth + 1, false);
+        interpret_content_seeded(doc, &content_ops, res.as_ref(), tile_gs, prims, depth + 1, false, cell_bbox_device);
         return;
     }
     let (mut pminx, mut pminy, mut pmaxx, mut pmaxy) = (f64::MAX, f64::MAX, f64::MIN, f64::MIN);
@@ -1755,7 +2058,19 @@ fn paint_tiling_pattern(
         ..GraphicsState::default()
     };
     if paint_type == 2 { cell_gs.fill = base_argb; cell_gs.stroke = base_argb; }
-    interpret_content(doc, &content_ops, res.as_ref(), cell_gs, &mut cell_prims, depth + 1, false);
+    // This cell is interpreted at IDENTITY, so its "device" space IS pattern space and the
+    // extent is the `/BBox` unmapped. Seeding it is not cosmetic: it decides the GATE below.
+    // Unseeded, a cell whose only content is `sh` produced no Image prim, `cell_prims` came
+    // out all-Fill/Stroke, the periodic-raster path was taken, and the gradient was silently
+    // dropped from every tile. Seeded, the Image appears, the gate correctly rejects it, and
+    // the per-tile path (also seeded) paints it.
+    let cell_space_bbox = quad_device_bbox(&[
+        (bbox[0], bbox[1]),
+        (bbox[2], bbox[1]),
+        (bbox[2], bbox[3]),
+        (bbox[0], bbox[3]),
+    ]);
+    interpret_content_seeded(doc, &content_ops, res.as_ref(), cell_gs, &mut cell_prims, depth + 1, false, cell_space_bbox);
     if !cell_prims.is_empty()
         && cell_prims.iter().all(|p| matches!(p, Prim::Fill { .. } | Prim::Stroke { .. }))
         && prims.len() < MAX_PRIMITIVES
@@ -1856,7 +2171,12 @@ fn paint_tiling_pattern(
                 tile_gs.fill = base_argb;
                 tile_gs.stroke = base_argb;
             }
-            interpret_content(doc, &content_ops, res.as_ref(), tile_gs, prims, depth + 1, false);
+            // §8.7.3.1 clips the cell to the pattern `/BBox`, which is therefore the
+            // clip extent a `sh` inside the cell must fill (§8.7.4.1). Without it
+            // `rasterize_shading` declines and a gradient-filled hatch cell paints
+            // nothing — the `bc` corners just used for the ClipPush are that extent.
+            let cell_clip = quad_device_bbox(&bc);
+            interpret_content_seeded(doc, &content_ops, res.as_ref(), tile_gs, prims, depth + 1, false, cell_clip);
             prims.push(Prim::ClipPop);
         }
     }
@@ -1881,6 +2201,420 @@ pub(crate) fn read_rect(doc: &Document, obj: &Object) -> Option<[f64; 4]> {
         out[i] = deref(doc, v).and_then(num)?;
     }
     Some(out)
+}
+
+#[cfg(test)]
+mod coverage_gap_tests {
+    use crate::*;
+    use lopdf::content::Operation;
+    use lopdf::{dictionary, Stream};
+
+    /// §8.7.4.1: `sh` shall fill the ENTIRE current clipping region. Because a
+    /// shading with no `/BBox` has no extent of its own, `images::rasterize_shading`
+    /// deliberately refuses to guess one and returns `None` — painting nothing —
+    /// when the caller supplies no clip extent either. Only the page-level caller
+    /// ever did; every nested stream went through `interpret_content`, which passes
+    /// `None`. So `/Sh sh` inside a form XObject emitted no primitive at all, which
+    /// is a fully-implemented operator rendering nothing. §8.10.1 makes the form's
+    /// `/BBox` the clip its content is drawn under, so that box is the extent.
+    #[test]
+    fn sh_inside_a_form_xobject_paints_without_a_shading_bbox() {
+        let mut doc = Document::with_version("1.7");
+        let func = doc.add_object(dictionary! {
+            "FunctionType" => 2,
+            "Domain" => vec![0.into(), 1.into()],
+            "C0" => vec![1.0.into(), 0.0.into(), 0.0.into()],
+            "C1" => vec![0.0.into(), 0.0.into(), 1.0.into()],
+            "N" => 1,
+        });
+        // Deliberately NO /BBox on the shading: the whole point of the test.
+        let shading = doc.add_object(dictionary! {
+            "ShadingType" => 2,
+            "ColorSpace" => "DeviceRGB",
+            "Coords" => vec![0.into(), 0.into(), 100.into(), 0.into()],
+            "Function" => Object::Reference(func),
+        });
+        let form = doc.add_object(Stream::new(
+            dictionary! {
+                "Type" => "XObject",
+                "Subtype" => "Form",
+                "BBox" => vec![0.into(), 0.into(), 100.into(), 100.into()],
+                "Resources" => dictionary! {
+                    "Shading" => dictionary! { "Sh" => Object::Reference(shading) },
+                },
+            },
+            b"/Sh sh".to_vec(),
+        ));
+        let res = dictionary! {
+            "XObject" => dictionary! { "Fm" => Object::Reference(form) },
+        };
+        let ops = vec![Operation::new("Do", vec![Object::Name(b"Fm".to_vec())])];
+        let mut prims = Vec::new();
+        // Mirrors `interpret_page`: the page box is the starting clip extent.
+        interpret_content_seeded(
+            &doc,
+            &ops,
+            Some(&res),
+            GraphicsState::default(),
+            &mut prims,
+            0,
+            false,
+            Some([0.0, 0.0, 200.0, 200.0]),
+        );
+        let images = prims.iter().filter(|p| matches!(p, Prim::Image { .. })).count();
+        assert_eq!(images, 1, "the gradient must be painted, not silently dropped");
+        // A 1x1 raster would technically satisfy the count while showing nothing, so
+        // check the shading was actually rasterized over the form's box.
+        for p in &prims {
+            if let Prim::Image { w, h, data, .. } = p {
+                assert!(*w > 1 && *h > 1, "raster collapsed to {w}x{h}");
+                assert_eq!(data.len(), (*w as usize) * (*h as usize) * 4);
+                assert!(data.chunks(4).any(|px| px[3] > 0), "raster is fully transparent");
+            }
+        }
+    }
+
+    /// Same hazard one level deeper: a luminosity soft mask whose group paints
+    /// nothing is uniformly black, which hides ALL of the masked content rather
+    /// than merely mis-toning it. §11.6.5.2 makes the mask group a form XObject,
+    /// so its `/BBox` is the extent for a `sh` inside it.
+    #[test]
+    fn sh_inside_a_soft_mask_group_paints_without_a_shading_bbox() {
+        let mut doc = Document::with_version("1.7");
+        let func = doc.add_object(dictionary! {
+            "FunctionType" => 2,
+            "Domain" => vec![0.into(), 1.into()],
+            "C0" => vec![0.0.into()],
+            "C1" => vec![1.0.into()],
+            "N" => 1,
+        });
+        let shading = doc.add_object(dictionary! {
+            "ShadingType" => 2,
+            "ColorSpace" => "DeviceGray",
+            "Coords" => vec![0.into(), 0.into(), 100.into(), 0.into()],
+            "Function" => Object::Reference(func),
+        });
+        let group = doc.add_object(Stream::new(
+            dictionary! {
+                "Type" => "XObject",
+                "Subtype" => "Form",
+                "BBox" => vec![0.into(), 0.into(), 100.into(), 100.into()],
+                "Group" => dictionary! { "S" => "Transparency" },
+                "Resources" => dictionary! {
+                    "Shading" => dictionary! { "Sh" => Object::Reference(shading) },
+                },
+            },
+            b"/Sh sh".to_vec(),
+        ));
+        let mask = SoftMask {
+            group_id: group,
+            mask_type: 1,
+            ctm: IDENTITY,
+            backdrop: None,
+            tr: None,
+        };
+        let mut prims = Vec::new();
+        render_soft_mask_group(&doc, None, &mask, &mut prims, 0);
+        assert!(
+            prims.iter().any(|p| matches!(p, Prim::Image { .. })),
+            "an all-black mask hides everything it should reveal"
+        );
+    }
+
+    /// §8.11.2: content in a disabled optional-content group shall not be drawn.
+    /// The `Do` arm gated the Image branch, the `/BBox` ClipPush and the
+    /// `GroupPush` on the marked-content hidden flag but NOT the form recursion,
+    /// and `oc_stack` is a local that no nested stream inherits — so a hidden
+    /// form painted its entire contents, and painted them UNCLIPPED, because the
+    /// clip that would have bounded them was suppressed by the very flag the
+    /// recursion ignored. Reported by `residuals`' cross-round interaction review.
+    #[test]
+    fn a_form_xobject_in_a_disabled_oc_group_paints_nothing() {
+        // `text_only` = false is the render path; true is `search::build_index`,
+        // which must still descend so a hidden layer's text stays searchable.
+        let run = |text_only: bool| -> (usize, usize) {
+            let mut doc = Document::with_version("1.7");
+            let ocg = doc.add_object(dictionary! {
+                "Type" => "OCG",
+                "Name" => Object::string_literal("hidden layer"),
+            });
+            // The OCG is OFF in the default configuration.
+            let catalog = doc.add_object(dictionary! {
+                "Type" => "Catalog",
+                "OCProperties" => dictionary! {
+                    "OCGs" => vec![Object::Reference(ocg)],
+                    "D" => dictionary! { "OFF" => vec![Object::Reference(ocg)] },
+                },
+            });
+            doc.trailer.set("Root", Object::Reference(catalog));
+            let font = doc.add_object(dictionary! {
+                "Type" => "Font",
+                "Subtype" => "Type1",
+                "BaseFont" => "Helvetica",
+                "FirstChar" => 65,
+                "LastChar" => 66,
+                "Widths" => vec![1000.into(), 1000.into()],
+            });
+            let form = doc.add_object(Stream::new(
+                dictionary! {
+                    "Type" => "XObject",
+                    "Subtype" => "Form",
+                    "BBox" => vec![0.into(), 0.into(), 100.into(), 100.into()],
+                    "Resources" => dictionary! {
+                        "Font" => dictionary! { "F1" => Object::Reference(font) },
+                    },
+                },
+                b"0 0 50 50 re f BT /F1 12 Tf (AB) Tj ET".to_vec(),
+            ));
+            let res = dictionary! {
+                "XObject" => dictionary! { "Fm" => Object::Reference(form) },
+                "Properties" => dictionary! { "P1" => Object::Reference(ocg) },
+            };
+            let ops = vec![
+                Operation::new(
+                    "BDC",
+                    vec![Object::Name(b"OC".to_vec()), Object::Name(b"P1".to_vec())],
+                ),
+                Operation::new("Do", vec![Object::Name(b"Fm".to_vec())]),
+                Operation::new("EMC", vec![]),
+            ];
+            let mut prims = Vec::new();
+            interpret_content(
+                &doc,
+                &ops,
+                Some(&res),
+                GraphicsState::default(),
+                &mut prims,
+                0,
+                text_only,
+            );
+            (
+                prims.iter().filter(|p| matches!(p, Prim::Fill { .. })).count(),
+                prims.iter().filter(|p| matches!(p, Prim::Text { .. })).count(),
+            )
+        };
+
+        let (fills, _) = run(false);
+        assert_eq!(fills, 0, "a hidden layer's form must not paint");
+
+        // Sanity check that the fixture would paint at all when the layer is ON,
+        // so a zero above cannot come from a broken fixture.
+        let mut doc = Document::with_version("1.7");
+        let form = doc.add_object(Stream::new(
+            dictionary! {
+                "Type" => "XObject",
+                "Subtype" => "Form",
+                "BBox" => vec![0.into(), 0.into(), 100.into(), 100.into()],
+            },
+            b"0 0 50 50 re f".to_vec(),
+        ));
+        let res = dictionary! {
+            "XObject" => dictionary! { "Fm" => Object::Reference(form) },
+        };
+        let ops = vec![Operation::new("Do", vec![Object::Name(b"Fm".to_vec())])];
+        let mut prims = Vec::new();
+        interpret_content(&doc, &ops, Some(&res), GraphicsState::default(), &mut prims, 0, false);
+        assert!(
+            prims.iter().any(|p| matches!(p, Prim::Fill { .. })),
+            "fixture must paint when the layer is not hidden"
+        );
+
+        // The search-index path still descends: hidden is not absent (§8.11.2 bars
+        // DRAWING, not indexing), matching the `Tj` arm's render-mode-3 policy.
+        let (_, texts) = run(true);
+        assert!(texts > 0, "a hidden layer's text must stay searchable");
+    }
+
+    /// §11.6.6: on entering a transparency group the alpha constants reset to 1.0,
+    /// because `/ca` applies ONCE to the group's composited result. That reset is
+    /// gated on `pushed_group`, so making the group push mutually exclusive with
+    /// the soft-mask bracket silently disabled it — precisely the failure the
+    /// comment above it warns about. A form with BOTH `/ca` < 1 and an `/SMask`
+    /// then applied `ca` to every element inside, over-darkening wherever that
+    /// content overlaps itself. Reported by `residuals`' interaction review.
+    #[test]
+    fn group_alpha_resets_even_when_a_soft_mask_is_active() {
+        let mut doc = Document::with_version("1.7");
+        let mask_group = doc.add_object(Stream::new(
+            dictionary! {
+                "Type" => "XObject",
+                "Subtype" => "Form",
+                "Group" => dictionary! { "S" => "Transparency", "CS" => "DeviceGray" },
+                "BBox" => vec![0.into(), 0.into(), 100.into(), 100.into()],
+            },
+            b"1 g 0 0 100 100 re f".to_vec(),
+        ));
+        let egs = doc.add_object(dictionary! {
+            "Type" => "ExtGState",
+            "ca" => 0.5,
+            "SMask" => dictionary! {
+                "S" => "Luminosity",
+                "G" => Object::Reference(mask_group),
+            },
+        });
+        // Two OVERLAPPING fills: per-element and per-group alpha agree everywhere
+        // else, so overlap is the only shape that can witness the bug.
+        let form = doc.add_object(Stream::new(
+            dictionary! {
+                "Type" => "XObject",
+                "Subtype" => "Form",
+                "Group" => dictionary! { "S" => "Transparency" },
+                "BBox" => vec![0.into(), 0.into(), 100.into(), 100.into()],
+            },
+            b"0 0 60 60 re f 40 40 60 60 re f".to_vec(),
+        ));
+        let res = dictionary! {
+            "ExtGState" => dictionary! { "GS" => Object::Reference(egs) },
+            "XObject" => dictionary! { "Fm" => Object::Reference(form) },
+        };
+        let ops = vec![
+            Operation::new("gs", vec![Object::Name(b"GS".to_vec())]),
+            Operation::new("Do", vec![Object::Name(b"Fm".to_vec())]),
+        ];
+        let mut prims = Vec::new();
+        interpret_content(&doc, &ops, Some(&res), GraphicsState::default(), &mut prims, 0, false);
+
+        let mask = prims
+            .iter()
+            .position(|p| matches!(p, Prim::SoftMaskPush { .. }))
+            .expect("the soft mask must bracket the form");
+        let push = prims
+            .iter()
+            .position(|p| matches!(p, Prim::GroupPush { .. }))
+            .expect("a transparency group must still be pushed when a soft mask is active");
+        // §11.6.5.1 order: the group composites first, inside the masked layer.
+        assert!(mask < push, "SoftMaskPush at {mask} must precede GroupPush at {push}");
+        let Prim::GroupPush { alpha, .. } = &prims[push] else { unreachable!() };
+        assert!((*alpha - 0.5).abs() < 1e-6, "group carries alpha {alpha}, expected /ca 0.5");
+
+        // ...so `ca` must NOT also be baked into the elements inside the group.
+        // Alpha rides in the top byte of `argb`.
+        let group_end = prims[push..]
+            .iter()
+            .position(|p| matches!(p, Prim::GroupPop))
+            .map(|i| push + i)
+            .expect("the group must be popped");
+        let inner: Vec<u8> = prims[push..group_end]
+            .iter()
+            .filter_map(|p| match p {
+                Prim::Fill { argb, .. } => Some((argb >> 24) as u8),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(inner.len(), 2, "both fills must reach the group");
+        for a in inner {
+            assert_eq!(a, 0xFF, "element alpha {a:#x} — /ca was applied twice");
+        }
+    }
+
+    /// (§10.6.2 flatness tolerance), and `bezier_steps_for_flatness` already
+    /// consumes it — it was the one Table 58 key with plumbing but no parser, so a
+    /// document that set flatness through `gs` got the default tolerance.
+    #[test]
+    fn extgstate_fl_changes_curve_flattening() {
+        let flatten = |fl: Option<f64>| -> usize {
+            let mut doc = Document::with_version("1.7");
+            let gs_id = doc.add_object(match fl {
+                Some(v) => dictionary! { "FL" => v },
+                None => dictionary! {},
+            });
+            let res = dictionary! {
+                "ExtGState" => dictionary! { "GS1" => Object::Reference(gs_id) },
+            };
+            let ops = vec![
+                Operation::new("gs", vec![Object::Name(b"GS1".to_vec())]),
+                Operation::new("m", vec![0.into(), 0.into()]),
+                Operation::new(
+                    "c",
+                    vec![0.into(), 800.into(), 800.into(), 800.into(), 800.into(), 0.into()],
+                ),
+                Operation::new("S", vec![]),
+            ];
+            let mut prims = Vec::new();
+            interpret_content(&doc, &ops, Some(&res), GraphicsState::default(), &mut prims, 0, false);
+            prims
+                .iter()
+                .filter_map(|p| match p {
+                    Prim::Stroke { pts, .. } => Some(pts.len()),
+                    _ => None,
+                })
+                .max()
+                .unwrap_or(0)
+        };
+        let fine = flatten(None);
+        let coarse = flatten(Some(3.0));
+        assert!(fine > 1, "the curve must be flattened at all");
+        assert!(
+            coarse < fine,
+            "a coarser /FL must flatten to fewer segments, got {coarse} vs {fine}"
+        );
+    }
+
+    /// §8.4.5 Table 58 `/Font` is `[font size]` with `font` an indirect reference to
+    /// a font dictionary — the graphics-state equivalent of `Tf`, referencing a font
+    /// the resource dictionary need not name. Unparsed, `gs.font_key` stayed empty
+    /// and `show_string` took its no-metrics branch: the whole run collapsed to ONE
+    /// primitive at the origin with a guessed advance, instead of one per glyph
+    /// placed from `/Widths`.
+    #[test]
+    fn extgstate_font_selects_a_font_without_a_resource_name() {
+        let mut doc = Document::with_version("1.7");
+        let font_id = doc.add_object(dictionary! {
+            "Type" => "Font",
+            "Subtype" => "Type1",
+            "BaseFont" => "Helvetica",
+            "FirstChar" => 65,
+            "LastChar" => 66,
+            "Widths" => vec![1000.into(), 1000.into()],
+        });
+        let gs_id = doc.add_object(dictionary! {
+            "Font" => vec![Object::Reference(font_id), 12.into()],
+        });
+        // No /Font entry in the resources at all: `/Font` is precisely for this.
+        let res = dictionary! {
+            "ExtGState" => dictionary! { "GS1" => Object::Reference(gs_id) },
+        };
+        let ops = vec![
+            Operation::new("gs", vec![Object::Name(b"GS1".to_vec())]),
+            Operation::new("BT", vec![]),
+            Operation::new("Tj", vec![Object::string_literal("AB")]),
+            Operation::new("ET", vec![]),
+        ];
+        let mut prims = Vec::new();
+        interpret_content(&doc, &ops, Some(&res), GraphicsState::default(), &mut prims, 0, false);
+        let texts: Vec<&Prim> = prims.iter().filter(|p| matches!(p, Prim::Text { .. })).collect();
+        assert_eq!(texts.len(), 2, "one primitive per glyph, placed from /Widths");
+        // /Widths 1000 at size 12 is a 12-unit advance, not the 0.5-em-per-byte guess.
+        for t in &texts {
+            if let Prim::Text { size, advance, .. } = t {
+                assert!((*size - 12.0).abs() < 1e-3, "size comes from /Font, got {size}");
+                assert!((*advance - 12.0).abs() < 0.5, "advance from /Widths, got {advance}");
+            }
+        }
+        // A dangling /Font reference must leave the previous selection alone rather
+        // than blanking it, so the text does not disappear on a malformed file.
+        let bad_gs = doc.add_object(dictionary! {
+            "Font" => vec![Object::Reference((9999, 0)), 12.into()],
+        });
+        let res2 = dictionary! {
+            "Font" => dictionary! { "F1" => Object::Reference(font_id) },
+            "ExtGState" => dictionary! { "GS2" => Object::Reference(bad_gs) },
+        };
+        let ops2 = vec![
+            Operation::new("Tf", vec![Object::Name(b"F1".to_vec()), 12.into()]),
+            Operation::new("gs", vec![Object::Name(b"GS2".to_vec())]),
+            Operation::new("BT", vec![]),
+            Operation::new("Tj", vec![Object::string_literal("AB")]),
+            Operation::new("ET", vec![]),
+        ];
+        let mut prims2 = Vec::new();
+        interpret_content(&doc, &ops2, Some(&res2), GraphicsState::default(), &mut prims2, 0, false);
+        assert_eq!(
+            prims2.iter().filter(|p| matches!(p, Prim::Text { .. })).count(),
+            2,
+            "a dangling /Font must not discard the font Tf already selected"
+        );
+    }
 }
 
 #[cfg(test)]

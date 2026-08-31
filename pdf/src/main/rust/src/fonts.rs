@@ -13,30 +13,34 @@ pub(crate) struct FontStyle {
 }
 
 #[derive(Clone)]
+/// `Clone` is the font cache's HIT path (see [`FontCacheScope`]), so every
+/// collection here is behind an `Arc`: cloning must not copy the tables, which
+/// for a CJK `/W` table of 32768 entries dominated the hit. Adding an owned
+/// collection here silently reintroduces that.
 pub(crate) struct FontInfo {
     /// Type0 (Identity-H) fonts use 2-byte codes; simple fonts use 1 byte.
     pub(crate) two_byte: bool,
     pub(crate) wmode: u8,
     /// CID -> `(w1_y, v_x)` from `/W2`: the vertical displacement and the x
     /// component of the position vector, in text-space units (glyph units/1000).
-    pub(crate) vertical_metrics: HashMap<u32, (f64, f64)>,
+    pub(crate) vertical_metrics: Arc<HashMap<u32, (f64, f64)>>,
     /// `(v_y, w1_y)` from `/DW2`, text-space units. Spec default `[880 -1000]`.
     pub(crate) default_vertical: (f64, f64),
-    pub(crate) cid_to_gid: Option<HashMap<u32, u16>>,
+    pub(crate) cid_to_gid: Option<Arc<HashMap<u32, u16>>>,
     /// `code -> unicode string` from the font's `/ToUnicode` CMap, if any.
     /// Shared, not owned: see [`FontCacheScope`].
     pub(crate) to_unicode: Option<Arc<HashMap<u32, String>>>,
     /// `code -> unicode char` from the simple-font encoding (base + Differences),
     /// used when `/ToUnicode` is absent or lacks the code.
-    pub(crate) encoding: HashMap<u32, char>,
+    pub(crate) encoding: Arc<HashMap<u32, char>>,
     /// `code -> unicode char` recovered from an embedded TrueType `cmap`, for
     /// re-encoded subset fonts without `/ToUnicode`. Preferred over `encoding`.
-    pub(crate) cmap_uni: HashMap<u32, char>,
+    pub(crate) cmap_uni: Arc<HashMap<u32, char>>,
     /// Type0 `/Encoding` CMap mapping character codes -> CIDs (non-Identity CJK
     /// encodings). `None` for Identity-H/V (code == CID) and simple fonts.
-    pub(crate) cmap: Option<cmap::EncodingCMap>,
+    pub(crate) cmap: Option<Arc<cmap::EncodingCMap>>,
     /// `code (or CID) -> glyph width` in text-space units (glyph units / 1000).
-    pub(crate) widths: HashMap<u32, f64>,
+    pub(crate) widths: Arc<HashMap<u32, f64>>,
     /// Fallback width (glyph units / 1000) for codes absent from `widths`.
     pub(crate) default_width: f64,
     /// Type 3 font data (glyph CharProc content streams), if this is a Type 3 font.
@@ -48,6 +52,11 @@ pub(crate) struct FontInfo {
     /// 1 = serif, 2 = monospace.
     pub(crate) family: u8,
     /// Descriptive base font name for fallback shaping (optional).
+    /// The raw `/BaseFont` name, kept for diagnostics only — everything downstream
+    /// needs from it is already extracted at parse time into `style` and `family`,
+    /// which ship packed into the v8 `fontFlags` byte. Read by the local-file debug
+    /// test, so do not go looking for a consumer to wire it to.
+    #[allow(dead_code)]
     pub(crate) base_font: String,
     /// Embedded font program (TrueType/CFF/Type1) for rendering the PDF's real
     /// glyph outlines. `None` falls back to system-font substitution. Shared
@@ -56,7 +65,7 @@ pub(crate) struct FontInfo {
     pub(crate) glyph_program: Option<Arc<crate::outlines::GlyphProgram>>,
     /// `code -> glyph name` from the PDF `/Encoding` `/Differences`, used to look
     /// up outlines by name in Type1 / CFF programs.
-    pub(crate) glyph_names: HashMap<u32, String>,
+    pub(crate) glyph_names: Arc<HashMap<u32, String>>,
 }
 
 /// Type 3 font: glyphs are content streams drawn in glyph space, mapped to text
@@ -81,7 +90,7 @@ impl FontInfo {
                 Some(cm) => {
                     let mut i = 0;
                     while i < bytes.len() {
-                        let n = cm.code_len(bytes[i]).clamp(1, 4).min(bytes.len() - i);
+                        let n = cm.code_len_at(&bytes[i..]).clamp(1, 4).min(bytes.len() - i);
                         let mut c = 0u32;
                         for k in 0..n { c = (c << 8) | bytes[i + k] as u32; }
                         // Tw applies only to a single-byte code 32.
@@ -155,7 +164,7 @@ impl FontInfo {
 thread_local! {
     /// Populated only inside a [`FontCacheScope`]. `None` means "no cache", which
     /// is the safe default: an entry cannot go stale if none is stored.
-    static FONT_CACHE: std::cell::RefCell<Option<HashMap<(usize, ObjectId), FontInfo>>> =
+    static FONT_CACHE: std::cell::RefCell<Option<HashMap<ObjectId, (u64, FontInfo)>>> =
         std::cell::RefCell::new(None);
 }
 
@@ -166,15 +175,40 @@ thread_local! {
 /// a cache a font shared by N pages is parsed N times to render and another N
 /// times to build the search index.
 ///
-/// The key is the font dictionary's object id *paired with the identity of the
-/// `Document` it came from*, and it is a *complete* key only while that document
-/// is not mutated. That is precisely why the cache is scoped to one top-level
-/// operation and dropped at the end instead of living in a global: a `docedit`
-/// mutation between operations cannot be served a stale entry, because between
-/// operations there is no cache at all. The document component means a scope that
-/// happens to span two documents cannot collide on a shared object id. Fonts
-/// written as direct (non-indirect) dictionaries have no object id and are never
-/// cached.
+/// The key is the font dictionary's object id, and a hit additionally requires the stored
+/// [`font_identity`] — a hash of the font dictionary with every indirect reference
+/// RESOLVED — to still match. Hashing is far cheaper than `font_info`, which parses the
+/// whole embedded font program into glyph outlines.
+///
+/// It is not, however, free, and it is what a hit now costs: every [`FontInfo`] collection
+/// is behind an `Arc`, so the clone is O(1), but `font_identity` walks the resolved dict on
+/// EVERY lookup — including a CID font's `/W` array element by element and the embedded
+/// program's bytes. Measured by `perf_font_cache_hit_vs_parse`: 0.80 ms per hit at
+/// `/W` = 32768 against 12.1 ms per uncached render, so the cache is still strongly
+/// worth having, but the per-hit cost scales with the font rather than being constant.
+/// Making it constant means a key that needs no content check — the registry handle, which
+/// is a stable identity — and that is a change to `FontCacheScope::new`'s signature and to
+/// its callers in `interpret.rs` and `search.rs`. Do NOT instead weaken the hash to a
+/// bounded sample of the font: that trades the identity guarantee below for speed, which is
+/// the exact trade that put the address key here in the first place.
+///
+/// The id alone is not an identity, and neither of the two cheaper things this tried
+/// first is either:
+///   * the id paired with the `Document`'s ADDRESS — overwriting a `Box<Document>` in
+///     place puts the replacement at the same address, so a scope spanning both served
+///     the first document's fonts for the second (a Courier document rendered with
+///     Helvetica's metrics). A raw pointer is an identity no test can enforce and no
+///     compiler error can catch.
+///   * the id paired with the font dictionary itself — shallow equality misses two
+///     documents whose font dicts are byte-identical but whose indirect TARGETS differ,
+///     the same `/Widths 7 0 R` naming different arrays.
+/// Resolving through the references closes both.
+///
+/// It is still a *complete* key only while the document is not mutated. That is precisely
+/// why the cache is scoped to one top-level operation and dropped at the end instead of
+/// living in a global: a `docedit` mutation between operations cannot be served a stale
+/// entry, because between operations there is no cache at all. Fonts written as direct
+/// (non-indirect) dictionaries have no object id and are never cached.
 ///
 /// Nesting is safe — only the outermost guard installs and tears down the cache —
 /// so callers may create one without knowing whether an outer one exists.
@@ -213,39 +247,123 @@ pub(crate) fn fonts_from_resources(doc: &Document, res_dict: &lopdf::Dictionary)
         _ => return fonts,
     };
     for (name, font_ref) in font_dict.iter() {
-        // Only an indirect font can be cached: a direct dictionary has no
-        // identity to key on. The document address distinguishes equal object ids
-        // coming from different documents; it is stable because the document
-        // outlives the scope.
-        let key = match font_ref {
-            Object::Reference(id) => Some((doc as *const Document as usize, *id)),
+        // Only an indirect font can be cached: a direct dictionary has no identity to
+        // key on. A hit must also match the resolved content the id names now, so a
+        // colliding object id from another document cannot be served.
+        let id = match font_ref {
+            Object::Reference(id) => Some(*id),
             _ => None,
         };
-        if let Some(hit) = key.and_then(cached_font) {
-            fonts.insert(name.clone(), hit);
+        let Some(Object::Dictionary(fd)) = deref(doc, font_ref) else {
             continue;
-        }
-        if let Some(Object::Dictionary(fd)) = deref(doc, font_ref) {
-            let fi = font_info(doc, fd);
-            if let Some(key) = key {
-                cache_font(key, &fi);
+        };
+        let identity = id.map(|_| font_identity(doc, fd));
+        if let (Some(id), Some(identity)) = (id, identity) {
+            if let Some(hit) = cached_font(id, identity) {
+                fonts.insert(name.clone(), hit);
+                continue;
             }
-            fonts.insert(name.clone(), fi);
         }
+        let fi = font_info(doc, fd);
+        if let (Some(id), Some(identity)) = (id, identity) {
+            cache_font(id, identity, &fi);
+        }
+        fonts.insert(name.clone(), fi);
     }
     fonts
 }
 
-fn cached_font(key: (usize, ObjectId)) -> Option<FontInfo> {
-    FONT_CACHE.with(|c| c.borrow().as_ref()?.get(&key).cloned())
+fn cached_font(id: ObjectId, identity: u64) -> Option<FontInfo> {
+    FONT_CACHE.with(|c| {
+        let (stored, fi) = c.borrow().as_ref()?.get(&id)?.clone();
+        (stored == identity).then_some(fi)
+    })
 }
 
-fn cache_font(key: (usize, ObjectId), fi: &FontInfo) {
+fn cache_font(id: ObjectId, identity: u64, fi: &FontInfo) {
     FONT_CACHE.with(|c| {
         if let Some(map) = c.borrow_mut().as_mut() {
-            map.insert(key, fi.clone());
+            map.insert(id, (identity, fi.clone()));
         }
     });
+}
+
+/// Hash `obj` with every indirect reference RESOLVED, so the result depends on the
+/// content the font is actually built from rather than on object numbers.
+///
+/// Depth-bounded because a hostile file can make the object graph cyclic; a font dict
+/// nests only a few levels (descendant font -> descriptor -> font file).
+fn hash_resolved(doc: &Document, obj: &Object, h: &mut impl std::hash::Hasher, depth: u32) {
+    use std::hash::Hash;
+    if depth > 8 {
+        return;
+    }
+    // Discriminants are hashed so `/X 1` and `/X (1)` cannot collide.
+    match obj {
+        Object::Null => 0u8.hash(h),
+        Object::Boolean(b) => {
+            1u8.hash(h);
+            b.hash(h);
+        }
+        Object::Integer(i) => {
+            2u8.hash(h);
+            i.hash(h);
+        }
+        Object::Real(r) => {
+            3u8.hash(h);
+            r.to_bits().hash(h);
+        }
+        Object::Name(n) => {
+            4u8.hash(h);
+            n.hash(h);
+        }
+        Object::String(s, f) => {
+            5u8.hash(h);
+            s.hash(h);
+            (*f as u8).hash(h);
+        }
+        Object::Array(a) => {
+            6u8.hash(h);
+            a.len().hash(h);
+            for v in a {
+                hash_resolved(doc, v, h, depth + 1);
+            }
+        }
+        Object::Dictionary(d) => {
+            7u8.hash(h);
+            d.len().hash(h);
+            for (k, v) in d.iter() {
+                k.hash(h);
+                hash_resolved(doc, v, h, depth + 1);
+            }
+        }
+        Object::Stream(s) => {
+            8u8.hash(h);
+            for (k, v) in s.dict.iter() {
+                k.hash(h);
+                hash_resolved(doc, v, h, depth + 1);
+            }
+            // The still-encoded bytes: cheaper than decoding, and equal encoded bytes
+            // under an equal dictionary decode to equal samples.
+            s.content.hash(h);
+        }
+        // The whole point: hash what the reference POINTS AT, not its object number.
+        Object::Reference(id) => match doc.get_object(*id) {
+            Ok(o) => hash_resolved(doc, o, h, depth + 1),
+            Err(_) => 9u8.hash(h),
+        },
+    }
+}
+
+/// Content identity of a font dictionary: everything [`font_info`] reads, resolved.
+fn font_identity(doc: &Document, dict: &Dictionary) -> u64 {
+    use std::hash::Hasher;
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    for (k, v) in dict.iter() {
+        std::hash::Hash::hash(k, &mut h);
+        hash_resolved(doc, v, &mut h, 0);
+    }
+    h.finish()
 }
 
 pub(crate) fn font_info(doc: &Document, font: &lopdf::Dictionary) -> FontInfo {
@@ -582,21 +700,21 @@ pub(crate) fn font_info(doc: &Document, font: &lopdf::Dictionary) -> FontInfo {
     FontInfo {
         two_byte,
         wmode: effective_wmode,
-        vertical_metrics: vert_map,
+        vertical_metrics: Arc::new(vert_map),
         default_vertical: default_vert,
-        cid_to_gid,
+        cid_to_gid: cid_to_gid.map(Arc::new),
         to_unicode: to_unicode.map(Arc::new),
-        encoding,
-        cmap_uni,
-        cmap: encoding_cmap,
-        widths,
+        encoding: Arc::new(encoding),
+        cmap_uni: Arc::new(cmap_uni),
+        cmap: encoding_cmap.map(Arc::new),
+        widths: Arc::new(widths),
         default_width,
         t3,
         style: FontStyle { bold, italic },
         family,
         base_font: base_font_name,
         glyph_program: glyph_program.map(Arc::new),
-        glyph_names,
+        glyph_names: Arc::new(glyph_names),
     }
 }
 
@@ -1713,6 +1831,33 @@ mod type1_tests {
     }
 
     #[test]
+    fn gb18030_four_byte_plane_needs_the_second_byte() {
+        // GBK2K-H is GB18030: <81 30 81 30>-<FE 39 FE 39> is a FOUR-byte code, and it is
+        // distinguished from the two-byte plane only by the second byte being 0x30-0x39.
+        // Reading it as two 2-byte codes desynchronizes the rest of the string.
+        let cs = cmap::predefined_codespace("GBK2K-H").expect("GBK2K recognized");
+        let cm = cmap::EncodingCMap { codespace: cs, ..Default::default() };
+        assert_eq!(cm.code_len_at(&[0x81, 0x30, 0x81, 0x30]), 4);
+        assert_eq!(cm.code_len_at(&[0x81, 0x40]), 2, "the two-byte plane is untouched");
+        assert_eq!(cm.code_len_at(&[0x41]), 1, "ASCII is still single-byte");
+        // The lookahead is a strict refinement: every other predefined codespace answers
+        // exactly what the first-byte-only `code_len` answers.
+        for name in ["GBK-EUC-H", "90ms-RKSJ-H", "UniJIS-UTF8-H", "UniGB-UTF16-H", "ETen-B5-H"] {
+            let cs = cmap::predefined_codespace(name).unwrap();
+            let cm = cmap::EncodingCMap { codespace: cs, ..Default::default() };
+            for b1 in 0u16..=255 {
+                for b2 in [0x00u8, 0x30, 0x39, 0x40, 0x80, 0xA0, 0xFE, 0xFF] {
+                    assert_eq!(
+                        cm.code_len_at(&[b1 as u8, b2]),
+                        cm.code_len(b1 as u8),
+                        "{name} changed segmentation at {b1:#04x} {b2:#04x}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
     fn for_each_code_resegments_a_mixed_width_string() {
         // End-to-end: the whole point of the codespace is that a 1-byte code in
         // the middle of a CJK string does not shift every following code by one
@@ -1720,7 +1865,7 @@ mod type1_tests {
         let cs = cmap::predefined_codespace("90ms-RKSJ-H").unwrap();
         let fi = FontInfo {
             two_byte: true,
-            cmap: Some(cmap::EncodingCMap { codespace: cs, ..Default::default() }),
+            cmap: Some(Arc::new(cmap::EncodingCMap { codespace: cs, ..Default::default() })),
             ..simple_font_with_encoding()
         };
         let mut got = Vec::new();
@@ -1815,25 +1960,102 @@ mod type1_tests {
         );
     }
 
+    // The font cache is keyed by the font's OBJECT ID, not by its resource name. Two
+    // pages may each bind /F1 to a different font object, so a name-keyed cache would
+    // render page 2's text in page 1's font. This is the cross-page leak the interaction
+    // review was looking for; it asserts the key, since a name-keyed regression here
+    // would be silent.
+    #[test]
+    fn font_cache_does_not_confuse_two_fonts_that_share_a_resource_name() {
+        let mut doc = Document::with_version("1.7");
+        let mut font_named_f1 = |ch: u8, uni: &str| {
+            let tu = doc.add_object(Stream::new(
+                dictionary! {},
+                format!("1 beginbfchar\n<{ch:02X}> <{uni}>\nendbfchar").into_bytes(),
+            ));
+            let font = doc.add_object(dictionary! {
+                "Type" => "Font",
+                "Subtype" => "TrueType",
+                "BaseFont" => "Helvetica",
+                "ToUnicode" => tu,
+            });
+            dictionary! { "Font" => dictionary! { "F1" => font } }
+        };
+        let res_a = font_named_f1(0x41, "0041");
+        let res_b = font_named_f1(0x41, "0042");
+        let _scope = FontCacheScope::new();
+        let a = fonts_from_resources(&doc, &res_a);
+        let b = fonts_from_resources(&doc, &res_b);
+        let (au, bu) = (
+            a[b"F1".as_ref()].to_unicode.as_ref().unwrap(),
+            b[b"F1".as_ref()].to_unicode.as_ref().unwrap(),
+        );
+        assert_eq!(au.get(&0x41).map(String::as_str), Some("A"));
+        assert_eq!(
+            bu.get(&0x41).map(String::as_str),
+            Some("B"),
+            "the second /F1 is a different font object and must not be served from the cache"
+        );
+        assert!(!Arc::ptr_eq(au, bu));
+    }
+
+    // A colliding object id from a DIFFERENT document must not be served. The cache used
+    // to key on the `Document`'s raw ADDRESS, which is not an identity: overwriting a
+    // `Box<Document>` in place puts the replacement at the same address, and a scope
+    // spanning both then rendered the second document with the first one's font metrics.
+    // A hit now also has to match the dictionary the id resolves to.
+    #[test]
+    fn font_cache_rejects_a_colliding_id_from_another_document() {
+        let build = |base: &str| {
+            let mut doc = Document::with_version("1.7");
+            // Burn object 1 so the font lands on the same id in both documents.
+            doc.add_object(Object::Null);
+            let font = doc.add_object(dictionary! {
+                "Type" => "Font",
+                "Subtype" => "Type1",
+                "BaseFont" => base,
+            });
+            let res = dictionary! { "Font" => dictionary! { "F1" => font } };
+            (doc, res, font)
+        };
+        let (doc_a, res_a, id_a) = build("Helvetica");
+        let (doc_b, res_b, id_b) = build("Courier");
+        assert_eq!(id_a, id_b, "precondition: the two fonts share an object id");
+
+        let _scope = FontCacheScope::new();
+        let a = fonts_from_resources(&doc_a, &res_a);
+        let b = fonts_from_resources(&doc_b, &res_b);
+        // Courier is monospaced, Helvetica is not: a stale hit shows up as `i` and `M`
+        // having different widths, which is what the address-keyed cache produced.
+        let wi = b[b"F1".as_ref()].widths.get(&(b'i' as u32)).copied();
+        let wm = b[b"F1".as_ref()].widths.get(&(b'M' as u32)).copied();
+        assert_eq!(wi, wm, "the second document must get Courier's uniform advance");
+        assert_ne!(
+            a[b"F1".as_ref()].widths.get(&(b'i' as u32)).copied(),
+            a[b"F1".as_ref()].widths.get(&(b'M' as u32)).copied(),
+            "precondition: Helvetica is proportional, so the two are distinguishable"
+        );
+    }
+
     fn simple_font_with_encoding() -> FontInfo {
         FontInfo {
             two_byte: false,
             wmode: 0,
-            vertical_metrics: HashMap::new(),
+            vertical_metrics: Arc::default(),
             default_vertical: (0.880, -1.0),
             cid_to_gid: None,
             to_unicode: None,
-            encoding: encoding::win_ansi(),
-            cmap_uni: HashMap::new(),
+            encoding: Arc::new(encoding::win_ansi()),
+            cmap_uni: Arc::default(),
             cmap: None,
-            widths: HashMap::new(),
+            widths: Arc::default(),
             default_width: 0.5,
             t3: None,
             style: FontStyle::default(),
             family: 0,
             base_font: String::new(),
             glyph_program: None,
-            glyph_names: HashMap::new(),
+            glyph_names: Arc::default(),
         }
     }
 }
@@ -2036,16 +2258,18 @@ pub(crate) mod cmap {
             return Some(vec![(0x00, 0x80, 1), (0x8EA0, 0x8EFE, 2), (0xA1A1, 0xFEFE, 2)]);
         }
         // GBK: GBK-EUC-H, GBKp-EUC-H, GBK2K-H
-        //
-        // GBK2K-H (GB18030) additionally has a 4-byte plane whose codes are
-        // distinguished from 2-byte codes only by the SECOND byte (0x30-0x39),
-        // which `code_len` cannot see — it dispatches on the first byte alone.
-        // Those codes therefore still mis-segment. Left as-is deliberately: the
-        // 1- and 2-byte planes cover essentially all real GBK2K content, and
-        // widening `code_len` to a multi-byte lookahead would change
-        // `for_each_code` for every font to fix a rare case.
         if name.contains("GBK") {
-            return Some(vec![(0x00, 0x80, 1), (0x8140, 0xFEFE, 2)]);
+            let mut cs = vec![(0x00, 0x80, 1), (0x8140, 0xFEFE, 2)];
+            // GBK2K-H/V is GB18030, which adds a four-byte plane distinguished from the
+            // two-byte plane only by the SECOND byte (0x30-0x39). `code_len` dispatches on
+            // the first byte alone and cannot see it, so `code_len_at` resolves this range
+            // with a one-byte lookahead. It is listed AFTER the two-byte range so
+            // `code_len` still answers 2 for a bare first byte. Plain GBK-EUC has no such
+            // plane and must not get the range.
+            if name.contains("GBK2K") {
+                cs.push((0x8130_8130, 0xFE39_FE39, 4));
+            }
+            return Some(cs);
         }
         // EUC-CN: GB-EUC-H, GBpc-EUC-H (checked after GBK, whose names also
         // contain "GB").
@@ -2101,6 +2325,39 @@ pub(crate) mod cmap {
                 }
             }
             if self.codespace.is_empty() { 2 } else { self.codespace[0].2 as usize }
+        }
+
+        /// Byte length of the code beginning at `bytes[0]`, using the following byte to
+        /// disambiguate where the codespace needs it.
+        ///
+        /// §9.7.6.2 matches a code against the codespace ranges byte by byte, so two
+        /// ranges may share a first byte and differ in length. GB18030 (GBK2K-H/V) is the
+        /// case that matters in practice: its four-byte plane differs from its two-byte
+        /// plane only in the SECOND byte.
+        ///
+        /// This is a strict refinement of [`Self::code_len`] — it only ever chooses a
+        /// LONGER range, and only when that range also matches the second byte. No other
+        /// predefined codespace has two ranges of different length sharing a first byte,
+        /// so for every font but GB18030 the answer is identical to `code_len`.
+        pub fn code_len_at(&self, bytes: &[u8]) -> usize {
+            let Some(&first) = bytes.first() else { return 1 };
+            let n = self.code_len(first);
+            let Some(&second) = bytes.get(1) else { return n };
+            for &(lo, hi, len) in &self.codespace {
+                let len = len as usize;
+                if len <= n || len > 4 {
+                    continue;
+                }
+                let s1 = (len - 1) * 8;
+                if !((lo >> s1) & 0xFF..=(hi >> s1) & 0xFF).contains(&(first as u32)) {
+                    continue;
+                }
+                let s2 = (len - 2) * 8;
+                if ((lo >> s2) & 0xFF..=(hi >> s2) & 0xFF).contains(&(second as u32)) {
+                    return len;
+                }
+            }
+            n
         }
     }
 

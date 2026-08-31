@@ -839,11 +839,8 @@ pub(crate) fn set_choice_field(handle: i64, widget_id: i64, value: &str) -> bool
     true
 }
 
-/// Extract the document's visible text (from rendered text primitives), one
-/// blank line between pages.
-pub(crate) fn document_text(handle: i64) -> Option<String> {
-    let reg = registry().lock().unwrap_or_else(|e| e.into_inner());
-    let doc = reg.get(&handle)?;
+/// Concatenate the visible text of every page, one blank line between pages.
+fn all_pages_text(doc: &Document) -> String {
     let mut out = String::new();
     for (_num, page_id) in doc.get_pages() {
         if let Ok(pd) = interpret_page(doc, page_id) {
@@ -860,7 +857,36 @@ pub(crate) fn document_text(handle: i64) -> Option<String> {
         }
         out.push_str("\n\n");
     }
-    Some(out)
+    out
+}
+
+/// Extract the document's visible text (from rendered text primitives), one
+/// blank line between pages.
+pub(crate) fn document_text(handle: i64) -> Option<String> {
+    let reg = registry().lock().unwrap_or_else(|e| e.into_inner());
+    let doc = reg.get(&handle)?;
+    // Same hazard as `docedit::render_page`: `interpret_page` recurses for form
+    // XObjects, tiling patterns, soft-mask groups and Type 3 glyphs, and those caps
+    // bound the DEPTH but not the frame SIZE, so the real headroom is whatever the
+    // calling thread happens to have — a JNI thread on Android. A guard-page fault
+    // is not an unwind, so the JNI `catch_unwind` cannot turn it into a failed
+    // extraction; it kills the process. The stack has to be pinned here rather than
+    // at the boundary because `JNIEnv` is not `Send`. A panic is re-raised with its
+    // payload so that boundary still sees it, and a spawn failure falls back to the
+    // calling thread.
+    Some(std::thread::scope(|s| {
+        match std::thread::Builder::new()
+            .name("pdf-text".to_owned())
+            .stack_size(crate::docedit::RENDER_STACK_BYTES)
+            .spawn_scoped(s, || all_pages_text(doc))
+        {
+            Ok(h) => match h.join() {
+                Ok(r) => r,
+                Err(payload) => std::panic::resume_unwind(payload),
+            },
+            Err(_) => all_pages_text(doc),
+        }
+    }))
 }
 
 // ---------------------------------------------------------------------------

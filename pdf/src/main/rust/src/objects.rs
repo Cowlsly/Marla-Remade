@@ -76,16 +76,25 @@ pub(crate) fn decode_stream_content(doc: &Document, dict: &Dictionary, raw: &[u8
     if let Some(decoded) = filters::decode_stream_chain(raw.to_vec(), &specs, doc) {
         return decoded;
     }
-    // Fall back to lopdf's native chain — but NOT when a predictor is involved.
+    // Fall back to lopdf's native chain ONLY for a filter name we do not implement.
     //
-    // lopdf reads the parameters as a single DIRECT dictionary (object.rs:681,
-    // `get(b"DecodeParms").and_then(Object::as_dict)`), so an indirect reference, or
-    // the array form used alongside a filter chain, silently resolves to `None`. It
-    // then inflates happily and returns Ok with the /Predictor NEVER UNDONE — success
-    // carrying garbage, which no error check can catch. Our own chain is the only
-    // predictor implementation here that resolves both forms, so if it failed there is
-    // nothing left to trust.
-    if !wants_predictor(doc, dict) {
+    // `decode_stream_chain` implements every `FilterKind` except `Unknown`, so when it
+    // fails on a filter we DO implement it has already judged the bytes corrupt — and
+    // lopdf cannot do better than garbage. It can do worse: its ASCII85 decoder adds a
+    // base-85 5-tuple into a `u32` without checking (`lopdf/src/object.rs:777`), so
+    // `uuuuu` panics with "attempt to add with overflow" in debug and wraps silently in
+    // release. A panic here is fatal at the JNI boundary, which kills the whole document
+    // for one malformed stream.
+    //
+    // It is also skipped whenever a predictor is involved: lopdf reads the parameters as
+    // a single DIRECT dictionary (`get(b"DecodeParms").and_then(Object::as_dict)`), so an
+    // indirect reference, or the array form used alongside a filter chain, silently
+    // resolves to `None`. It then inflates happily and returns Ok with the /Predictor
+    // NEVER UNDONE — success carrying garbage, which no error check can catch.
+    let has_unknown_filter = specs
+        .iter()
+        .any(|(k, _)| matches!(k, filters::FilterKind::Unknown(_)));
+    if has_unknown_filter && !wants_predictor(doc, dict) {
         let temp = Stream::new(dict.clone(), raw.to_vec());
         if let Ok(d) = temp.decompressed_content() {
             return d;

@@ -388,114 +388,141 @@ pub(crate) fn extgstates_from_resources(doc: &Document, res_dict: &lopdf::Dictio
             if let Ok(id) = v.as_reference() {
                 out.insert(name.clone(), id);
             } else if let Object::Dictionary(_) = v {
-                // inline dict without indirect: create synthetic entry? For now, parse directly by storing dummy - handled via direct dict lookup in gs implementation
-                // We'll handle inline dict in interpret_content by also checking resources for direct dict
-                // To support, we add a separate path: store name with a sentinel and also keep dict; but for MVP we allow direct lookup via resources dict retrieval
-                // For simplicity, insert with placeholder and treat separately? Instead, we will parse inline ExtGState via a separate function extgstate_dict
-                // No placeholder needed - we will also check direct dict in interpret_content if not found in extgstates
+                // A DIRECT ExtGState dictionary has no object id, so it cannot go in this
+                // name -> ObjectId map. It is not lost: the `gs` operator resolves the
+                // named entry straight out of `/Resources /ExtGState` itself, which
+                // handles the direct and indirect forms alike.
             }
         }
     }
     out
 }
 
-pub(crate) fn extgstate_dict<'a>(doc: &'a Document, res_dict: &'a lopdf::Dictionary, name: &[u8]) -> Option<&'a lopdf::Dictionary> {
-    let eg = res_dict.get(b"ExtGState").ok().and_then(|o| deref(doc, o)).and_then(|o| o.as_dict().ok())?;
-    let obj = eg.get(name).ok().and_then(|o| deref(doc, o)).and_then(|o| o.as_dict().ok())?;
-    Some(obj)
+/// The document's default optional-content configuration (`/OCProperties /D`,
+/// §8.11.4.3) resolved into set membership, so a query is O(1).
+///
+/// Built ONCE per caller. Reading membership out of the arrays instead costs
+/// O(|/ON| + |/OFF|) per query and a `BDC` asks per marked-content section, so a
+/// document whose N layers are each opened once — a CAD or map export — paid
+/// O(N²): 6400 distinct groups measured 57.8 ms against 40.7 ms for 6400
+/// sections sharing one group, where the call-site memo absorbs every repeat.
+///
+/// `/ON` and `/OFF` hold indirect references; a group that is a direct
+/// dictionary has no id to match, so a group absent from both sets falls back to
+/// `/BaseState` exactly as scanning the arrays for it did.
+pub(crate) struct OcConfig {
+    on: std::collections::HashSet<ObjectId>,
+    off: std::collections::HashSet<ObjectId>,
+    /// `/BaseState`, defaulting to ON (§8.11.4.3). Also the answer for a
+    /// document with no usable `/OCProperties /D`, where everything is visible.
+    base_on: bool,
 }
 
-
-/// Check if an OCG (Optional Content Group) is visible based on document's OCProperties.
-/// Returns true if visible or unknown (default visible to avoid breaking existing PDFs).
-pub(crate) fn is_ocg_visible(doc: &Document, ocg_id: ObjectId) -> bool {
-    // Try to parse OCProperties from catalog
-    let catalog = match doc.catalog() {
-        Ok(c) => c,
-        Err(_) => return true,
-    };
-    let oc_props = match catalog.get(b"OCProperties").ok().and_then(|o| doc.dereference(o).ok()).map(|(_,obj)| obj) {
-        Some(Object::Dictionary(d)) => d.clone(),
-        _ => return true,
-    };
-    let d_dict = match oc_props.get(b"D").ok().and_then(|o| doc.dereference(o).ok()).map(|(_,obj)| obj).and_then(|o| o.as_dict().ok()).cloned() {
-        Some(d) => d,
-        None => return true,
-    };
-    // BaseState: ON or OFF
-    let base_on = matches!(d_dict.get(b"BaseState").ok().and_then(|o| o.as_name().ok()), Some(b"ON") | None);
-    // ON and OFF arrays
-    let on_list = d_dict.get(b"ON").ok().and_then(|o| doc.dereference(o).ok()).map(|(_,obj)| obj).and_then(|o| o.as_array().ok()).cloned().unwrap_or_default();
-    let off_list = d_dict.get(b"OFF").ok().and_then(|o| doc.dereference(o).ok()).map(|(_,obj)| obj).and_then(|o| o.as_array().ok()).cloned().unwrap_or_default();
-
-    let is_in_list = |list: &[Object], id: ObjectId| -> bool {
-        list.iter().any(|obj| {
-            if let Ok(ref_id) = obj.as_reference() { ref_id == id } else { false }
-        })
-    };
-
-    if is_in_list(&on_list, ocg_id) {
-        return true;
-    }
-    if is_in_list(&off_list, ocg_id) {
-        return false;
-    }
-    // No explicit entry, use BaseState
-    base_on
-}
-
-pub(crate) fn ocg_is_visible_alias(doc: &Document, id: ObjectId) -> Option<bool> {
-    Some(is_ocg_visible(doc, id))
-}
-
-/// Evaluate an OCMD (Optional Content Membership Dictionary) `/OCGs` + `/P`
-/// visibility policy. Returns true if the membership resolves to HIDDEN.
-fn ocmd_hidden(doc: &Document, d: &Dictionary) -> bool {
-    let mut ids: Vec<ObjectId> = Vec::new();
-    match d.get(b"OCGs").ok() {
-        Some(Object::Reference(id)) => ids.push(*id),
-        Some(Object::Array(a)) => {
-            for o in a {
-                if let Ok(id) = o.as_reference() { ids.push(id); }
+impl OcConfig {
+    pub(crate) fn from_doc(doc: &Document) -> Self {
+        let mut cfg = OcConfig {
+            on: std::collections::HashSet::new(),
+            off: std::collections::HashSet::new(),
+            base_on: true,
+        };
+        let Ok(catalog) = doc.catalog() else {
+            return cfg;
+        };
+        let Some(Object::Dictionary(oc_props)) =
+            catalog.get(b"OCProperties").ok().and_then(|o| deref(doc, o))
+        else {
+            return cfg;
+        };
+        let Some(d_dict) = oc_props
+            .get(b"D")
+            .ok()
+            .and_then(|o| deref(doc, o))
+            .and_then(|o| o.as_dict().ok())
+        else {
+            return cfg;
+        };
+        cfg.base_on = matches!(
+            d_dict.get(b"BaseState").ok().and_then(|o| o.as_name().ok()),
+            Some(b"ON") | None
+        );
+        let collect = |key: &[u8], out: &mut std::collections::HashSet<ObjectId>| {
+            if let Some(list) = d_dict
+                .get(key)
+                .ok()
+                .and_then(|o| deref(doc, o))
+                .and_then(|o| o.as_array().ok())
+            {
+                out.extend(list.iter().filter_map(|obj| obj.as_reference().ok()));
             }
-        }
-        _ => {}
+        };
+        collect(b"ON", &mut cfg.on);
+        collect(b"OFF", &mut cfg.off);
+        cfg
     }
-    if ids.is_empty() {
-        return false; // no member groups -> visible
-    }
-    let vis: Vec<bool> = ids.iter().map(|id| is_ocg_visible(doc, *id)).collect();
-    let policy = d.get(b"P").ok().and_then(|o| o.as_name().ok());
-    let visible = match policy {
-        Some(b"AllOn") => vis.iter().all(|v| *v),
-        Some(b"AnyOff") => vis.iter().any(|v| !*v),
-        Some(b"AllOff") => vis.iter().all(|v| !*v),
-        _ => vis.iter().any(|v| *v), // AnyOn (default)
-    };
-    !visible
-}
 
-/// Decide whether marked content / an XObject tagged with the given `/OC` object
-/// (an OCG or OCMD, possibly an indirect reference) should be HIDDEN.
-pub(crate) fn oc_object_hidden(doc: &Document, obj: &Object) -> bool {
-    match obj {
-        Object::Reference(id) => {
-            if let Ok(Object::Dictionary(d)) = doc.get_object(*id) {
-                if d.get(b"Type").ok().and_then(|o| o.as_name().ok()) == Some(b"OCMD") {
-                    return ocmd_hidden(doc, d);
+    /// Whether an OCG is visible. True for an unknown group, so a document that
+    /// never declares `/OCProperties` renders in full.
+    pub(crate) fn is_ocg_visible(&self, ocg_id: ObjectId) -> bool {
+        // §8.11.4.3: /ON and /OFF override /BaseState, applied in the order
+        // Table 101 lists them — /BaseState, then /ON, then /OFF — so /OFF wins
+        // for a group named by both, matching mainstream viewers.
+        if self.off.contains(&ocg_id) {
+            return false;
+        }
+        if self.on.contains(&ocg_id) {
+            return true;
+        }
+        self.base_on
+    }
+
+    /// Evaluate an OCMD (Optional Content Membership Dictionary) `/OCGs` + `/P`
+    /// visibility policy. Returns true if the membership resolves to HIDDEN.
+    fn ocmd_hidden(&self, d: &Dictionary) -> bool {
+        let mut ids: Vec<ObjectId> = Vec::new();
+        match d.get(b"OCGs").ok() {
+            Some(Object::Reference(id)) => ids.push(*id),
+            Some(Object::Array(a)) => {
+                for o in a {
+                    if let Ok(id) = o.as_reference() { ids.push(id); }
                 }
             }
-            !is_ocg_visible(doc, *id)
+            _ => {}
         }
-        Object::Dictionary(d) if d.get(b"Type").ok().and_then(|o| o.as_name().ok()) == Some(b"OCMD") => {
-            ocmd_hidden(doc, d)
+        if ids.is_empty() {
+            return false; // no member groups -> visible
         }
-        // Inline OCG dict without an object id can't be matched against the
-        // ON/OFF lists; default to visible.
-        _ => false,
+        let vis: Vec<bool> = ids.iter().map(|id| self.is_ocg_visible(*id)).collect();
+        let policy = d.get(b"P").ok().and_then(|o| o.as_name().ok());
+        let visible = match policy {
+            Some(b"AllOn") => vis.iter().all(|v| *v),
+            Some(b"AnyOff") => vis.iter().any(|v| !*v),
+            Some(b"AllOff") => vis.iter().all(|v| !*v),
+            _ => vis.iter().any(|v| *v), // AnyOn (default)
+        };
+        !visible
+    }
+
+    /// Decide whether marked content / an XObject tagged with the given `/OC`
+    /// object (an OCG or OCMD, possibly an indirect reference) should be HIDDEN.
+    pub(crate) fn object_hidden(&self, doc: &Document, obj: &Object) -> bool {
+        match obj {
+            Object::Reference(id) => {
+                if let Ok(Object::Dictionary(d)) = doc.get_object(*id) {
+                    if d.get(b"Type").ok().and_then(|o| o.as_name().ok()) == Some(b"OCMD") {
+                        return self.ocmd_hidden(d);
+                    }
+                }
+                !self.is_ocg_visible(*id)
+            }
+            Object::Dictionary(d) if d.get(b"Type").ok().and_then(|o| o.as_name().ok()) == Some(b"OCMD") => {
+                self.ocmd_hidden(d)
+            }
+            // Inline OCG dict without an object id can't be matched against the
+            // ON/OFF lists; default to visible.
+            _ => false,
+        }
     }
 }
-
 
 /// Whether a colorspace requires the full `eval_cs_to_rgb` path (vs the fast
 /// `comps_to_rgb` device path which is equivalent for plain RGB/Gray/CMYK).
@@ -839,6 +866,16 @@ pub(crate) fn extract_image(doc: &Document, stream: &lopdf::Stream, fill_argb: u
 /// `interp` should pass this onto the `Prim::Image` record and `viewer` should carry it
 /// on the wire and use it to choose `isFilterBitmap`. It is a standalone predicate rather
 /// than an `ImageData` field so it can land without breaking either of their files.
+///
+/// UNWIRED, deliberately, and NOT dead code — do not delete it looking for a caller. The
+/// policy is complete and tested (`interpolation_is_refused_for_bilevel_art`), but
+/// `Prim::Image` has no field for it, so nothing serializes it and the Kotlin parser's
+/// pre-v11 default (smooth) applies to everything. `wire.rs` records the rest: the wire
+/// version bump to 11 and the `u8 interpolate` byte must land in the SAME change, because
+/// bumping without writing the byte makes the parser eat the first byte of the image's
+/// `u32 len` and desync every primitive after it. That crosses wire.rs and the Kotlin
+/// side, so it is not this file's to finish.
+#[allow(dead_code)]
 pub(crate) fn image_should_interpolate(doc: &Document, dict: &Dictionary) -> bool {
     // `/I` is the §8.9.7 Table 93 abbreviation for /Interpolate in an inline image
     // dictionary. (As a /CS *value* `/I` means Indexed; as a KEY it is unambiguous.)
@@ -872,6 +909,53 @@ fn is_bilevel(doc: &Document, dict: &Dictionary) -> bool {
     specs.iter().any(|(kind, _)| {
         matches!(kind, filters::FilterKind::Ccitt | filters::FilterKind::Jbig2)
     })
+}
+
+/// Resolve `/JBIG2Globals`, the symbol dictionary shared across pages (§7.4.7).
+///
+/// `specs` pairs an ARRAY `/DecodeParms` with the filter array index-by-index, which is
+/// where `/Filter [/FlateDecode /JBIG2Decode]` keeps its parameters. Both JBIG2 call
+/// sites then fell back to matching only a direct `Object::Dictionary` on the stream
+/// dict, so an array `/DecodeParms` that `specs` could not pair — producers do emit it
+/// misaligned with the filter chain — lost the globals entirely. A JBIG2 decode without
+/// them fails, and a failed decode renders the region silently transparent.
+///
+/// §7.4 Table 5 allows `/DecodeParms` to be a dictionary or an array; `/DP` is its
+/// inline-image abbreviation (§8.9.7 Table 93).
+fn jbig2_globals(
+    doc: &Document,
+    dict: &Dictionary,
+    specs: &[(filters::FilterKind, Option<Dictionary>)],
+) -> Option<Vec<u8>> {
+    // NOT `decompressed_content()`: that is lopdf's decoder, which implements only
+    // Flate/LZW/ASCII85 and whose `unwrap_or_else` fallback hands back the still-ENCODED
+    // bytes to be parsed as a symbol dictionary.
+    let from_parms = |pd: &Dictionary| -> Option<Vec<u8>> {
+        match pd.get(b"JBIG2Globals").ok().and_then(|o| deref(doc, o)) {
+            Some(Object::Stream(gs)) => Some(stream_data_with_doc(doc, gs)),
+            _ => None,
+        }
+    };
+    if let Some(g) = specs
+        .iter()
+        .filter(|(k, _)| *k == filters::FilterKind::Jbig2)
+        .find_map(|(_, pd)| pd.as_ref().and_then(|d| from_parms(d)))
+    {
+        return Some(g);
+    }
+    match dict
+        .get(b"DecodeParms")
+        .ok()
+        .or_else(|| dict.get(b"DP").ok())
+        .and_then(|o| deref(doc, o))
+    {
+        Some(Object::Dictionary(d)) => from_parms(d),
+        Some(Object::Array(a)) => a
+            .iter()
+            .filter_map(|el| deref(doc, el).and_then(|o| o.as_dict().ok()))
+            .find_map(|d| from_parms(d)),
+        _ => None,
+    }
 }
 
 fn extract_image_inner(doc: &Document, stream: &lopdf::Stream, fill_argb: u32, cs_resources: &HashMap<Vec<u8>, ObjectId>) -> Option<ImageData> {
@@ -920,45 +1004,7 @@ fn extract_image_inner(doc: &Document, stream: &lopdf::Stream, fill_argb: u32, c
 
     // JBIG2: attempt with Globals
     if is_jbig2 {
-        let mut globals_bytes: Option<Vec<u8>> = None;
-        // Try to find JBIG2Globals in DecodeParms of JBIG2 filter
-        for (kind, parms) in specs.iter() {
-            if *kind == filters::FilterKind::Jbig2 {
-                if let Some(pd) = parms {
-                    // /JBIG2Globals may be indirect stream
-                    let obj_opt = pd.get(b"JBIG2Globals").ok()
-                        .and_then(|o| deref(doc,o).or(Some(o)))
-                        .cloned();
-                    if let Some(obj) = obj_opt {
-                        match obj {
-                            // NOT `decompressed_content()`: that is lopdf's decoder, which
-                            // implements only Flate/LZW/ASCII85, and the `unwrap_or_else`
-                            // fallback handed back the still-ENCODED bytes to be parsed as
-                            // a JBIG2 symbol dictionary. It also reads /DecodeParms with
-                            // `as_dict()`, so an indirect or array one skips the predictor.
-                            Object::Stream(s) => {
-                                globals_bytes = Some(stream_data_with_doc(doc, &s));
-                            }
-                            Object::Reference(id) => {
-                                if let Ok(Object::Stream(s)) = doc.get_object(id) {
-                                    globals_bytes = Some(stream_data_with_doc(doc, s));
-                                }
-                            }
-                            _ => {}
-                        }
-                    }
-                    // also nested deref if DecodeParms is reference containing indirect
-                }
-            }
-        }
-        // Also check dict's own DecodeParms may be array with first dict containing globals
-        if globals_bytes.is_none() {
-            if let Some(Object::Dictionary(d)) = dict.get(b"DecodeParms").ok().and_then(|o| deref(doc,o)) {
-                if let Some(Object::Stream(s)) = d.get(b"JBIG2Globals").ok().and_then(|o| deref(doc,o).or(Some(o))).cloned() {
-                    globals_bytes = Some(stream_data_with_doc(doc, &s));
-                }
-            }
-        }
+        let globals_bytes = jbig2_globals(doc, dict, &specs);
 
         // Attempt decode from raw content
         if let Some((jw,jh,mut rgba)) = jbig2::decode_jbig2(&stream.content, globals_bytes.as_deref(), w, h) {
@@ -1431,14 +1477,6 @@ pub(crate) fn radial_shading_param(coords: &[f64], e0: bool, e1: bool, fx: f64, 
         }
     }
     best
-}
-
-/// Compute an effective raster resolution from a unit-square→device matrix so
-/// gradients stay sharp when the page is zoomed. Clamped to a sane range.
-pub(crate) fn shading_device_size(unit_to_device: &Mat) -> u32 {
-    let dev_w = (unit_to_device[0].powi(2) + unit_to_device[1].powi(2)).sqrt();
-    let dev_h = (unit_to_device[2].powi(2) + unit_to_device[3].powi(2)).sqrt();
-    (dev_w.max(dev_h).ceil() as u32).clamp(64, 1024)
 }
 
 pub(crate) fn rasterize_shading(doc: &Document, shading_obj: &Object, base_ctm: &Mat, cs_resources: &HashMap<Vec<u8>, ObjectId>, size: u32, clip_bbox_device: Option<[f64;4]>) -> Option<(Mat, u32, u32, Vec<u8>)> {
@@ -2654,35 +2692,9 @@ fn decode_mask_stream_gray(
         // /JBIG2Globals holds the symbol dictionary shared across pages. Without it a
         // JBIG2 image decodes to nothing, and a failed JBIG2 mask renders as a silently
         // transparent region, so this is the single most common cause of total failure.
-        //
-        // Read it off `specs`, which pairs an ARRAY of /DecodeParms with the filter array
-        // index-by-index. Matching only a direct `Object::Dictionary` on the stream dict —
-        // as this did — misses `/Filter [/FlateDecode /JBIG2Decode]` with
-        // `/DecodeParms [null <</JBIG2Globals 5 0 R>>]`, which is the common shape, since
-        // there /DecodeParms is an Array and the branch never fired. The primary image
-        // path (`extract_image_inner`) already resolves it this way; this mask path did
-        // not, and the two must agree.
-        let globals_bytes = |pd: &Dictionary| -> Option<Vec<u8>> {
-            // NOT `decompressed_content()`: that is lopdf's decoder, which implements only
-            // Flate/LZW/ASCII85 and returns Err for the rest, and the old fallback handed
-            // back the still-ENCODED bytes as if they were a symbol dictionary.
-            match pd.get(b"JBIG2Globals").ok().and_then(|o| deref(doc, o)) {
-                Some(Object::Stream(gs)) => Some(stream_data_with_doc(doc, gs)),
-                _ => None,
-            }
-        };
-        let mut globals: Option<Vec<u8>> = specs
-            .iter()
-            .filter(|(k, _)| *k == filters::FilterKind::Jbig2)
-            .filter_map(|(_, pd)| pd.as_ref().and_then(|d| globals_bytes(d)))
-            .next();
-        // Fallback: a /DecodeParms dict hung directly off the stream, unpaired with the
-        // filter chain. Harmless when `specs` already supplied the globals.
-        if globals.is_none() {
-            if let Some(Object::Dictionary(d)) = s.dict.get(b"DecodeParms").ok().and_then(|o| deref(doc, o)) {
-                globals = globals_bytes(d);
-            }
-        }
+        // `jbig2_globals` is the same resolution the primary image path uses, so the two
+        // cannot disagree about which shapes of /DecodeParms carry the globals.
+        let globals = jbig2_globals(doc, &s.dict, &specs);
         if globals.is_none() {
             image_warn!("JBIG2 mask {}x{}: no /JBIG2Globals found - decode may fail", sw, sh);
         }
@@ -3068,19 +3080,6 @@ mod mask_tests {
     }
 
     #[test]
-    fn device_size_scales_with_ctm() {
-        // Unit square scaled to 500 device px -> ~500 raster, clamped to [64,1024].
-        let big = super::shading_device_size(&[500.0, 0.0, 0.0, 400.0, 0.0, 0.0]);
-        assert_eq!(big, 500);
-        // A tiny footprint clamps up to the 64 minimum.
-        let small = super::shading_device_size(&[10.0, 0.0, 0.0, 10.0, 0.0, 0.0]);
-        assert_eq!(small, 64);
-        // A huge footprint clamps to the 1024 maximum.
-        let huge = super::shading_device_size(&[5000.0, 0.0, 0.0, 5000.0, 0.0, 0.0]);
-        assert_eq!(huge, 1024);
-    }
-
-    #[test]
     fn bilevel_downscale_keeps_two_colours() {
         // A 4x1 black/white checker halved. Averaging blends each pair to mid grey and is
         // what makes a downscaled QR code unreadable; nearest keeps the pixels it picks.
@@ -3271,6 +3270,255 @@ mod mask_tests {
             assert!(
                 alpha.iter().any(|v| *v != 0),
                 "an undecodable JBIG2 mask must not mask the whole image away"
+            );
+        }
+    }
+
+    // §7.4.7: both JBIG2 paths must resolve /JBIG2Globals identically. `specs` pairs an
+    // array /DecodeParms with the filter chain index-by-index, but producers also emit the
+    // array MISALIGNED with the chain, and matching only a direct `Object::Dictionary` —
+    // which both call sites did as their fallback — dropped the globals. A JBIG2 decode
+    // without them fails, and a failed decode renders the region silently transparent.
+    #[test]
+    fn jbig2_globals_are_found_in_every_decodeparms_shape() {
+        let mut doc = Document::with_version("1.7");
+        let globals = doc.add_object(Object::Stream(Stream::new(
+            lopdf::dictionary! {},
+            b"GLOBALS".to_vec(),
+        )));
+        let parms = || lopdf::dictionary! { "JBIG2Globals" => Object::Reference(globals) };
+        let expect = |d: Dictionary, why: &str| {
+            let specs = filters::filter_specs_from_dict(&doc, &d);
+            assert_eq!(
+                super::jbig2_globals(&doc, &d, &specs).as_deref(),
+                Some(&b"GLOBALS"[..]),
+                "{why}"
+            );
+        };
+        // Paired through the filter chain: a single filter, and an array whose second
+        // element carries the parameters.
+        expect(
+            lopdf::dictionary! { "Filter" => Object::Name(b"JBIG2Decode".to_vec()), "DecodeParms" => parms() },
+            "single /Filter with a dict /DecodeParms",
+        );
+        expect(
+            lopdf::dictionary! {
+                "Filter" => Object::Array(vec![Object::Name(b"FlateDecode".to_vec()), Object::Name(b"JBIG2Decode".to_vec())]),
+                "DecodeParms" => Object::Array(vec![Object::Null, Object::Dictionary(parms())]),
+            },
+            "/Filter [/FlateDecode /JBIG2Decode] with an aligned array /DecodeParms",
+        );
+        // Misaligned: the globals sit at the index of the OTHER filter, so `specs` pairs
+        // `None` with JBIG2 and only an array-scanning fallback finds them.
+        expect(
+            lopdf::dictionary! {
+                "Filter" => Object::Array(vec![Object::Name(b"FlateDecode".to_vec()), Object::Name(b"JBIG2Decode".to_vec())]),
+                "DecodeParms" => Object::Array(vec![Object::Dictionary(parms()), Object::Null]),
+            },
+            "an array /DecodeParms misaligned with the filter chain",
+        );
+    }
+
+    // ---- Compressed-codec stencil paths -----------------------------------
+    // The polarity tests above all drive the UNCOMPRESSED 1-bit path. The codec
+    // branches reach `stencilize` by a different route and each has its own
+    // inversion source, so they need their own pins. CCITT is the worst case: it
+    // folds `/Decode` into `black_bit` while building the raster and then calls
+    // `stencilize(.., false)` precisely so the same `/Decode` is not applied a
+    // second time. Nothing caught a regression there before these.
+
+    /// Group 4 (T.6) encode `rows` of `true` = black pels, as `/CCITTFaxDecode`
+    /// with `/K -1` expects.
+    fn g4_encode(rows: &[Vec<bool>], width: u32) -> Vec<u8> {
+        let mut enc = fax::encoder::Encoder::new(fax::VecWriter::new());
+        for row in rows {
+            let pels = row
+                .iter()
+                .map(|&b| if b { fax::Color::Black } else { fax::Color::White });
+            enc.encode_line(pels, width).expect("VecWriter is infallible");
+        }
+        enc.finish().expect("infallible").finish()
+    }
+
+    /// 8x2, left half black. Returned with the row pattern so a test can state
+    /// the expectation in terms of ink rather than bits.
+    fn half_black_g4() -> (Vec<u8>, usize) {
+        let row: Vec<bool> = (0..8).map(|x| x < 4).collect();
+        (g4_encode(&[row.clone(), row], 8), 8)
+    }
+
+    fn ccitt_stencil(decode_inverts: bool, black_is1: bool) -> ImageData {
+        let doc = Document::with_version("1.7");
+        let (data, w) = half_black_g4();
+        let mut parms = dictionary! { "K" => -1, "Columns" => w as i64, "Rows" => 2 };
+        if black_is1 {
+            parms.set("BlackIs1", true);
+        }
+        let mut d = dictionary! {
+            "Width" => w as i64, "Height" => 2, "BitsPerComponent" => 1,
+            "ImageMask" => true,
+            "Filter" => "CCITTFaxDecode",
+            "DecodeParms" => parms,
+        };
+        if decode_inverts {
+            d.set("Decode", vec![1.into(), 0.into()]);
+        }
+        extract_image(&doc, &Stream::new(d, data), 0xFF00_FF00, &HashMap::new())
+            .expect("a G4 stencil must decode")
+    }
+
+    /// A `/ImageMask` CCITT stencil paints the fill colour where the fax has BLACK
+    /// pels and leaves the rest of the page alone (§8.9.6.2). Rendering the
+    /// complement is the "solid dark block over a scanned page" symptom.
+    #[test]
+    fn ccitt_stencil_paints_the_black_pels() {
+        let img = ccitt_stencil(false, false);
+        assert_eq!((img.w, img.h, img.format), (8, 2, 0));
+        assert_eq!(
+            &img.data[0..4], &[0, 255, 0, 255],
+            "a black pel takes the fill colour, opaque"
+        );
+        assert_eq!(img.data[4 * 3 + 3], 255, "still black at x=3");
+        assert_eq!(img.data[4 * 4 + 3], 0, "the white half is transparent");
+        assert_eq!(img.data[4 * 7 + 3], 0, "and stays transparent to the row end");
+        // Row 1 is the same pattern: a polarity that depended on the row would be
+        // a reference-line bug rather than a polarity bug.
+        assert_eq!(img.data[4 * 8 + 3], 255, "row 1, x=0 is painted");
+        assert_eq!(img.data[4 * 12 + 3], 0, "row 1, x=4 is transparent");
+    }
+
+    /// `/Decode [1 0]` reverses a CCITT stencil EXACTLY ONCE. The raster loop
+    /// applies it via `black_bit` and `stencilize` is then called with
+    /// `invert = false`; if a future change also passes `mask_invert` here, the two
+    /// cancel and this test sees the un-inverted image.
+    #[test]
+    fn ccitt_stencil_decode_array_inverts_exactly_once() {
+        let plain = ccitt_stencil(false, false);
+        let inverted = ccitt_stencil(true, false);
+        // Only alpha is asserted for an unpainted pixel: `stencilize` zeroes alpha and
+        // leaves RGB as the raster left it, so the colour under a transparent pixel is
+        // not part of the contract. Here it is the white the raster is initialised to,
+        // because `/Decode [1 0]` makes the loop skip the black pels rather than write
+        // them — pinning it would pin which of the two stages inverts, not that exactly
+        // one does.
+        assert_eq!(
+            inverted.data[3], 0,
+            "/Decode [1 0] must stop painting the black pels"
+        );
+        assert_eq!(
+            &inverted.data[4 * 4..4 * 4 + 4], &[0, 255, 0, 255],
+            "and must paint the white half instead"
+        );
+        // Stated as a whole-raster complement so a partial inversion (one row, or
+        // only the fast path) cannot pass.
+        for px in 0..(8 * 2) {
+            assert_ne!(
+                plain.data[px * 4 + 3], inverted.data[px * 4 + 3],
+                "pixel {px} must flip under /Decode [1 0]"
+            );
+        }
+    }
+
+    /// `/BlackIs1` is the CCITT path's SECOND inversion source, and it lives in the
+    /// filter: §7.4.6 Table 11 says 1 bits are black when it is true, "the reverse of
+    /// the normal PDF convention", and `decode_ccitt` emits that polarity. The image
+    /// layer then reads sample 0 as black per §8.9.5.2 without re-applying the flag,
+    /// so the decoded stencil comes out reversed — which is what a `/Decode [1 0]`
+    /// alongside `/BlackIs1 true` exists to undo. Pinned because it is the one
+    /// polarity input NOT applied where the others are, so a well-meaning "fix" that
+    /// folds it into `black_bit` as well would double-invert and silently return this
+    /// to the un-reversed raster.
+    #[test]
+    fn ccitt_black_is1_reverses_the_stencil_and_decode_restores_it() {
+        let plain = ccitt_stencil(false, false);
+        let black_is1 = ccitt_stencil(false, true);
+        for px in 0..(8 * 2) {
+            assert_ne!(
+                plain.data[px * 4 + 3], black_is1.data[px * 4 + 3],
+                "pixel {px}: /BlackIs1 true reverses the decoded samples"
+            );
+        }
+        let restored = ccitt_stencil(true, true);
+        assert_eq!(
+            plain.data, restored.data,
+            "/BlackIs1 true with /Decode [1 0] is the same image as neither"
+        );
+    }
+
+    /// One JBIG2 segment header (embedded organisation, §7.2): number, flags
+    /// carrying the type, an empty referred-to list, a 1-byte page association and
+    /// the data length.
+    fn jbig2_segment(number: u32, seg_type: u8, page: u8, data: &[u8]) -> Vec<u8> {
+        let mut out = Vec::new();
+        out.extend_from_slice(&number.to_be_bytes());
+        out.push(seg_type); // page-association size bit clear => 1 byte
+        out.push(0x00); // referred-to count 0, no retain flags
+        out.push(page);
+        out.extend_from_slice(&(data.len() as u32).to_be_bytes());
+        out.extend_from_slice(data);
+        out
+    }
+
+    /// An embedded JBIG2 stream holding one immediate lossless generic region coded
+    /// with MMR (which is T.6, so the same G4 bytes a fax uses).
+    fn jbig2_mmr_stream(width: u32, height: u32, mmr: &[u8]) -> Vec<u8> {
+        let mut page = Vec::new();
+        page.extend_from_slice(&width.to_be_bytes());
+        page.extend_from_slice(&height.to_be_bytes());
+        page.extend_from_slice(&0u32.to_be_bytes()); // x resolution
+        page.extend_from_slice(&0u32.to_be_bytes()); // y resolution
+        page.push(0x01); // lossless, default pixel 0 (white)
+        page.extend_from_slice(&0u16.to_be_bytes()); // striping
+
+        let mut region = Vec::new();
+        region.extend_from_slice(&width.to_be_bytes());
+        region.extend_from_slice(&height.to_be_bytes());
+        region.extend_from_slice(&0u32.to_be_bytes()); // x
+        region.extend_from_slice(&0u32.to_be_bytes()); // y
+        region.push(0x00); // external combination operator OR
+        region.push(0x01); // generic region flags: MMR = 1, so no AT pixels follow
+        region.extend_from_slice(mmr);
+
+        let mut out = jbig2_segment(0, 48, 1, &page);
+        out.extend_from_slice(&jbig2_segment(1, 39, 1, &region));
+        out
+    }
+
+    fn jbig2_stencil(decode_inverts: bool) -> Option<ImageData> {
+        let doc = Document::with_version("1.7");
+        let (mmr, w) = half_black_g4();
+        let data = jbig2_mmr_stream(w as u32, 2, &mmr);
+        let mut d = dictionary! {
+            "Width" => w as i64, "Height" => 2, "BitsPerComponent" => 1,
+            "ImageMask" => true,
+            "Filter" => "JBIG2Decode",
+        };
+        if decode_inverts {
+            d.set("Decode", vec![1.into(), 0.into()]);
+        }
+        extract_image(&doc, &Stream::new(d, data), 0xFF00_FF00, &HashMap::new())
+    }
+
+    /// The JBIG2 stencil branch is a different route to `stencilize` from CCITT's:
+    /// the decoder hands back an already-black-on-white RGBA raster and `/Decode` is
+    /// applied ONLY by `stencilize`'s `invert`. Both directions are pinned because
+    /// this branch, unlike CCITT's, would silently paint nothing at all if the
+    /// polarity were reversed on a mostly-white scan.
+    #[test]
+    fn jbig2_stencil_paints_the_black_pixels_and_decode_inverts_it() {
+        let plain = jbig2_stencil(false).expect("an MMR generic region must decode");
+        assert_eq!((plain.w, plain.h, plain.format), (8, 2, 0));
+        assert_eq!(
+            &plain.data[0..4], &[0, 255, 0, 255],
+            "a black JBIG2 pixel takes the fill colour"
+        );
+        assert_eq!(plain.data[4 * 4 + 3], 0, "the white half is transparent");
+
+        let inverted = jbig2_stencil(true).expect("decodes");
+        for px in 0..(8 * 2) {
+            assert_ne!(
+                plain.data[px * 4 + 3], inverted.data[px * 4 + 3],
+                "pixel {px} must flip under /Decode [1 0]"
             );
         }
     }

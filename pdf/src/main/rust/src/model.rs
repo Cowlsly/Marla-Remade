@@ -149,6 +149,14 @@ pub(crate) enum Prim {
     ///
     /// Boxed because 256 bytes inline would grow every `Prim` in the page vector by
     /// ~3x — see `MAX_PRIMITIVES` for why per-prim size is load-bearing here.
+    ///
+    /// That worked, and the consequence is worth recording: `bench` measured
+    /// `size_of::<Box<[u8; 256]>>() == 8`, so this is no longer the widest variant.
+    /// The binding ones are now `Image`/`ImageTiled`, which carry a `Mat` (48 B) AND a
+    /// `Vec<u8>` (24 B) — 72 B before `w`, `h`, `format`, `alpha`, `blend` and the
+    /// discriminant, which is what puts `size_of::<Prim>()` at 112. So boxing another
+    /// small payload would buy nothing; if `Prim` ever needs to be narrower the lever
+    /// is the `Mat` or the image payload. The const assertion below this enum pins it.
     SoftMaskTransfer(Box<[u8; 256]>),
     /// Marker: switch from masked content to mask drawing (v5).
     SoftMaskContent,
@@ -171,48 +179,14 @@ pub(crate) struct PageData {
     pub(crate) prims: Vec<Prim>,
 }
 
-/// Multiply the alpha channel of a primitive's color by `alpha_mul` (0..1). Used to
-/// honor an annotation's constant opacity (`/CA`). Images: scale per-image alpha.
-pub(crate) fn scale_prim_alpha(prim: &mut Prim, alpha_mul: f64) {
-    let scale = |argb: &mut u32| {
-        let a = ((*argb >> 24) & 0xFF) as f64;
-        let na = (a * alpha_mul).round().clamp(0.0, 255.0) as u32;
-        *argb = (*argb & 0x00FF_FFFF) | (na << 24);
-    };
-    let scale_opt = |argb: &mut Option<u32>| {
-        if let Some(v) = argb {
-            let a = ((*v >> 24) & 0xFF) as f64;
-            let na = (a * alpha_mul).round().clamp(0.0, 255.0) as u32;
-            *v = (*v & 0x00FF_FFFF) | (na << 24);
-        }
-    };
-    match prim {
-        Prim::Text { argb, stroke_argb, .. } => { scale(argb); scale_opt(stroke_argb); },
-        Prim::Fill { argb, .. } => scale(argb),
-        Prim::Stroke { argb, .. } => scale(argb),
-        Prim::Image { alpha: img_a, .. } => {
-            let cur = *img_a as f64;
-            let na = (cur * alpha_mul.clamp(0.0,1.0)).clamp(0.0,1.0) as f32;
-            *img_a = if na.is_nan() { 1.0 } else { na };
-        },
-        Prim::ImageTiled { alpha: img_a, .. } => {
-            let cur = *img_a as f64;
-            let na = (cur * alpha_mul.clamp(0.0,1.0)).clamp(0.0,1.0) as f32;
-            *img_a = if na.is_nan() { 1.0 } else { na };
-        },
-        Prim::ClipPush { .. } => {},
-        Prim::ClipPop => {},
-        Prim::TextClipApply => {},
-        Prim::GroupPush { alpha: ga, .. } => { let cur = *ga as f64; *ga = (cur * alpha_mul.clamp(0.0,1.0)) as f32; },
-        Prim::GroupPop => {},
-        Prim::SoftMaskPush { .. } => {},
-        // A transfer LUT is a mask-shape function, not colour; constant opacity does
-        // not scale it. Scaling it here would distort the mask curve rather than fade it.
-        Prim::SoftMaskTransfer(_) => {},
-        Prim::SoftMaskContent => {},
-        Prim::SoftMaskPop => {},
-    }
-}
+// `scale_prim_alpha` was here: it multiplied one primitive's alpha channel by a
+// constant. Removed once its only caller went away. Annotation constant opacity
+// (`/CA`, §12.5.2) is the opacity of the annotation AS A WHOLE, and per-primitive
+// scaling cannot express that — walking the emitted prims scaled a `GroupPush` and
+// everything inside it, so `/CA` landed twice on a transparency group's contents.
+// `render_annotation` now wraps the appearance in a `GroupPush`/`GroupPop` layer
+// instead, which applies it exactly once. Composite through a layer rather than
+// reintroducing this.
 
 pub(crate) fn apply_alpha_to_argb(argb: u32, alpha_mul: f64) -> u32 {
     if (alpha_mul - 1.0).abs() < 1e-6 {
@@ -223,7 +197,24 @@ pub(crate) fn apply_alpha_to_argb(argb: u32, alpha_mul: f64) -> u32 {
     (argb & 0x00FF_FFFF) | (na << 24)
 }
 
+/// `Prim` width is load-bearing: [`MAX_PRIMITIVES`] of them are held live in one vector and
+/// then copied wholesale into the wire buffer, so the per-variant size multiplies by
+/// 300_000. Measured at 112 bytes (independently confirmed on this tree, and by `bench`).
+///
+/// This is a CONST assertion rather than a `#[test]` so it is checked by `cargo check` on
+/// every build, cannot be skipped by a test filter, and needs no linking. Asserted as a
+/// ceiling rather than `== 112` deliberately: the exact figure is padding-dependent and
+/// could legitimately differ on another target or compiler version, and an assertion that
+/// fires for that reason teaches people to delete it. The ceiling still catches the mistake
+/// that matters — inlining the 256-byte `/TR` LUT back into `SoftMaskTransfer`, which would
+/// take the enum past 264 and roughly triple the vector.
+const _: () = assert!(
+    std::mem::size_of::<Prim>() <= 128,
+    "size_of::<Prim>() exceeded 128 B. At MAX_PRIMITIVES it is held live AND copied into \
+     the wire buffer, so this multiplies by 300_000. Box any large payload added to a \
+     variant - see SoftMaskTransfer."
+);
+
 // ---------------------------------------------------------------------------
 // Object helpers
-
 // ---------------------------------------------------------------------------

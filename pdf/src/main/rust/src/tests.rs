@@ -179,22 +179,22 @@ fn text_advances_by_glyph_widths() {
     let fi = FontInfo {
         two_byte: false,
         wmode: 0,
-        vertical_metrics: HashMap::new(),
+        vertical_metrics: std::sync::Arc::default(),
         default_vertical: (0.0, -1000.0),
         cid_to_gid: None,
         to_unicode: None,
-        encoding: HashMap::new(),
-        cmap_uni: HashMap::new(),
+        encoding: std::sync::Arc::default(),
+        cmap_uni: std::sync::Arc::default(),
         cmap: None,
         // 'A' (0x41) and 'B' (0x42) each 500 glyph units => 0.5.
-        widths: HashMap::from([(0x41, 0.5), (0x42, 0.5)]),
+        widths: std::sync::Arc::new(HashMap::from([(0x41, 0.5), (0x42, 0.5)])),
         default_width: 0.5,
         t3: None,
         style: FontStyle::default(),
         family: 0,
         base_font: String::new(),
         glyph_program: None,
-        glyph_names: HashMap::new(),
+        glyph_names: std::sync::Arc::default(),
     };
     let mut fonts = HashMap::new();
     fonts.insert(b"F1".to_vec(), fi);
@@ -239,21 +239,21 @@ fn mode3_text_emits_no_ink_but_stays_searchable() {
     let fi = FontInfo {
         two_byte: false,
         wmode: 0,
-        vertical_metrics: HashMap::new(),
+        vertical_metrics: std::sync::Arc::default(),
         default_vertical: (0.0, -1000.0),
         cid_to_gid: None,
         to_unicode: None,
-        encoding: HashMap::new(),
-        cmap_uni: HashMap::new(),
+        encoding: std::sync::Arc::default(),
+        cmap_uni: std::sync::Arc::default(),
         cmap: None,
-        widths: HashMap::new(),
+        widths: std::sync::Arc::default(),
         default_width: 0.5,
         t3: None,
         style: FontStyle::default(),
         family: 0,
         base_font: String::new(),
         glyph_program: None,
-        glyph_names: HashMap::new(),
+        glyph_names: std::sync::Arc::default(),
     };
     let mut fonts = HashMap::new();
     fonts.insert(b"F1".to_vec(), fi);

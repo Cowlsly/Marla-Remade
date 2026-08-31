@@ -50,11 +50,12 @@ UTF-8 text, so Kotlin never touches the raw PDF bytes.
   owns the whole decompressed embedded font program — used to be rebuilt on every
   `interpret_content` call, so a font shared by *N* pages was parsed *N* times to
   render and another *N* times to build the search index. The cache is keyed by
-  the font dictionary's object id and is scoped to a single top-level operation,
-  then dropped: an object id is only a complete key while the document is
-  unmutated, so a short-lived cache is correct where a global one would serve
-  stale fonts after a `docedit`. Direct (non-indirect) font dictionaries are
-  never cached.
+  the font dictionary's object id *plus* a hash of that dictionary with every
+  indirect reference resolved, so a colliding id from another document cannot be
+  served, and is scoped to a single top-level operation, then dropped: even that
+  key is complete only while the document is unmutated, so a short-lived cache is
+  correct where a global one would serve stale fonts after a `docedit`. Direct
+  (non-indirect) font dictionaries have no id and are never cached.
 - **Embedded glyph outlines**: TrueType/OpenType, bare CFF (`/Type1C`,
   `/CIDFontType0C`) and bare Type 1 programs are parsed and their real glyph
   contours are emitted as vector fills/strokes (`outlines.rs`), so paint modes
@@ -176,7 +177,107 @@ UTF-8 text, so Kotlin never touches the raw PDF bytes.
   Ink, Highlight, Underline and StrikeOut (via `/QuadPoints`, `/C`, `/IC`,
   `/BS`).
 
+## Known cross-fix interaction risks (round-3 review)
+
+These came out of a review of the ~90 changes that landed across rounds 1 and 2,
+looking specifically for fixes that conflict, cancel or double-apply rather than
+for individually-wrong code. All were verified against the working tree. The
+first two are open because they live outside the reviewing agent's file set.
+
+- **Optional content does not gate form XObject content.** `oc_stack` is a local
+  in `interpret_content_seeded` and is not threaded into nested streams, so
+  `/OC1 BDC /Fm0 Do EMC` with `OC1` OFF paints the form's whole contents —
+  and, because the `/BBox` clip is suppressed by the same hidden flag, paints
+  them *unclipped*. Round 1 fixed the BMC/BDC/EMC balance and round 2 fixed the
+  text operators, but the `Do` recursion was never gated. An XObject's own `/OC`
+  key (§8.11.3.3) *is* honoured; it is only the BDC-bracket state that is lost.
+- **The §11.6.6 group alpha reset is disabled whenever a soft mask is active.**
+  Round 2 made the transparency-group push and the soft-mask bracket mutually
+  exclusive (`should_emit_group = is_transparency_group && !use_smask`), and the
+  reset of `alpha_fill`/`alpha_stroke` to 1.0 is gated on the push having
+  happened. A group form drawn with both `/ca < 1` and an `/SMask` therefore
+  applies `ca` to every element inside the group instead of once to the
+  composited result. Same hole when `MAX_PRIMITIVES` or the group-depth cap
+  demotes the push. Identical output for non-overlapping content; over-darkens
+  overlapping content.
+- **Annotation `/CA` used to be applied twice** — fixed. `render_annotation`
+  scaled the alpha of every prim it had just emitted, which hit both a nested
+  `GroupPush`'s alpha *and* every prim inside that group (CA² on the contents),
+  and also hit the soft-mask group's own prims, which `wrap_with_soft_mask`
+  appends after `SoftMaskContent` in the same range — so `/CA` altered the mask
+  rather than the content. It now wraps the appearance in one
+  `GroupPush{alpha: ca}`/`GroupPop`, which is the §12.5.2 + §11.6.6 model and
+  applies the opacity once, at composite time.
+
+Verified clean, with the evidence, so a future change knows what it is allowed to
+disturb:
+
+- **Mask polarity is inverted exactly once on every convention.** `/Decode` is
+  read in exactly five places in `images.rs`, and `decode_mask_stream_gray`
+  deliberately does not read it at all — polarity comes only from its
+  `MaskPolarity` argument, and the caller applies `/Decode` once afterwards. The
+  CCITT stencil path folds `/Decode` into its `black_bit` and then calls
+  `stencilize` with `invert: false` precisely so it is not re-applied. The CCITT
+  and JBIG2 stencil paths are now covered by tests as well as by reading —
+  including `/BlackIs1`, the second inversion source, and the `/BlackIs1` +
+  `/Decode [1 0]` pair that cancel. `stencilize` zeroes alpha and leaves the RGB
+  of a transparent pixel as the raster left it, so those tests state polarity in
+  terms of alpha; the colour beneath an unpainted pixel is not part of the
+  contract. The DCT and JPX mask branches remain untested.
+- **Neither round-2 cache leaks.** The font cache is a `thread_local` installed
+  by an RAII `FontCacheScope` (one per page render, one per search-index build)
+  and keyed by the font's `ObjectId` plus a hash of its dictionary with every
+  indirect reference *resolved* — not by resource name, so two
+  pages both binding `/F1` to different font objects stay distinct, and not by
+  the `Document`'s address, which is not an identity: `Document`s are held by
+  value in the registry's `IndexMap`, so one can be replaced at the address
+  another just vacated and a scope spanning both would serve the first
+  document's fonts for the second. Resolving through the references also catches
+  two font dicts that are byte-identical but whose `/Widths 7 0 R` names
+  different arrays. It has no
+  invalidation hook and needs none: it does not exist between operations, so a
+  `docedit` mutation cannot be served a stale entry. Residual fragility: the key
+  is complete only while the document is unmutated *within* a scope, which is
+  what scoping it to one top-level operation buys. The soft-mask
+  coalescing memo is a local in `interpret_content_seeded`, and its key includes
+  the group id, mask type, the CTM as exact `f64::to_bits()`, `/BC` and the whole
+  256-byte `/TR` LUT, so a mask cannot be reused at a different CTM.
+- **Clip and group brackets balance on every path**, including the truncation
+  and cap paths: every structural pop is emitted *without* a `MAX_PRIMITIVES`
+  guard while every content push has one, so the cap can never suppress a
+  closer, and the end-of-stream drain closes whatever is left.
+
+### Deliberate omission: GB18030's four-byte plane
+
+Now implemented. `EncodingCMap::code_len` dispatches on the first byte alone,
+which cannot see GB18030's four-byte plane (distinguished from its two-byte plane
+only by the second byte being `0x30`-`0x39`). Round 2 left this alone on the
+grounds that widening the lookahead for every font to fix a rare case was not
+obviously right. `code_len_at` resolves it as a *strict refinement* instead: it
+only ever chooses a longer range, and only when that range also matches the
+second byte. No other predefined codespace has two ranges of different length
+sharing a first byte, so for every font but GB18030 the answer is provably
+identical to `code_len` — which removes the tradeoff that made the deferral
+reasonable. `gb18030_four_byte_plane_needs_the_second_byte` asserts both halves,
+exhaustively over all 256 first bytes for the other families.
+
+
 ## Genuinely unsupported (documented, not silently skipped)
+
+Per-feature spec coverage, and the rationale for each deliberately-ignored
+feature: [SPEC_COVERAGE.md](SPEC_COVERAGE.md).
+
+### An OCG listed in both `/ON` and `/OFF` renders as OFF
+
+§8.11.4.3 gives `/ON` and `/OFF` as overrides of `/BaseState` and does not spell
+out the result when the same group appears in both. `OcConfig::is_ocg_visible`
+applies them in the order Table 101 lists them — `/BaseState` (default ON), then
+`/ON`, then `/OFF` — so `/OFF` is applied last and wins, which is what mainstream
+viewers do and therefore how a file authored against them was meant to look.
+
+`/BlackPoint` on CIE-based spaces (§8.6.5.2, §8.6.5.4) is a genuine deviation of
+this kind: the conversion adapts from `/WhitePoint` only, so the effect is a
+slight shift in the darkest tones rather than missing content.
 
 > ### WARNING: Redaction does not remove content — it covers it
 >
@@ -190,9 +291,7 @@ UTF-8 text, so Kotlin never touches the raw PDF bytes.
 > This is a **security** limitation, not a fidelity one — the page looks redacted
 > while the data is still there. The removal is a heuristic over text-showing
 > operators, not a content-stream rewrite. There is currently no user-facing
-> warning on the apply action. It also compounds with the stale search index below:
-> in the same session, search can still surface and highlight the text you just
-> redacted.
+> warning on the apply action.
 
 
 - **Public-key / certificate encryption** (`/Filter /Adobe.PubSec`): decryption
@@ -358,18 +457,20 @@ UTF-8 text, so Kotlin never touches the raw PDF bytes.
   bracket per painting operator re-expanded the mask for every operator and pushed
   pages past the primitive cap, truncating real content — a visibly worse outcome
   than a slight blend error.
-- **The search index is never invalidated after a document edit**: redacting,
-  adding or deleting an annotation, filling a form field, or moving, removing or
-  rotating a page does **not** rebuild the text index for the rest of the session.
-  Search then returns hits computed from the pre-edit text and highlights
-  rectangles that point at content which has moved or no longer exists. The
-  privacy-relevant case compounds with the redaction warning above: **search can
-  still surface and highlight text that was just redacted.** `invalidate_index`
-  exists and is correct, but has no callers — the mutators take the registry lock
-  directly rather than through a single accessor, so there is no one place that
-  observes "this document changed", and the ~25 handle-taking mutators across
-  `docedit.rs`, `annotations.rs` and `forms.rs` would each have to remember to call
-  it. Closing an unused document is the only thing that currently evicts an index.
+- **The search index is invalidated by an RAII guard, not by the mutators
+  themselves**: `ensure_index` is a pure memo keyed by handle and never re-reads
+  the document, so the "a search answers from the current document" contract rests
+  entirely on every mutating entry point dropping the entry. `invalidate_index`
+  used to have no callers at all, which meant redacting, annotating, filling a
+  form field or moving a page left search answering from the pre-edit text —
+  including, in the privacy-relevant case, surfacing and highlighting text that
+  had just been redacted. Each mutating `extern` fn in `jni_bindings.rs` now holds
+  an `InvalidateSearchIndex` guard for the whole call, so the eviction happens on
+  the unwind path too and a panic that leaves a document half-edited cannot leave
+  a matching index behind. The residual fragility is that it is per-entry-point
+  rather than structural: a *new* mutating binding that forgets the guard
+  reintroduces the staleness, because there is still no single accessor that
+  observes "this document changed".
 - **Form fields with no appearance stream are invisible**: a field that relies on
   the viewer to build its own appearance (`/NeedAppearances` set, no `/AP`)
   renders as nothing at all rather than as a box showing its value, because
