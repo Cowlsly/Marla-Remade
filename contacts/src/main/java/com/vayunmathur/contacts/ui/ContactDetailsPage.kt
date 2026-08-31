@@ -43,7 +43,6 @@ import com.vayunmathur.library.ui.DetailLazyColumn
 import com.vayunmathur.library.ui.IconButton
 import com.vayunmathur.library.ui.MaterialTheme
 import com.vayunmathur.library.ui.Surface
-import com.vayunmathur.library.util.exitDownward
 import com.vayunmathur.library.util.sharedContainer
 import com.vayunmathur.library.util.sharedText
 import com.vayunmathur.library.util.sharedContent
@@ -473,10 +472,6 @@ fun ContactDetailsScreen(
                         data = ringtoneTitle(context, contact.customRingtone),
                         label = stringResource(R.string.ringtone),
                         onClick = { actions.pickRingtone(contact) },
-                        // The groups block above this one grows downwards as it morphs into the editor,
-                        // travelling straight over this row. Fading in place would leave it half-legible
-                        // underneath; moving with the traveller gets it out of the way.
-                        modifier = Modifier.exitDownward(),
                     )
                 }
             }

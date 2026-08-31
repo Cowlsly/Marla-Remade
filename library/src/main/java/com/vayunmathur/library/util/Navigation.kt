@@ -40,7 +40,7 @@ import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.SnackbarResult
 import androidx.compose.material3.Text
 import androidx.compose.material3.adaptive.ExperimentalMaterial3AdaptiveApi
-import androidx.compose.material3.adaptive.currentWindowAdaptiveInfo
+import androidx.compose.material3.adaptive.currentWindowAdaptiveInfoV2
 import androidx.compose.material3.adaptive.navigation3.ListDetailSceneStrategy
 import androidx.compose.material3.adaptive.navigation3.rememberListDetailSceneStrategy
 import androidx.compose.runtime.Composable
@@ -453,7 +453,7 @@ fun <T: NavKey> MainNavigation(
     val transitions = rememberNavTransitions()
 
     // Matches the width at which the list-detail strategy starts showing two panes at once.
-    val multiPane = currentWindowAdaptiveInfo().windowSizeClass
+    val multiPane = currentWindowAdaptiveInfoV2().windowSizeClass
         .isWidthAtLeastBreakpoint(WindowSizeClass.WIDTH_DP_MEDIUM_LOWER_BOUND)
 
     val resolvedContainerColor = containerColor.takeOrElse { MaterialTheme.colorScheme.background }
@@ -555,33 +555,6 @@ fun <T: NavKey> rememberNavBackStack(vararg elements: T): NavBackStack<T> {
         @Suppress("UNCHECKED_CAST")
         (retained.stack as? NavBackStack<T>)
             ?: NavBackStack(elements).also { retained.stack = it }
-    }
-}
-
-/**
- * Sends just this element down and out of the window as the screen leaves, instead of fading in place.
- *
- * Narrow tool, and deliberately not the default for a morph. Use it only where something above this
- * element travels *downwards over it* during the transition: a fading element still occupies its space
- * for the whole fade, so the traveller crosses over something half-legible. Moving it in the same
- * direction as the traveller clears the path.
- *
- * Everywhere else this is wrong. Vertical movement reads as the screen falling apart, and applying it
- * broadly costs the calm of a plain crossfade for no gain - which is why it is opt-in per element.
- *
- * No-ops outside a [MainNavigation].
- */
-@Composable
-fun Modifier.exitDownward(): Modifier {
-    val scope = LocalEntryAnimatedScope.current ?: return this
-    val motion = MaterialTheme.motionScheme
-    val offset = motion.defaultSpatialSpec<IntOffset>()
-    val alpha = motion.defaultEffectsSpec<Float>()
-    return with(scope) {
-        this@exitDownward.animateEnterExit(
-            enter = fadeIn(alpha),
-            exit = fadeOut(alpha) + slideOutVertically(offset) { it },
-        )
     }
 }
 
