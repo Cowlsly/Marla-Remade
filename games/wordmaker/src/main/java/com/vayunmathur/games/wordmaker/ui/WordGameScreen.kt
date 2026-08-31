@@ -233,10 +233,12 @@ fun WordGameScreen(
                     rootOffset = it.localToRoot(Offset.Zero)
                 }
         ) {
-            // Puzzle board fills entire area so it can be dragged under the letter wheel.
-            // It is drawn first (behind), so the wheel and buttons appear on top.
+            // Puzzle board occupies the space above the letter wheel so it stays
+            // vertically centred there. The wheel below is 320.dp tall.
             Box(
-                modifier = Modifier.fillMaxSize(),
+                modifier = Modifier
+                    .fillMaxSize()
+                    .padding(bottom = 320.dp),
                 contentAlignment = Alignment.Center
             ) {
                 CrosswordBoard(
