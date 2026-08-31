@@ -43,6 +43,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
 import com.vayunmathur.library.util.NavBackStack
+import com.vayunmathur.library.util.sharedText
 import com.vayunmathur.library.image.compose.AsyncImage
 import com.vayunmathur.library.image.ImageRequest
 import com.vayunmathur.library.ui.invisibleClickable
@@ -216,6 +217,14 @@ fun VideoRow(
     modifier: Modifier = Modifier,
     trailingContent: @Composable (() -> Unit)? = null,
     overflowActions: List<Pair<String, () -> Unit>> = emptyList(),
+    /**
+     * Morphs this row's title into the title on the video screen. Passed in per call site rather
+     * than derived from [row] here, because a row is drawn by eight of them: the home feed and the
+     * search overlay are on screen together, and the tab pager has two feeds composed mid-swipe, so
+     * keying every row would put the same video under one key twice with no single origin to travel
+     * from. Null everywhere but the one list a morph starts at.
+     */
+    titleSharedKey: Any? = null,
 ) {
     val effectiveTrailing: (@Composable () -> Unit)? = when {
         overflowActions.isNotEmpty() -> {
@@ -272,7 +281,11 @@ fun VideoRow(
                     }
                 }
             }, trailingContent = effectiveTrailing?.let { { it() } }, colors = ListItemDefaults.colors(containerColor = Color.Transparent)) {
-                Text(row.title, style = MaterialTheme.typography.titleMedium)
+                Text(
+                    row.title,
+                    style = MaterialTheme.typography.titleMedium,
+                    modifier = if (titleSharedKey == null) Modifier else Modifier.sharedText(titleSharedKey),
+                )
             }
         }
     }

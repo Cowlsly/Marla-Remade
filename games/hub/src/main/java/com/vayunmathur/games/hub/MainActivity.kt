@@ -35,7 +35,7 @@ import com.vayunmathur.games.hub.viewmodel.GameHubViewModelFactory
 import com.vayunmathur.library.ui.DynamicTheme
 import com.vayunmathur.library.util.DatabaseHelper
 import com.vayunmathur.library.util.MainNavigation
-import com.vayunmathur.library.util.ZoomPage
+import com.vayunmathur.library.util.MorphPage
 import com.vayunmathur.library.util.NavBackStack
 import com.vayunmathur.library.util.NavKey
 import com.vayunmathur.library.util.rememberNavBackStack
@@ -96,7 +96,7 @@ fun HubNavigation(
         entry<MainRoute.Main> {
             HubTabs(viewModel = viewModel, backStack = backStack, dbConfigs = dbConfigs)
         }
-        entry<MainRoute.GameDetail>(metadata = ZoomPage()) { route ->
+        entry<MainRoute.GameDetail>(metadata = MorphPage()) { route ->
             GameDetailScreen(
                 gameId = route.gameId,
                 viewModel = viewModel,

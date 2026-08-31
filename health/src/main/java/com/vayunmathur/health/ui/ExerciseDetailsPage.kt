@@ -2,6 +2,7 @@ package com.vayunmathur.health.ui
 
 import kotlinx.datetime.format.DateTimeFormat
 import com.vayunmathur.library.util.DateNameStyle
+import com.vayunmathur.library.util.sharedText
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
@@ -61,8 +62,13 @@ fun ExerciseDetailsPage(backStack: NavBackStack<Route>, viewModel: HealthViewMod
     val records by remember { viewModel.getAllRecordsOfType(RecordType.Exercise) }.collectAsState(emptyList())
 
     AppScaffold(
-        title = stringResource(R.string.label_exercise),
-        backStack = backStack,
+        title = {
+            Text(
+                stringResource(R.string.label_exercise),
+                modifier = Modifier.sharedText("health-metric-label-EXERCISE"),
+            )
+        },
+        onNavigateBack = { backStack.pop() },
         scrollBehavior = appBarScrollBehavior(),
     ) { padding ->
         if (records.isEmpty()) {

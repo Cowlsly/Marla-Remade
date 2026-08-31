@@ -34,6 +34,7 @@ import com.vayunmathur.library.ui.SnackbarHost
 import com.vayunmathur.library.ui.SnackbarHostState
 import com.vayunmathur.library.ui.Text
 import com.vayunmathur.library.ui.appBarScrollBehavior
+import com.vayunmathur.library.util.sharedText
 import com.vayunmathur.vpn.R
 import com.vayunmathur.vpn.data.VpnConfig
 
@@ -108,8 +109,19 @@ private fun ConfigRow(
         Column(Modifier.fillMaxWidth().padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
                 Column {
-                    Text(cfg.name.ifBlank { "Unnamed" }, fontWeight = FontWeight.Bold, fontSize = 16.sp)
-                    Text(cfg.peerEndpoint, fontSize = 12.sp, fontFamily = FontFamily.Monospace, color = if (isActive) MaterialTheme.colorScheme.onPrimaryContainer else MaterialTheme.colorScheme.onSurfaceVariant)
+                    Text(
+                        cfg.name.ifBlank { "Unnamed" },
+                        fontWeight = FontWeight.Bold,
+                        fontSize = 16.sp,
+                        modifier = Modifier.sharedText("vpn-title-${cfg.id}"),
+                    )
+                    Text(
+                        cfg.peerEndpoint,
+                        fontSize = 12.sp,
+                        fontFamily = FontFamily.Monospace,
+                        color = if (isActive) MaterialTheme.colorScheme.onPrimaryContainer else MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.sharedText("vpn-endpoint-${cfg.id}"),
+                    )
                 }
                 if (isConnecting) CircularProgressIndicator(Modifier.size(20.dp), strokeWidth = 2.dp)
             }

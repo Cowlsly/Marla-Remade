@@ -1,7 +1,6 @@
 package com.vayunmathur.flashcards.ui
 
 import androidx.activity.compose.BackHandler
-import androidx.compose.animation.core.animateDpAsState
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.RowScope
@@ -55,7 +54,9 @@ import com.vayunmathur.library.ui.TextField
 import com.vayunmathur.library.ui.rememberReorderableLazyListState
 import com.vayunmathur.library.ui.reorderDragHandle
 import com.vayunmathur.library.ui.appBarScrollBehavior
+import com.vayunmathur.library.ui.animatedDp
 import com.vayunmathur.library.util.NavBackStack
+import com.vayunmathur.library.util.sharedText
 import kotlin.math.roundToInt
 
 /** Binds [FlashcardsViewModel] and the nav back stack to the stateless [DeckListScreen]. */
@@ -165,7 +166,7 @@ fun DeckListScreen(
                     Modifier.animateItem()
                 }
                 ReorderableItem(reorderState, key = summary.deck.id, modifier = itemModifier) { isDragging ->
-                    val elevation by animateDpAsState(if (isDragging) 8.dp else 0.dp, label = "deckElevation")
+                    val elevation = animatedDp(if (isDragging) 8.dp else 0.dp)
                     Surface(shadowElevation = elevation) {
                         DeckRow(
                             summary = summary,
@@ -221,7 +222,12 @@ private fun DeckRow(
                 modifier = Modifier.size(48.dp),
             )
         },
-        headlineContent = { Text(summary.deck.name) },
+        headlineContent = {
+            Text(
+                summary.deck.name,
+                modifier = Modifier.sharedText("flashcards-deck-name-${summary.deck.id}"),
+            )
+        },
         supportingContent = {
             Text(
                 stringResource(

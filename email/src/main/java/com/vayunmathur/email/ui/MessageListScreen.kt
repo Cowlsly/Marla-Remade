@@ -66,6 +66,7 @@ import com.vayunmathur.library.ui.SnackbarHostState
 import com.vayunmathur.library.ui.Surface
 import com.vayunmathur.library.ui.Text
 import com.vayunmathur.library.ui.appBarScrollBehavior
+import com.vayunmathur.library.util.sharedText
 
 @Composable
 fun MessageListPage(
@@ -199,6 +200,17 @@ fun MessageListScreen(
                     else -> state.messages
                 }
             }
+            // The thread screen opens on a thread, not a message, and a folder can hold several
+            // messages of the same thread - so only the newest row of each thread carries the key.
+            // Two rows holding one key leave the morph no single origin to travel from.
+            val subjectMorphKeys = remember(filteredMessages) {
+                filteredMessages
+                    .distinctBy { "${it.accountEmail}|${it.threadId ?: it.id}" }
+                    .associate { msg ->
+                        "${msg.accountEmail}|${msg.folderName}|${msg.id}" to
+                            "email-subject-${msg.accountEmail}-${msg.threadId ?: msg.id}"
+                    }
+            }
             com.vayunmathur.library.ui.PullToRefreshBox(isRefreshing = state.isSyncing, onRefresh = { actions.refresh(context) }, modifier = Modifier.fillMaxSize()) {
                 if (state.messages.isEmpty() && state.searchQuery.isEmpty()) {
                     Box(modifier = Modifier.fillMaxSize()) {
@@ -228,6 +240,7 @@ fun MessageListScreen(
                         items(filteredMessages, key = { "${it.accountEmail}|${it.folderName}|${it.id}" }) { message ->
                             val isPending = pendingDelete?.let { it.id == message.id && it.accountEmail == message.accountEmail && it.folderName == message.folderName } == true
                             if (!isPending) {
+                                val subjectKey = subjectMorphKeys["${message.accountEmail}|${message.folderName}|${message.id}"]
                                 val accountBandColor = Color(accountColor(message.accountEmail))
                                 val isSelected = message.id in state.selectedUids
                                 val currentMessage by rememberUpdatedState(message)
@@ -258,7 +271,7 @@ fun MessageListScreen(
                                         Surface(modifier = Modifier.width(4.dp).fillMaxHeight(), color = if (message.isRead) Color.Transparent else MaterialTheme.colorScheme.primary) {}
                                         ListItem(
                                             leadingContent = null,
-                                            content = { Text(text = message.subject, style = MaterialTheme.typography.bodyLarge, fontWeight = if (message.isRead) androidx.compose.ui.text.font.FontWeight.Normal else androidx.compose.ui.text.font.FontWeight.Bold) },
+                                            content = { Text(text = message.subject, style = MaterialTheme.typography.bodyLarge, fontWeight = if (message.isRead) androidx.compose.ui.text.font.FontWeight.Normal else androidx.compose.ui.text.font.FontWeight.Bold, modifier = if (subjectKey == null) Modifier else Modifier.sharedText(subjectKey)) },
                                             supportingContent = {
                                                 Column {
                                                     Text(text = senderDisplayName(message.from), style = MaterialTheme.typography.titleSmall)

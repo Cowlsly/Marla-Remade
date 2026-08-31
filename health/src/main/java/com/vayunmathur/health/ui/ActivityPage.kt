@@ -27,6 +27,7 @@ import com.vayunmathur.library.ui.DashboardSection
 import com.vayunmathur.library.ui.DashboardSectionDivider
 import com.vayunmathur.health.util.HealthViewModel
 import com.vayunmathur.library.util.NavBackStack
+import com.vayunmathur.library.util.sharedText
 import com.vayunmathur.library.util.round
 import kotlinx.coroutines.flow.map
 import kotlinx.datetime.TimeZone
@@ -91,6 +92,7 @@ fun ActivityPage(backStack: NavBackStack<Route>, viewModel: HealthViewModel) {
                         unit = stringResource(R.string.unit_steps),
                         leadingIcon = { m, c -> IconDirectionsWalk(m, c) },
                         leadingTint = colorFor(RecordType.Steps),
+                        labelModifier = Modifier.sharedText("health-metric-label-STEPS"),
                         onClick = { backStack.add(Route.BarChartDetails(HealthMetricConfig.STEPS)) },
                     )
                     DashboardSectionDivider()
@@ -100,6 +102,7 @@ fun ActivityPage(backStack: NavBackStack<Route>, viewModel: HealthViewModel) {
                         unit = stringResource(R.string.unit_cal),
                         leadingIcon = { m, c -> IconFire(m, c) },
                         leadingTint = colorFor(RecordType.CaloriesActive),
+                        labelModifier = Modifier.sharedText("health-metric-label-ACTIVE_CALORIES"),
                         onClick = { backStack.add(Route.BarChartDetails(HealthMetricConfig.ACTIVE_CALORIES)) },
                     )
                     DashboardSectionDivider()
@@ -109,6 +112,7 @@ fun ActivityPage(backStack: NavBackStack<Route>, viewModel: HealthViewModel) {
                         unit = stringResource(R.string.unit_km),
                         leadingIcon = { m, c -> IconLocationOn(m, c) },
                         leadingTint = colorFor(RecordType.Distance),
+                        labelModifier = Modifier.sharedText("health-metric-label-DISTANCE"),
                         onClick = { backStack.add(Route.BarChartDetails(HealthMetricConfig.DISTANCE)) },
                     )
                     DashboardSectionDivider()
@@ -118,6 +122,7 @@ fun ActivityPage(backStack: NavBackStack<Route>, viewModel: HealthViewModel) {
                         unit = stringResource(R.string.unit_fl),
                         leadingIcon = { m, c -> IconLocationOn(m, c) },
                         leadingTint = colorFor(RecordType.Floors),
+                        labelModifier = Modifier.sharedText("health-metric-label-FLOORS"),
                         onClick = { backStack.add(Route.BarChartDetails(HealthMetricConfig.FLOORS)) },
                     )
                     DashboardSectionDivider()
@@ -127,6 +132,7 @@ fun ActivityPage(backStack: NavBackStack<Route>, viewModel: HealthViewModel) {
                         unit = stringResource(R.string.unit_m),
                         leadingIcon = { m, c -> IconLocationOn(m, c) },
                         leadingTint = colorFor(RecordType.Elevation),
+                        labelModifier = Modifier.sharedText("health-metric-label-ELEVATION"),
                         onClick = { backStack.add(Route.BarChartDetails(HealthMetricConfig.ELEVATION)) },
                     )
                     DashboardSectionDivider()
@@ -136,6 +142,7 @@ fun ActivityPage(backStack: NavBackStack<Route>, viewModel: HealthViewModel) {
                         unit = stringResource(R.string.unit_pushes),
                         leadingIcon = { m, c -> IconDirectionsWalk(m, c) },
                         leadingTint = colorFor(RecordType.Wheelchair),
+                        labelModifier = Modifier.sharedText("health-metric-label-WHEELCHAIR_PUSHES"),
                         onClick = { backStack.add(Route.BarChartDetails(HealthMetricConfig.WHEELCHAIR_PUSHES)) },
                     )
                     DashboardSectionDivider()
@@ -145,6 +152,7 @@ fun ActivityPage(backStack: NavBackStack<Route>, viewModel: HealthViewModel) {
                         unit = stringResource(R.string.unit_min),
                         leadingIcon = { m, c -> IconDirectionsWalk(m, c) },
                         leadingTint = colorFor(RecordType.Exercise),
+                        labelModifier = Modifier.sharedText("health-metric-label-EXERCISE"),
                         onClick = { backStack.add(Route.ExerciseDetails) },
                     )
                 }

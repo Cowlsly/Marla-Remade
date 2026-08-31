@@ -32,6 +32,8 @@ import com.vayunmathur.library.ui.MaterialTheme
 import com.vayunmathur.library.ui.Text
 import com.vayunmathur.library.ui.appBarScrollBehavior
 import com.vayunmathur.library.util.NavBackStack
+import com.vayunmathur.library.util.sharedContainer
+import com.vayunmathur.library.util.sharedText
 import com.vayunmathur.music.R
 import com.vayunmathur.music.Route
 import com.vayunmathur.music.ui.components.PlayShuffleRow
@@ -67,12 +69,17 @@ fun AlbumDetailContent(
                     AlbumArt(state.artUri, Modifier
                         .size(260.dp)
                         .clip(RoundedCornerShape(24.dp))
-                        .background(MaterialTheme.colorScheme.surfaceVariant))
+                        .background(MaterialTheme.colorScheme.surfaceVariant)
+                        .sharedContainer("music-album-art-${state.albumId}"))
 
                     Spacer(modifier = Modifier.height(24.dp))
 
                     ListItem({
-                        Text(state.name, style = MaterialTheme.typography.titleLarge)
+                        Text(
+                            state.name,
+                            style = MaterialTheme.typography.titleLarge,
+                            modifier = Modifier.sharedText("music-album-title-${state.albumId}"),
+                        )
                     }, Modifier, {Text(stringResource(R.string.label_album))}, {
                         Column {
                             if (state.artistName.isNotEmpty()) {
@@ -81,11 +88,11 @@ fun AlbumDetailContent(
                                     state.artistName,
                                     color = if (artistId != null) MaterialTheme.colorScheme.primary
                                     else Color.Unspecified,
-                                    modifier = if (artistId != null) {
+                                    modifier = (if (artistId != null) {
                                         Modifier.clickable { backStack.add(Route.ArtistDetail(artistId)) }
                                     } else {
                                         Modifier
-                                    },
+                                    }).sharedText("music-album-artist-${state.albumId}"),
                                 )
                             }
                             Text(state.info)

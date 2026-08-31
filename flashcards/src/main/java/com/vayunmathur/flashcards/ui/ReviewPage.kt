@@ -1,7 +1,5 @@
 package com.vayunmathur.flashcards.ui
 
-import androidx.compose.animation.core.animateFloatAsState
-import androidx.compose.animation.core.tween
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.layout.Arrangement
@@ -55,6 +53,8 @@ import com.vayunmathur.library.ui.MaterialTheme
 import com.vayunmathur.library.ui.OutlinedTextField
 import com.vayunmathur.library.ui.Text
 import com.vayunmathur.library.ui.appBarScrollBehavior
+import com.vayunmathur.library.ui.animatedFloat
+import com.vayunmathur.library.ui.Motion
 import com.vayunmathur.library.util.NavBackStack
 import kotlin.math.abs
 
@@ -231,10 +231,11 @@ private fun FlipCard(
     typed: String,
     modifier: Modifier = Modifier,
 ) {
-    val rotation by animateFloatAsState(
-        targetValue = if (revealed) 180f else 0f,
-        animationSpec = tween(durationMillis = 400),
-        label = "flip",
+    // Duration-based, not the scheme's spring: an underdamped spring overshoots 180 and rubber-bands
+    // the card back, which on a face turning in 3D reads as a wobble rather than a flip.
+    val rotation = animatedFloat(
+        target = if (revealed) 180f else 0f,
+        spec = Motion.open(400),
     )
     Box(
         modifier = modifier.graphicsLayer {

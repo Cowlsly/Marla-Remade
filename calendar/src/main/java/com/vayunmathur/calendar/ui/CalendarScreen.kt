@@ -76,6 +76,7 @@ import com.vayunmathur.library.ui.IconArrowDropDown
 import com.vayunmathur.library.ui.IconSettings
 import com.vayunmathur.library.util.NavBackStack
 import com.vayunmathur.library.util.ResultEffect
+import com.vayunmathur.library.util.sharedText
 import kotlinx.datetime.DatePeriod
 import kotlinx.datetime.LocalDate
 import kotlinx.datetime.TimeZone
@@ -367,6 +368,18 @@ fun CalendarPagerView(
     }
 }
 
+/**
+ * The key that morphs one event's title into the title on its detail screen, or null when this copy
+ * is not the one the morph should start from.
+ *
+ * Keyed on the instance rather than the event: every occurrence of a repeating event is on screen at
+ * once in a month, and they all share an event id. Keyed only on the day the occurrence starts,
+ * because an event spanning days is drawn once per day it covers - and the week and month pagers keep
+ * the neighbouring pages composed, so those copies are live too. One key, one origin.
+ */
+private fun eventTitleMorphKey(instance: Instance, date: LocalDate): String? =
+    if (date == instance.startDateTime.date) "calendar-event-title-${instance.id}" else null
+
 @Composable
 fun SummaryGrid(
     context: android.content.Context,
@@ -395,7 +408,7 @@ fun SummaryGrid(
             ) {
                 dayInstances.forEach { instance ->
                     val ev = vEventsByID[instance.eventID]!!
-                    SummaryEventItem(context, instance, ev, calendars, onEventClick)
+                    SummaryEventItem(context, instance, ev, calendars, onEventClick, eventTitleMorphKey(instance, day))
                 }
             }
             if (index < weekDays.size - 1) {
@@ -411,7 +424,8 @@ fun SummaryEventItem(
     instance: Instance,
     ev: Event,
     calendars: Map<Long, Calendar>,
-    onEventClick: (Instance) -> Unit
+    onEventClick: (Instance) -> Unit,
+    titleSharedKey: Any? = null
 ) {
     val eventColor = Color(ev.color ?: calendars[ev.calendarID]!!.color)
     val onEventColor = contentColorOn(eventColor)
@@ -430,7 +444,8 @@ fun SummaryEventItem(
                 color = onEventColor,
                 fontSize = 10.sp,
                 fontWeight = FontWeight.Bold,
-                lineHeight = 12.sp
+                lineHeight = 12.sp,
+                modifier = if (titleSharedKey == null) Modifier else Modifier.sharedText(titleSharedKey)
             )
             if (!instance.allDay) {
                 val is24 = DateFormat.is24HourFormat(context)
@@ -613,7 +628,7 @@ fun MonthWeekRow(
                 Spacer(Modifier.height(2.dp))
                 dayInstances.forEach { instance ->
                     val ev = vEventsByID[instance.eventID]!!
-                    SummaryEventItem(context, instance, ev, calendars, onEventClick)
+                    SummaryEventItem(context, instance, ev, calendars, onEventClick, eventTitleMorphKey(instance, date))
                 }
             }
         }
@@ -676,8 +691,14 @@ fun AgendaView(
                 )
                 dayInstances.filter { date in it.spanDays }.forEach { instance ->
                     val ev = vEventsByID[instance.eventID]!!
+                    val titleKey = eventTitleMorphKey(instance, date)
                     ListItem(
-                        content = { Text(ev.title.ifEmpty { context.getString(R.string.no_title) }) },
+                        content = {
+                            Text(
+                                ev.title.ifEmpty { context.getString(R.string.no_title) },
+                                modifier = if (titleKey == null) Modifier else Modifier.sharedText(titleKey)
+                            )
+                        },
                         supportingContent = {
                             Text(dateRangeString(context, instance.startDateTimeDisplay.date, instance.endDateTimeDisplay.date, instance.startDateTimeDisplay.time, instance.endDateTimeDisplay.time, instance.allDay, includeDate = false))
                         },
@@ -758,6 +779,7 @@ private fun AllDayRow(
                         instances.forEach { instance ->
                             val ev = events[instance.eventID]!!
                             val eventColor = Color(ev.color ?: calendars[ev.calendarID]!!.color)
+                            val titleKey = eventTitleMorphKey(instance, d)
                             Box(
                                 Modifier
                                     .padding(bottom = 4.dp)
@@ -769,7 +791,9 @@ private fun AllDayRow(
                             ) {
                                 Text(
                                     ev.title.ifEmpty { stringResource(R.string.no_title) },
-                                    Modifier.padding(horizontal = 6.dp, vertical = 4.dp),
+                                    Modifier
+                                        .padding(horizontal = 6.dp, vertical = 4.dp)
+                                        .then(if (titleKey == null) Modifier else Modifier.sharedText(titleKey)),
                                     contentColorOn(eventColor),
                                     fontSize = 12.sp
                                 )
@@ -894,9 +918,12 @@ private fun HourlyGrid(
                                     .background(Color(ev.color))
                                     .clickable { onEventClick(instance) }
                             ) {
+                                val titleKey = eventTitleMorphKey(instance, d)
                                 Text(
                                     ev.title.ifEmpty { stringResource(R.string.no_title) },
-                                    Modifier.padding(6.dp),
+                                    Modifier
+                                        .padding(6.dp)
+                                        .then(if (titleKey == null) Modifier else Modifier.sharedText(titleKey)),
                                     contentColorOn(Color(ev.color)),
                                     maxLines = 2,
                                     fontSize = 12.sp

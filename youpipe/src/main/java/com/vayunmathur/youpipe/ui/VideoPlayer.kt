@@ -5,9 +5,6 @@ import android.content.ComponentName
 import android.os.Bundle
 import android.text.format.DateUtils
 import androidx.annotation.OptIn
-import androidx.compose.animation.AnimatedVisibility
-import androidx.compose.animation.fadeIn
-import androidx.compose.animation.fadeOut
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.interaction.MutableInteractionSource
@@ -39,6 +36,7 @@ import com.vayunmathur.library.ui.IconFullscreenExit
 import com.vayunmathur.library.ui.IconList
 import com.vayunmathur.library.ui.IconLock
 import com.vayunmathur.library.ui.IconButton
+import com.vayunmathur.library.ui.FadeVisibility
 import com.vayunmathur.library.ui.MaterialTheme
 import com.vayunmathur.library.ui.Slider
 import com.vayunmathur.library.ui.SliderDefaults
@@ -680,7 +678,7 @@ fun VideoPlayer(
             }
         }
 
-        AnimatedVisibility(visible = isControlsVisible && !isPipMode && !isLocked, enter = fadeIn(), exit = fadeOut()) {
+        FadeVisibility(visible = isControlsVisible && !isPipMode && !isLocked) {
             Box(modifier = Modifier.fillMaxSize().background(Color.Black.copy(alpha = 0.4f))) {
 
                 Row(
@@ -978,7 +976,7 @@ fun VideoPlayer(
             }
         }
 
-        AnimatedVisibility(visible = isLocked && isControlsVisible && !isPipMode, enter = fadeIn(), exit = fadeOut()) {
+        FadeVisibility(visible = isLocked && isControlsVisible && !isPipMode) {
             Box(modifier = Modifier.fillMaxSize()) {
                 IconButton(
                     onClick = {
@@ -995,7 +993,7 @@ fun VideoPlayer(
             }
         }
 
-        AnimatedVisibility(visible = isChapterMenuVisible && !isPipMode, enter = fadeIn(), exit = fadeOut()) {
+        FadeVisibility(visible = isChapterMenuVisible && !isPipMode) {
             Box(modifier = Modifier.fillMaxSize().background(Color.Black.copy(alpha = 0.9f)).clickable(enabled = true, onClick = {})) {
                 Column(modifier = Modifier.fillMaxSize()) {
                     Row(

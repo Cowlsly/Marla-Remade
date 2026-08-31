@@ -1,6 +1,5 @@
 package com.vayunmathur.youpipe.ui
 
-import androidx.compose.animation.core.animateDpAsState
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.lazy.items
@@ -35,7 +34,9 @@ import com.vayunmathur.library.ui.Text
 import com.vayunmathur.library.ui.rememberReorderableLazyListState
 import com.vayunmathur.library.ui.reorderDragHandle
 import com.vayunmathur.library.ui.appBarScrollBehavior
+import com.vayunmathur.library.ui.animatedDp
 import com.vayunmathur.library.util.NavBackStack
+import com.vayunmathur.library.util.sharedText
 import com.vayunmathur.youpipe.R
 import com.vayunmathur.youpipe.Route
 import com.vayunmathur.youpipe.util.YouPipeViewModel
@@ -128,7 +129,12 @@ fun SavedPage(backStack: NavBackStack<Route>, youPipeViewModel: YouPipeViewModel
                 item(key = "pinned-watch-later") {
                     ListItem(
                         leadingContent = { IconList() },
-                        content = { Text(stringResource(R.string.playlist_watch_later)) },
+                        content = {
+                            Text(
+                                stringResource(R.string.playlist_watch_later),
+                                modifier = Modifier.sharedText("youpipe-playlist-name-${watchLater.id}"),
+                            )
+                        },
                         supportingContent = {
                             Text(stringResource(R.string.playlist_video_count, counts[watchLater.id] ?: 0))
                         },
@@ -150,11 +156,16 @@ fun SavedPage(backStack: NavBackStack<Route>, youPipeViewModel: YouPipeViewModel
                     Modifier.animateItem()
                 }
                 ReorderableItem(reorderState, key = playlist.id, modifier = itemMod) { isDrag ->
-                    val elevation by animateDpAsState(if (isDrag) 8.dp else 0.dp)
+                    val elevation = animatedDp(if (isDrag) 8.dp else 0.dp)
                     Surface(shadowElevation = elevation) {
                         ListItem(
                             leadingContent = { IconList() },
-                            content = { Text(playlist.name) },
+                            content = {
+                                Text(
+                                    playlist.name,
+                                    modifier = Modifier.sharedText("youpipe-playlist-name-${playlist.id}"),
+                                )
+                            },
                             supportingContent = {
                                 Text(stringResource(R.string.playlist_video_count, counts[playlist.id] ?: 0))
                             },

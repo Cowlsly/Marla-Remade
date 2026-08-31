@@ -24,6 +24,7 @@ import com.vayunmathur.vpn.Route
 import com.vayunmathur.vpn.data.WgConfigParser
 import com.vayunmathur.vpn.platform.VpnViewModel
 import com.vayunmathur.library.util.NavBackStack
+import com.vayunmathur.library.util.sharedText
 
 /**
  * Read-only detail for an imported .conf tunnel — the only way to add is opening a .conf file.
@@ -43,8 +44,18 @@ fun ConfigDetailPage(backStack: NavBackStack<Route>, vm: VpnViewModel, id: Long)
             stringResource(R.string.imported_from_wireguard_conf_using_gotat),
             fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
-        Text(stringResource(R.string.name, cfg.name), fontSize = 14.sp, fontWeight = FontWeight.Bold)
-        Text(stringResource(R.string.endpoint, cfg.peerEndpoint), fontSize = 12.sp, fontFamily = FontFamily.Monospace)
+        Text(
+            stringResource(R.string.name, cfg.name),
+            fontSize = 14.sp,
+            fontWeight = FontWeight.Bold,
+            modifier = Modifier.sharedText("vpn-title-$id"),
+        )
+        Text(
+            stringResource(R.string.endpoint, cfg.peerEndpoint),
+            fontSize = 12.sp,
+            fontFamily = FontFamily.Monospace,
+            modifier = Modifier.sharedText("vpn-endpoint-$id"),
+        )
         Text(stringResource(R.string.address, cfg.address), fontSize = 12.sp, fontFamily = FontFamily.Monospace)
         Text(stringResource(R.string.dns, cfg.dns), fontSize = 12.sp, fontFamily = FontFamily.Monospace)
         Text(stringResource(R.string.allowedips, cfg.peerAllowedIPs), fontSize = 12.sp, fontFamily = FontFamily.Monospace)

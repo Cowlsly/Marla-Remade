@@ -12,6 +12,8 @@ import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
 import androidx.core.net.toUri
 import com.vayunmathur.library.util.NavBackStack
+import com.vayunmathur.library.util.sharedContainer
+import com.vayunmathur.library.util.sharedText
 import com.vayunmathur.library.ui.ListPage
 import com.vayunmathur.library.ui.appBarScrollBehavior
 import com.vayunmathur.music.ui.components.ShufflePlayFab
@@ -25,14 +27,16 @@ import com.vayunmathur.music.data.Artist
 fun ArtistsTabContent(backStack: NavBackStack<Route>, musicViewModel: MusicViewModel) {
     val artists by musicViewModel.artists.collectAsState()
 
-    ListPage<Artist, Route, Route.Song>(backStack, artists, stringResource(R.string.page_title_music), { Text(it.name) }, {
+    ListPage<Artist, Route, Route.Song>(backStack, artists, stringResource(R.string.page_title_music), {
+        Text(it.name, modifier = Modifier.sharedText("music-artist-name-${it.id}"))
+    }, {
     }, {
         Route.ArtistDetail(it)
     }, leadingContent = { artist ->
         val albumIds by musicViewModel.matchedAlbumsForArtist(artist.id)
         val allAlbums by musicViewModel.albums.collectAsState()
         val albumsUris by remember { derivedStateOf { allAlbums.filter { it.id in albumIds }.map { it.uri.toUri() } } }
-        AlbumArt(albumsUris, Modifier.size(40.dp))
+        AlbumArt(albumsUris, Modifier.size(40.dp).sharedContainer("music-artist-art-${artist.id}"))
     }, searchEnabled = true, fab = {
         ShufflePlayFab(musicViewModel)
     }, sortOrder = Comparator.comparing { it.name }, scrollBehavior = appBarScrollBehavior())

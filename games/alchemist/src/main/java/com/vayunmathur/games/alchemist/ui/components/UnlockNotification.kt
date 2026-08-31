@@ -1,11 +1,6 @@
 package com.vayunmathur.games.alchemist.ui.components
 
 import androidx.compose.ui.res.pluralStringResource
-import androidx.compose.animation.AnimatedVisibility
-import androidx.compose.animation.fadeIn
-import androidx.compose.animation.fadeOut
-import androidx.compose.animation.slideInVertically
-import androidx.compose.animation.slideOutVertically
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -14,6 +9,7 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.shape.RoundedCornerShape
+import com.vayunmathur.library.ui.BannerVisibility
 import com.vayunmathur.library.ui.Card
 import com.vayunmathur.library.ui.CardDefaults
 import com.vayunmathur.library.ui.MaterialTheme
@@ -32,10 +28,8 @@ fun UnlockNotification(
     unlock: List<AlchemyItem>,
     showing: Boolean
 ) {
-    AnimatedVisibility(
+    BannerVisibility(
         visible = showing && unlock.isNotEmpty(),
-        enter = slideInVertically { -it } + fadeIn(),
-        exit = slideOutVertically { -it } + fadeOut(),
         modifier = Modifier.padding(16.dp)
     ) {
         Card(

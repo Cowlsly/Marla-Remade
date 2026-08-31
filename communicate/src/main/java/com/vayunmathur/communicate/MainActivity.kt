@@ -27,6 +27,7 @@ import com.vayunmathur.library.ui.PagerTab
 import com.vayunmathur.library.ui.TabStyle
 import com.vayunmathur.library.ui.TabbedPagerScaffold
 import com.vayunmathur.library.util.MainNavigation
+import com.vayunmathur.library.util.MorphPage
 import com.vayunmathur.library.util.NavBackStack
 import com.vayunmathur.library.util.NavKey
 import com.vayunmathur.library.util.rememberNavBackStack
@@ -258,7 +259,7 @@ private fun CommunicateApp(initialDeepLink: DeepLink? = null) {
                 onRegistered = { backStack.pop() },
             )
         }
-        entry<Route.Conversation> { route ->
+        entry<Route.Conversation>(metadata = MorphPage()) { route ->
             ConversationScreen(
                 threadId = route.threadId,
                 address = route.address,

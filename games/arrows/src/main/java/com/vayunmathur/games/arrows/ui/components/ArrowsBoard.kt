@@ -1,3 +1,6 @@
+// RAW ANIMATION EXCEPTION: an arrow travelling its route is imperative motion - one Animatable
+// per tap, run through a sequence of legs (travel, blocked-hold, retreat) whose easing and length
+// depend on how far the arrow actually got, which no declarative target value can express.
 package com.vayunmathur.games.arrows.ui.components
 
 import androidx.compose.animation.core.Animatable

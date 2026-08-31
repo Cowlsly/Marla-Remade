@@ -32,6 +32,7 @@ import com.vayunmathur.library.ui.Tab
 import com.vayunmathur.library.ui.Text
 import com.vayunmathur.library.ui.appBarScrollBehavior
 import com.vayunmathur.library.util.NavBackStack
+import com.vayunmathur.library.util.sharedText
 import com.vayunmathur.musicbrainz.R
 import com.vayunmathur.musicbrainz.Route
 import com.vayunmathur.musicbrainz.ui.components.CoverArtImage
@@ -143,7 +144,9 @@ private fun SearchResults(
         when (state.tab) {
             SearchTab.Artists -> items(state.artists, key = { it.id }) { artist ->
                 ListItem(
-                    headlineContent = { Text(artist.name) },
+                    headlineContent = {
+                        Text(artist.name, modifier = Modifier.sharedText("mb-artist-name-${artist.id}"))
+                    },
                     modifier = Modifier
                         .fillMaxWidth()
                         .clickable { backStack.add(Route.Artist(artist.id)) },
@@ -153,7 +156,9 @@ private fun SearchResults(
             }
             SearchTab.Releases -> items(state.releaseGroups, key = { it.id }) { group ->
                 ListItem(
-                    headlineContent = { Text(group.title) },
+                    headlineContent = {
+                        Text(group.title, modifier = Modifier.sharedText("mb-release-group-title-${group.id}"))
+                    },
                     modifier = Modifier
                         .fillMaxWidth()
                         .clickable { backStack.add(Route.ReleaseGroup(group.id)) },

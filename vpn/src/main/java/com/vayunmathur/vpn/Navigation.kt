@@ -4,6 +4,7 @@ import android.content.Intent
 import androidx.activity.compose.LocalActivity
 import androidx.compose.runtime.Composable
 import com.vayunmathur.library.util.MainNavigation
+import com.vayunmathur.library.util.MorphPage
 import com.vayunmathur.library.util.rememberNavBackStack
 import com.vayunmathur.vpn.platform.VpnViewModel
 import com.vayunmathur.vpn.ui.BypassListPage
@@ -22,7 +23,7 @@ fun Navigation(vm: VpnViewModel) {
     val backStack = rememberNavBackStack<Route>(Route.Main(startTab))
     MainNavigation(backStack) {
         entry<Route.Main> { VpnTabs(backStack, vm, it.initialTab) }
-        entry<Route.Detail> { ConfigDetailPage(backStack, vm, it.id) }
+        entry<Route.Detail>(metadata = MorphPage()) { ConfigDetailPage(backStack, vm, it.id) }
         entry<Route.BypassList> { BypassListPage(backStack) }
     }
 }

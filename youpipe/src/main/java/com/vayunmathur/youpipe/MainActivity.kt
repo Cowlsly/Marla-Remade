@@ -32,8 +32,8 @@ import com.vayunmathur.library.ui.TabStyle
 import com.vayunmathur.library.ui.TabbedPagerScaffold
 import com.vayunmathur.library.util.DataStoreUtils
 import com.vayunmathur.library.util.DialogPage
-import com.vayunmathur.library.util.FullscreenPage
 import com.vayunmathur.library.util.MainNavigation
+import com.vayunmathur.library.util.MorphPage
 import com.vayunmathur.library.util.NavBackStack
 import com.vayunmathur.library.util.rememberNavBackStack
 import com.vayunmathur.youpipe.data.SubscriptionRepository
@@ -256,7 +256,10 @@ fun Navigation(initialBackStack: List<Route>, ypvm: YouPipeViewModel) {
     val backStack = rememberNavBackStack(initialBackStack)
     MainNavigation(backStack) {
         entry<Route.Main> { YouPipeTabs(backStack, ypvm, it.initialTab) }
-        entry<Route.VideoPage>(metadata = FullscreenPage()) {
+        // Morph, not Fullscreen: the feed row's title travels into the title under the player, and
+        // a morph only works against a crossfade - the immersive scale would move the target while
+        // the title is still on its way to it.
+        entry<Route.VideoPage>(metadata = MorphPage()) {
             VideoPage(backStack, ypvm, it.videoID)
         }
         entry<Route.ChannelPage> {
@@ -271,7 +274,7 @@ fun Navigation(initialBackStack: List<Route>, ypvm: YouPipeViewModel) {
         entry<Route.Downloads> {
             DownloadedVideosPage(backStack, ypvm)
         }
-        entry<Route.PlaylistDetail> {
+        entry<Route.PlaylistDetail>(metadata = MorphPage()) {
             PlaylistDetailPage(backStack, ypvm, it.playlistId)
         }
         entry<Route.CreatePlaylist>(metadata = DialogPage()) {

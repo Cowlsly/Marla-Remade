@@ -23,6 +23,7 @@ import com.vayunmathur.library.ui.MaterialTheme
 import com.vayunmathur.library.ui.Text
 import com.vayunmathur.library.ui.appBarScrollBehavior
 import com.vayunmathur.library.util.NavBackStack
+import com.vayunmathur.library.util.sharedText
 import com.vayunmathur.musicbrainz.R
 import com.vayunmathur.musicbrainz.Route
 import com.vayunmathur.musicbrainz.ui.components.CoverArtImage
@@ -35,7 +36,7 @@ import com.vayunmathur.musicbrainz.platform.MusicBrainzViewModel
 fun ArtistPage(backStack: NavBackStack<Route>, viewModel: MusicBrainzViewModel, artistId: String) {
     LaunchedEffect(artistId) { viewModel.loadArtist(artistId) }
     val state by viewModel.artist.collectAsStateWithLifecycle()
-    ArtistScreen(state, viewModel, backStack)
+    ArtistScreen(state, viewModel, backStack, sharedTextKey = "mb-artist-name-$artistId")
 }
 
 /** An artist's discography, newest first. */
@@ -44,10 +45,17 @@ fun ArtistScreen(
     state: ArtistUiState,
     actions: MusicBrainzActions,
     backStack: NavBackStack<Route>,
+    /** Pairs the heading with the search row this artist was opened from. */
+    sharedTextKey: Any? = null,
 ) {
     AppScaffold(
-        title = state.name.ifBlank { stringResource(R.string.artist) },
-        backStack = backStack,
+        title = {
+            Text(
+                state.name.ifBlank { stringResource(R.string.artist) },
+                modifier = if (sharedTextKey == null) Modifier else Modifier.sharedText(sharedTextKey),
+            )
+        },
+        onNavigateBack = { backStack.pop() },
         scrollBehavior = appBarScrollBehavior(),
     ) { padding ->
         when {
@@ -80,7 +88,9 @@ fun ArtistScreen(
                 }
                 items(state.releaseGroups, key = { it.id }) { group ->
                     ListItem(
-                        headlineContent = { Text(group.title) },
+                        headlineContent = {
+                            Text(group.title, modifier = Modifier.sharedText("mb-release-group-title-${group.id}"))
+                        },
                         modifier = Modifier
                             .fillMaxWidth()
                             .clickable { backStack.add(Route.ReleaseGroup(group.id)) },

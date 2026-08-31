@@ -24,6 +24,7 @@ import com.vayunmathur.everysync.platform.AccountDetailActions
 import com.vayunmathur.everysync.platform.AccountDetailUiState
 import com.vayunmathur.everysync.platform.EverySyncViewModel
 import com.vayunmathur.library.util.NavBackStack
+import com.vayunmathur.library.util.sharedText
 
 /** Binds [EverySyncViewModel] and the back stack to the stateless [AccountDetailScreen]. */
 @Composable
@@ -67,7 +68,12 @@ fun AccountDetailScreen(state: AccountDetailUiState, actions: AccountDetailActio
     val provider = state.providerId?.let { ProviderRegistry.get(it) }
 
     DetailScaffold(
-        title = state.accountName,
+        title = {
+            Text(
+                state.accountName,
+                modifier = Modifier.sharedText("everysync-title-${state.accountName}"),
+            )
+        },
         onNavigateBack = { actions.back() },
         scrollBehavior = appBarScrollBehavior(),
     ) {

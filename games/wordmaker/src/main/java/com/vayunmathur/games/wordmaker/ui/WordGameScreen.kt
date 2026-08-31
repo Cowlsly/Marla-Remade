@@ -1,3 +1,7 @@
+// RAW ANIMATION EXCEPTION: the letter-flight and rejection-shake are imperative motion - letters
+// fly from the chooser to their grid cells on a per-letter Animatable, and a rejected word is
+// walked through a hand-written sequence of decaying offsets, neither of which is a state a
+// declarative animation can settle on.
 package com.vayunmathur.games.wordmaker.ui
 
 import androidx.compose.animation.core.Animatable

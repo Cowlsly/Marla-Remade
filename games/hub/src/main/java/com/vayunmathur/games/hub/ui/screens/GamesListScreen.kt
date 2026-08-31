@@ -28,6 +28,7 @@ import com.vayunmathur.library.ui.IconMoreVert
 import com.vayunmathur.library.ui.MaterialTheme
 import com.vayunmathur.library.ui.Text
 import com.vayunmathur.library.ui.appBarScrollBehavior
+import com.vayunmathur.library.util.sharedContainer
 import androidx.compose.ui.res.stringResource
 
 enum class GameSort { LAST_PLAYED, MOST_PLAYED, NAME, COMPLETION }
@@ -88,6 +89,7 @@ fun GamesListScreen(
             items(filteredSorted, key = { it.gameId }) { game ->
                 GameCard(
                     game = game, isInstalled = game.gameId in state.installedGameIds,
+                    modifier = Modifier.sharedContainer("hub-game-${game.gameId}"),
                     achievementProgress = state.achievementProgressByGame[game.gameId],
                     dailyStreak = state.dailyStreakByGame[game.gameId],
                     iconDrawable = iconFor(game),

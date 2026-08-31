@@ -68,6 +68,7 @@ import com.vayunmathur.communicate.data.SmsMessage
 import com.vayunmathur.communicate.data.signal.SignalSafetyNumber
 import com.vayunmathur.communicate.data.SmsThread
 import com.vayunmathur.library.util.AppMessages
+import com.vayunmathur.library.util.sharedText
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -251,6 +252,7 @@ fun ConversationScreen(
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis,
                         fontWeight = FontWeight.SemiBold,
+                        modifier = Modifier.sharedText("communicate-thread-title-$threadId"),
                     )
                     LineBadge(line, modifier = Modifier.padding(start = 8.dp))
                 }

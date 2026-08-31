@@ -3,7 +3,6 @@ package com.vayunmathur.flashcards.ui
 import android.content.Intent
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
-import androidx.compose.animation.core.animateDpAsState
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
@@ -70,7 +69,9 @@ import com.vayunmathur.library.ui.rememberReorderableLazyListState
 import com.vayunmathur.library.ui.rememberSelectionState
 import com.vayunmathur.library.ui.reorderDragHandle
 import com.vayunmathur.library.ui.appBarScrollBehavior
+import com.vayunmathur.library.ui.animatedDp
 import com.vayunmathur.library.util.NavBackStack
+import com.vayunmathur.library.util.sharedText
 import com.vayunmathur.library.util.parseMarkdown
 
 /** Binds the deck with [deckId] to the stateless [NoteListScreen]. */
@@ -175,6 +176,7 @@ fun NoteListPage(
             decks = decks.filter { it.id != deckId }.map { DeckOption(it.id, it.name) },
         ),
         actions = actions,
+        deckNameSharedKey = "flashcards-deck-name-$deckId",
         onImport = {
             importLauncher.launch(
                 arrayOf(
@@ -200,6 +202,8 @@ fun NoteListScreen(
     state: NoteListUiState,
     actions: NoteListActions,
     onImport: () -> Unit = {},
+    /** Morphs the deck's name out of its row on the deck list. Null when nothing morphs into it. */
+    deckNameSharedKey: Any? = null,
 ) {
     var query by remember { mutableStateOf("") }
     var selectedTags by remember { mutableStateOf(emptySet<String>()) }
@@ -228,10 +232,15 @@ fun NoteListScreen(
     val plainList = query.isNotBlank() || selectedTags.isNotEmpty() || selection.isActive
 
     AppScaffold(
-        title = if (selection.isActive) {
-            stringResource(R.string.selected_count, selection.count)
-        } else {
-            state.deckName
+        title = {
+            if (selection.isActive) {
+                Text(stringResource(R.string.selected_count, selection.count))
+            } else {
+                Text(
+                    state.deckName,
+                    modifier = if (deckNameSharedKey == null) Modifier else Modifier.sharedText(deckNameSharedKey),
+                )
+            }
         },
         onNavigateBack = { if (selection.isActive) selection.clear() else actions.back() },
         actions = {
@@ -449,7 +458,7 @@ private fun ReorderableNoteList(
                 Modifier.animateItem()
             }
             ReorderableItem(reorderState, key = row.note.id, modifier = itemModifier) { isDragging ->
-                val elevation by animateDpAsState(if (isDragging) 8.dp else 0.dp, label = "noteElevation")
+                val elevation = animatedDp(if (isDragging) 8.dp else 0.dp)
                 Surface(shadowElevation = elevation) {
                     NoteRowItem(
                         row = row,

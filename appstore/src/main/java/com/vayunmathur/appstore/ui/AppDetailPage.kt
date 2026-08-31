@@ -63,6 +63,7 @@ import com.vayunmathur.library.ui.R as UiR
 import com.vayunmathur.library.ui.Text
 import com.vayunmathur.library.ui.TextButton
 import com.vayunmathur.library.ui.appBarScrollBehavior
+import com.vayunmathur.library.util.sharedContainer
 
 /** Binds [AppStoreViewModel] to the stateless [AppDetailScreen]. */
 @Composable
@@ -142,7 +143,10 @@ fun AppDetailScreen(
 private fun Header(state: AppDetailUiState) {
     val app = state.app ?: return
     Row(
-        Modifier.fillMaxWidth().padding(start = 16.dp, end = 16.dp, top = 8.dp),
+        Modifier
+            .sharedContainer("appstore-app-${app.packageName}")
+            .fillMaxWidth()
+            .padding(start = 16.dp, end = 16.dp, top = 8.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
         AppIcon(app, state.installedIcon, size = 80.dp, corner = 20.dp)

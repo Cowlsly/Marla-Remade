@@ -1,6 +1,5 @@
 package com.vayunmathur.games.alchemist.ui
 
-import androidx.compose.animation.Crossfade
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
@@ -34,6 +33,7 @@ import com.vayunmathur.library.ui.IconMoreVert
 import com.vayunmathur.library.ui.MaterialTheme
 import com.vayunmathur.library.ui.OverlayAction
 import com.vayunmathur.library.ui.Surface
+import com.vayunmathur.library.ui.SwappedContent
 import com.vayunmathur.library.ui.Text
 import com.vayunmathur.library.ui.TopAppBarOverlay
 import androidx.compose.runtime.Composable
@@ -226,10 +226,7 @@ fun HomeScreen(
                     tonalElevation = 8.dp,
                     color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.8f)
                 ) {
-                    Crossfade(
-                        targetState = isDraggingBoardItem,
-                        label = "bottom_bar_crossfade"
-                    ) { isDragging ->
+                    SwappedContent(isDraggingBoardItem) { isDragging ->
                         if (isDragging) {
                             Box(
                                 modifier = Modifier

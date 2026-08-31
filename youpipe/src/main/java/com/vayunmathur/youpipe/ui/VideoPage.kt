@@ -75,6 +75,7 @@ import com.vayunmathur.library.util.NavBackStack
 import com.vayunmathur.library.image.compose.AsyncImage
 import com.vayunmathur.library.image.ImageRequest
 import com.vayunmathur.library.util.round
+import com.vayunmathur.library.util.sharedText
 import com.vayunmathur.youpipe.data.DownloadedVideo
 import com.vayunmathur.youpipe.util.DownloadManager
 import com.vayunmathur.youpipe.R
@@ -348,6 +349,7 @@ fun VideoPage(
             }
         },
         fullscreen = isFullscreen,
+        titleSharedKey = "youpipe-video-title-$videoID",
     ) {
         videoData?.let { data ->
             if (videoStreams.isNotEmpty()) {
@@ -375,6 +377,8 @@ fun VideoDetailScreen(
     fullscreen: Boolean = false,
     /** Which of comments / related / description opens first. A seam for the previews. */
     initialTab: Int = 0,
+    /** Morphs the title out of the feed row the user tapped. Null when nothing morphs into it. */
+    titleSharedKey: Any? = null,
     player: @Composable () -> Unit = {},
 ) {
     Scaffold { paddingValues ->
@@ -382,7 +386,7 @@ fun VideoDetailScreen(
         Column(modifier) {
             if (state.loaded) {
                 player()
-                VideoDetails(state, actions)
+                VideoDetails(state, actions, titleSharedKey)
 
                 if(!fullscreen) {
                     val pagerState = rememberPagerState(initialPage = initialTab, pageCount = { 3 })
@@ -425,6 +429,7 @@ fun VideoDetailScreen(
 fun VideoDetails(
     state: VideoDetailUiState,
     actions: VideoDetailActions,
+    titleSharedKey: Any? = null,
 ) {
     var isDownloadDialogVisible by remember { mutableStateOf(false) }
 
@@ -581,7 +586,11 @@ fun VideoDetails(
                 }
             }
         }) {
-            Text(state.title, style = MaterialTheme.typography.titleMedium)
+            Text(
+                state.title,
+                style = MaterialTheme.typography.titleMedium,
+                modifier = if (titleSharedKey == null) Modifier else Modifier.sharedText(titleSharedKey),
+            )
         }
     }
 }

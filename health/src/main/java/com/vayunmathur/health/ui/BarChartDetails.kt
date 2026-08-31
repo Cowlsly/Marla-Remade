@@ -1,6 +1,7 @@
 package com.vayunmathur.health.ui
 
 import com.vayunmathur.library.util.DateNameStyle
+import com.vayunmathur.library.util.sharedText
 import com.vayunmathur.library.util.localizedMonthNames
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
@@ -378,7 +379,12 @@ fun BarChartDetailsScreen(
     }
 
     AppScaffold(
-        title = stringResource(config.titleRes),
+        title = {
+            Text(
+                stringResource(config.titleRes),
+                modifier = Modifier.sharedText("health-metric-label-${config.name}"),
+            )
+        },
         onNavigateBack = { actions.navigateUp() },
         scrollBehavior = appBarScrollBehavior(),
     ) { padding ->

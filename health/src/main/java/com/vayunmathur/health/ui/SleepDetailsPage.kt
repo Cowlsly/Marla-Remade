@@ -21,6 +21,7 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.health.connect.client.records.SleepSessionRecord
 import com.vayunmathur.health.R
+import com.vayunmathur.library.util.sharedText
 import com.vayunmathur.health.Route
 import com.vayunmathur.health.data.Record
 import com.vayunmathur.health.data.SleepData
@@ -47,8 +48,13 @@ fun SleepDetailsPage(backStack: NavBackStack<Route>, viewModel: HealthViewModel)
     val today = Clock.System.todayIn(tz)
 
     AppScaffold(
-        title = stringResource(R.string.label_sleep),
-        backStack = backStack,
+        title = {
+            Text(
+                stringResource(R.string.label_sleep),
+                modifier = Modifier.sharedText("health-metric-label-SLEEP"),
+            )
+        },
+        onNavigateBack = { backStack.pop() },
         scrollBehavior = appBarScrollBehavior(),
     ) { padding ->
         Column(

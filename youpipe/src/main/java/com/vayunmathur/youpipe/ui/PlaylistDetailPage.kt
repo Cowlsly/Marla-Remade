@@ -1,6 +1,5 @@
 package com.vayunmathur.youpipe.ui
 
-import androidx.compose.animation.core.animateDpAsState
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.Box
@@ -40,7 +39,9 @@ import com.vayunmathur.library.ui.ReorderableItem
 import com.vayunmathur.library.ui.rememberReorderableLazyListState
 import com.vayunmathur.library.ui.reorderDragHandle
 import com.vayunmathur.library.ui.appBarScrollBehavior
+import com.vayunmathur.library.ui.animatedDp
 import com.vayunmathur.library.util.NavBackStack
+import com.vayunmathur.library.util.sharedText
 import com.vayunmathur.youpipe.R
 import com.vayunmathur.youpipe.Route
 import com.vayunmathur.youpipe.util.YouPipeViewModel
@@ -117,7 +118,7 @@ fun PlaylistDetailPage(
             if (isSelectionMode) {
                 Text(stringResource(R.string.selected_1, selectedIds.size))
             } else {
-                Text(title)
+                Text(title, modifier = Modifier.sharedText("youpipe-playlist-name-$playlistId"))
             }
         },
         navigationIcon = {
@@ -168,7 +169,7 @@ fun PlaylistDetailPage(
                         Modifier.animateItem()
                     }
                     ReorderableItem(reorderState, key = item.id, modifier = itemMod) { isDrag ->
-                        val elevation by animateDpAsState(if (isDrag) 8.dp else 0.dp)
+                        val elevation = animatedDp(if (isDrag) 8.dp else 0.dp)
                         Surface(shadowElevation = elevation) {
                             Row(verticalAlignment = Alignment.CenterVertically) {
                                 if (isSelectionMode) {

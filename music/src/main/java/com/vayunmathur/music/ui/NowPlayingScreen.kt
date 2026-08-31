@@ -11,7 +11,6 @@ import com.vayunmathur.sdk.cast.CastClient
 import com.vayunmathur.sdk.cast.CastPickerContract
 import kotlinx.coroutines.launch
 import androidx.activity.compose.rememberLauncherForActivityResult
-import androidx.compose.animation.Crossfade
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
@@ -56,6 +55,7 @@ import com.vayunmathur.library.ui.IconSkipPrevious
 import com.vayunmathur.library.ui.MaterialTheme
 import com.vayunmathur.library.ui.Scaffold
 import com.vayunmathur.library.ui.Slider
+import com.vayunmathur.library.ui.SwappedContent
 import com.vayunmathur.library.ui.Text
 import com.vayunmathur.library.ui.TextButton
 import com.vayunmathur.library.ui.TopAppBar
@@ -138,7 +138,7 @@ fun NowPlayingScreen(
                     .clip(RoundedCornerShape(24.dp))
                     .clickable { showLyrics = !showLyrics }
             ) {
-                Crossfade(targetState = showLyrics, label = "LyricsToggle") { isShowingLyrics ->
+                SwappedContent(showLyrics) { isShowingLyrics ->
                     if (isShowingLyrics) {
                         LyricsView(lyrics, currentIndex)
                     } else {

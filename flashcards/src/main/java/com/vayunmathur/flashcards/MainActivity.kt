@@ -31,6 +31,7 @@ import com.vayunmathur.library.ui.TabStyle
 import com.vayunmathur.library.ui.TabbedPagerScaffold
 import com.vayunmathur.library.util.FullscreenPage
 import com.vayunmathur.library.util.MainNavigation
+import com.vayunmathur.library.util.MorphPage
 import com.vayunmathur.library.util.NavBackStack
 import com.vayunmathur.library.util.NavKey
 import com.vayunmathur.library.util.rememberNavBackStack
@@ -95,7 +96,7 @@ fun Navigation(viewModel: FlashcardsViewModel) {
         entry<Route.Stats> { StatsPage(backStack, viewModel) }
         entry<Route.NoteTypeList> { NoteTypeListPage(backStack, viewModel) }
         entry<Route.NoteTypeEdit> { NoteTypeEditPage(backStack, viewModel, it.noteTypeId) }
-        entry<Route.CardList> { NoteListPage(backStack, viewModel, it.deckId) }
+        entry<Route.CardList>(metadata = MorphPage()) { NoteListPage(backStack, viewModel, it.deckId) }
         entry<Route.NoteEdit> { NoteEditPage(backStack, viewModel, it.deckId, it.noteId) }
         entry<Route.Review>(metadata = FullscreenPage()) { ReviewPage(backStack, viewModel, it.deckId, it.mode, it.count, it.daysAhead, it.tags) }
     }

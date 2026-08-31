@@ -27,6 +27,7 @@ import com.vayunmathur.library.ui.FilterChip
 import com.vayunmathur.library.ui.IconPackage
 import com.vayunmathur.library.ui.Text
 import com.vayunmathur.library.ui.appBarScrollBehavior
+import com.vayunmathur.library.util.sharedContainer
 
 /** Binds [AppStoreViewModel] to the stateless [LibraryScreen]. */
 @Composable
@@ -88,6 +89,7 @@ fun LibraryScreen(
                     items(state.apps, key = { it.packageName }) { app ->
                         AppRow(
                             app = app,
+                            modifier = Modifier.sharedContainer("appstore-app-${app.packageName}"),
                             isInstalled = true,
                             installedIcon = state.installedIcons[app.packageName],
                             onClick = { onAppClick(app) },

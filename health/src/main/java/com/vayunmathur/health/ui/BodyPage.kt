@@ -16,6 +16,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.Modifier
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
 import com.vayunmathur.health.R
@@ -31,6 +32,7 @@ import com.vayunmathur.library.ui.IconBodySystem
 import com.vayunmathur.library.ui.IconClose
 import com.vayunmathur.library.ui.appBarScrollBehavior
 import com.vayunmathur.library.util.NavBackStack
+import com.vayunmathur.library.util.sharedText
 import com.vayunmathur.library.util.round
 
 private val bodyMetricConfigs = listOf(
@@ -101,6 +103,7 @@ fun BodyPage(backStack: NavBackStack<Route>, viewModel: HealthViewModel) {
                         unit = stringResource(R.string.unit_kg),
                         leadingIcon = { m, c -> IconBodySystem(m, c) },
                         leadingTint = colorFor(com.vayunmathur.health.data.RecordType.Weight),
+                        labelModifier = Modifier.sharedText("health-metric-label-WEIGHT"),
                         onClick = { backStack.add(Route.BarChartDetails(HealthMetricConfig.WEIGHT)) },
                     )
                     DashboardSectionDivider()
@@ -110,6 +113,7 @@ fun BodyPage(backStack: NavBackStack<Route>, viewModel: HealthViewModel) {
                         unit = stringResource(R.string.unit_cm),
                         leadingIcon = { m, c -> IconBodySystem(m, c) },
                         leadingTint = colorFor(com.vayunmathur.health.data.RecordType.Height),
+                        labelModifier = Modifier.sharedText("health-metric-label-HEIGHT"),
                         onClick = { backStack.add(Route.BarChartDetails(HealthMetricConfig.HEIGHT)) },
                     )
                     DashboardSectionDivider()
@@ -119,6 +123,7 @@ fun BodyPage(backStack: NavBackStack<Route>, viewModel: HealthViewModel) {
                         unit = stringResource(R.string.unit_percent),
                         leadingIcon = { m, c -> IconBodySystem(m, c) },
                         leadingTint = colorFor(com.vayunmathur.health.data.RecordType.BodyFat),
+                        labelModifier = Modifier.sharedText("health-metric-label-BODY_FAT"),
                         onClick = { backStack.add(Route.BarChartDetails(HealthMetricConfig.BODY_FAT)) },
                     )
                     DashboardSectionDivider()
@@ -128,6 +133,7 @@ fun BodyPage(backStack: NavBackStack<Route>, viewModel: HealthViewModel) {
                         unit = stringResource(R.string.unit_kg),
                         leadingIcon = { m, c -> IconBodySystem(m, c) },
                         leadingTint = colorFor(com.vayunmathur.health.data.RecordType.LeanBodyMass),
+                        labelModifier = Modifier.sharedText("health-metric-label-LEAN_BODY_MASS"),
                         onClick = { backStack.add(Route.BarChartDetails(HealthMetricConfig.LEAN_BODY_MASS)) },
                     )
                     DashboardSectionDivider()
@@ -137,6 +143,7 @@ fun BodyPage(backStack: NavBackStack<Route>, viewModel: HealthViewModel) {
                         unit = stringResource(R.string.unit_kg),
                         leadingIcon = { m, c -> IconBodySystem(m, c) },
                         leadingTint = colorFor(com.vayunmathur.health.data.RecordType.BoneMass),
+                        labelModifier = Modifier.sharedText("health-metric-label-BONE_MASS"),
                         onClick = { backStack.add(Route.BarChartDetails(HealthMetricConfig.BONE_MASS)) },
                     )
                     DashboardSectionDivider()
@@ -146,6 +153,7 @@ fun BodyPage(backStack: NavBackStack<Route>, viewModel: HealthViewModel) {
                         unit = stringResource(R.string.unit_kg),
                         leadingIcon = { m, c -> IconBodySystem(m, c) },
                         leadingTint = colorFor(com.vayunmathur.health.data.RecordType.BodyWaterMass),
+                        labelModifier = Modifier.sharedText("health-metric-label-BODY_WATER_MASS"),
                         onClick = { backStack.add(Route.BarChartDetails(HealthMetricConfig.BODY_WATER_MASS)) },
                     )
                 }

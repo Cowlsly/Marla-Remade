@@ -15,6 +15,7 @@ import androidx.lifecycle.lifecycleScope
 import com.vayunmathur.library.ui.DynamicTheme
 import com.vayunmathur.library.util.openSettingsIfRequested
 import com.vayunmathur.library.util.MainNavigation
+import com.vayunmathur.library.util.MorphPage
 import com.vayunmathur.library.util.NavKey
 import com.vayunmathur.library.util.rememberNavBackStack
 import com.vayunmathur.travel.data.TravelRepository
@@ -182,7 +183,7 @@ fun MainGraph(viewModel: TravelViewModel) {
             entry<Route.Cancel> { CancellationPage(backStack, viewModel, it) }
             entry<Route.Change> { ChangePage(backStack, viewModel, it) }
             entry<Route.StayResults> { StayResultsPage(backStack, viewModel, it) }
-            entry<Route.StayDetail> { StayDetailPage(backStack, viewModel, it) }
+            entry<Route.StayDetail>(metadata = MorphPage()) { StayDetailPage(backStack, viewModel, it) }
             entry<Route.StayGuests> { StayGuestsPage(backStack, viewModel) }
             entry<Route.StayConfirmation> { StayConfirmationPage(backStack, viewModel, it) }
             entry<Route.Trips> { TripsPage(backStack, viewModel) }

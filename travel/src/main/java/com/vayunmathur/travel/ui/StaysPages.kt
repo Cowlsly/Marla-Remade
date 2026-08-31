@@ -46,6 +46,8 @@ import com.vayunmathur.library.ui.TopAppBar
 import com.vayunmathur.library.ui.DateString
 import com.vayunmathur.library.ui.appBarScrollBehavior
 import com.vayunmathur.library.util.NavBackStack
+import com.vayunmathur.library.util.sharedContainer
+import com.vayunmathur.library.util.sharedText
 import com.vayunmathur.travel.Route
 import com.vayunmathur.travel.network.StayRateDto
 import com.vayunmathur.travel.network.StaySearchResultDto
@@ -227,13 +229,25 @@ private fun StayResultCard(result: StaySearchResultDto, onClick: () -> Unit) {
                     model = result.photoUrl,
                     contentDescription = result.name,
                     contentScale = ContentScale.Crop,
-                    modifier = Modifier.fillMaxWidth().aspectRatio(16f / 9f),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .aspectRatio(16f / 9f)
+                        .sharedContainer("travel-stay-photo-${result.id}"),
                 )
             }
             Row(Modifier.fillMaxWidth().padding(16.dp), verticalAlignment = Alignment.Top) {
                 Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                    Text(result.name.ifBlank { stringResource(R.string.hotel) }, style = MaterialTheme.typography.titleMedium)
-                    Text(starLabel(result.rating, result.reviewScore), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    Text(
+                        result.name.ifBlank { stringResource(R.string.hotel) },
+                        style = MaterialTheme.typography.titleMedium,
+                        modifier = Modifier.sharedText("travel-stay-name-${result.id}"),
+                    )
+                    Text(
+                        starLabel(result.rating, result.reviewScore),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.sharedText("travel-stay-rating-${result.id}"),
+                    )
                     if (result.address.isNotBlank()) {
                         Text(result.address, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                     }
@@ -287,12 +301,24 @@ fun StayDetailPage(
                     model = photo,
                     contentDescription = rates.name,
                     contentScale = ContentScale.Crop,
-                    modifier = Modifier.fillMaxWidth().aspectRatio(16f / 9f),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .aspectRatio(16f / 9f)
+                        .sharedContainer("travel-stay-photo-${route.searchResultId}"),
                 )
             }
             Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                Text(rates.name.ifBlank { stringResource(R.string.hotel) }, style = MaterialTheme.typography.headlineSmall)
-                Text(starLabel(rates.rating, rates.reviewScore), style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                Text(
+                    rates.name.ifBlank { stringResource(R.string.hotel) },
+                    style = MaterialTheme.typography.headlineSmall,
+                    modifier = Modifier.sharedText("travel-stay-name-${route.searchResultId}"),
+                )
+                Text(
+                    starLabel(rates.rating, rates.reviewScore),
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.sharedText("travel-stay-rating-${route.searchResultId}"),
+                )
                 if (rates.address.isNotBlank()) {
                     Text(rates.address, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                 }

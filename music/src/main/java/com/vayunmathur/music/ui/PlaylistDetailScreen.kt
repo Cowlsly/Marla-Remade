@@ -21,6 +21,8 @@ import com.vayunmathur.library.ui.ConfirmDialog
 import com.vayunmathur.library.ui.IconClose
 import com.vayunmathur.library.ui.IconPlay
 import com.vayunmathur.library.util.NavBackStack
+import com.vayunmathur.library.util.sharedContainer
+import com.vayunmathur.library.util.sharedText
 import com.vayunmathur.music.ui.components.PlayShuffleRow
 import com.vayunmathur.music.ui.components.PlayingBottomBar
 import com.vayunmathur.music.ui.components.TrackListItem
@@ -82,7 +84,8 @@ fun PlaylistDetailScreen(backStack: NavBackStack<Route>, musicViewModel: MusicVi
                     Box(Modifier
                         .size(260.dp)
                         .clip(RoundedCornerShape(24.dp))
-                        .background(MaterialTheme.colorScheme.surfaceVariant),
+                        .background(MaterialTheme.colorScheme.surfaceVariant)
+                        .sharedContainer("music-playlist-art-$playlistId"),
                         contentAlignment = Alignment.Center
                     ) {
                         if (musicInPlaylist.isEmpty()) {
@@ -99,7 +102,7 @@ fun PlaylistDetailScreen(backStack: NavBackStack<Route>, musicViewModel: MusicVi
                         var newName by remember(playlist!!.name) { mutableStateOf(playlist!!.name) }
                         Text(playlist!!.name, style = MaterialTheme.typography.titleLarge, modifier = Modifier.clickable {
                             showRenameDialog = true
-                        })
+                        }.sharedText("music-playlist-name-$playlistId"))
 
                         if (showRenameDialog) {
                             AlertDialog(

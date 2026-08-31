@@ -1,6 +1,5 @@
 package com.vayunmathur.games.wordmaker.ui.components
 
-import androidx.compose.animation.core.animateDpAsState
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectDragGestures
@@ -45,6 +44,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.vayunmathur.games.wordmaker.R
 import com.vayunmathur.games.wordmaker.ui.ChooserLetter
+import com.vayunmathur.library.ui.animatedDp
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.launch
 import kotlin.math.atan2
@@ -209,8 +209,8 @@ fun LetterChooser(
                         val targetX = (cos(angle) * radius.value).dp
                         val targetY = (sin(angle) * radius.value).dp
 
-                        val x by animateDpAsState(targetX, label = "x")
-                        val y by animateDpAsState(targetY, label = "y")
+                        val x = animatedDp(targetX)
+                        val y = animatedDp(targetY)
 
                         SurfaceText(Modifier
                             .align(Alignment.Center)

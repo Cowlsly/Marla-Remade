@@ -47,6 +47,7 @@ import com.vayunmathur.library.ui.Text
 import com.vayunmathur.library.ui.TopAppBar
 import com.vayunmathur.library.ui.appBarScrollBehavior
 import com.vayunmathur.library.util.NavBackStack
+import com.vayunmathur.library.util.sharedContainer
 import androidx.compose.ui.res.stringResource
 import com.vayunmathur.games.hub.R
 
@@ -86,7 +87,7 @@ fun GameDetailScreen(
 
         LazyColumn(modifier = modifier.fillMaxSize().padding(padding), contentPadding = PaddingValues(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
             item {
-                Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(16.dp), verticalAlignment = Alignment.CenterVertically) {
+                Row(modifier = Modifier.sharedContainer("hub-game-$gameId").fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(16.dp), verticalAlignment = Alignment.CenterVertically) {
                     Box(modifier = Modifier.size(72.dp).clip(RoundedCornerShape(16.dp)), contentAlignment = Alignment.Center) {
                         if (iconBmp != null) Image(bitmap = iconBmp.asImageBitmap(), contentDescription = g.displayName, modifier = Modifier.size(72.dp).clip(RoundedCornerShape(16.dp)))
                         else Text(text = g.displayName.firstOrNull()?.uppercase() ?: "?", style = MaterialTheme.typography.headlineLarge, fontWeight = FontWeight.Bold)

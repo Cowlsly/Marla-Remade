@@ -44,6 +44,7 @@ import com.vayunmathur.health.util.MainPageMetrics
 import com.vayunmathur.health.util.TodayActions
 import com.vayunmathur.health.util.TodayUiState
 import com.vayunmathur.library.util.NavBackStack
+import com.vayunmathur.library.util.sharedText
 import com.vayunmathur.library.util.round
 import kotlinx.coroutines.flow.map
 import kotlinx.datetime.TimeZone
@@ -158,6 +159,7 @@ fun TodayScreen(state: TodayUiState, actions: TodayActions) {
                         unit = "",
                         leadingIcon = { m, c -> IconBedtime(m, c) },
                         leadingTint = HealthColors.Sleep,
+                        labelModifier = Modifier.sharedText("health-metric-label-SLEEP"),
                         onClick = { actions.openSleepDetails() },
                     )
                 }
@@ -175,6 +177,7 @@ fun TodayScreen(state: TodayUiState, actions: TodayActions) {
                         unit = stringResource(R.string.unit_bpm),
                         leadingIcon = { m, c -> IconFavorite(m, c) },
                         leadingTint = colorFor(RecordType.HeartRate),
+                        labelModifier = Modifier.sharedText("health-metric-label-HEART_RATE"),
                         onClick = { actions.openMetric(HealthMetricConfig.HEART_RATE) },
                     )
                     DashboardSectionDivider()
@@ -184,6 +187,7 @@ fun TodayScreen(state: TodayUiState, actions: TodayActions) {
                         unit = stringResource(R.string.label_blood_pressure_unit),
                         leadingIcon = { m, c -> IconFavorite(m, c) },
                         leadingTint = colorFor(RecordType.BloodPressure),
+                        labelModifier = Modifier.sharedText("health-metric-label-BLOOD_PRESSURE"),
                         onClick = { actions.openMetric(HealthMetricConfig.BLOOD_PRESSURE) },
                     )
                     DashboardSectionDivider()
@@ -193,6 +197,7 @@ fun TodayScreen(state: TodayUiState, actions: TodayActions) {
                         unit = stringResource(R.string.unit_percent),
                         leadingIcon = { m, c -> IconFavorite(m, c) },
                         leadingTint = colorFor(RecordType.OxygenSaturation),
+                        labelModifier = Modifier.sharedText("health-metric-label-OXYGEN_SATURATION"),
                         onClick = { actions.openMetric(HealthMetricConfig.OXYGEN_SATURATION) },
                     )
                     DashboardSectionDivider()
@@ -202,6 +207,7 @@ fun TodayScreen(state: TodayUiState, actions: TodayActions) {
                         unit = stringResource(R.string.unit_bpm),
                         leadingIcon = { m, c -> IconFavorite(m, c) },
                         leadingTint = colorFor(RecordType.RestingHeartRate),
+                        labelModifier = Modifier.sharedText("health-metric-label-RESTING_HEART_RATE"),
                         onClick = { actions.openMetric(HealthMetricConfig.RESTING_HEART_RATE) },
                     )
                 }
@@ -219,6 +225,7 @@ fun TodayScreen(state: TodayUiState, actions: TodayActions) {
                         unit = stringResource(R.string.unit_steps),
                         leadingIcon = { m, c -> IconDirectionsWalk(m, c) },
                         leadingTint = colorFor(RecordType.Steps),
+                        labelModifier = Modifier.sharedText("health-metric-label-STEPS"),
                         onClick = { actions.openMetric(HealthMetricConfig.STEPS) },
                     )
                     DashboardSectionDivider()
@@ -228,6 +235,7 @@ fun TodayScreen(state: TodayUiState, actions: TodayActions) {
                         unit = stringResource(R.string.unit_km),
                         leadingIcon = { m, c -> IconLocationOn(m, c) },
                         leadingTint = colorFor(RecordType.Distance),
+                        labelModifier = Modifier.sharedText("health-metric-label-DISTANCE"),
                         onClick = { actions.openMetric(HealthMetricConfig.DISTANCE) },
                     )
                     DashboardSectionDivider()
@@ -237,6 +245,7 @@ fun TodayScreen(state: TodayUiState, actions: TodayActions) {
                         unit = stringResource(R.string.unit_fl),
                         leadingIcon = { m, c -> IconLocationOn(m, c) },
                         leadingTint = colorFor(RecordType.Floors),
+                        labelModifier = Modifier.sharedText("health-metric-label-FLOORS"),
                         onClick = { actions.openMetric(HealthMetricConfig.FLOORS) },
                     )
                     DashboardSectionDivider()
@@ -246,6 +255,7 @@ fun TodayScreen(state: TodayUiState, actions: TodayActions) {
                         unit = stringResource(R.string.unit_ml),
                         leadingIcon = { m, c -> IconBedtime(m, c) }, // TODO: replace with a water-drop icon
                         leadingTint = hydrationColor,
+                        labelModifier = Modifier.sharedText("health-metric-label-HYDRATION"),
                         onClick = { actions.openMetric(HealthMetricConfig.HYDRATION) },
                     )
                 }

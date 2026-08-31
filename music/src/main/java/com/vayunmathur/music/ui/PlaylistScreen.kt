@@ -12,6 +12,8 @@ import androidx.core.net.toUri
 import com.vayunmathur.library.ui.ListPage
 import com.vayunmathur.library.ui.appBarScrollBehavior
 import com.vayunmathur.library.util.NavBackStack
+import com.vayunmathur.library.util.sharedContainer
+import com.vayunmathur.library.util.sharedText
 import com.vayunmathur.music.platform.AlbumArt
 import com.vayunmathur.music.platform.MusicViewModel
 import com.vayunmathur.music.R
@@ -24,14 +26,16 @@ import com.vayunmathur.music.ui.components.ShufflePlayFab
 fun PlaylistsTabContent(backStack: NavBackStack<Route>, musicViewModel: MusicViewModel) {
     val playlists by musicViewModel.playlists.collectAsState()
 
-    ListPage<Playlist, Route, Route.Song>(backStack, playlists, stringResource(R.string.page_title_playlists), { Text(it.name) }, {
+    ListPage<Playlist, Route, Route.Song>(backStack, playlists, stringResource(R.string.page_title_playlists), {
+        Text(it.name, modifier = Modifier.sharedText("music-playlist-name-${it.id}"))
+    }, {
     }, {
         Route.PlaylistDetail(it)
     }, leadingContent = { playlist ->
         val songIds by musicViewModel.matchedMusicForPlaylist(playlist.id)
         val allMusic by musicViewModel.music.collectAsState()
         val musicUris = allMusic.filter { it.id in songIds }.map { it.uri.toUri() }
-        AlbumArt(musicUris, Modifier.size(40.dp))
+        AlbumArt(musicUris, Modifier.size(40.dp).sharedContainer("music-playlist-art-${playlist.id}"))
     }, searchEnabled = true, fab = {
         NewPlaylistFab(musicViewModel)
         ShufflePlayFab(musicViewModel)

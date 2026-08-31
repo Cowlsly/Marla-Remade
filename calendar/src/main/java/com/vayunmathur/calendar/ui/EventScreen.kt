@@ -42,6 +42,7 @@ import com.vayunmathur.library.ui.IconDescription
 import com.vayunmathur.library.ui.IconEdit
 import com.vayunmathur.library.ui.IconGlobe
 import com.vayunmathur.library.util.NavBackStack
+import com.vayunmathur.library.util.sharedText
 import kotlinx.datetime.LocalDate
 import kotlinx.datetime.LocalTime
 import com.vayunmathur.library.ui.DateString
@@ -144,7 +145,11 @@ fun EventScreen(state: EventUiState, actions: EventActions) {
         scrollBehavior = appBarScrollBehavior(),
     ) {
             ListItem({
-                Text(event.title, style = MaterialTheme.typography.titleLarge)
+                Text(
+                    event.title,
+                    style = MaterialTheme.typography.titleLarge,
+                    modifier = Modifier.sharedText("calendar-event-title-${instance.id}"),
+                )
             }, supportingContent = {
                 Column {
                     Text(calendar.displayName)
@@ -160,7 +165,7 @@ fun EventScreen(state: EventUiState, actions: EventActions) {
                 IconDescription()
             })
             if(event.location.isNotBlank()) ListItem(
-                { Text(event.location) },
+                { Text(event.location, modifier = Modifier.sharedText("calendar-event-location-${event.id}")) },
                 Modifier.clickable {
                     val intent = Intent(
                         Intent.ACTION_VIEW,

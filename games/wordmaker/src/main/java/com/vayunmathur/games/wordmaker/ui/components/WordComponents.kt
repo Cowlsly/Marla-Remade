@@ -1,3 +1,5 @@
+// RAW ANIMATION EXCEPTION: AnimatedLetter carries the in-flight Animatable that WordGameScreen
+// drives for a letter travelling from the chooser to its grid cell; the type has to name it.
 package com.vayunmathur.games.wordmaker.ui.components
 
 import androidx.compose.animation.core.Animatable

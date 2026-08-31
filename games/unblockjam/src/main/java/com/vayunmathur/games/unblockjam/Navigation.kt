@@ -2,8 +2,6 @@ package com.vayunmathur.games.unblockjam
 
 import android.Manifest
 import android.os.Build
-import androidx.compose.animation.core.animateDpAsState
-import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
@@ -64,10 +62,12 @@ import com.vayunmathur.library.ui.GameCenterScreen
 import com.vayunmathur.library.ui.IconCheck
 import com.vayunmathur.library.ui.IconStar
 import com.vayunmathur.library.ui.MaterialTheme
+import com.vayunmathur.library.ui.Motion
 import com.vayunmathur.library.ui.AppScaffold
 import com.vayunmathur.library.ui.Surface
 import com.vayunmathur.library.ui.Text
 import com.vayunmathur.library.ui.appBarScrollBehavior
+import com.vayunmathur.library.ui.animatedDp
 import com.vayunmathur.library.ui.rememberPermissionRequest
 import com.vayunmathur.library.ui.game.DailyChallengeCard
 import com.vayunmathur.library.ui.game.GameTopBarActions
@@ -587,10 +587,9 @@ fun GameBoard(
                 var offsetY by remember(block, levelData) { mutableStateOf(cellHeight * block.position.y) }
 
                 val targetOffsetX = if (isMainBlock && isLevelWon) boardSize + cellWidth else offsetX
-                val currentOffsetX by animateDpAsState(
+                val currentOffsetX = animatedDp(
                     targetOffsetX,
-                    tween(if (isMainBlock && isLevelWon) 600 else 0),
-                    "blockOffset"
+                    Motion.over(if (isMainBlock && isLevelWon) 600 else 0),
                 )
 
                 var modifier = Modifier

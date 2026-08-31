@@ -52,6 +52,7 @@ import com.vayunmathur.library.ui.rememberDrawerState
 import com.vayunmathur.library.util.ListDetailPage
 import com.vayunmathur.library.util.ListPage
 import com.vayunmathur.library.util.MainNavigation
+import com.vayunmathur.library.util.MorphPage
 import com.vayunmathur.library.util.openSettingsIfRequested
 import com.vayunmathur.library.util.rememberNavBackStack
 import kotlinx.coroutines.launch
@@ -183,7 +184,7 @@ fun Navigation(viewModel: EmailViewModel) {
                     onOpenDrawer = { scope.launch { drawerState.open() } }
                 )
             }
-            entry<Route.MessageThread>(metadata = ListDetailPage()) { route ->
+            entry<Route.MessageThread>(metadata = ListDetailPage() + MorphPage()) { route ->
                 MessageThreadPage(
                     viewModel = viewModel,
                     accountEmail = route.accountEmail,

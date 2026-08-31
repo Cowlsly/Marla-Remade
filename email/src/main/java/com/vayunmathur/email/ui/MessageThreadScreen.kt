@@ -76,6 +76,7 @@ import com.vayunmathur.library.ui.contentColorOn
 import com.vayunmathur.library.ui.rememberModalBottomSheetState
 import com.vayunmathur.library.ui.appBarScrollBehavior
 import com.vayunmathur.library.util.AppMessages
+import com.vayunmathur.library.util.sharedText
 
 @Composable
 fun MessageThreadPage(
@@ -121,7 +122,14 @@ fun MessageThreadScreen(
         }
     }
     AppScaffold(
-        title = messages.firstOrNull()?.subject ?: stringResource(R.string.conversation),
+        title = {
+            val first = messages.firstOrNull()
+            val subjectKey = first?.let { "email-subject-${it.accountEmail}-$threadId" }
+            Text(
+                first?.subject ?: stringResource(R.string.conversation),
+                modifier = if (subjectKey == null) Modifier else Modifier.sharedText(subjectKey),
+            )
+        },
         onNavigateBack = onBack,
         scrollBehavior = appBarScrollBehavior(),
     ) { padding ->

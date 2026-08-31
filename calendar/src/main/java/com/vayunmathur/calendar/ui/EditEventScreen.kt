@@ -21,6 +21,7 @@ import com.vayunmathur.library.ui.DropdownMenu
 import com.vayunmathur.library.ui.DropdownMenuItem
 import com.vayunmathur.library.ui.HorizontalDivider
 import com.vayunmathur.library.ui.IconButton
+import com.vayunmathur.library.ui.LabeledTextField
 import com.vayunmathur.library.ui.MaterialTheme
 import com.vayunmathur.library.ui.OutlinedTextField
 import com.vayunmathur.library.ui.ProvideTextStyle
@@ -367,7 +368,18 @@ fun EditEventScreen(viewModel: CalendarViewModel, editRoute: Route.EditEvent, ba
             }
 
             HorizontalDivider(Modifier.padding(vertical = 16.dp))
-            OutlinedTextField(location, { location = it }, Modifier.fillMaxWidth().padding(8.dp), label = { Text(stringResource(R.string.label_location)) })
+            // The location line on the detail screen morphs into this field. sharedTextKey, not a
+            // modifier: the editable line fills the field's width, so keying the field itself would
+            // balloon the arriving text out to that width and snap it back on landing. Null for a new
+            // event, which has no detail screen to have come from.
+            LabeledTextField(
+                value = location,
+                onValueChange = { location = it },
+                label = stringResource(R.string.label_location),
+                modifier = Modifier.fillMaxWidth().padding(8.dp),
+                singleLine = false,
+                sharedTextKey = editRoute.id?.let { "calendar-event-location-$it" },
+            )
     }
 }
 

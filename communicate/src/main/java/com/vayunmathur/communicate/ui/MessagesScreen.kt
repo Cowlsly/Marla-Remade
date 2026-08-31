@@ -59,6 +59,7 @@ import com.vayunmathur.library.ui.OutlinedTextField
 import com.vayunmathur.library.ui.TextButton
 import com.vayunmathur.library.ui.appBarScrollBehavior
 import com.vayunmathur.library.util.AppMessages
+import com.vayunmathur.library.util.sharedText
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -302,7 +303,9 @@ private fun MessageThreadRow(thread: SmsThread, onClick: () -> Unit, onDelete: (
                     fontWeight = if (thread.unreadCount > 0) FontWeight.Bold else FontWeight.Normal,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
-                    modifier = Modifier.weight(1f, fill = false),
+                    modifier = Modifier
+                        .weight(1f, fill = false)
+                        .sharedText("communicate-thread-title-${thread.threadId}"),
                 )
                 LineBadge(thread.line, thread.subscriptionId, modifier = Modifier.padding(start = 6.dp))
                 Spacer(Modifier.weight(1f))

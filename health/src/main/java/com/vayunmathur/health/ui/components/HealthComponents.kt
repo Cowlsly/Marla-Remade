@@ -46,6 +46,7 @@ import kotlin.math.min
 fun HealthRow(
     headline: String,
     modifier: Modifier = Modifier,
+    headlineModifier: Modifier = Modifier,
     supporting: String? = null,
     leadingIcon: (@Composable (Modifier, Color) -> Unit)? = null,
     leadingTint: Color = MaterialTheme.colorScheme.primary,
@@ -78,6 +79,7 @@ fun HealthRow(
                 text = headline,
                 style = MaterialTheme.typography.bodyLarge,
                 color = MaterialTheme.colorScheme.onSurface,
+                modifier = headlineModifier,
             )
             if (supporting != null) {
                 Text(
@@ -104,6 +106,7 @@ fun MetricRow(
     value: String,
     unit: String,
     modifier: Modifier = Modifier,
+    labelModifier: Modifier = Modifier,
     leadingIcon: (@Composable (Modifier, Color) -> Unit)? = null,
     leadingTint: Color = MaterialTheme.colorScheme.primary,
     delta: Float? = null,
@@ -114,6 +117,7 @@ fun MetricRow(
     HealthRow(
         headline = label,
         modifier = modifier,
+        headlineModifier = labelModifier,
         leadingIcon = leadingIcon,
         leadingTint = leadingTint,
         onClick = onClick,

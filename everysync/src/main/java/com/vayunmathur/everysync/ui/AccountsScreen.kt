@@ -43,6 +43,7 @@ import com.vayunmathur.library.ui.DateString
 import com.vayunmathur.library.ui.is24Hour
 import com.vayunmathur.library.ui.appBarScrollBehavior
 import com.vayunmathur.library.util.NavBackStack
+import com.vayunmathur.library.util.sharedText
 import kotlin.time.Instant
 
 /** Binds [EverySyncViewModel] and the back stack to the stateless [AccountsScreen]. */
@@ -118,7 +119,14 @@ fun AccountsScreen(state: AccountsUiState, actions: AccountsActions) {
                     val provider = ProviderRegistry.get(account.providerId)
                     ListItem(
                         modifier = Modifier.clickable { actions.openAccount(account.accountName) },
-                        content = { Text(account.accountName) },
+                        content = {
+                            Text(
+                                account.accountName,
+                                modifier = Modifier.sharedText(
+                                    "everysync-title-${account.accountName}"
+                                ),
+                            )
+                        },
                         supportingContent = {
                             Column {
                                 Text(provider?.displayName ?: account.providerId)

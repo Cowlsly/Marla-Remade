@@ -242,6 +242,9 @@ fun SearchScreen(
                     VideoRow(
                         row = row,
                         modifier = Modifier.invisibleClickable { actions.openVideo(row.videoID) },
+                        // Only the feed is keyed, not the search overlay above it: both are composed
+                        // at once, and a video in each would give one key two origins.
+                        titleSharedKey = "youpipe-video-title-${row.videoID}",
                         overflowActions = listOf(
                             stringResource(R.string.action_not_interested) to { actions.notInterested(row.channelKey) },
                             stringResource(R.string.action_more_like_this) to { actions.moreLikeThis(row.channelKey) },

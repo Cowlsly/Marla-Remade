@@ -32,6 +32,8 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.net.toUri
 import com.vayunmathur.library.util.NavBackStack
+import com.vayunmathur.library.util.sharedContainer
+import com.vayunmathur.library.util.sharedText
 import com.vayunmathur.library.ui.IconPlay
 import com.vayunmathur.library.ui.appBarScrollBehavior
 import com.vayunmathur.music.ui.components.PlayShuffleRow
@@ -85,12 +87,17 @@ fun ArtistDetailScreen(backStack: NavBackStack<Route>, musicViewModel: MusicView
                     AlbumArt(albumsUris, Modifier
                         .size(260.dp)
                         .clip(RoundedCornerShape(24.dp))
-                        .background(MaterialTheme.colorScheme.surfaceVariant))
+                        .background(MaterialTheme.colorScheme.surfaceVariant)
+                        .sharedContainer("music-artist-art-$artistId"))
 
                     Spacer(modifier = Modifier.height(24.dp))
 
                     ListItem({
-                        Text(artist.name, style = MaterialTheme.typography.titleLarge)
+                        Text(
+                            artist.name,
+                            style = MaterialTheme.typography.titleLarge,
+                            modifier = Modifier.sharedText("music-artist-name-$artistId"),
+                        )
                     }, Modifier, {Text(stringResource(R.string.label_artist))}, {
                         Text(stringResource(R.string.artist_info_format, artistsMusic.size, formatDuration(artistTotalDurationMs)))
                     })
@@ -130,13 +137,18 @@ fun ArtistDetailScreen(backStack: NavBackStack<Route>, musicViewModel: MusicView
                 }
 
                 ListItem(
-                    content = { Text(album.name) },
+                    content = { Text(album.name, modifier = Modifier.sharedText("music-album-title-${album.id}")) },
                     modifier = Modifier.clickable {
                         backStack.add(Route.AlbumDetail(album.id))
                     },
                     supportingContent = { Text(albumYear) },
                     trailingContent = { Text(formatDuration(albumDurationMs)) },
-                    leadingContent = { AlbumArt(album.uri.toUri(), Modifier.size(48.dp)) }
+                    leadingContent = {
+                        AlbumArt(
+                            album.uri.toUri(),
+                            Modifier.size(48.dp).sharedContainer("music-album-art-${album.id}"),
+                        )
+                    }
                 )
             }
 
