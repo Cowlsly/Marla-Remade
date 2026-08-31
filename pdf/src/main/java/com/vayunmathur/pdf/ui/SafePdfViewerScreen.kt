@@ -117,6 +117,7 @@ import androidx.compose.ui.text.TextRange
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.input.TextFieldValue
 import androidx.compose.ui.unit.dp
+import kotlinx.coroutines.flow.collectLatest
 import androidx.compose.ui.unit.sp
 import androidx.core.net.toUri
 import androidx.compose.ui.unit.IntSize
@@ -634,6 +635,19 @@ fun SafePdfViewerScreen(uri: Uri, onBack: () -> Unit) {
             .collect { PdfStateStore.saveSafePage(context, uri, it) }
     }
 
+    // Right-side page-number indicator: visible while scrolling, hides shortly after.
+    var showPageIndicator by remember { mutableStateOf(false) }
+    LaunchedEffect(listState) {
+        snapshotFlow { listState.isScrollInProgress }.collectLatest { scrolling ->
+            if (scrolling) {
+                showPageIndicator = true
+            } else {
+                delay(1000)
+                showPageIndicator = false
+            }
+        }
+    }
+
     // Pinch-to-zoom + pan (two-finger); single-finger still scrolls.
     var viewportSize by remember { mutableStateOf(IntSize.Zero) }
     var zoom by remember { mutableFloatStateOf(1f) }
@@ -974,6 +988,10 @@ fun SafePdfViewerScreen(uri: Uri, onBack: () -> Unit) {
             Modifier
                 .padding(innerPadding)
                 .fillMaxSize()
+        ) {
+        Box(
+            Modifier
+                .fillMaxSize()
                 .onSizeChanged { viewportSize = it }
                 // Track finger count in the Initial pass (before the LazyColumn's
                 // scroll reacts in the Main pass) so multi-touch disables scroll.
@@ -1108,6 +1126,23 @@ fun SafePdfViewerScreen(uri: Uri, onBack: () -> Unit) {
                     }
                 }
             }
+        }
+        // Page-number indicator on the right edge, shown while scrolling.
+        if (pageCount > 1 && showPageIndicator) {
+            Box(
+                Modifier
+                    .align(Alignment.CenterEnd)
+                    .padding(end = 8.dp)
+                    .background(Color(0xCC000000), CircleShape)
+                    .padding(horizontal = 12.dp, vertical = 6.dp)
+            ) {
+                Text(
+                    text = "${listState.firstVisibleItemIndex + 1} / $pageCount",
+                    color = Color.White,
+                    style = MaterialTheme.typography.labelLarge,
+                )
+            }
+        }
         }
     }
 
