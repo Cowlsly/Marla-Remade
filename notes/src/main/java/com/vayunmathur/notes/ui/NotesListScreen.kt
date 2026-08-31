@@ -1,7 +1,6 @@
 package com.vayunmathur.notes.ui
 
 import androidx.activity.compose.BackHandler
-import androidx.compose.animation.core.animateDpAsState
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.PaddingValues
@@ -28,6 +27,7 @@ import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.zIndex
 import com.vayunmathur.library.ui.CommonSearchBar
+import com.vayunmathur.library.util.sharedText
 import com.vayunmathur.library.ui.ExperimentalMaterial3Api
 import com.vayunmathur.library.ui.FloatingActionButton
 import com.vayunmathur.library.ui.IconAdd
@@ -46,6 +46,7 @@ import com.vayunmathur.library.ui.ReorderableItem
 import com.vayunmathur.library.ui.rememberReorderableLazyListState
 import com.vayunmathur.library.ui.reorderDragHandle
 import com.vayunmathur.library.ui.appBarScrollBehavior
+import com.vayunmathur.library.ui.animatedDp
 import com.vayunmathur.notes.R
 import com.vayunmathur.notes.data.Note
 import com.vayunmathur.notes.platform.NotesListActions
@@ -213,11 +214,16 @@ fun NotesListScreen(
                     Modifier.animateItem()
                 }
                 ReorderableItem(reorderState, key = note.id, modifier = itemMod) { isDragging ->
-                    val elevation by animateDpAsState(if (isDragging) 8.dp else 0.dp)
+                    val elevation = animatedDp(if (isDragging) 8.dp else 0.dp)
                     val isSelected = note.id in selectedIds
                     Surface(shadowElevation = elevation) {
                         ListItem(
-                            content = { Text(note.title) },
+                            content = {
+                                Text(
+                                    note.title,
+                                    modifier = Modifier.sharedText("note-title-${note.id}"),
+                                )
+                            },
                             modifier = Modifier.combinedClickable(
                                 onClick = {
                                     if (isSelectionMode) {

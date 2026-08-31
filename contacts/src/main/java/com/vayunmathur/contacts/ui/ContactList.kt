@@ -4,16 +4,6 @@ import androidx.compose.ui.res.pluralStringResource
 import android.graphics.Bitmap
 import android.net.Uri
 import android.provider.ContactsContract
-import androidx.compose.animation.AnimatedContent
-import androidx.compose.animation.AnimatedVisibility
-import androidx.compose.animation.fadeIn
-import androidx.compose.animation.fadeOut
-import androidx.compose.animation.scaleIn
-import androidx.compose.animation.scaleOut
-import androidx.compose.animation.slideInVertically
-import androidx.compose.animation.slideOutVertically
-import androidx.compose.animation.togetherWith
-import androidx.compose.animation.core.animateIntAsState
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
@@ -67,7 +57,6 @@ import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
-import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import com.vayunmathur.contacts.R
 import com.vayunmathur.contacts.Route
@@ -82,8 +71,8 @@ import com.vayunmathur.contacts.util.ContactSorting.sortedLocale
 import com.vayunmathur.contacts.util.ContactViewModel
 import com.vayunmathur.contacts.util.ContactsActions
 import com.vayunmathur.library.util.NavBackStack
-import com.vayunmathur.library.util.sharedContainer
 import com.vayunmathur.library.util.sharedContent
+import com.vayunmathur.library.util.sharedText
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 
@@ -177,11 +166,6 @@ fun ContactListScreen(state: ContactListUiState, actions: ContactsActions) {
         if (id in selectedIds) selectedIds.remove(id) else selectedIds.add(id)
     }
 
-    val motion = MaterialTheme.motionScheme
-    val offsetSpec = motion.defaultSpatialSpec<IntOffset>()
-    val scaleSpec = motion.defaultSpatialSpec<Float>()
-    val fadeSpec = motion.defaultEffectsSpec<Float>()
-
     var showDeleteConfirmation by remember { mutableStateOf(false) }
 
     var isFocusableBySystem by remember { mutableStateOf(false) }
@@ -219,16 +203,7 @@ fun ContactListScreen(state: ContactListUiState, actions: ContactsActions) {
 
     LazyListScaffold(
         topBar = {
-            AnimatedContent(
-                targetState = isSelectionMode,
-                transitionSpec = {
-                    // Selection slides down over the search field and back up when dismissed, so the
-                    // two bars read as one surface being swapped rather than two crossfading.
-                    val towards = if (targetState) -1 else 1
-                    (fadeIn(fadeSpec) + slideInVertically(offsetSpec) { towards * it / 3 })
-                        .togetherWith(fadeOut(fadeSpec) + slideOutVertically(offsetSpec) { -towards * it / 3 })
-                },
-            ) { selecting ->
+            SwappedTopBar(showingOverlay = isSelectionMode) { selecting ->
                 if (selecting) {
                 TopAppBar(
                     title = { Text(stringResource(R.string.selected_count, selectedIds.size)) },
@@ -290,11 +265,7 @@ fun ContactListScreen(state: ContactListUiState, actions: ContactsActions) {
         floatingActionButton = {
             // Scales away when selection mode takes over the bar, rather than vanishing. It does not
             // react to scrolling: the add button should always be reachable.
-            AnimatedVisibility(
-                visible = state.showAddButton && !isSelectionMode,
-                enter = scaleIn(scaleSpec) + fadeIn(fadeSpec),
-                exit = scaleOut(scaleSpec) + fadeOut(fadeSpec),
-            ) {
+            PopVisibility(visible = state.showAddButton && !isSelectionMode) {
                 FloatingActionButton(onClick = { actions.addContact() }) {
                     IconAdd()
                 }
@@ -330,11 +301,7 @@ fun ContactListScreen(state: ContactListUiState, actions: ContactsActions) {
                 FavoritesHeader(Modifier.animateItem().padding(vertical = 6.dp))
             }
             itemsIndexed(favorites, key = { _, c -> "favorite-${c.id}" }) { idx, contact ->
-                GroupedContactRow(idx, favorites.size, Modifier.animateItem(
-                    fadeInSpec = fadeSpec,
-                    placementSpec = offsetSpec,
-                    fadeOutSpec = fadeSpec,
-                )) {
+                GroupedContactRow(idx, favorites.size, itemMotion()) {
                     ContactItem(
                         contact = contact,
                         // Only multi-select tints the row. It used to also tint whichever contact was
@@ -362,11 +329,7 @@ fun ContactListScreen(state: ContactListUiState, actions: ContactsActions) {
                 LetterHeader(letter, Modifier.animateItem().padding(vertical = 6.dp))
             }
             itemsIndexed(contactsInGroup, key = { _, c -> "contact-${c.id}" }) { idx, contact ->
-                GroupedContactRow(idx, contactsInGroup.size, Modifier.animateItem(
-                    fadeInSpec = fadeSpec,
-                    placementSpec = offsetSpec,
-                    fadeOutSpec = fadeSpec,
-                )) {
+                GroupedContactRow(idx, contactsInGroup.size, itemMotion()) {
                     ContactItem(
                         contact = contact,
                         isSelected = isSelectionMode && contact.id in selectedIds,
@@ -582,13 +545,7 @@ fun ContactItem(
 ) {
     val interaction = remember { MutableInteractionSource() }
     val pressed by interaction.collectIsPressedAsState()
-    // The avatar squares off under the finger and springs back on release. A percentage rather than a
-    // Dp so it reads the same on the 50dp row avatar and the 100dp one on the detail page, and on the
-    // bouncy `fast` spring because a press wants to feel like it gives.
-    val avatarCorner by animateIntAsState(
-        targetValue = if (pressed) 30 else 50,
-        animationSpec = MaterialTheme.motionScheme.fastSpatialSpec(),
-    )
+    val avatarShape = pressedShape(pressed)
 
     val combinedModifier = if (dropdownList == null) {
         modifier.combinedClickable(
@@ -638,15 +595,13 @@ fun ContactItem(
                             if (sharedKey == null) Modifier
                             else Modifier.sharedContent("contact-avatar-$sharedKey")
                         ),
-                    shape = RoundedCornerShape(avatarCorner),
+                    shape = avatarShape,
                 )
                 Spacer(Modifier.width(16.dp))
                 Column(modifier = Modifier.weight(1f)) {
-                    // The name is drawn part by part rather than as one joined string, so each piece
-                    // pairs with the same piece in the detail header and travels there on its own.
-                    // Morphing the whole row into the whole header instead meant reflowing a
-                    // horizontal layout into a centred vertical one mid-flight, which read as the row
-                    // sliding up, snapping to a new layout, then settling.
+                    // Same pieces, same order and same shared keys as the detail header, so every part
+                    // has a counterpart to travel to. Only the type scale differs, and sharedText
+                    // scales rather than reflows so that difference does not garble the text in flight.
                     val name = contact.name
                     val parts = listOfNotNull(
                         name.namePrefix.takeIf { it.isNotBlank() }?.let { "nameprefix" to it },
@@ -664,15 +619,28 @@ fun ContactItem(
                                 maxLines = 1,
                                 overflow = TextOverflow.Ellipsis,
                                 modifier = if (sharedKey == null) Modifier
-                                else Modifier.sharedContainer("contact-$slot-$sharedKey"),
+                                else Modifier.sharedText("contact-$slot-$sharedKey"),
                             )
                         }
+                    }
+                    if (contact.nickname.nickname.isNotBlank()) {
+                        Text(
+                            text = contact.nickname.nickname,
+                            style = MaterialTheme.typography.bodyMedium,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                            modifier = if (sharedKey == null) Modifier
+                            else Modifier.sharedText("contact-nickname-$sharedKey"),
+                        )
                     }
                     if (showOrg) {
                         Text(
                             text = trimmedOrg,
+                            style = MaterialTheme.typography.bodyMedium,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
                             modifier = if (sharedKey == null) Modifier
-                            else Modifier.sharedContainer("contact-company-$sharedKey"),
+                            else Modifier.sharedText("contact-company-$sharedKey"),
                         )
                     }
                     if (showGroups) {

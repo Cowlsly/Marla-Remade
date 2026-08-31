@@ -16,6 +16,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.SolidColor
+import com.vayunmathur.library.util.SharedEditableText
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
@@ -54,7 +55,7 @@ import com.vayunmathur.notes.ui.components.InkBlock
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun NoteScreen(state: NoteUiState, actions: NoteActions) {
+fun NoteScreen(state: NoteUiState, actions: NoteActions, sharedTextKey: Any? = null) {
     val context = LocalContext.current
 
     // Which text block currently has focus, so new media is inserted next to it
@@ -104,7 +105,11 @@ fun NoteScreen(state: NoteUiState, actions: NoteActions) {
                             text = stringResource(R.string.title),
                             style = MaterialTheme.typography.headlineMedium.copy(color = MaterialTheme.colorScheme.onSurfaceVariant),
                         )
-                        innerTextField()
+                        SharedEditableText(
+                            key = sharedTextKey,
+                            value = state.title,
+                            style = MaterialTheme.typography.headlineMedium,
+                        ) { innerTextField() }
                     }
                 },
             )

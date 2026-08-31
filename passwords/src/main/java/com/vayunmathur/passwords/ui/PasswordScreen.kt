@@ -29,6 +29,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.core.net.toUri
 import com.vayunmathur.library.ui.Card
+import com.vayunmathur.library.util.sharedText
 import com.vayunmathur.library.ui.CircularProgressIndicator
 import com.vayunmathur.library.ui.ExperimentalMaterial3Api
 import com.vayunmathur.library.ui.ExternalIntents
@@ -124,10 +125,21 @@ fun PasswordScreen(
                     Spacer(Modifier.width(12.dp))
 
                     Column(Modifier.weight(1f)) {
-                        Text(password.name.ifBlank { stringResource(R.string.no_name) }, style = MaterialTheme.typography.titleMedium, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                        Text(
+                            password.name.ifBlank { stringResource(R.string.no_name) },
+                            style = MaterialTheme.typography.titleMedium,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                            modifier = Modifier.sharedText("password-name-${password.id}"),
+                        )
                         Spacer(Modifier.height(4.dp))
                         val subtitle = password.username.ifBlank { password.email }
-                        Text(subtitle.ifBlank { stringResource(R.string.no_user) }, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        Text(
+                            subtitle.ifBlank { stringResource(R.string.no_user) },
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier.sharedText("password-user-${password.id}"),
+                        )
                     }
                 }
             }

@@ -133,6 +133,7 @@ fun NotePage(
 
     NoteScreen(
         state = NoteUiState(title = note.title, blocks = blocks.toList()),
+        sharedTextKey = "note-title-$noteID",
         actions = object : NoteActions {
             override fun back() = backStack.pop()
 

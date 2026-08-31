@@ -1,9 +1,6 @@
 package com.vayunmathur.contacts.ui
 
 import androidx.compose.ui.res.pluralStringResource
-import androidx.compose.animation.AnimatedVisibility
-import androidx.compose.animation.animateColorAsState
-import androidx.compose.animation.core.animateDpAsState
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
@@ -113,14 +110,10 @@ fun GroupsScreen(state: GroupsUiState, actions: ContactsActions, expandGroupId: 
 
                     val collapsedColor = MaterialTheme.colorScheme.surfaceVariant
                     val expandedColor = MaterialTheme.colorScheme.secondaryContainer
-                    val headerColor by animateColorAsState(
-                        targetValue = if (attachContacts) expandedColor else collapsedColor,
-                        label = "groupHeaderColor",
+                    val headerColor = animatedColor(
+                        if (attachContacts) expandedColor else collapsedColor
                     )
-                    val bottomRadius by animateDpAsState(
-                        targetValue = if (attachContacts) 4.dp else 16.dp,
-                        label = "groupHeaderBottomRadius",
-                    )
+                    val bottomRadius = animatedDp(if (attachContacts) 4.dp else 16.dp)
                     val headerShape = RoundedCornerShape(
                         topStart = 16.dp, topEnd = 16.dp,
                         bottomStart = bottomRadius, bottomEnd = bottomRadius,
@@ -178,7 +171,7 @@ fun GroupsScreen(state: GroupsUiState, actions: ContactsActions, expandGroupId: 
                         // 2dp gap is part of the visible block so it appears
                         // and disappears with the list rather than leaving a
                         // gap when collapsed.
-                        AnimatedVisibility(visible = attachContacts) {
+                        ExpandVisibility(visible = attachContacts) {
                             Column {
                                 Spacer(Modifier.height(2.dp))
                                 GroupedContactSection(

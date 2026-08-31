@@ -20,6 +20,7 @@ import com.vayunmathur.library.ui.ListPage
 import com.vayunmathur.library.ui.MaterialTheme
 import com.vayunmathur.library.ui.Text
 import com.vayunmathur.library.util.NavBackStack
+import com.vayunmathur.library.util.sharedText
 import com.vayunmathur.library.util.tryOrDefault
 import com.vayunmathur.passwords.R
 import com.vayunmathur.passwords.Route
@@ -43,7 +44,12 @@ fun MenuScreen(
 
     ListPage<CredentialItem, Route, Route.PasswordEditPage>(backStack, items, "Passwords", {
         when (it) {
-            is CredentialItem.PasswordItem -> Text(it.password.name.ifBlank { stringResource(R.string.no_name) })
+            // Same keys as the detail page's header, so the row's name and user travel there rather
+            // than crossfading. Passkeys have no detail page to morph into, so they stay unkeyed.
+            is CredentialItem.PasswordItem -> Text(
+                it.password.name.ifBlank { stringResource(R.string.no_name) },
+                modifier = Modifier.sharedText("password-name-${it.password.id}"),
+            )
             is CredentialItem.PasskeyItem -> Row(verticalAlignment = Alignment.CenterVertically) {
                 IconKey(Modifier.size(16.dp))
                 Spacer(Modifier.width(4.dp))
@@ -52,7 +58,10 @@ fun MenuScreen(
         }
     }, {
         when (it) {
-            is CredentialItem.PasswordItem -> Text(it.password.username.ifBlank { it.password.email })
+            is CredentialItem.PasswordItem -> Text(
+                it.password.username.ifBlank { it.password.email },
+                modifier = Modifier.sharedText("password-user-${it.password.id}"),
+            )
             is CredentialItem.PasskeyItem -> Text(it.passkey.userName)
         }
     }, {

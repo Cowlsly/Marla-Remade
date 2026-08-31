@@ -7,6 +7,7 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.vayunmathur.library.util.ListDetailPage
 import com.vayunmathur.library.util.ListPage
 import com.vayunmathur.library.util.MainNavigation
+import com.vayunmathur.library.util.MorphPage
 import com.vayunmathur.library.util.rememberNavBackStack
 import com.vayunmathur.notes.platform.NotesViewModel
 import com.vayunmathur.notes.ui.ExternalNoteScreen
@@ -27,7 +28,7 @@ fun Navigation(notesViewModel: NotesViewModel) {
         entry<Route.NotesList>(metadata = ListPage()) {
             NotesListPage(backStack, notesViewModel)
         }
-        entry<Route.Note>(metadata = ListDetailPage()) {
+        entry<Route.Note>(metadata = ListDetailPage() + MorphPage()) {
             NotePage(backStack, notesViewModel, it.id)
         }
         entry<Route.ExternalNote>(metadata = ListDetailPage()) {

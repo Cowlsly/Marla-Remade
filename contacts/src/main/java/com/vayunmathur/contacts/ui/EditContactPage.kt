@@ -96,6 +96,7 @@ import com.vayunmathur.library.ui.IconRemoveCircle
 import com.vayunmathur.library.ui.appBarScrollBehavior
 import com.vayunmathur.library.util.NavBackStack
 import com.vayunmathur.library.util.ResultEffect
+import com.vayunmathur.library.util.expandFromLine
 import com.vayunmathur.library.util.sharedContainer
 import com.vayunmathur.library.util.sharedContent
 import kotlinx.datetime.LocalDate
@@ -211,22 +212,10 @@ fun EditContactPage(backStack: NavBackStack<Route>, viewModel: ContactViewModel,
             // Plain Column rather than FormSection: DetailScaffold already insets its content
             // horizontally, and the section's own padding on top of that made the name fields
             // narrower than every field below them.
-            // One key per name part, so each piece of the header lands in the field that owns it.
-            // Null for a new contact, which has no header to come from. Spelled out rather than built
-            // by a helper because a local function cannot be @Composable.
+            // One key per name part, so each piece of the header lands in the field that owns it. These
+            // go to sharedTextKey, not to a modifier: keyed on the field the header's text would grow
+            // to the whole box and then snap: keyed on the inner text, text pairs with text.
             val id = editRoute.contactId
-            val firstNameMod = if (id == null) Modifier.fillMaxWidth()
-            else Modifier.sharedContainer("contact-firstname-$id").fillMaxWidth()
-            val middleNameMod = if (id == null) Modifier.fillMaxWidth()
-            else Modifier.sharedContainer("contact-middlename-$id").fillMaxWidth()
-            val lastNameMod = if (id == null) Modifier.fillMaxWidth()
-            else Modifier.sharedContainer("contact-lastname-$id").fillMaxWidth()
-            val nicknameMod = if (id == null) Modifier.fillMaxWidth()
-            else Modifier.sharedContainer("contact-nickname-$id").fillMaxWidth()
-            val companyMod = if (id == null) Modifier.fillMaxWidth()
-            else Modifier.sharedContainer("contact-company-$id").fillMaxWidth()
-            val prefixKey = id?.let { "contact-nameprefix-$it" }
-            val suffixKey = id?.let { "contact-namesuffix-$it" }
             Column(
                 modifier = Modifier.fillMaxWidth(),
                 verticalArrangement = Arrangement.spacedBy(12.dp),
@@ -235,9 +224,10 @@ fun EditContactPage(backStack: NavBackStack<Route>, viewModel: ContactViewModel,
                     value = currentDraft.firstName,
                     onValueChange = { v -> viewModel.updateEditDraft { it.copy(firstName = v) } },
                     label = stringResource(R.string.first_name),
-                    modifier = firstNameMod,
+                    sharedTextKey = id?.let { "contact-firstname-$it" },
+                    modifier = Modifier.fillMaxWidth().expandFromLine(),
                     leadingIcon = {
-                        NamePrefixChooser(currentDraft.namePrefix, prefixKey) { v ->
+                        NamePrefixChooser(currentDraft.namePrefix, null) { v ->
                             viewModel.updateEditDraft { it.copy(namePrefix = v) }
                         }
                     },
@@ -246,15 +236,17 @@ fun EditContactPage(backStack: NavBackStack<Route>, viewModel: ContactViewModel,
                     value = currentDraft.middleName,
                     onValueChange = { v -> viewModel.updateEditDraft { it.copy(middleName = v) } },
                     label = stringResource(R.string.middle_name),
-                    modifier = middleNameMod,
+                    sharedTextKey = id?.let { "contact-middlename-$it" },
+                    modifier = Modifier.fillMaxWidth().expandFromLine(),
                 )
                 LabeledTextField(
                     value = currentDraft.lastName,
                     onValueChange = { v -> viewModel.updateEditDraft { it.copy(lastName = v) } },
                     label = stringResource(R.string.last_name),
-                    modifier = lastNameMod,
+                    sharedTextKey = id?.let { "contact-lastname-$it" },
+                    modifier = Modifier.fillMaxWidth().expandFromLine(),
                     trailingIcon = {
-                        NameSuffixChooser(currentDraft.nameSuffix, suffixKey) { v ->
+                        NameSuffixChooser(currentDraft.nameSuffix, null) { v ->
                             viewModel.updateEditDraft { it.copy(nameSuffix = v) }
                         }
                     },
@@ -263,13 +255,15 @@ fun EditContactPage(backStack: NavBackStack<Route>, viewModel: ContactViewModel,
                     value = currentDraft.nickname,
                     onValueChange = { v -> viewModel.updateEditDraft { it.copy(nickname = v) } },
                     label = stringResource(R.string.nickname),
-                    modifier = nicknameMod,
+                    sharedTextKey = id?.let { "contact-nickname-$it" },
+                    modifier = Modifier.fillMaxWidth().expandFromLine(),
                 )
                 LabeledTextField(
                     value = currentDraft.company,
                     onValueChange = { v -> viewModel.updateEditDraft { it.copy(company = v) } },
                     label = stringResource(R.string.company),
-                    modifier = companyMod,
+                    sharedTextKey = id?.let { "contact-company-$it" },
+                    modifier = Modifier.fillMaxWidth().expandFromLine(),
                 )
             }
 
@@ -323,6 +317,7 @@ fun EditContactPage(backStack: NavBackStack<Route>, viewModel: ContactViewModel,
                 // added has no id yet and no counterpart, so it is left unkeyed.
                 sharedKey = { it.id.takeIf { id -> id > 0 }?.let { id -> "contact-phone-$id" } },
                 isMandatory = { it == mobileIndex },
+                expandOnEnter = true,
             )
             Spacer(Modifier.height(8.dp))
 
@@ -348,6 +343,7 @@ fun EditContactPage(backStack: NavBackStack<Route>, viewModel: ContactViewModel,
                 addIcon = { IconMail() },
                 sharedKey = { it.id.takeIf { id -> id > 0 }?.let { id -> "contact-email-$id" } },
                 isMandatory = { it == homeEmailIndex },
+                expandOnEnter = true,
             )
             Spacer(Modifier.height(16.dp))
             val addressCtx = LocalContext.current
@@ -369,6 +365,7 @@ fun EditContactPage(backStack: NavBackStack<Route>, viewModel: ContactViewModel,
                 customLabelText = stringResource(R.string.custom_label),
                 customPlaceholder = stringResource(R.string.enter_custom_label),
                 addIcon = { IconLocationOn() },
+                expandOnEnter = true,
             )
             Spacer(Modifier.height(12.dp))
             Birthday(backStack, currentDraft.birthday) { v ->
@@ -713,6 +710,7 @@ private fun ColumnScope.GroupMembershipSection(
         selected = memberGroups,
         available = availableGroups,
         itemLabel = { it.name },
+        modifier = Modifier.expandFromLine(),
         onAdd = { onAddGroup(it.id) },
         onRemove = { onRemoveGroup(it.id) },
         chipModifier = { group ->

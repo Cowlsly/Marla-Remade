@@ -3,7 +3,6 @@ package com.vayunmathur.notes.ui
 import androidx.compose.ui.res.stringResource
 import com.vayunmathur.notes.R
 import androidx.activity.compose.BackHandler
-import androidx.compose.animation.core.animateDpAsState
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.PaddingValues
