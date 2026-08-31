@@ -108,7 +108,9 @@ configure<com.android.build.api.dsl.ApplicationExtension> {
         disable += listOf("MissingTranslation")
         // Toast is banned repo-wide; this one fails the build even though
         // abortOnError is off for everything else. See :lint-rules.
-        fatal += listOf("ToastUsage")
+        // DirectComposeAnimation keeps motion in the shared helpers, so the same
+        // interaction cannot pick up a different duration on every screen.
+        fatal += listOf("ToastUsage", "DirectComposeAnimation")
     }
 
     // Every app declares the same res/resources.properties (unqualifiedResLocale) for

@@ -73,6 +73,7 @@ not blocking**.
 | `./gradlew :compileDevKotlin` | **Yes** | The only automated PR gate |
 | `./gradlew checkMetadata` | **Yes** | First step of the release workflow |
 | `ToastUsage` lint | **Yes** (`fatal`) | Local `./gradlew lint` only — CI builds with `-x lint` |
+| `DirectComposeAnimation` lint | **Yes** (`fatal`) | Local `./gradlew lint` only — CI builds with `-x lint` |
 | The other 6 custom lint rules | No | Reported by `./gradlew lint` |
 | `scripts/*.sh` audits | No | Manual only |
 | Unit tests | No | CI builds with `-x test` |
@@ -286,7 +287,7 @@ no suitable glyph, put a 24dp vector in `library`'s res and wrap `painterResourc
 
 ### Never use `Toast`
 
-This is the one lint rule that fails the build. Toasts render outside the app's Material
+This is one of two lint rules marked `fatal`. Toasts render outside the app's Material
 surface, ignore the theme, can't carry an action, and are silently suppressed when the app is
 backgrounded on Android 12+ — so the case people reach for a Toast in, reporting from
 background work, is the case where it may never appear.
@@ -297,6 +298,34 @@ AppMessages.show(...)           // from a ViewModel, Worker, or Activity
 ```
 
 Use a notification when the message has to outlive the current screen.
+
+### Never animate directly with `androidx.compose.animation`
+
+The other `fatal` rule, `DirectComposeAnimation`. Motion written at a call site carries no
+intent: the same interaction picks up a different duration and curve on each screen, and a spec
+written with no arguments silently takes Compose's own default instead of the motion scheme the
+app is themed with. Reach for the helper that names the interaction:
+
+| Instead of | Use | From |
+| :--- | :--- | :--- |
+| `animateDpAsState` / `animateFloatAsState` / `animateColorAsState` | `animatedDp` / `animatedFloat` / `animatedColor` | `library.ui` |
+| `AnimatedVisibility` + `fadeIn`/`scaleIn`/`expandVertically` | `FadeVisibility` / `PopVisibility` / `ExpandVisibility` / `BannerVisibility` | `library.ui` |
+| `AnimatedContent` | `SwappedContent` / `SwappedTopBar` | `library.ui` |
+| `Modifier.animateItem(...)` | `itemMotion()` | `library.ui` |
+| a press-shape `animateIntAsState` | `pressedShape(pressed)` | `library.ui` |
+| a hand-rolled entrance | `Modifier.staggeredEntrance(index, arriving)` | `library.ui` |
+| a shared element across a nav change | `sharedText` / `sharedContainer` / `SharedEditableText` / `MorphPage()` | `library.util` |
+
+Imperative one-off motion on `androidx.compose.animation.core.Animatable` is **not** flagged — a
+game board wave or a camera capture flash is genuinely bespoke, and wrapping it would be a
+passthrough that names nothing. `com.vayunmathur.library.*` is exempt because the helpers are
+built there, and `com.vayunmathur.launcher.*` is exempt because its home screen is built on
+`animateBounds` and `Animatable`. Anything else that genuinely needs the raw API opts out per
+file with the exact marker:
+
+```kotlin
+// RAW ANIMATION EXCEPTION: <reason>
+```
 
 ### Screens are stateless; a binder wires the ViewModel
 

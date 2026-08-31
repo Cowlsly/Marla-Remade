@@ -11,6 +11,7 @@ class ModernAppsIssueRegistry : IssueRegistry() {
     override val issues: List<Issue> = listOf(
         ToastDetector.ISSUE,
         DirectBuildDatabaseDetector.ISSUE,
+        DirectComposeAnimationDetector.ISSUE,
         OneComposablePerFileDetector.ISSUE,
         PackageStructureDetector.ISSUE,
         RawScaffoldInAppDetector.ISSUE,
