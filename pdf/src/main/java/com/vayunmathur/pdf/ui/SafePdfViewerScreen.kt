@@ -116,6 +116,7 @@ import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.TextRange
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.input.TextFieldValue
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import kotlinx.coroutines.flow.collectLatest
 import androidx.compose.ui.unit.sp
@@ -1282,12 +1283,17 @@ fun PdfOutlineDrawer(
  * Takes a decoded [SafePdfPage] rather than a document handle, so a `@Preview` can render a
  * hand-built page (the primitives are plain data; only producing them needs the native
  * renderer).
+ *
+ * A null [page] with a non-null [failureReason] is a page that will never arrive, and shows a
+ * placeholder instead of a spinner. Without that distinction a decode failure, a caught native
+ * panic and "still loading" all present as the same indefinite spinner.
  */
 @Composable
 fun SafePdfPageCanvas(
     page: SafePdfPage?,
     modifier: Modifier = Modifier,
     placeholderRatio: Float? = null,
+    failureReason: String? = null,
     overlays: @Composable BoxWithConstraintsScope.(cw: Float, ch: Float, scale: Float) -> Unit = { _, _, _ -> },
 ) {
     // A wrong placeholder ratio makes the item change height the moment the page decodes,
@@ -1308,7 +1314,20 @@ fun SafePdfPageCanvas(
             .clipToBounds()
     ) {
         if (page == null || page.width <= 0f) {
-            CircularProgressIndicator(Modifier.align(Alignment.Center))
+            if (failureReason != null) {
+                // A page that will never arrive. A spinner here is a lie that never resolves,
+                // and is why this whole class of failure went unreported: the reason is logged
+                // for the bug report, the user just needs to know this page is not coming.
+                Text(
+                    text = stringResource(R.string.pdf_page_failed),
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    textAlign = TextAlign.Center,
+                    modifier = Modifier.align(Alignment.Center).padding(16.dp),
+                )
+            } else {
+                CircularProgressIndicator(Modifier.align(Alignment.Center))
+            }
             return@BoxWithConstraints
         }
         val decoded = page
@@ -1368,8 +1387,8 @@ private fun SafePdfPageItem(
     onAddPolyPoint: (Offset) -> Unit,
     onLinkPage: (Int) -> Unit,
 ) {
-    val page by produceState<SafePdfPage?>(null, document, index, version) {
-        value = document.renderPage(index)
+    val pageLoad by produceState<SafePdfDocument.PageLoad?>(null, document, index, version) {
+        value = document.renderPageResult(index)
     }
     val annotations by produceState(emptyList<SafeAnnotation>(), document, index, version) {
         value = if (editMode) document.annotations(index) else emptyList()
@@ -1381,14 +1400,19 @@ private fun SafePdfPageItem(
         value = if (!editMode) document.links(index) else emptyList()
     }
 
-    val current = page
+    val current = (pageLoad as? SafePdfDocument.PageLoad.Decoded)?.page
+    val failureReason = (pageLoad as? SafePdfDocument.PageLoad.Failed)?.reason
 
     // Report this page's width so the viewer can raise the zoom cap for large pages.
     LaunchedEffect(current?.width) {
         current?.width?.let { if (it > 0f) onPageWidth(it) }
     }
 
-    SafePdfPageCanvas(current, placeholderRatio = document.knownAspectRatio(index)) { cw, ch, scale ->
+    SafePdfPageCanvas(
+        current,
+        placeholderRatio = document.knownAspectRatio(index),
+        failureReason = failureReason,
+    ) { cw, ch, scale ->
         // Non-null inside the overlay slot: SafePdfPageCanvas only invokes it once the page
         // has been decoded.
         val decoded = current!!
@@ -2869,7 +2893,6 @@ internal fun DrawScope.drawSafePage(page: SafePdfPage) {
         return p
     }
     val textClipPath = android.graphics.Path()
-    var hasTextClip = false
     val glyphPathPaint = android.graphics.Paint().apply { isAntiAlias = true }
     val tmpGlyphPath = android.graphics.Path()
 
@@ -2950,8 +2973,14 @@ internal fun DrawScope.drawSafePage(page: SafePdfPage) {
             }
 
             is PdfPrimitive.Text -> {
-                // Embedded-font glyphs are painted via their real outline as Fill
-                // prims; this Text is kept only for selection/search — never painted.
+                // `outline` means "skip this record entirely" — no paint AND no clip
+                // contribution — not merely "already painted". Modes 0-2 set it because
+                // Rust already inked the glyph as Fill/Stroke prims from its real contours
+                // and there is no clip to build, so only the selection/search payload is
+                // left. Modes 4-6 now paint from those same real contours (draw.rs) but
+                // deliberately send `outline = false`, because this check sits ABOVE the
+                // clip accumulator below and would take the aperture with it; they are made
+                // non-painting by `argb = 0` instead. Do not widen this to the clip modes.
                 if (prim.outline) continue
                 if (prim.text.isBlank()) continue
                 val origin = map(prim.origin)
@@ -3038,11 +3067,33 @@ internal fun DrawScope.drawSafePage(page: SafePdfPage) {
                 // Accumulate glyph outlines for text-clip render modes (Tr 4-7),
                 // applied at the following TextClipApply marker. Use styled glyphPathPaint
                 // so clip matches bold/italic visual.
+                //
+                // KNOWN LIMITATION: the aperture is derived from the SUBSTITUTE face via
+                // getTextPath, never from the document's embedded outline — Rust sends a
+                // string here, not contours. Modes 4-6 now take their INK from the real
+                // embedded contours (draw.rs), so ink and aperture come from different
+                // sources and disagree by up to about a third of their union. That is the
+                // ceiling, not the typical case: pdfTypeface() matches the generic family
+                // and the bold/italic style the wire carries, so the mismatch is a weight
+                // or metric difference within the right family, and a correctly matched
+                // weight lands below it. A wholly wrong family would be worse but needs
+                // Rust's family detection to be wrong, which is a separate defect.
+                // Both shapes were substitute-derived before C4, so they were wrong
+                // together and this was invisible; it is newly VISIBLE, not newly wrong.
+                // Fixing it means carrying the real contours across the wire — see the
+                // carrier constraint on ClipPush above.
+                //
+                // CONTRACT: every Text at rm 4..7 MUST be followed by a TextClipApply.
+                // `textClipPath` is reset ONLY in that arm, so a record that never gets a
+                // marker leaves its outlines pending and folds them into the NEXT text
+                // object's clip. Rust guarantees this by latching on the same condition it
+                // emits the record under; a latch predicate that misses an emit path
+                // (e.g. the whole-run no-font-metrics record, which bypasses for_each_code)
+                // breaks it.
                 if (rm in 4..7) {
                     tmpGlyphPath.reset()
                     glyphPathPaint.getTextPath(prim.text, 0, prim.text.length, origin.x, origin.y, tmpGlyphPath)
                     textClipPath.addPath(tmpGlyphPath)
-                    hasTextClip = true
                 }
             }
 
@@ -3155,6 +3206,14 @@ internal fun DrawScope.drawSafePage(page: SafePdfPage) {
             is PdfPrimitive.ClipPush -> {
                 // Save and apply clip; prefer the bezier-retentive path (v4) for
                 // accurate curved clips, falling back to the flattened polyline.
+                //
+                // An empty path here means DO NOT NARROW — the opposite of TextClipApply
+                // below, which narrows to nothing. Deliberate: Rust drops an empty ClipPush
+                // entirely (interpret.rs), so one arriving here is a degenerate `W n` whose
+                // ClipPop would otherwise release an enclosing clip early, whereas an empty
+                // text clip is a real §9.4.3 intersection against no outlines. Both contracts
+                // are pinned by tests. Do not "harmonize" them, and do not route glyph
+                // outlines through ClipPush — it would silently invert the text-clip case.
                 nativeCanvas.save()
                 saveCount++
                 val ops = prim.pathOps
@@ -3184,15 +3243,16 @@ internal fun DrawScope.drawSafePage(page: SafePdfPage) {
             }
 
             is PdfPrimitive.TextClipApply -> {
-                // Intersect the accumulated glyph outlines into the clip. Paired
-                // with a later ClipPop (Rust incremented the clip depth).
+                // §9.4.3: at ET the accumulated glyph outlines are combined with the current
+                // clip BY INTERSECTION. An empty accumulation intersects to EMPTY, not to
+                // absent, so clip unconditionally — a Path with no contours has an empty
+                // region and yields exactly that. Skipping the clip instead would let the
+                // content that should show only inside the letterforms paint over the whole
+                // page. Paired with a later ClipPop (Rust incremented the clip depth).
                 nativeCanvas.save()
                 saveCount++
-                if (hasTextClip) {
-                    nativeCanvas.clipPath(textClipPath)
-                }
+                nativeCanvas.clipPath(textClipPath)
                 textClipPath.reset()
-                hasTextClip = false
             }
 
             is PdfPrimitive.GroupPush -> {

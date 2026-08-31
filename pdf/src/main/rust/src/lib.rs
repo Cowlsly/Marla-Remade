@@ -90,6 +90,8 @@ mod issue321_tests;
 #[cfg(test)]
 mod differential_tests;
 #[cfg(test)]
+mod reference_diff_tests;
+#[cfg(test)]
 mod perf_tests;
 #[cfg(test)]
 mod robustness_tests;

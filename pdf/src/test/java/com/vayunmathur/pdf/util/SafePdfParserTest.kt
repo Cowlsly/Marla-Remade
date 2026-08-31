@@ -93,7 +93,12 @@ class SafePdfParserTest {
         assertEquals(BlendMode.Normal, fill.blend)
     }
 
-    /** A version above what Kotlin knows must warn and carry on, never throw. */
+    /**
+     * A version outside the known range must warn and carry on, never throw, in EITHER
+     * direction. A throw here becomes a null page and an indefinite spinner, and the
+     * older-than-known case degrades exactly as gracefully as the newer-than-known one:
+     * parse what the tags allow.
+     */
     @Test
     fun aFutureWireVersionIsToleratedRatherThanRejected() {
         val page = SafePdfParser.parse(WireWriter(version = 99).fill().build())
@@ -101,40 +106,50 @@ class SafePdfParserTest {
     }
 
     @Test
-    fun versionZeroIsRejected() {
-        assertFailsWith<IllegalArgumentException> {
-            SafePdfParser.parse(WireWriter(version = 0).fill().build())
-        }
+    fun versionZeroIsToleratedRatherThanRejected() {
+        val page = SafePdfParser.parse(WireWriter(version = 0).fill().build())
+        assertEquals(612f, page.width)
+        assertEquals(792f, page.height)
     }
 
+    /**
+     * Out-of-range dimensions are CLAMPED, not rejected. A throw happens before the
+     * per-primitive guard, so it discards the whole page, and `renderPage` can only turn that
+     * into a failed page — which the viewer used to show as an indefinite spinner. The Rust
+     * producer carries no matching 20000pt bound, so it can legitimately emit a page this side
+     * once refused: large-format CAD and poster PDFs land here and every real viewer renders
+     * them. A page drawn at a clamped size beats a page that never appears.
+     */
     @Test
-    fun implausiblePageDimensionsAreRejected() {
-        assertFailsWith<IllegalArgumentException> {
-            SafePdfParser.parse(WireWriter(width = 0f).fill().build())
-        }
-        assertFailsWith<IllegalArgumentException> {
-            SafePdfParser.parse(WireWriter(height = 50_000f).fill().build())
-        }
+    fun implausiblePageDimensionsAreClampedRatherThanRejected() {
+        val zeroWidth = SafePdfParser.parse(WireWriter(width = 0f).fill().build())
+        assertEquals(612f, zeroWidth.width, "a non-positive width must fall back, not throw")
+        assertEquals(1, zeroWidth.primitives.size, "the page was discarded over its header")
+
+        val tall = SafePdfParser.parse(WireWriter(height = 50_000f).fill().build())
+        assertEquals(20000f, tall.height, "an over-tall page must clamp to the bound")
+        assertEquals(1, tall.primitives.size)
     }
 
     /**
      * NaN is not caught by a range check — every comparison against it is false, so a NaN
-     * dimension passes both `<= 0f` and `> 20000f`. It then reaches `SafePdfPageCanvas`,
+     * dimension passes both `<= 0f` and `> 20000f`. It must not reach `SafePdfPageCanvas`,
      * where `Modifier.aspectRatio(width / height)` requires a ratio > 0 and throws from
      * COMPOSITION, losing the whole viewer rather than the one page. Infinity is caught by
      * the upper bound already; assert both so the guard cannot regress to a bare range test.
      */
     @Test
-    fun nonFinitePageDimensionsAreRejected() {
-        assertFailsWith<IllegalArgumentException> {
-            SafePdfParser.parse(WireWriter(width = Float.NaN).fill().build())
-        }
-        assertFailsWith<IllegalArgumentException> {
-            SafePdfParser.parse(WireWriter(height = Float.NaN).fill().build())
-        }
-        assertFailsWith<IllegalArgumentException> {
-            SafePdfParser.parse(WireWriter(width = Float.POSITIVE_INFINITY).fill().build())
-        }
+    fun nonFinitePageDimensionsAreReplacedWithFiniteOnes() {
+        val nanWidth = SafePdfParser.parse(WireWriter(width = Float.NaN).fill().build())
+        assertEquals(612f, nanWidth.width)
+        assertTrue(nanWidth.width.isFinite() && nanWidth.height.isFinite())
+
+        val nanHeight = SafePdfParser.parse(WireWriter(height = Float.NaN).fill().build())
+        assertEquals(792f, nanHeight.height)
+
+        val infWidth = SafePdfParser.parse(WireWriter(width = Float.POSITIVE_INFINITY).fill().build())
+        assertEquals(612f, infWidth.width, "infinity is not finite, so it takes the fallback")
+        assertTrue(infWidth.width > 0f, "aspectRatio() would throw from composition otherwise")
     }
 
     /**
@@ -384,6 +399,82 @@ class SafePdfParserTest {
     }
 
     /**
+     * A JPEG over the 16 Mpx budget must SURVIVE as a primitive. Rust deliberately drops its
+     * own pixel guard for the format-1 passthrough (images.rs:1082-1087) and sends the photo
+     * at full dimensions, because the platform decoder subsamples it. Kotlin used to apply the
+     * budget in the TAG_IMAGE arm BEFORE reading `format`, so it rejected every format alike
+     * and deleted the image with no bitmap, no log and nothing in logcat — the passthrough
+     * Rust built to stop deleting high-res scans was cancelled one language later.
+     *
+     * 5184x3888 is an ordinary 20 MP camera photo, over the 16 Mi pixel cap.
+     */
+    @Test
+    fun anOversizedJpegSurvivesInsteadOfBeingDropped() {
+        val page = SafePdfParser.parse(
+            WireWriter()
+                .image(w = 5184, h = 3888, format = 1, data = ByteArray(64))
+                .fill(argb = 0xFF121212.toInt())
+                .build()
+        )
+        assertEquals(2, page.primitives.size, "the oversized JPEG primitive was dropped")
+        assertIs<PdfPrimitive.Image>(page.primitives[0])
+        // The stream must still be in sync for everything after it.
+        assertEquals(0xFF121212.toInt(), assertIs<PdfPrimitive.FillPath>(page.primitives[1]).color)
+    }
+
+    /**
+     * The counterpart, and an HONEST statement of what this harness can show. The raw path
+     * must still refuse an oversized image, because it allocates `w*h` ints up front with no
+     * chance to subsample; Rust decimates that path, so an oversized raw image is a contract
+     * violation rather than ordinary input.
+     *
+     * The stub `android.jar` answers `BitmapFactory` with null for BOTH formats, so a null
+     * bitmap here is NOT evidence that the format guard fired — this test pins that the
+     * primitive survives and the stream stays in sync, which is what is observable off-device.
+     * The guard itself is pinned by [theJpegSubsampleFactorIsAPowerOfTwoThatMeetsTheBudget]
+     * and by the format-1 branch being the only one that reaches a decoder at all.
+     */
+    @Test
+    fun anOversizedRawImageKeepsItsPrimitiveAndTheStreamInSync() {
+        val page = SafePdfParser.parse(
+            WireWriter()
+                .image(w = 5184, h = 3888, format = 0, data = ByteArray(64))
+                .fill(argb = 0xFF343434.toInt())
+                .build()
+        )
+        assertEquals(2, page.primitives.size)
+        assertNull(assertIs<PdfPrimitive.Image>(page.primitives[0]).bitmap)
+        assertEquals(0xFF343434.toInt(), assertIs<PdfPrimitive.FillPath>(page.primitives[1]).color)
+    }
+
+    /**
+     * `BitmapFactory` rounds `inSampleSize` DOWN to a power of two, so a non-power-of-two would
+     * decode LARGER than requested — the direction that OOMs. Pin that the returned factor is
+     * always a power of two AND actually brings the image under budget.
+     */
+    @Test
+    fun theJpegSubsampleFactorIsAPowerOfTwoThatMeetsTheBudget() {
+        val cap = 16L * 1024L * 1024L
+        val cases = listOf(
+            2 to 2,             // trivially under budget
+            4096 to 4096,       // exactly at the cap
+            5184 to 3888,       // 20 MP photo
+            9933 to 14043,      // A0 300dpi scan, 139 Mpx
+            20000 to 20000,     // the dimension bound, 400 Mpx
+        )
+        for ((w, h) in cases) {
+            val s = SafePdfParser.sampleSizeFor(w, h)
+            assertTrue(s > 0 && (s and (s - 1)) == 0, "sample size $s for ${w}x$h is not a power of two")
+            assertTrue(
+                (w.toLong() / s) * (h.toLong() / s) <= cap,
+                "sample size $s leaves ${w}x$h over the pixel budget",
+            )
+        }
+        assertEquals(1, SafePdfParser.sampleSizeFor(2, 2), "a small image must not be subsampled")
+        assertEquals(1, SafePdfParser.sampleSizeFor(4096, 4096), "an image at the cap must not be subsampled")
+    }
+
+    /**
      * An unusable size must consume its payload EXACTLY and drop only that primitive; a
      * short-read here would desync every primitive after it.
      */
@@ -626,10 +717,41 @@ class SafePdfParserTest {
         assertEquals(2, page.primitives.size)
     }
 
+    /**
+     * A negative count coerces to zero rather than throwing: the header is still usable, so
+     * the page renders empty instead of becoming a failed page behind a spinner.
+     */
     @Test
-    fun aNegativeCountIsRejected() {
-        assertFailsWith<IllegalArgumentException> {
-            SafePdfParser.parse(WireWriter().fill().apply { declaredCount = -1 }.build())
+    fun aNegativeCountYieldsAnEmptyPageRatherThanAThrow() {
+        val page = SafePdfParser.parse(WireWriter().fill().apply { declaredCount = -1 }.build())
+        assertEquals(0, page.primitives.size)
+        assertEquals(612f, page.width)
+    }
+
+    /**
+     * The header guards must never be able to fail the whole page. Every rejection they used to
+     * make became a null page, and the viewer rendered that as an indefinite spinner — so a
+     * poster-sized page, a stale wire version and a corrupt count all presented as "still
+     * loading" forever. Pin the whole class: a well-formed body always survives its header.
+     */
+    @Test
+    fun noHeaderValueCanTurnAWellFormedPageIntoAFailedOne() {
+        val headers = listOf(
+            "over-wide" to WireWriter(width = 90_000f),
+            "over-tall" to WireWriter(height = 90_000f),
+            "zero width" to WireWriter(width = 0f),
+            "negative height" to WireWriter(height = -5f),
+            "NaN width" to WireWriter(width = Float.NaN),
+            "infinite height" to WireWriter(height = Float.POSITIVE_INFINITY),
+            "version below range" to WireWriter(version = 0),
+            "version above range" to WireWriter(version = 99),
+        )
+        for ((label, writer) in headers) {
+            val page = SafePdfParser.parse(writer.fill().build())
+            assertEquals(1, page.primitives.size, "$label lost the page body")
+            assertTrue(page.width.isFinite() && page.width > 0f, "$label left an unusable width")
+            assertTrue(page.height.isFinite() && page.height > 0f, "$label left an unusable height")
+            assertTrue(page.width <= 20000f && page.height <= 20000f, "$label exceeded the bound")
         }
     }
 

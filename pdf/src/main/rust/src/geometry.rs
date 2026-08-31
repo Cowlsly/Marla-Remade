@@ -89,6 +89,21 @@ pub(crate) fn user_unit(doc: &Document, page_id: ObjectId) -> f64 {
     uu.clamp(1.0, 75000.0)
 }
 
+/// Upper bound on either page dimension, in PDF units.
+///
+/// Matches the consumer's `coerceAtMost(20000f)` in `SafePdfParser.kt`. Without
+/// a bound on this side the two describe DIFFERENT pages: every coordinate on
+/// the wire is laid out against the unclamped box while the canvas is sized to
+/// the clamped one. The contract mismatch is the defect — the value itself only
+/// has to be the same value on both sides.
+///
+/// Deliberately NOT unified with `MAX_IMAGE_DIM` in `graphics_state.rs`, which
+/// happens to be 20000 too. That one bounds an image edge in PIXELS against a
+/// decode-memory budget; this one bounds a page box in PDF USER-SPACE UNITS
+/// against the consumer's canvas arithmetic. Same number, unrelated policies —
+/// folding them together would make tuning either silently move the other.
+const MAX_PAGE_DIMENSION: f64 = 20000.0;
+
 /// Visible page rectangle: `CropBox` intersected with `MediaBox` when present,
 /// otherwise `MediaBox` (§14.11.2). Always normalized so `x0 < x1` and `y0 < y1`,
 /// and never degenerate — a zero-size result falls back to US Letter.
@@ -122,7 +137,29 @@ pub(crate) fn page_visible_box(doc: &Document, page_id: ObjectId) -> [f64; 4] {
     // validation) would otherwise ship a zero page dimension and divide by zero
     // in the rasterizer's fit-to-width scale.
     if vb[2] - vb[0] >= 1.0 && vb[3] - vb[1] >= 1.0 {
-        vb
+        // Clamped from the origin rather than falling back to US Letter: content
+        // near the origin still lands where the file put it, which loses the
+        // overflow rather than relocating all of the artwork.
+        //
+        // CROPPING, not scaling, and that is forced rather than preferred.
+        // Scaling the page down to fit reads as the strictly better option —
+        // nothing is lost — but the consumer CLAMPS (`coerceAtMost`, per axis)
+        // and does not scale. A scaling producer against a clamping consumer
+        // describes two different pages again, which is exactly the mismatch
+        // this bound exists to close. Scaling only becomes available if both
+        // sides change together. Reached for independently by `hunt-missing`,
+        // so it is worth stating here rather than leaving to be re-derived.
+        //
+        // Unreachable for conforming input in any case: PDF 1.7 Appendix C.2
+        // puts the architectural page-size limit at 14400 units, so this only
+        // fires on malformed files, where a cropped renderable page beats the
+        // permanent loading spinner the consumer used to produce.
+        [
+            vb[0],
+            vb[1],
+            vb[2].min(vb[0] + MAX_PAGE_DIMENSION),
+            vb[3].min(vb[1] + MAX_PAGE_DIMENSION),
+        ]
     } else {
         [0.0, 0.0, 612.0, 792.0]
     }
@@ -279,6 +316,83 @@ mod geometry_tests {
         });
         doc.trailer.set("Root", catalog_id);
         doc
+    }
+
+    /// The producer must not describe a page the consumer will not accept.
+    /// `SafePdfParser.kt` clamps width and height with `coerceAtMost(20000f)`,
+    /// so an unbounded box here laid every coordinate out against one page size
+    /// while the canvas was sized to another. Only the LOWER bound was checked.
+    #[test]
+    fn an_oversized_page_is_clamped_to_the_bound_the_consumer_uses() {
+        let doc = page_doc([0.0, 0.0, 50_000.0, 90_000.0], None, None, None);
+        let page_id = nth_page_id(&doc, 0).expect("page 0");
+        let vb = page_visible_box(&doc, page_id);
+        assert_eq!(vb, [0.0, 0.0, 20_000.0, 20_000.0]);
+
+        // Clamped from the ORIGIN, so a non-zero origin keeps its own coordinates
+        // rather than being relocated.
+        let doc = page_doc([100.0, 200.0, 50_000.0, 90_000.0], None, None, None);
+        let page_id = nth_page_id(&doc, 0).expect("page 0");
+        assert_eq!(page_visible_box(&doc, page_id), [100.0, 200.0, 20_100.0, 20_200.0]);
+    }
+
+    /// The clamp must not touch a page that is merely large but in range, nor
+    /// re-open the degenerate case the lower bound already handles.
+    #[test]
+    fn the_page_clamp_leaves_in_range_and_degenerate_boxes_alone() {
+        let doc = page_doc([0.0, 0.0, 20_000.0, 612.0], None, None, None);
+        let page_id = nth_page_id(&doc, 0).expect("page 0");
+        assert_eq!(page_visible_box(&doc, page_id), [0.0, 0.0, 20_000.0, 612.0]);
+
+        let doc = page_doc([0.0, 0.0, 0.0, 0.0], None, None, None);
+        let page_id = nth_page_id(&doc, 0).expect("page 0");
+        assert_eq!(page_visible_box(&doc, page_id), [0.0, 0.0, 612.0, 792.0]);
+    }
+
+    /// [`MAX_PAGE_DIMENSION`] is a CONTRACT with `SafePdfParser.kt`, not a local
+    /// policy: the whole point of FINDING F was that the two sides disagreed, so
+    /// a comment saying "matches the consumer" is exactly the assurance that
+    /// rots. Nothing else catches a drift — both numbers are valid literals,
+    /// Kotlin still compiles, and every Rust test here asserts our own value
+    /// against itself. So assert it across the language boundary against the
+    /// real file, the way `wire::wire_version_is_not_ahead_of_the_kotlin_parser`
+    /// already does for the wire version.
+    ///
+    /// Suggested by `hunt-missing`, who pointed out that hoisting a duplicated
+    /// literal into a named constant on each side makes each side internally
+    /// consistent and leaves the PAIR just as free to drift.
+    #[test]
+    fn the_page_bound_matches_the_kotlin_consumers_clamp() {
+        let path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../java/com/vayunmathur/pdf/util/SafePdfParser.kt"
+        );
+        let src = std::fs::read_to_string(path)
+            .unwrap_or_else(|e| panic!("cannot read the page box's only consumer {path}: {e}"));
+        // `rawWidth.coerceAtMost(20000f)` and the same on height.
+        let bounds: Vec<f64> = src
+            .lines()
+            .filter(|l| l.contains("rawWidth") || l.contains("rawHeight"))
+            .filter_map(|l| l.split_once("coerceAtMost("))
+            .filter_map(|(_, rest)| rest.split(')').next())
+            .filter_map(|v| v.trim().trim_end_matches('f').parse::<f64>().ok())
+            .collect();
+        assert_eq!(
+            bounds.len(),
+            2,
+            "expected a `coerceAtMost(<n>f)` on each of rawWidth and rawHeight in {path}; \
+             found {bounds:?}. If the consumer's clamp moved or was renamed, this contract \
+             needs re-pinning rather than deleting."
+        );
+        for b in bounds {
+            assert_eq!(
+                b, super::MAX_PAGE_DIMENSION,
+                "geometry.rs clamps the page box at {} but SafePdfParser.kt clamps at {b}. \
+                 The two then describe DIFFERENT pages: wire coordinates are laid out against \
+                 one box and the canvas is sized from the other. Change both together.",
+                super::MAX_PAGE_DIMENSION
+            );
+        }
     }
 
     fn assert_mat_eq(a: &Mat, b: &Mat, what: &str) {

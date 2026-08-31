@@ -76,10 +76,15 @@ pub fn decode_jbig2(data: &[u8], globals: Option<&[u8]>, _max_w: u32, _max_h: u3
     let try_decode_image = |img: &Image| -> Option<(u32, u32, Vec<u8>)> {
         let w = img.width();
         let h = img.height();
-        if w == 0 || h == 0 || w > 20000 || h > 20000 {
+        if w == 0 || h == 0 || w > crate::MAX_IMAGE_DIM || h > crate::MAX_IMAGE_DIM {
             return None;
         }
-        if (w as usize).saturating_mul(h as usize) > 16 * 1024 * 1024 {
+        // Unlike the CCITT cap in `filters.rs`, this one is correctly unit-matched and is
+        // NOT raised: `SimpleRgbaDecoder` allocates `w * h * 4`, so `MAX_IMAGE_PIXELS`
+        // (16 Mpx = 64 MB of RGBA) is measuring exactly the buffer it guards. Only the
+        // hardcoded literals change — they duplicated the crate's budget constants and
+        // would have drifted from them silently.
+        if (w as usize).saturating_mul(h as usize) > crate::MAX_IMAGE_PIXELS {
             return None;
         }
         let mut decoder = SimpleRgbaDecoder::new(w as usize, h as usize);

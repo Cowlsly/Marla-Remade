@@ -283,6 +283,15 @@ pub(crate) const MAX_PRIMITIVES: usize = 300000;
 pub(crate) const MAX_ANNOTATIONS: usize = 10000;
 pub(crate) const MAX_IMAGE_DIM: u32 = 20000;
 pub(crate) const MAX_IMAGE_BYTES: usize = 16 * 1024 * 1024;
+/// Decoded-pixel budget. `images.rs` DECIMATES an oversized image down to this rather
+/// than dropping it, so it is a target the producer aims at, not just a refusal.
+///
+/// `MAX_IMAGE_PIXELS` and `MAX_IMAGE_DIM` are each declared a second time in
+/// `SafePdfParser.kt`, where they are a REFUSAL. Lowering either of these, or raising
+/// the Kotlin twin's counterpart, is safe; raising these above the Kotlin values is not
+/// — the image then clears every Rust guard and the parser drops the primitive with no
+/// diagnostic on either side. `wire.rs`'s `the_kotlin_image_budgets_are_not_below_the_
+/// rust_ones` asserts that direction against the real Kotlin file.
 pub(crate) const MAX_IMAGE_PIXELS: usize = 16 * 1024 * 1024; // ~16 MP cap
 /// Decoded raster images are downscaled (preserving aspect) so their longer side
 /// does not exceed this, capping per-image RGBA memory on device. 2048px is well

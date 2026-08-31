@@ -145,6 +145,37 @@ object SafePdfParser {
      * which is why exceeding it skips the one primitive instead of ending the page.
      */
     private const val MAX_IMAGE_DATA_BYTES = 16 * 1024 * 1024
+
+    /**
+     * Decoded-pixel budget, deliberately a SEPARATE constant from [MAX_IMAGE_DATA_BYTES] even
+     * though the two currently hold the same literal: one counts compressed bytes on the wire,
+     * the other counts pixels after decode (16 Mi pixels is 64 MB of ARGB_8888). The same
+     * conflation exists on the Rust side as `MAX_IMAGE_BYTES` / `MAX_IMAGE_PIXELS`; sharing one
+     * literal between the two is how a change to either silently moves the other.
+     *
+     * Enforced per FORMAT, not globally — see `decodeBitmap`.
+     *
+     * TWIN of `graphics_state.rs:286`, and the invariant is ONE-DIRECTIONAL:
+     * this value must be >= Rust's, never <.
+     *
+     * `images.rs:848` decimates until `out_w * out_h <= MAX_IMAGE_PIXELS` (Rust's), then the
+     * `format == 0` branch of `decodeBitmap` drops anything above this one. If this were
+     * LOWERED below Rust's, Rust would emit rasters in the gap believing it had decimated them
+     * to fit, and they would vanish here — the large-CCITT bug (F13) silently returning, with
+     * both sides individually "correct" and no diagnostic on either. Raising it is safe.
+     *
+     * Same shape as `wire.rs`'s `WIRE_VERSION <= kotlin_version` check: the consumer may run
+     * ahead of the producer, never behind. Written as a bare literal with an explicit type so
+     * that check's file-reading approach can be pointed at this line too.
+     */
+    private const val MAX_IMAGE_PIXELS: Long = 16777216 // 16 * 1024 * 1024
+
+    /**
+     * TWIN of `graphics_state.rs:284` (used at `images.rs:1078`), with the same
+     * consumer->=producer invariant as [MAX_IMAGE_PIXELS]: Rust refuses an image past its
+     * value, so a SMALLER value here drops images Rust considered valid.
+     */
+    private const val MAX_IMAGE_DIM: Int = 20000
     /**
      * Cap on a tiling pattern's lattice extent per axis. The extent only decides how large a
      * region the REPEAT shader is asked to cover, so a big count is not itself expensive, but
@@ -223,37 +254,43 @@ object SafePdfParser {
 
         val firstInt = buf.int
         val wireVersion: Int
-        val width: Float
-        val height: Float
-        val countRaw: Int
+        val rawWidth: Float
+        val rawHeight: Float
+        val rawCount: Int
 
         if (firstInt == WIRE_MAGIC) {
             if (buf.remaining() < 16) throw IllegalArgumentException("v2/v3 header truncated")
             wireVersion = buf.int
-            width = buf.float
-            height = buf.float
-            countRaw = buf.int
+            rawWidth = buf.float
+            rawHeight = buf.float
+            rawCount = buf.int
         } else {
             // v1 legacy: firstInt was actually width bits, reinterpret
             wireVersion = 1
-            width = java.lang.Float.intBitsToFloat(firstInt)
-            height = buf.float
-            countRaw = buf.int
+            rawWidth = java.lang.Float.intBitsToFloat(firstInt)
+            rawHeight = buf.float
+            rawCount = buf.int
         }
 
         // Safety guards: count caps, version enforcement, dimension sanity.
-        // NaN is checked explicitly: every comparison against it is false, so a NaN width
-        // passes `<= 0f` and `> 20000f` alike and reaches SafePdfPageCanvas, whose
+        //
+        // CLAMP, DO NOT THROW. A throw here happens before the per-primitive guard below, so
+        // renderPage turns the whole page into null and the UI shows an indefinite spinner —
+        // and the Rust producer carries no matching 20000pt bound, so it can legitimately emit
+        // a page this side used to reject. Large-format CAD and poster PDFs land here and every
+        // real viewer renders them. An over-large page drawn at a clamped size beats a page that
+        // never appears.
+        //
+        // NaN is handled by the same expression: every comparison against it is false, so it
+        // takes the fallback rather than reaching SafePdfPageCanvas, whose
         // `Modifier.aspectRatio(width / height)` requires a ratio > 0 and throws on NaN —
         // taking down the composition rather than the one page.
-        if (!width.isFinite() || !height.isFinite() ||
-            width <= 0f || height <= 0f || width > 20000f || height > 20000f
-        ) {
-            throw IllegalArgumentException("Invalid page dimensions $width x $height")
+        val width = if (rawWidth.isFinite() && rawWidth > 0f) rawWidth.coerceAtMost(20000f) else 612f
+        val height = if (rawHeight.isFinite() && rawHeight > 0f) rawHeight.coerceAtMost(20000f) else 792f
+        if (width != rawWidth || height != rawHeight) {
+            android.util.Log.w(TAG, "page dimensions $rawWidth x $rawHeight out of range, clamped to $width x $height")
         }
-        if (countRaw < 0) {
-            throw IllegalArgumentException("Negative primitive count: $countRaw")
-        }
+        val countRaw = rawCount.coerceAtLeast(0)
         val count = countRaw.coerceAtMost(MAX_PRIMITIVES)
         if (count < countRaw) {
             android.util.Log.w(TAG, "primitive count $countRaw exceeds $MAX_PRIMITIVES, rendering the first $count")
@@ -271,11 +308,13 @@ object SafePdfParser {
         // Accept v1 (legacy), v2, v3 and v4. Newer versions are tolerated via
         // forward-compat parsing as long as the tags are known.
         if (wireVersion !in 1..WIRE_VERSION) {
-            if (wireVersion > WIRE_VERSION) {
-                android.util.Log.w("SafePdfParser", "Wire version $wireVersion > $WIRE_VERSION, attempting forward compat parse")
-            } else {
-                throw IllegalArgumentException("Unsupported wire version: $wireVersion")
-            }
+            // Neither direction throws: a throw here becomes a null page and an indefinite
+            // spinner. An older-than-known version degrades the same way a newer one does —
+            // parse what the tags allow and drop what they do not.
+            android.util.Log.w(
+                "SafePdfParser",
+                "Wire version $wireVersion outside 1..$WIRE_VERSION, attempting best-effort parse",
+            )
         }
 
         val primitives = ArrayList<PdfPrimitive>(count.coerceAtMost(4096))
@@ -464,13 +503,20 @@ object SafePdfParser {
                     val ctm = FloatArray(6) { buf.float }
                     val w = buf.int
                     val h = buf.int
-                    if (w <= 0 || h <= 0 || w > 20000 || h > 20000 ||
-                        w.toLong() * h.toLong() > 16 * 1024 * 1024
-                    ) {
+                    if (w <= 0 || h <= 0 || w > MAX_IMAGE_DIM || h > MAX_IMAGE_DIM) {
                         // Unusable dimensions: consume this payload EXACTLY so the stream
                         // stays in sync, then drop the primitive. If it cannot be skipped
                         // cleanly the buffer is untrustworthy, so stop rather than decode
                         // garbage from a desynced offset.
+                        //
+                        // The PIXEL budget is deliberately NOT tested here. `format` is not
+                        // read until below, so a test here can only reject every format
+                        // alike — and Rust drops its own pixel guard for the JPEG
+                        // passthrough precisely because the platform decoder subsamples it
+                        // (images.rs:1082-1087). Rejecting here deleted every JPEG over
+                        // 16 Mpx, which is an ordinary phone photo, with no bitmap, no log
+                        // and nothing in logcat. The budget now applies per format in
+                        // `decodeBitmap`, where the memory is actually committed.
                         val fixed = 1 + (if (isV9) 4 else 0) + (if (isV10) 1 else 0) +
                             (if (isV11) 1 else 0) + 4
                         if (buf.remaining() < fixed) break
@@ -831,9 +877,26 @@ object SafePdfParser {
         return ops
     }
 
+    /**
+     * Smallest power-of-two subsample bringing `w*h` within [MAX_IMAGE_PIXELS].
+     * `BitmapFactory` rounds `inSampleSize` DOWN to a power of two, so compute one directly
+     * rather than hand it a ratio it would round the wrong way (a rounded-down sample size
+     * decodes LARGER than asked, which is the direction that OOMs).
+     */
+    internal fun sampleSizeFor(w: Int, h: Int): Int {
+        var s = 1
+        while ((w.toLong() / s) * (h.toLong() / s) > MAX_IMAGE_PIXELS) s = s shl 1
+        return s
+    }
+
     /** Decode an image payload: format 1 = JPEG bytes, 0 = raw RGBA8888. */
     private fun decodeBitmap(w: Int, h: Int, format: Int, data: ByteArray): android.graphics.Bitmap? {
-        if (w <= 0 || h <= 0 || w > 20000 || h > 20000 || w.toLong()*h.toLong() > 16*1024*1024) return null
+        if (w <= 0 || h <= 0 || w > MAX_IMAGE_DIM || h > MAX_IMAGE_DIM) return null
+        // The pixel budget is per format. The raw branch below allocates `w*h` ints before it
+        // can do anything, so it must be refused outright — and Rust decimates that path, so
+        // an oversized raw image is a contract violation rather than ordinary input. A JPEG
+        // commits nothing until the decoder runs and is scaled down there instead.
+        if (format != 1 && w.toLong() * h.toLong() > MAX_IMAGE_PIXELS) return null
         return try {
             when (format) {
                 1 -> {
@@ -841,7 +904,13 @@ object SafePdfParser {
                         android.util.Log.w("SafePdfParser", "JPEG too large ${data.size}")
                         null
                     } else {
-                        android.graphics.BitmapFactory.decodeByteArray(data, 0, data.size)
+                        // Subsample instead of dropping. Rust hands the JPEG over at full
+                        // dimensions deliberately (images.rs:1082-1087) because this decoder
+                        // is what is supposed to scale it; without inSampleSize it decodes at
+                        // full size, so a 20 MP photo would commit ~80 MB of ARGB_8888.
+                        val opts = android.graphics.BitmapFactory.Options()
+                        opts.inSampleSize = sampleSizeFor(w, h)
+                        android.graphics.BitmapFactory.decodeByteArray(data, 0, data.size, opts)
                     }
                 }
                 0 -> {

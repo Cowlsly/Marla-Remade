@@ -119,6 +119,73 @@ fn hidden_render_mode(rm: i64) -> i64 {
     if rm >= 4 { 7 } else { 3 }
 }
 
+/// Whether a show operator that just ran should latch the text clip.
+///
+/// §9.4.3 builds the clip from the outlines of the glyphs SHOWN, and the
+/// consumer resets its accumulated path ONLY when it sees the `TextClipApply`
+/// that `ET` emits. The gate is deliberately HERE and not in the consumer: the
+/// consumer applies the marker unconditionally, so an empty accumulation clips
+/// to EMPTY. That is the right reading for a run that shows only whitespace — a
+/// space has no contours, so it contributes no outline — and it is safe only
+/// because this side does not send the marker for a run that showed nothing.
+///
+/// "Shown" is an ITERATION property and is measured with the same decoder the
+/// show path uses. Two cheaper proxies are both wrong, and each was tried:
+///
+/// * `!bytes.is_empty()` is an OPERAND property. `FontInfo::for_each_code`'s
+///   Identity-H/V branch consumes codes in PAIRS (`while i + 1 < bytes.len()`),
+///   so a ONE-byte string in a two-byte font is non-empty and yields ZERO codes.
+///   Latching there sent the marker over an empty accumulation and blanked every
+///   mark to the matching `ClipPop`. Caught by `fix-text`, `hunt-missing` and
+///   `differential`.
+/// * "a prim was emitted" is discontinuous. In a ten-glyph `Tr 7` run over a
+///   full-page gradient, one glyph resolving gives a one-letterform aperture and
+///   leaks ~0.3% of the page; zero resolving sends no marker, no clip, and the
+///   gradient covers 100% of it. The failure inverts on a single `/ToUnicode`
+///   entry. `differential` measured the two outcomes at MAE 15.15 (blanked, all
+///   surviving content intact) against 155.70 (unclipped, none of it intact).
+///
+/// So a run whose glyphs were all dropped still latches and clips to EMPTY. That
+/// is deliberate: the true aperture is a handful of letterforms, so empty is a
+/// SUBSET of it and the error is bounded by the text's own area, whereas not
+/// clipping is a superset of everything and the error is the whole page.
+///
+/// An earlier version rested this on the soft-mask precedent — an unexpandable
+/// mask paints unmasked, losing the EFFECT not the artwork. `hunt-missing`
+/// showed the disanalogy that sinks it: a soft mask MODULATES content that has
+/// its own geometry, so dropping it leaks only within that path, while a text
+/// clip DEFINES the extent, so dropping it leaks without bound.
+///
+/// `shown_mode` is the mode BEFORE [`hidden_render_mode`] may have rewritten it:
+/// an optional-content group that is off still contributes its clip (see that
+/// function).
+fn latches_text_clip(
+    shown_mode: i64,
+    fonts: &HashMap<Vec<u8>, FontInfo>,
+    font_key: &[u8],
+    bytes: &[u8],
+) -> bool {
+    // Checked first so the extra decode only happens for clipping modes, which
+    // are rare — this must not put a second pass over every string on the hot
+    // text path.
+    if shown_mode < 4 {
+        return false;
+    }
+    match fonts.get(font_key) {
+        // `FontInfo::shows_any_glyph`, not a second copy of its body: that
+        // method is what the Identity-H matrix in `fonts.rs` pins, and a
+        // duplicate here would leave the only coverage of the case that blanked
+        // pages exercising a function the renderer never calls. Flagged by
+        // `hunt-wrong2` and `hunt-missing`.
+        Some(fi) => fi.shows_any_glyph(bytes),
+        // No font resource: `draw.rs` emits a single record for the whole run,
+        // gated only on the string being non-empty. Collapsing this match to
+        // `.map(..).unwrap_or(false)` would drop that record's clip on the floor
+        // and contaminate the next text object with it.
+        None => !bytes.is_empty(),
+    }
+}
+
 pub(crate) fn bezier_steps_for_flatness(hull: [(f64, f64); 4], flatness: f64) -> usize {
     // §10.6.2 defines flatness as a tolerance in DEVICE space, so the segment
     // count has to scale with the curve's device-space size. A fixed count made
@@ -531,8 +598,28 @@ pub(crate) fn interpret_content_seeded(
             .filter(|v| v.is_finite())
     };
 
+    // §9.6.5: "The glyph description shall begin with either the d0 or the d1
+    // operator." A `d1` glyph is SHAPE ONLY — Table 113 requires any colour or
+    // colour-related parameters it specifies to be IGNORED and the glyph painted
+    // with the current text-state colour. Without this a CharProc that does
+    // `1 1 1 rg` after its `d1` paints white on white: invisible, no crash, no log.
+    //
+    // Keyed on the leading operator rather than a threaded parameter because `d1`
+    // is legal nowhere else, so its presence at index 0 IS the signal, and reading
+    // it here needs no change at the four call sites. Unreachable until
+    // `content::repair_d0_d1` restored `d1` as an operator lopdf can produce.
+    let type3_shape_only = ops.first().is_some_and(|op| op.operator == "d1");
+
     for op in ops.iter().take(MAX_CONTENT_OPS) {
         let o = &op.operands;
+        if type3_shape_only
+            && matches!(
+                op.operator.as_str(),
+                "g" | "rg" | "k" | "cs" | "sc" | "scn" | "G" | "RG" | "K" | "CS" | "SC" | "SCN"
+            )
+        {
+            continue;
+        }
         match op.operator.as_str() {
             "q" => {
                 if stack.len() < MAX_GRAPHICS_STACK_HARD {
@@ -1254,6 +1341,18 @@ pub(crate) fn interpret_content_seeded(
                                 };
                                 let mut bbox_clipped = false;
                                 if !text_only && !oc_stack.last().copied().unwrap_or(false) {
+                                    // §8.10.2 makes `/BBox` REQUIRED on a form
+                                    // XObject, so a form without one is malformed
+                                    // and there is no box to clip to. Deliberately
+                                    // left unclipped rather than falling back to
+                                    // the page box: that matches pdf.js, and the
+                                    // form's `/Matrix` may legitimately place its
+                                    // content outside the page, so a page-box
+                                    // fallback would erase content in files that
+                                    // render today. It does resolve malformed
+                                    // input in the ink-ADDING direction, which is
+                                    // the trade being made knowingly. Raised by
+                                    // `hunt-extra`; a decision, not an oversight.
                                     if let Some(bb) = stream.dict.get(b"BBox").ok().and_then(|o| read_rect(doc, o)) {
                                         if prims.len() < MAX_PRIMITIVES {
                                             let c = [
@@ -1473,14 +1572,21 @@ pub(crate) fn interpret_content_seeded(
                 }
                 if !text_only {
                     if let Some(Object::Name(name)) = o.first() {
-                        if let Some(&id) = shadings.get(name) {
-                            if let Ok(obj) = doc.get_object(id) {
-                                if let Some((ctm,w,h,data)) = rasterize_shading(doc, obj, &gs.ctm, &colorspaces, 0, clip_bbox_device) {
-                                    if prims.len() < MAX_PRIMITIVES && !oc_stack.last().copied().unwrap_or(false) {
-                                        let sm_start = prims.len();
-                                        prims.push(Prim::Image { ctm, w, h, format: 0, data, alpha: gs.alpha_fill as f32, blend: gs.blend_mode });
-                                        if let Some(m) = gs.soft_mask.clone() { wrap_with_soft_mask(prims, sm_start, doc, resources, &m, depth, &mut mask_bracket, current_clip_bbox); }
-                                    }
+                        // §8.7.4.2: a /Shading resource is "a dictionary or a
+                        // stream", and §7.3.8.1 requires only the stream form to
+                        // be indirect — so ShadingTypes 1-3 are legally written
+                        // DIRECTLY in the resource dictionary and never reach the
+                        // reference-only `shadings` map.
+                        let shading = shadings
+                            .get(name)
+                            .and_then(|&id| doc.get_object(id).ok())
+                            .or_else(|| resolve_named_resource(doc, resources, b"Shading", name));
+                        if let Some(obj) = shading {
+                            if let Some((ctm,w,h,data)) = rasterize_shading(doc, obj, &gs.ctm, &colorspaces, 0, clip_bbox_device) {
+                                if prims.len() < MAX_PRIMITIVES && !oc_stack.last().copied().unwrap_or(false) {
+                                    let sm_start = prims.len();
+                                    prims.push(Prim::Image { ctm, w, h, format: 0, data, alpha: gs.alpha_fill as f32, blend: gs.blend_mode });
+                                    if let Some(m) = gs.soft_mask.clone() { wrap_with_soft_mask(prims, sm_start, doc, resources, &m, depth, &mut mask_bracket, current_clip_bbox); }
                                 }
                             }
                         }
@@ -1544,9 +1650,16 @@ pub(crate) fn interpret_content_seeded(
                 if oc_overflow > 0 { oc_overflow -= 1; } else { oc_stack.pop(); }
             }
             "d0" | "d1" => {
-                // Type3 glyph width+bbox: record if inside Type3 context (in draw.rs)
-                // Here at top-level content stream, these are explicit no-ops per spec
-                // outside charproc, but we honor d1/d0 as no-op without advancing pen.
+                // §9.6.5 Table 113: `wx wy d0` and `wx wy llx lly urx ury d1` declare
+                // the glyph's advance (and, for `d1`, its bbox). The advance comes
+                // from the font's /Widths array, which §9.6.5 requires to agree, so
+                // there is nothing to apply here — but `d1` additionally makes the
+                // glyph SHAPE ONLY, which `type3_shape_only` above acts on.
+                //
+                // Reachable only since `content::repair_d0_d1`: lopdf 0.36 ends an
+                // operator token at the first digit, so this arm was dead code and
+                // the `"d"` arm ran instead, clearing the dash pattern the glyph
+                // inherits.
             }
             "BT" => {
                 if let Some(pc) = pending_clip.take() {
@@ -1562,9 +1675,24 @@ pub(crate) fn interpret_content_seeded(
                 // renderer accumulates glyph outlines as they are shown, so a
                 // BDC/EMC that hides only the tail of the text object would
                 // otherwise leave those outlines pending and fold them into the
-                // NEXT text object's clip. When nothing was accumulated the
-                // marker is a bare save/restore, which is harmless.
-                if text_clip_used && !text_only && prims.len() < MAX_PRIMITIVES {
+                // NEXT text object's clip.
+                //
+                // Nor gated on MAX_PRIMITIVES, for exactly that reason. The
+                // consumer resets its accumulated path ONLY in the TextClipApply
+                // arm and accumulates by UNION, so dropping the marker does not
+                // drop the clip — it hands this object's letterforms to the next
+                // Tr 4-7 object, which then paints through both. The cap is
+                // reachable and recoverable: a failed soft-mask expansion and the
+                // per-glyph Type 3 bound both truncate `prims` back below it. One
+                // prim past the cap is bounded by MAX_CONTENT_OPS, and the
+                // matching `ClipPop` is emitted unconditionally at `Q` and at end
+                // of stream, so the clip stack stays balanced.
+                //
+                // The marker is NOT harmless when nothing was accumulated: §9.4.3
+                // intersects the shown glyphs' outlines with the current clip, so
+                // an empty accumulation clips to EMPTY. That is why `text_clip_used`
+                // must be latched if and only if a glyph was actually shown.
+                if text_clip_used && !text_only {
                     prims.push(Prim::TextClipApply);
                     clip_depth += 1;
                 }
@@ -1635,7 +1763,6 @@ pub(crate) fn interpret_content_seeded(
             "Tj" => {
                 if let Some(Object::String(bytes, _)) = o.first() {
                     let sm_start = prims.len();
-                    if gs.render_mode >= 4 { text_clip_used = true; }
                     // §8.11.2: content in a disabled optional-content group shall
                     // not be drawn — text as much as paths. Render mode 3 is
                     // precisely "neither fill nor stroke" (§9.3.6), so borrow it for
@@ -1648,6 +1775,7 @@ pub(crate) fn interpret_content_seeded(
                     if oc_hidden { gs.render_mode = hidden_render_mode(gs.render_mode); }
                     let adv = show_string_in(doc, prims, &gs, &fonts, &text_matrix, bytes, depth, resources);
                     gs.render_mode = shown_mode;
+                    if latches_text_clip(shown_mode, &fonts, &gs.font_key, bytes) { text_clip_used = true; }
                     if fonts.get(&gs.font_key).map(|f| f.wmode == 1).unwrap_or(false) {
                         text_matrix = mat_mul(&translate(0.0, adv), &text_matrix);
                     } else {
@@ -1671,12 +1799,12 @@ pub(crate) fn interpret_content_seeded(
                 if let Some(Object::String(bytes, _)) = o.first() {
                     // P0 fix #24: soft-mask must apply to ' operator
                     let sm_start = prims.len();
-                    if gs.render_mode >= 4 { text_clip_used = true; }
                     let oc_hidden = oc_stack.last().copied().unwrap_or(false);
                     let shown_mode = gs.render_mode;
                     if oc_hidden { gs.render_mode = hidden_render_mode(gs.render_mode); }
                     let adv = show_string_in(doc, prims, &gs, &fonts, &text_matrix, bytes, depth, resources);
                     gs.render_mode = shown_mode;
+                    if latches_text_clip(shown_mode, &fonts, &gs.font_key, bytes) { text_clip_used = true; }
                     if fonts.get(&gs.font_key).map(|f| f.wmode == 1).unwrap_or(false) {
                         text_matrix = mat_mul(&translate(0.0, adv), &text_matrix);
                     } else {
@@ -1695,12 +1823,12 @@ pub(crate) fn interpret_content_seeded(
                 if let Some(Object::String(bytes, _)) = o.get(2) {
                     // P0 fix #24: soft-mask must apply to " operator
                     let sm_start = prims.len();
-                    if gs.render_mode >= 4 { text_clip_used = true; }
                     let oc_hidden = oc_stack.last().copied().unwrap_or(false);
                     let shown_mode = gs.render_mode;
                     if oc_hidden { gs.render_mode = hidden_render_mode(gs.render_mode); }
                     let adv = show_string_in(doc, prims, &gs, &fonts, &text_matrix, bytes, depth, resources);
                     gs.render_mode = shown_mode;
+                    if latches_text_clip(shown_mode, &fonts, &gs.font_key, bytes) { text_clip_used = true; }
                     if fonts.get(&gs.font_key).map(|f| f.wmode == 1).unwrap_or(false) {
                         text_matrix = mat_mul(&translate(0.0, adv), &text_matrix);
                     } else {
@@ -1713,7 +1841,6 @@ pub(crate) fn interpret_content_seeded(
             }
             "TJ" => {
                 let sm_start = prims.len();
-                if gs.render_mode >= 4 { text_clip_used = true; }
                 let oc_hidden = oc_stack.last().copied().unwrap_or(false);
                 let shown_mode = gs.render_mode;
                 if oc_hidden { gs.render_mode = hidden_render_mode(gs.render_mode); }
@@ -1721,7 +1848,13 @@ pub(crate) fn interpret_content_seeded(
                     for el in arr {
                         match el {
                             Object::String(bytes, _) => {
+                                // §9.4.3: the clip accumulates the outlines of the
+                                // glyphs SHOWN. Latching outside this destructure
+                                // made `7 Tr [] TJ` — and any TJ whose operand is
+                                // not an array — claim a clip built from no glyphs
+                                // at all, which `ET` then applies.
                                 let adv = show_string_in(doc, prims, &gs, &fonts, &text_matrix, bytes, depth, resources);
+                                if latches_text_clip(shown_mode, &fonts, &gs.font_key, bytes) { text_clip_used = true; }
                                 if fonts.get(&gs.font_key).map(|f| f.wmode == 1).unwrap_or(false) {
                         text_matrix = mat_mul(&translate(0.0, adv), &text_matrix);
                     } else {
@@ -1946,52 +2079,79 @@ pub(crate) fn render_soft_mask_group(
         .and_then(|o| deref(doc, o))
         .and_then(|o| o.as_dict().ok())
         .cloned();
-    // /BC backdrop for luminosity masks.
+    // §11.6.5.2 backdrop for luminosity masks. `/BC` is OPTIONAL and its default
+    // is "the colour representing a zero luminosity in the group's colour space"
+    // — BLACK, not "no backdrop at all". Gating the whole fill on `/BC` being
+    // PRESENT treated a defaulted value as an absent feature.
+    //
+    // The clause says to composite the group against a FULLY OPAQUE backdrop and
+    // take the result's luminosity, so the fill also supplies the alpha the
+    // consumer's luminosity filter cannot: that filter is an affine ColorMatrix
+    // whose alpha row has a 0 coefficient in the A column, and A_out = A_in x
+    // luma(RGB) is not expressible as one, so this cannot be fixed on that side.
+    // Worked by `hunt-wrong2`: a white group rect at `/ca 0.5` over no backdrop
+    // reads as luminosity 1.0 under straight alpha — twice as opaque as the 0.5
+    // the clause gives — while over an opaque black backdrop it reads 0.5. Under
+    // premultiplied alpha the two already agree, so this is a no-op there and a
+    // fix under straight alpha; it cannot make either worse.
     if mask.mask_type == 1 {
-        if let Some(bc) = &mask.backdrop {
-            if let Some(rect) = mstream.dict.get(b"BBox").ok().and_then(|o| read_rect(doc, o)) {
+        let argb = match &mask.backdrop {
+            Some(bc) => {
                 let cs = mstream.dict.get(b"Group").ok().and_then(|o| deref(doc, o))
                     .and_then(|o| o.as_dict().ok())
                     .and_then(|gd| gd.get(b"CS").ok().and_then(|o| parse_cs_kind(doc, Some(o), &HashMap::new())));
-                let argb = cs.as_ref()
+                cs.as_ref()
                     .and_then(|k| eval_cs_to_rgb(doc, k, bc, &HashMap::new()))
                     .unwrap_or_else(|| match bc.len() {
                         1 => gray_to_argb(bc[0]),
                         3 => rgb_to_argb(bc[0], bc[1], bc[2]),
                         4 => cmyk_to_argb(bc[0], bc[1], bc[2], bc[3]),
                         _ => 0xFF00_0000,
-                    });
-                // The backdrop covers everything the mask is applied to, not just
-                // the group's /BBox — see this function's doc comment. Falling
-                // back to the /BBox quad when there is no extent is deliberate:
-                // that reproduces the OLD, known-wrong behaviour in a case that
-                // already had it, whereas an unbounded fill would flood the page
-                // with the backdrop colour, which is a worse new failure.
-                //
-                // Capturing the extent at bracket creation is sound even though
-                // `wrap_with_soft_mask` later splices more content into the SAME
-                // bracket, because coalescing requires `b.end == start` — the
-                // bracket must still be the tail of `prims`. The only operator
-                // that can GROW the clip is `Q`, and it pushes a `Prim::ClipPop`
-                // per level before restoring the saved bbox, so any growth emits
-                // a prim, fails that check and forces a fresh bracket with a
-                // freshly sized backdrop. The extent therefore cannot go stale
-                // for anything that coalesces in. (Sizing it to the masked
-                // CONTENT's extent has no such guarantee and silently
-                // under-covers every operation after the first.)
-                let poly: Vec<(f64, f64)> = match masked_extent {
-                    Some([x0, y0, x1, y1]) => {
-                        vec![(x0, y0), (x1, y0), (x1, y1), (x0, y1)]
-                    }
-                    None => vec![
-                        transform(&group_ctm, rect[0], rect[1]),
-                        transform(&group_ctm, rect[2], rect[1]),
-                        transform(&group_ctm, rect[2], rect[3]),
-                        transform(&group_ctm, rect[0], rect[3]),
-                    ],
-                };
-                emit_fill(prims, std::slice::from_ref(&poly), argb, false, 1.0, BlendMode::Normal);
+                    })
             }
+            // Zero luminosity is black in every colour space this renders
+            // through, so the default needs no `/CS` round trip.
+            None => 0xFF00_0000,
+        };
+        // The backdrop covers everything the mask is applied to, not just the
+        // group's /BBox — see this function's doc comment. The /BBox quad is only
+        // the FALLBACK for when there is no extent: that reproduces the OLD,
+        // known-wrong behaviour in a case that already had it, whereas an
+        // unbounded fill would flood the page with the backdrop colour, which is
+        // a worse new failure.
+        //
+        // So the /BBox is required only on that fallback path. Gating the whole
+        // block on it — which is what reading `rect` before this match did —
+        // meant a group with no /BBox got no backdrop even when `masked_extent`
+        // was Some and the extent needed to paint one was right there. §8.10.2
+        // makes /BBox mandatory and a mask group is a form XObject, so that is
+        // malformed input, but producers omit it. Residual found by `hunt-wrong2`
+        // on the /BC fix below it.
+        //
+        // Capturing the extent at bracket creation is sound even though
+        // `wrap_with_soft_mask` later splices more content into the SAME
+        // bracket, because coalescing requires `b.end == start` — the
+        // bracket must still be the tail of `prims`. The only operator
+        // that can GROW the clip is `Q`, and it pushes a `Prim::ClipPop`
+        // per level before restoring the saved bbox, so any growth emits
+        // a prim, fails that check and forces a fresh bracket with a
+        // freshly sized backdrop. The extent therefore cannot go stale
+        // for anything that coalesces in. (Sizing it to the masked
+        // CONTENT's extent has no such guarantee and silently
+        // under-covers every operation after the first.)
+        let poly: Option<Vec<(f64, f64)>> = match masked_extent {
+            Some([x0, y0, x1, y1]) => Some(vec![(x0, y0), (x1, y0), (x1, y1), (x0, y1)]),
+            None => mstream.dict.get(b"BBox").ok().and_then(|o| read_rect(doc, o)).map(|rect| {
+                vec![
+                    transform(&group_ctm, rect[0], rect[1]),
+                    transform(&group_ctm, rect[2], rect[1]),
+                    transform(&group_ctm, rect[2], rect[3]),
+                    transform(&group_ctm, rect[0], rect[3]),
+                ]
+            }),
+        };
+        if let Some(poly) = poly {
+            emit_fill(prims, std::slice::from_ref(&poly), argb, false, 1.0, BlendMode::Normal);
         }
     }
     let msub_ops = crate::content::stream_operations(doc, &mstream);
@@ -2010,19 +2170,45 @@ pub(crate) fn render_soft_mask_group(
         // `sh` inside it paints nothing at all without that extent. A mask that
         // paints nothing is uniformly black, which for a luminosity mask hides
         // ALL of the masked content rather than merely mis-toning it.
-        let mask_clip_bbox = mstream
+        let bbox_corners = mstream
             .dict
             .get(b"BBox")
             .ok()
             .and_then(|o| read_rect(doc, o))
-            .and_then(|bb| {
-                quad_device_bbox(&[
+            .map(|bb| {
+                [
                     transform(&group_ctm, bb[0], bb[1]),
                     transform(&group_ctm, bb[2], bb[1]),
                     transform(&group_ctm, bb[2], bb[3]),
                     transform(&group_ctm, bb[0], bb[3]),
-                ])
+                ]
             });
+        let mask_clip_bbox = bbox_corners.as_ref().and_then(quad_device_bbox);
+        // Seeding the extent only tells a `sh` how big to rasterize; it does not
+        // BOUND anything the group paints. §11.6.5.2 makes the group a form
+        // XObject, so §8.10.1's rule applies unchanged — content outside the
+        // `/BBox` must read as backdrop — and the `Do` arm already emits this
+        // clip. Without it a group whose content overruns its box put mask
+        // luminosity where the file said there was none, revealing masked content
+        // it should have hidden.
+        //
+        // Deliberately after the `/BC` backdrop fill above, which covers
+        // everything the mask is applied to rather than just the `/BBox`.
+        let mut bbox_clipped = false;
+        if let Some(c) = bbox_corners {
+            if prims.len() < MAX_PRIMITIVES {
+                let pts: Vec<(f32, f32)> = c.iter().map(|&(x, y)| (x as f32, y as f32)).collect();
+                let po = vec![
+                    PathOp::Move(c[0].0 as f32, c[0].1 as f32),
+                    PathOp::Line(c[1].0 as f32, c[1].1 as f32),
+                    PathOp::Line(c[2].0 as f32, c[2].1 as f32),
+                    PathOp::Line(c[3].0 as f32, c[3].1 as f32),
+                    PathOp::Close,
+                ];
+                prims.push(Prim::ClipPush { even_odd: false, pts, path_ops: Some(po) });
+                bbox_clipped = true;
+            }
+        }
         interpret_content_seeded(
             doc,
             &msub_ops,
@@ -2033,6 +2219,10 @@ pub(crate) fn render_soft_mask_group(
             false,
             mask_clip_bbox,
         );
+        if bbox_clipped {
+            // Balanced even if the prim cap was hit inside, to keep the clip stack sane.
+            prims.push(Prim::ClipPop);
+        }
     }
     true
 }
@@ -3034,6 +3224,522 @@ mod coverage_gap_tests {
             prims2.iter().filter(|p| matches!(p, Prim::Text { .. })).count(),
             2,
             "a dangling /Font must not discard the font Tf already selected"
+        );
+    }
+}
+
+/// Round 6: findings from the `hayro` differential harness and the audit around it.
+#[cfg(test)]
+mod refdiff_followup_tests {
+    use crate::*;
+    use lopdf::content::Operation;
+    use lopdf::{dictionary, Stream};
+
+    fn op(name: &str, operands: Vec<Object>) -> Operation {
+        Operation::new(name, operands)
+    }
+
+    fn clip_applies(prims: &[Prim]) -> usize {
+        prims.iter().filter(|p| matches!(p, Prim::TextClipApply)).count()
+    }
+
+    /// §9.4.3: the text clip accumulates the outlines of the glyphs SHOWN. The
+    /// `TJ` arm latched `text_clip_used` OUTSIDE its array destructure, so
+    /// `7 Tr [] TJ` — and any `TJ` whose operand is not an array at all —
+    /// claimed a clip built from no glyphs, which `ET` then applied. The sibling
+    /// `Tj`/`'`/`"` arms all latch inside a successful string destructure.
+    ///
+    /// This matters far more since the consumer stopped ignoring an empty text
+    /// clip and started clipping to NOTHING, which is what §9.4.3 requires: a
+    /// spurious latch now blanks the page rather than being quietly absorbed.
+    #[test]
+    fn tj_does_not_latch_a_text_clip_when_it_shows_no_glyphs() {
+        let mut doc = Document::with_version("1.7");
+        let font = doc.add_object(dictionary! {
+            "Type" => "Font", "Subtype" => "Type1", "BaseFont" => "Helvetica",
+        });
+        let res = dictionary! { "Font" => dictionary! { "F1" => Object::Reference(font) } };
+        let run = |body: Vec<Operation>| {
+            let mut ops = vec![
+                op("BT", vec![]),
+                op("Tf", vec![Object::Name(b"F1".to_vec()), 12.into()]),
+                op("Tr", vec![7.into()]),
+            ];
+            ops.extend(body);
+            ops.push(op("ET", vec![]));
+            let mut prims = Vec::new();
+            interpret_content(&doc, &ops, Some(&res), GraphicsState::default(), &mut prims, 0, false);
+            prims
+        };
+
+        for (what, body) in [
+            ("an empty array", vec![op("TJ", vec![Object::Array(vec![])])]),
+            (
+                "adjustments only",
+                vec![op("TJ", vec![Object::Array(vec![Object::Integer(-500)])])],
+            ),
+            ("a non-array operand", vec![op("TJ", vec![Object::Integer(0)])]),
+            ("no operand at all", vec![op("TJ", vec![])]),
+        ] {
+            assert_eq!(clip_applies(&run(body)), 0, "TJ with {what} showed no glyphs, so no clip");
+        }
+
+        // The converse: a TJ that DOES show a glyph must still latch, or the fix
+        // would have deleted the feature instead of bounding it.
+        let prims = run(vec![op(
+            "TJ",
+            vec![Object::Array(vec![
+                Object::string_literal("A"),
+                Object::Integer(-200),
+                Object::string_literal("B"),
+            ])],
+        )]);
+        assert_eq!(clip_applies(&prims), 1, "a TJ that shows glyphs must still clip");
+
+        // A WHITESPACE-ONLY run must also latch. It delivers a record, so the
+        // consumer accumulates — and a space has no contours, so it accumulates an
+        // EMPTY path and clips to nothing. That is §9.4.3, and it is the case the
+        // consumer's unconditional clipPath was changed to serve; latching on
+        // delivery rather than on outline area is what keeps it reachable.
+        assert_eq!(
+            clip_applies(&run(vec![op("Tj", vec![Object::string_literal("   ")])])),
+            1,
+            "a whitespace-only Tr 7 run must still emit the marker"
+        );
+    }
+
+    /// §9.6.5 Table 113: after `d1` a glyph description "shall not specify any
+    /// colour or other colour-related parameters"; if it does, they SHALL BE
+    /// IGNORED and the glyph painted with the current text-state colour. A
+    /// CharProc doing `1 1 1 rg` after its `d1` otherwise paints white on white.
+    ///
+    /// Unreachable until `content::repair_d0_d1` made `d1` an operator lopdf can
+    /// actually produce, so this is also the regression test for that arm being
+    /// live rather than dead code.
+    #[test]
+    fn colour_operators_after_d1_are_ignored() {
+        let doc = Document::with_version("1.7");
+        let red = rgb_to_argb(1.0, 0.0, 0.0);
+        let glyph = vec![
+            op("d1", vec![0.into(), 0.into(), 0.into(), 0.into(), 750.into(), 750.into()]),
+            op("rg", vec![1.into(), 1.into(), 1.into()]),
+            op("re", vec![0.into(), 0.into(), 100.into(), 100.into()]),
+            op("f", vec![]),
+        ];
+        let mut gs = GraphicsState::default();
+        gs.fill = red;
+        let mut prims = Vec::new();
+        interpret_content(&doc, &glyph, None, gs.clone(), &mut prims, 0, false);
+        let fills: Vec<u32> = prims
+            .iter()
+            .filter_map(|p| match p {
+                Prim::Fill { argb, .. } => Some(*argb),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(fills, vec![red], "the `1 1 1 rg` inside a d1 glyph must be ignored");
+
+        // `d0` carries no such rule, and neither does a page stream: the
+        // suppression must not leak outside a d1 glyph description.
+        let mut d0_glyph = glyph.clone();
+        d0_glyph[0] = op("d0", vec![0.into(), 0.into()]);
+        let mut prims = Vec::new();
+        interpret_content(&doc, &d0_glyph, None, gs, &mut prims, 0, false);
+        assert!(
+            prims.iter().any(|p| matches!(p, Prim::Fill { argb, .. } if *argb == rgb_to_argb(1.0, 1.0, 1.0))),
+            "d0 imposes no colour rule, so `1 1 1 rg` must take effect"
+        );
+    }
+
+    /// §8.7.4.2 makes a `/Shading` resource "a dictionary or a stream", and
+    /// §7.3.8.1 requires only the STREAM form to be indirect — ShadingTypes 1-3
+    /// are dictionaries and are legally written directly in the resource
+    /// dictionary. `shadings_from_resources` collects only `as_reference()`
+    /// entries, so `/Sh0 sh` against a direct one painted nothing at all.
+    #[test]
+    fn sh_finds_a_shading_written_as_a_direct_dictionary() {
+        let mut doc = Document::with_version("1.7");
+        let func = doc.add_object(dictionary! {
+            "FunctionType" => 2,
+            "Domain" => vec![0.into(), 1.into()],
+            "C0" => vec![1.0.into(), 0.0.into(), 0.0.into()],
+            "C1" => vec![0.0.into(), 0.0.into(), 1.0.into()],
+            "N" => 1,
+        });
+        // The shading itself is DIRECT in /Resources /Shading — the point of the test.
+        let res = dictionary! {
+            "Shading" => dictionary! {
+                "Sh" => dictionary! {
+                    "ShadingType" => 2,
+                    "ColorSpace" => "DeviceRGB",
+                    "Coords" => vec![0.into(), 0.into(), 100.into(), 0.into()],
+                    "Function" => Object::Reference(func),
+                },
+            },
+        };
+        let ops = vec![op("sh", vec![Object::Name(b"Sh".to_vec())])];
+        let mut prims = Vec::new();
+        interpret_content_seeded(
+            &doc,
+            &ops,
+            Some(&res),
+            GraphicsState::default(),
+            &mut prims,
+            0,
+            false,
+            Some([0.0, 0.0, 200.0, 200.0]),
+        );
+        assert_eq!(
+            prims.iter().filter(|p| matches!(p, Prim::Image { .. })).count(),
+            1,
+            "a direct /Shading dictionary must paint, not be silently skipped"
+        );
+    }
+
+    /// §11.6.5.2 makes a soft-mask group a form XObject, so §8.10.1's `/BBox`
+    /// rule applies: content the group paints outside its box must read as
+    /// backdrop. The extent was seeded (so a `sh` inside knew how big to
+    /// rasterize) but never emitted as a clip, so a group whose content overran
+    /// its box put mask luminosity where the file said there was none — the
+    /// direction that REVEALS content the file hid.
+    #[test]
+    fn a_soft_mask_group_clips_its_content_to_its_bbox() {
+        let mut doc = Document::with_version("1.7");
+        // The group paints far outside its own 0..50 /BBox.
+        let group = doc.add_object(Stream::new(
+            dictionary! {
+                "Type" => "XObject", "Subtype" => "Form",
+                "BBox" => vec![0.into(), 0.into(), 50.into(), 50.into()],
+                "Group" => dictionary! { "S" => "Transparency", "CS" => "DeviceGray" },
+            },
+            b"1 g 0 0 500 500 re f".to_vec(),
+        ));
+        let extg = doc.add_object(dictionary! {
+            "Type" => "ExtGState",
+            "SMask" => dictionary! {
+                "S" => "Luminosity",
+                "G" => Object::Reference(group),
+            },
+        });
+        let res = dictionary! { "ExtGState" => dictionary! { "GS" => Object::Reference(extg) } };
+        let ops = vec![
+            op("gs", vec![Object::Name(b"GS".to_vec())]),
+            op("re", vec![0.into(), 0.into(), 200.into(), 200.into()]),
+            op("f", vec![]),
+        ];
+        let mut prims = Vec::new();
+        interpret_content_seeded(
+            &doc,
+            &ops,
+            Some(&res),
+            GraphicsState::default(),
+            &mut prims,
+            0,
+            false,
+            Some([0.0, 0.0, 200.0, 200.0]),
+        );
+        let content = prims
+            .iter()
+            .position(|p| matches!(p, Prim::SoftMaskContent))
+            .expect("the mask bracket must have been emitted");
+        let mask_side = &prims[content..];
+        let clip = mask_side
+            .iter()
+            .position(|p| matches!(p, Prim::ClipPush { .. }))
+            .expect("the group's /BBox must be pushed as a clip");
+        assert!(
+            mask_side[clip + 1..].iter().any(|p| matches!(p, Prim::ClipPop)),
+            "the /BBox clip must be balanced"
+        );
+        if let Prim::ClipPush { pts, .. } = &mask_side[clip] {
+            let max_x = pts.iter().fold(f32::NEG_INFINITY, |m, p| m.max(p.0));
+            let max_y = pts.iter().fold(f32::NEG_INFINITY, |m, p| m.max(p.1));
+            assert!(
+                (max_x - 50.0).abs() < 1e-3 && (max_y - 50.0).abs() < 1e-3,
+                "the clip must be the group's /BBox, got corners {pts:?}"
+            );
+        }
+    }
+
+    /// A `Tr 4-7` text object that crosses [`MAX_PRIMITIVES`] before its `ET`
+    /// used to emit no `TextClipApply`. The consumer resets its accumulated glyph
+    /// path ONLY in that arm and accumulates by UNION, so the marker going missing
+    /// does not drop the clip — it leaks this object's letterforms into the next
+    /// `Tr 4-7` object, which then paints through both. The comment above the
+    /// `ET` arm already gives that exact leak as the reason the marker is not
+    /// gated on optional-content visibility; the primitive cap reintroduced it.
+    ///
+    /// The cap is reachable AND recoverable, which is what makes the leak real: a
+    /// failed soft-mask expansion and the per-glyph Type 3 bound both truncate
+    /// `prims` back below it, so a later object can emit a marker again and pick
+    /// up the abandoned outlines.
+    #[test]
+    fn the_text_clip_marker_survives_the_primitive_cap() {
+        let mut doc = Document::with_version("1.7");
+        let font = doc.add_object(dictionary! {
+            "Type" => "Font", "Subtype" => "Type1", "BaseFont" => "Helvetica",
+        });
+        let res = dictionary! { "Font" => dictionary! { "F1" => Object::Reference(font) } };
+        let ops = vec![
+            op("BT", vec![]),
+            op("Tf", vec![Object::Name(b"F1".to_vec()), 12.into()]),
+            op("Tr", vec![7.into()]),
+            op("Tj", vec![Object::string_literal("A")]),
+            op("Tj", vec![Object::string_literal("B")]),
+            op("ET", vec![]),
+        ];
+        for seed in [MAX_PRIMITIVES - 1, MAX_PRIMITIVES + 8] {
+            let mut prims: Vec<Prim> = (0..seed).map(|_| Prim::ClipPop).collect();
+            let before = prims.len();
+            interpret_content(&doc, &ops, Some(&res), GraphicsState::default(), &mut prims, 0, false);
+            let tail = &prims[before..];
+            assert!(
+                tail.iter().any(|p| matches!(p, Prim::TextClipApply)),
+                "seed {seed}: the marker must survive the cap, or its outlines leak forward"
+            );
+            let opens = tail.iter().filter(|p| matches!(p, Prim::TextClipApply | Prim::ClipPush { .. })).count();
+            let closes = tail.iter().filter(|p| matches!(p, Prim::ClipPop)).count();
+            assert_eq!(opens, closes, "seed {seed}: the clip stack must stay balanced");
+        }
+    }
+
+    /// The predicate must be CONTINUOUS in how many glyphs actually resolved.
+    /// A delivery-based latch inverted the failure on a single `/ToUnicode`
+    /// entry: one glyph of ten resolving leaked ~0.3% of the page, zero resolving
+    /// sent no marker at all and leaked 100% of it. Keying on the operand instead
+    /// means an all-unresolvable run still clips — to empty, which is a SUBSET of
+    /// the aperture the file asked for rather than a superset of the whole page.
+    #[test]
+    fn an_unresolvable_glyph_run_still_latches_the_text_clip() {
+        let mut doc = Document::with_version("1.7");
+        // A /ToUnicode mapping the only code to the EMPTY string, which real
+        // producers emit for hidden and ligature-component glyphs. Every glyph is
+        // then dropped by draw.rs, so nothing is delivered.
+        let tounicode = doc.add_object(Stream::new(
+            dictionary! {},
+            b"/CIDInit /ProcSet findresource begin 1 begincmap\n\
+              1 beginbfchar <41> <> endbfchar\n\
+              endcmap end"
+                .to_vec(),
+        ));
+        let font = doc.add_object(dictionary! {
+            "Type" => "Font", "Subtype" => "Type1", "BaseFont" => "Helvetica",
+            "ToUnicode" => Object::Reference(tounicode),
+        });
+        let res = dictionary! { "Font" => dictionary! { "F1" => Object::Reference(font) } };
+        let ops = vec![
+            op("BT", vec![]),
+            op("Tf", vec![Object::Name(b"F1".to_vec()), 12.into()]),
+            op("Tr", vec![7.into()]),
+            op("Tj", vec![Object::string_literal("AAAA")]),
+            op("ET", vec![]),
+        ];
+        let mut prims = Vec::new();
+        interpret_content(&doc, &ops, Some(&res), GraphicsState::default(), &mut prims, 0, false);
+        assert!(
+            !prims.iter().any(|p| matches!(p, Prim::Text { .. })),
+            "precondition: no glyph may resolve, or this test passes for the wrong reason"
+        );
+        assert_eq!(
+            prims.iter().filter(|p| matches!(p, Prim::TextClipApply)).count(),
+            1,
+            "a run the file asked to show must clip even when no glyph resolved, \
+             or the following content paints across the whole page"
+        );
+    }
+
+    /// The `d1` detector is POSITIONAL — `ops.first()`. `fix-text` asked for this
+    /// pinned end to end, because if `content::repair_d0_d1` ever left an
+    /// operation ahead of the `d1` (an orphaned operand promoted into an op of
+    /// its own being the obvious way), detection would silently fail and the
+    /// glyph's colour operators would start taking effect against §9.6.5.
+    ///
+    /// The other d1 test builds the operator list by hand, so it cannot catch
+    /// that. This one goes through the real tokenizer + repair path a CharProc
+    /// actually takes.
+    #[test]
+    fn the_d1_detector_survives_the_tokenizer_repair_end_to_end() {
+        let charproc = b"0 0 0 0 750 750 d1\n1 1 1 rg\n0 0 100 100 re\nf";
+        let ops = crate::content::strict_operations(charproc).expect("strict parse");
+        assert_eq!(ops[0].operator, "d1", "the repair must leave d1 at index 0");
+
+        let doc = Document::with_version("1.7");
+        let red = rgb_to_argb(1.0, 0.0, 0.0);
+        let mut gs = GraphicsState::default();
+        gs.fill = red;
+        let mut prims = Vec::new();
+        interpret_content(&doc, &ops, None, gs, &mut prims, 0, false);
+        let fills: Vec<u32> = prims
+            .iter()
+            .filter_map(|p| match p {
+                Prim::Fill { argb, .. } => Some(*argb),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            fills,
+            vec![red],
+            "the glyph must paint in the text-state colour, not the `1 1 1 rg` it declares"
+        );
+    }
+
+    /// `!bytes.is_empty()` is an OPERAND property; the predicate needs an
+    /// ITERATION property. `FontInfo::for_each_code`'s Identity-H/V branch is
+    /// `while i + 1 < bytes.len()`, so a ONE-byte string in a two-byte font is
+    /// non-empty yet yields ZERO codes and shows no glyph. Latching there sent
+    /// `TextClipApply` over an empty accumulation, and with the consumer's
+    /// unconditional `clipPath` that blanked every mark to the matching
+    /// `ClipPop` — a whole-page regression, and strictly worse than the
+    /// delivery-based predicate it replaced. Caught by `fix-text`,
+    /// `hunt-missing` and `differential`.
+    #[test]
+    fn a_one_byte_identity_h_string_shows_no_glyph_and_must_not_latch() {
+        let mut doc = Document::with_version("1.7");
+        let descendant = doc.add_object(dictionary! {
+            "Type" => "Font", "Subtype" => "CIDFontType2", "BaseFont" => "Test",
+            "CIDSystemInfo" => dictionary! {
+                "Registry" => Object::string_literal("Adobe"),
+                "Ordering" => Object::string_literal("Identity"),
+                "Supplement" => 0,
+            },
+            "DW" => 1000,
+        });
+        let font = doc.add_object(dictionary! {
+            "Type" => "Font", "Subtype" => "Type0", "BaseFont" => "Test",
+            "Encoding" => "Identity-H",
+            "DescendantFonts" => vec![Object::Reference(descendant)],
+        });
+        let res = dictionary! { "Font" => dictionary! { "F1" => Object::Reference(font) } };
+        let clips = |s: &[u8]| {
+            let ops = vec![
+                op("BT", vec![]),
+                op("Tf", vec![Object::Name(b"F1".to_vec()), 12.into()]),
+                op("Tr", vec![7.into()]),
+                op("Tj", vec![Object::String(s.to_vec(), lopdf::StringFormat::Literal)]),
+                op("ET", vec![]),
+            ];
+            let mut prims = Vec::new();
+            interpret_content(&doc, &ops, Some(&res), GraphicsState::default(), &mut prims, 0, false);
+            prims.iter().filter(|p| matches!(p, Prim::TextClipApply)).count()
+        };
+        // Precondition: two bytes IS one code in this font, so the fixture really
+        // is an Identity-H font and the one-byte case is the odd one out.
+        assert_eq!(clips(&[0x00, 0x41]), 1, "precondition: a full 2-byte code shows a glyph");
+        assert_eq!(
+            clips(&[0x41]),
+            0,
+            "a stray byte shows no glyph, so latching would clip the page to empty"
+        );
+    }
+
+    /// §11.6.5.2: `/BC` is OPTIONAL and defaults to "the colour representing a
+    /// zero luminosity in the group's colour space" — BLACK, not "no backdrop".
+    /// Gating the whole backdrop fill on `/BC` being PRESENT treated a defaulted
+    /// value as an absent feature, leaving the mask surface without the fully
+    /// opaque backdrop the clause composites against. Reported by `hunt-wrong2`.
+    #[test]
+    fn a_luminosity_mask_gets_its_default_black_backdrop_without_bc() {
+        let backdrops = |bc: Option<Object>| {
+            let mut doc = Document::with_version("1.7");
+            let group = doc.add_object(Stream::new(
+                dictionary! {
+                    "Type" => "XObject", "Subtype" => "Form",
+                    "BBox" => vec![0.into(), 0.into(), 50.into(), 50.into()],
+                    "Group" => dictionary! { "S" => "Transparency", "CS" => "DeviceGray" },
+                },
+                b"1 g 0 0 50 50 re f".to_vec(),
+            ));
+            let mut smask = dictionary! {
+                "S" => "Luminosity",
+                "G" => Object::Reference(group),
+            };
+            if let Some(v) = bc {
+                smask.set("BC", v);
+            }
+            let extg = doc.add_object(dictionary! { "Type" => "ExtGState", "SMask" => smask });
+            let res = dictionary! { "ExtGState" => dictionary! { "GS" => Object::Reference(extg) } };
+            let ops = vec![
+                op("gs", vec![Object::Name(b"GS".to_vec())]),
+                op("re", vec![0.into(), 0.into(), 200.into(), 200.into()]),
+                op("f", vec![]),
+            ];
+            let mut prims = Vec::new();
+            interpret_content_seeded(
+                &doc, &ops, Some(&res), GraphicsState::default(), &mut prims, 0, false,
+                Some([0.0, 0.0, 200.0, 200.0]),
+            );
+            let content = prims
+                .iter()
+                .position(|p| matches!(p, Prim::SoftMaskContent))
+                .expect("the mask bracket must have been emitted");
+            // The backdrop is the first fill on the mask side, before the group's
+            // own `1 g` fill and before the /BBox clip.
+            prims[content..]
+                .iter()
+                .take_while(|p| !matches!(p, Prim::ClipPush { .. }))
+                .find_map(|p| match p {
+                    Prim::Fill { argb, .. } => Some(*argb),
+                    _ => None,
+                })
+        };
+
+        // Precondition: an explicit /BC still produces its own colour, so this
+        // fixture really does reach the backdrop path.
+        assert_eq!(
+            backdrops(Some(Object::Array(vec![Object::Real(1.0)]))),
+            Some(rgb_to_argb(1.0, 1.0, 1.0)),
+            "an explicit white /BC must still paint white"
+        );
+        assert_eq!(
+            backdrops(None),
+            Some(0xFF00_0000),
+            "an absent /BC defaults to zero luminosity, not to no backdrop at all"
+        );
+    }
+
+    /// Residual of the `/BC` fix, found by `hunt-wrong2`: the backdrop block was
+    /// still wrapped in `if let Some(rect) = ...BBox...`, but `rect` is only used
+    /// on the no-extent FALLBACK path. So a mask group with no `/BBox` got no
+    /// backdrop even when `masked_extent` was `Some` and the extent needed to
+    /// paint one was right there — the pre-fix behaviour surviving in a narrower
+    /// case. §8.10.2 makes `/BBox` required, but producers omit it.
+    #[test]
+    fn a_luminosity_mask_without_a_bbox_still_gets_its_backdrop() {
+        let mut doc = Document::with_version("1.7");
+        // Deliberately NO /BBox on the group: the point of the test.
+        let group = doc.add_object(Stream::new(
+            dictionary! {
+                "Type" => "XObject", "Subtype" => "Form",
+                "Group" => dictionary! { "S" => "Transparency", "CS" => "DeviceGray" },
+            },
+            b"1 g 0 0 50 50 re f".to_vec(),
+        ));
+        let extg = doc.add_object(dictionary! {
+            "Type" => "ExtGState",
+            "SMask" => dictionary! { "S" => "Luminosity", "G" => Object::Reference(group) },
+        });
+        let res = dictionary! { "ExtGState" => dictionary! { "GS" => Object::Reference(extg) } };
+        let ops = vec![
+            op("gs", vec![Object::Name(b"GS".to_vec())]),
+            op("re", vec![0.into(), 0.into(), 200.into(), 200.into()]),
+            op("f", vec![]),
+        ];
+        let mut prims = Vec::new();
+        interpret_content_seeded(
+            &doc, &ops, Some(&res), GraphicsState::default(), &mut prims, 0, false,
+            Some([0.0, 0.0, 200.0, 200.0]),
+        );
+        let content = prims
+            .iter()
+            .position(|p| matches!(p, Prim::SoftMaskContent))
+            .expect("the mask bracket must have been emitted");
+        assert_eq!(
+            prims[content..].iter().find_map(|p| match p {
+                Prim::Fill { argb, .. } => Some(*argb),
+                _ => None,
+            }),
+            Some(0xFF00_0000),
+            "the masked extent supplies the area, so a missing /BBox must not skip the backdrop"
         );
     }
 }

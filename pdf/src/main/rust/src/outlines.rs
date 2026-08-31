@@ -12,6 +12,28 @@ use std::collections::HashMap;
 
 /// Bezier flattening resolution (segments per curve). Glyphs are usually small
 /// on screen, so a modest fixed count keeps outlines smooth without bloat.
+///
+/// DELIBERATELY FIXED. A fixed count holds a constant fraction of the EM, so its
+/// device error scales with FONT SIZE: at 10 segments a cap bowl (radius ≈0.35 em,
+/// one cubic per quarter in CFF and Type 1) carries a sagitta of 0.0010789 em —
+/// 0.14 device px on 12 pt text but 2.3 px on 200 pt text at the same zoom. The
+/// path flattener does not share this, because `bezier_steps_for_flatness` adapts
+/// to the curve's length in page points and so stays sub-pixel at any size
+/// (measured 0.16-0.56 device px across the real zoom ceilings).
+///
+/// TUNING THIS CONSTANT IS NOT THE FIX, and two attempts to make it adaptive were
+/// reverted. Nothing on this side of the wire knows the viewer's zoom —
+/// `geometry::page_base_matrix` is a translate and a rotate with no scale, so
+/// `Tfs * ctm_scale` is page POINTS per em, not pixels. Feeding that to a
+/// pixel-denominated target gave 4 segments for 12 pt text, coarser than this.
+///
+/// The real fix is to stop pre-flattening and SEND CURVES, as clip paths already
+/// do: `PathOp::Cubic` (the sole producer is the `c`/`v`/`y` arm in `interpret.rs`)
+/// survives the wire and the consumer rebuilds a real path from it, so Skia
+/// flattens clips at true DEVICE resolution and a clip curve never facets at any
+/// zoom. Fills, strokes and these glyph contours instead ship point lists.
+/// Extending the clip's representation to them is a change to `model.rs` and
+/// `wire.rs`, so it is not reachable from this file.
 const CURVE_STEPS: usize = 10;
 
 /// Accumulates path segments into closed contours, flattening quadratic and

@@ -60,7 +60,14 @@ fn acroform(doc: &Document) -> Option<&Dictionary> {
 /// field's own, inheritable up `/Parent` (§12.7.4.3 Table 222), else the
 /// AcroForm document-wide default (§12.7.2 Table 218).
 fn field_quadding(doc: &Document, id: ObjectId) -> i64 {
-    inherited_num(doc, id, b"Q")
+    quadding_of(doc, field_attr(doc, id, b"Q"))
+}
+
+/// `field_quadding` given the field's own `/Q` already resolved, so the id-based
+/// and dictionary-based lookups cannot drift apart on the AcroForm default.
+fn quadding_of(doc: &Document, own: Option<&Object>) -> i64 {
+    own.and_then(|o| deref(doc, o).or(Some(o)))
+        .and_then(num)
         .or_else(|| {
             acroform(doc)
                 .and_then(|af| af.get(b"Q").ok())
@@ -154,7 +161,13 @@ pub(crate) fn parse_da(da: &[u8]) -> DefaultAppearance {
 /// A widget's effective `/DA`: the field's own (inheritable through `/Parent`),
 /// else the document-wide AcroForm default (§12.7.2 Table 218).
 pub(crate) fn field_da(doc: &Document, id: ObjectId) -> DefaultAppearance {
-    let own = field_attr(doc, id, b"DA")
+    da_of(doc, field_attr(doc, id, b"DA"))
+}
+
+/// `field_da` given the field's own `/DA` already resolved, shared with the
+/// dictionary-based lookup the renderer uses.
+fn da_of(doc: &Document, own: Option<&Object>) -> DefaultAppearance {
+    let own = own
         .and_then(|o| deref(doc, o).or(Some(o)))
         .and_then(|o| o.as_str().ok());
     if let Some(s) = own {
@@ -270,11 +283,17 @@ pub(crate) fn list_links(handle: i64, page_index: i32) -> Option<Vec<u8>> {
         .and_then(|o| deref(doc, o))
     {
         for a in annots {
-            let dict = match a.as_reference().ok().and_then(|id| doc.get_dictionary(id).ok()) {
+            // §12.5.2 does not require /Annots entries to be indirect, and
+            // `render_annotations` already derefs either form — so a direct
+            // dictionary PAINTED but was invisible here, leaving a link the user
+            // could see and not tap. Unlike `list_form_fields` and
+            // `list_annotations`, these records carry no object id (rect,
+            // destination page, URI), so there is no identity to invent.
+            let dict = match deref(doc, a).and_then(|o| o.as_dict().ok()) {
                 Some(d) => d,
                 None => continue,
             };
-            if dict.get(b"Subtype").ok().and_then(|o| o.as_name().ok()) != Some(b"Link".as_ref()) {
+            if dict.get(b"Subtype").ok().and_then(|o| deref(doc, o).or(Some(o))).and_then(|o| o.as_name().ok()) != Some(b"Link".as_ref()) {
                 continue;
             }
             let rect = match dict.get(b"Rect").ok().and_then(|o| read_rect(doc, o)) {
@@ -393,6 +412,16 @@ pub(crate) fn list_form_fields(handle: i64, page_index: i32) -> Option<Vec<u8>> 
         .and_then(|o| deref(doc, o))
     {
         for a in annots {
+            // A DIRECT annotation dictionary is skipped here deliberately, even
+            // though §12.5.2 permits one and `render_annotations` paints it.
+            // The `encode_id` below is the handle the caller passes back to
+            // `set_text_field` / `set_checkbox` / `set_choice_field`, and a
+            // direct dictionary has no ObjectId to put in it. Listing the field
+            // under a sentinel id would let the user tap it, type, and have the
+            // write silently fail — losing their input with no feedback, which
+            // is worse than a field that is visibly not interactive. A widget
+            // must also be reachable from the AcroForm /Fields array, whose
+            // entries ARE references, so a conforming form cannot reach this.
             let id = match a.as_reference() {
                 Ok(id) => id,
                 Err(_) => continue,
@@ -401,7 +430,7 @@ pub(crate) fn list_form_fields(handle: i64, page_index: i32) -> Option<Vec<u8>> 
                 Ok(d) => d,
                 Err(_) => continue,
             };
-            let is_widget = dict.get(b"Subtype").ok().and_then(|o| o.as_name().ok())
+            let is_widget = dict.get(b"Subtype").ok().and_then(|o| deref(doc, o).or(Some(o))).and_then(|o| o.as_name().ok())
                 == Some(b"Widget".as_ref());
             // Follow Parent T to locate AcroForm field type - handle nested field attrs
             let ft = field_attr(doc, id, b"FT").and_then(|o| o.as_name().ok());
@@ -452,7 +481,10 @@ pub(crate) fn list_form_fields(handle: i64, page_index: i32) -> Option<Vec<u8>> 
                 // by every kid of a radio group — using it as a fallback for a
                 // widget that has /AS = /Off reported every button in the group as
                 // selected. Only fall back to /V when the widget has no /AS.
-                match dict.get(b"AS").ok().and_then(|o| o.as_name().ok()) {
+                // §7.3.10: an indirect /AS reads as absent and falls back to /V,
+                // which is the FIELD's value shared by every kid of a radio
+                // group — reporting every button in the group as selected.
+                match dict.get(b"AS").ok().and_then(|o| deref(doc, o).or(Some(o))).and_then(|o| o.as_name().ok()) {
                     Some(s) => (s != b"Off") as u8,
                     None => (!value.is_empty() && value != "Off") as u8,
                 }
@@ -536,7 +568,7 @@ fn build_text_appearance(
         // glyph to y=0, sitting the row on the bottom edge of the box with its
         // descenders clipped.
         let cell_w = w / max_len as f64;
-        let base_y = (h - size) / 2.0;
+        let base_y = centered_baseline(h, size);
         for (i, ch) in value.chars().take(max_len).enumerate() {
             let cx = i as f64 * cell_w + (cell_w - char_w) / 2.0;
             body.push_str(&format!(
@@ -585,7 +617,7 @@ fn build_text_appearance(
         }
     } else {
         let x = aligned_x(value, w, char_w, quadding);
-        let y = (h - size) / 2.0;
+        let y = centered_baseline(h, size);
         body.push_str(&format!(
             "1 0 0 1 {x:.2} {y:.2} Tm ({}) Tj ",
             escape_pdf_literal(value)
@@ -593,6 +625,27 @@ fn build_text_appearance(
     }
     body.push_str("ET Q");
     body.into_bytes()
+}
+
+/// The BASELINE for a single row of text vertically centred in a field of
+/// height `h`, in the appearance's own form space.
+///
+/// `(h - size) / 2` centres the EM BOX, which is not the same thing: the
+/// baseline is not the bottom of the em box, glyphs hang below it by the
+/// descender. Centring the visible ink means centring the ascent-to-descent
+/// span, which puts the baseline `0.2445 * size` HIGHER than the em-box
+/// calculation for Helvetica's metrics. The old expression was always low by
+/// that amount, and since §8.10.1 clips the content to the `[0 0 w h]` BBox the
+/// descenders were cut off once `h < 1.414 * size`.
+///
+/// Helvetica's metrics are used because the rest of this generator already
+/// approximates with them (`char_w = size * 0.5`), and a `/DR` font adopted by
+/// `da_font_resources` is a Latin text face whose metrics are close enough that
+/// a centred row stays centred.
+fn centered_baseline(h: f64, size: f64) -> f64 {
+    const ASCENDER: f64 = 0.718;
+    const DESCENDER: f64 = 0.207; // magnitude; the metric itself is negative
+    (h - (ASCENDER + DESCENDER) * size) / 2.0 + DESCENDER * size
 }
 
 /// Horizontal text origin for a line given the box width, approximate glyph
@@ -615,6 +668,137 @@ fn field_font_size(da_size: f64, h: f64) -> f64 {
     } else {
         (h - 4.0).clamp(6.0, 14.0)
     }
+}
+
+/// Whether the AcroForm asks consumers to regenerate field appearances.
+///
+/// §12.7.2 Table 218: when `/NeedAppearances` is true the consumer SHALL
+/// construct appearance streams from `/V` and `/DA`, so it OVERRIDES a `/AP`
+/// already present in the file — that `/AP` is by definition the stale one.
+pub(crate) fn need_appearances(doc: &Document) -> bool {
+    acroform(doc)
+        .and_then(|af| af.get(b"NeedAppearances").ok())
+        .and_then(|o| deref(doc, o).or(Some(o)))
+        .and_then(|o| o.as_bool().ok())
+        .unwrap_or(false)
+}
+
+/// A field attribute resolved from the widget DICTIONARY: its own entry, else
+/// inherited up the `/Parent` chain (§12.7.3.1). The renderer walks `/Annots`
+/// values and so holds a dictionary rather than an id, which `field_attr` needs.
+fn widget_attr<'a>(doc: &'a Document, w: &'a Dictionary, key: &[u8]) -> Option<&'a Object> {
+    if let Ok(v) = w.get(key) {
+        return Some(v);
+    }
+    field_attr(doc, w.get(b"Parent").ok()?.as_reference().ok()?, key)
+}
+
+/// The text a widget displays for its field's `/V`, or `None` when there is
+/// nothing to draw. For a choice field `/V` holds the EXPORT value, so it is
+/// mapped back through `/Opt` to the display string the user picked
+/// (§12.7.4.4) — otherwise a field this crate itself filled in would re-render
+/// showing the export string.
+fn widget_display_value(doc: &Document, w: &Dictionary, choice: bool) -> Option<String> {
+    let text = |o: &Object| match deref(doc, o).unwrap_or(o) {
+        Object::String(s, _) => decode_pdf_text(s),
+        Object::Name(n) => String::from_utf8_lossy(n).into_owned(),
+        _ => String::new(),
+    };
+    let v = widget_attr(doc, w, b"V")?;
+    // §12.7.4.4: a multi-select choice field's /V is an array of the selected
+    // export values.
+    let value = match deref(doc, v).unwrap_or(v) {
+        Object::Array(sel) => sel.iter().map(text).filter(|s| !s.is_empty()).collect::<Vec<_>>().join(", "),
+        other => text(other),
+    };
+    if value.is_empty() {
+        return None;
+    }
+    if !choice {
+        return Some(value);
+    }
+    let opts = match widget_attr(doc, w, b"Opt")
+        .and_then(|o| deref(doc, o))
+        .and_then(|o| o.as_array().ok())
+    {
+        Some(o) => o,
+        None => return Some(value),
+    };
+    for o in opts {
+        if let Object::Array(pair) = deref(doc, o).unwrap_or(o) {
+            if pair.len() >= 2 && text(&pair[0]) == value {
+                return Some(text(&pair[1]));
+            }
+        }
+    }
+    Some(value)
+}
+
+/// Build the appearance a Widget's value should paint when the file supplies no
+/// usable `/AP`, or when `/NeedAppearances` requires one to be regenerated
+/// (§12.7.2 Table 218).
+///
+/// Returns the content stream, its resources, the `/BBox` it is laid out in and
+/// the `/Matrix` to place it with — the same four things `set_text_field` hands
+/// to `make_appearance_oriented`, so a value synthesized at render time lands
+/// exactly where the same value baked in by an edit would.
+pub(crate) fn widget_value_appearance(
+    doc: &Document,
+    widget: &Dictionary,
+    rect: [f64; 4],
+) -> Option<(Vec<u8>, Dictionary, [f64; 4], Mat)> {
+    // Only the variable-text field types (§12.7.4). A /Btn's value NAMES an /AP
+    // state rather than supplying text, and a /Sig's is a signature dictionary;
+    // neither has an appearance that can be derived from /DA.
+    let ft = widget_attr(doc, widget, b"FT")
+        .and_then(|o| deref(doc, o).or(Some(o)))
+        .and_then(|o| o.as_name().ok())?;
+    let choice = ft == b"Ch";
+    if ft != b"Tx" && !choice {
+        return None;
+    }
+    let flags = widget_attr(doc, widget, b"Ff")
+        .and_then(|o| deref(doc, o).or(Some(o)))
+        .and_then(num)
+        .unwrap_or(0.0) as u32;
+    // §12.7.4.3 Table 226 bit 14: a Password field's value "shall not be echoed
+    // visually". Regenerating an appearance for it would put a stored password
+    // on screen, so draw nothing.
+    if flags & (1 << 13) != 0 {
+        return None;
+    }
+    let value = widget_display_value(doc, widget, choice)?;
+
+    let r = normalize_rect(rect);
+    let (rw, rh) = (r[2] - r[0], r[3] - r[1]);
+    if !(rw > 0.0 && rh > 0.0) {
+        return None;
+    }
+    // Same display-orientation handling as set_text_field (§12.5.2 /P), so the
+    // value reads upright on a rotated page.
+    let rot = widget
+        .get(b"P")
+        .ok()
+        .and_then(|o| o.as_reference().ok())
+        .map(|pid| page_rotation(doc, pid))
+        .unwrap_or(0);
+    let (w, h, apm) = display_orientation(rot, rw, rh);
+    let da = da_of(doc, widget_attr(doc, widget, b"DA"));
+    let (res, font) = da_font_resources(doc, da.font.as_deref());
+    let size = field_font_size(da.size, h);
+    let quadding = quadding_of(doc, widget_attr(doc, widget, b"Q"));
+    let max_len = widget_attr(doc, widget, b"MaxLen")
+        .and_then(|o| deref(doc, o).or(Some(o)))
+        .and_then(num)
+        .unwrap_or(0.0) as usize;
+    // A choice field is laid out as a single line: §12.7.4.3's Multiline and
+    // Comb bits are text-field flags and share their bit positions with the
+    // choice flags (Combo, Sort, ...), so honouring them on a /Ch would wrap or
+    // comb the value on the strength of an unrelated flag.
+    let multiline = !choice && flags & (1 << 12) != 0; // Ff bit 13
+    let comb = !choice && flags & (1 << 24) != 0; // Ff bit 25
+    let content = build_text_appearance(&value, w, h, size, &font, da.argb, quadding, multiline, comb, max_len);
+    Some((content, res, [0.0, 0.0, w, h], apm))
 }
 
 pub(crate) fn set_text_field(handle: i64, widget_id: i64, value: &str) -> bool {
@@ -1195,8 +1379,9 @@ mod da_tests {
             "AB", 100.0, 20.0, 12.0, b"F1", 0xFF00_0000, 0, false, true, 5,
         ))
         .expect("utf8");
-        // (20 - 12) / 2 == 4 for every cell.
-        assert_eq!(c.matches("4.00 Tm").count(), 2, "both cells centered: {c}");
+        // Ink-centred baseline for h=20, size=12:
+        // (20 - 0.925*12)/2 + 0.207*12 == 6.93, shared by every cell.
+        assert_eq!(c.matches("6.93 Tm").count(), 2, "both cells centered: {c}");
         assert!(!c.contains(" 0.00 Tm"), "a cell fell to the bottom edge: {c}");
     }
 
@@ -1408,6 +1593,181 @@ mod da_tests {
             1,
             "multiline + comb must lay out as one line, not per-character cells"
         );
+    }
+
+    /// `(h - size)/2` centres the EM BOX, but the baseline is not the bottom of
+    /// the em box — glyphs hang below it by the descender. The old expression
+    /// therefore sat `0.2445 * size` too LOW, always downward, and since §8.10.1
+    /// clips the appearance to its `[0 0 w h]` BBox the descenders of a tight
+    /// field were cut off entirely.
+    #[test]
+    fn the_field_baseline_centres_the_ink_not_the_em_box() {
+        const ASC: f64 = 0.718;
+        const DESC: f64 = 0.207;
+        let baseline = |c: &str| -> f64 {
+            let tail = c.split("1 0 0 1 ").nth(1).expect("a Tm");
+            tail.split_whitespace().nth(1).expect("the y operand").parse().expect("a number")
+        };
+        for (h, size) in [(20.0, 12.0), (14.0, 12.0), (30.0, 9.0), (12.0, 10.0)] {
+            let c = String::from_utf8(build_text_appearance(
+                "gyp", 100.0, h, size, b"F1", 0xFF00_0000, 0, false, false, 0,
+            ))
+            .expect("utf8");
+            let y = baseline(&c);
+
+            // The descender clears the bottom of the BBox — the clipping failure.
+            let below = y - DESC * size;
+            assert!(below >= -0.01, "h={h} size={size}: descender at {below} is clipped away");
+            // Ink is centred: the gap below equals the gap above.
+            let above = h - (y + ASC * size);
+            assert!(
+                (below - above).abs() < 0.02,
+                "h={h} size={size}: ink not centred, {below} below vs {above} above"
+            );
+            // And it sits strictly higher than the old em-box expression.
+            assert!(y > (h - size) / 2.0, "h={h} size={size}: must be above the em-box baseline");
+        }
+    }
+
+    /// §12.5.2 does not require `/Annots` entries to be indirect, and
+    /// `render_annotations` derefs either form — so a link written as a DIRECT
+    /// dictionary painted but never reached `list_links`, leaving the user a
+    /// visible link they could not tap. These records carry no object id, so
+    /// unlike the field and annotation lists there is no identity to invent.
+    #[test]
+    fn a_direct_annotation_dictionary_is_still_a_tappable_link() {
+        for direct in [false, true] {
+            let mut doc = Document::with_version("1.7");
+            let pages_id = doc.new_object_id();
+            let target = doc.add_object(dictionary! {
+                "Type" => name_obj("Page"),
+                "Parent" => Object::Reference(pages_id),
+                "MediaBox" => rect_obj([0.0, 0.0, 200.0, 200.0]),
+            });
+            let link = dictionary! {
+                "Type" => name_obj("Annot"),
+                "Subtype" => name_obj("Link"),
+                "Rect" => rect_obj([10.0, 10.0, 90.0, 30.0]),
+                "Dest" => Object::Array(vec![Object::Reference(target), name_obj("Fit")]),
+            };
+            let entry = if direct {
+                Object::Dictionary(link)
+            } else {
+                Object::Reference(doc.add_object(link))
+            };
+            let page = doc.add_object(dictionary! {
+                "Type" => name_obj("Page"),
+                "Parent" => Object::Reference(pages_id),
+                "MediaBox" => rect_obj([0.0, 0.0, 200.0, 200.0]),
+                "Annots" => Object::Array(vec![entry]),
+            });
+            doc.objects.insert(
+                pages_id,
+                Object::Dictionary(dictionary! {
+                    "Type" => name_obj("Pages"),
+                    "Kids" => Object::Array(vec![Object::Reference(page), Object::Reference(target)]),
+                    "Count" => 2,
+                }),
+            );
+            let cat = doc.add_object(dictionary! {
+                "Type" => name_obj("Catalog"),
+                "Pages" => Object::Reference(pages_id),
+            });
+            doc.trailer.set("Root", cat);
+
+            let handle = next_handle();
+            registry().lock().unwrap_or_else(|e| e.into_inner()).insert(handle, doc);
+            let buf = list_links(handle, 0).expect("links");
+            let count = u32::from_le_bytes(buf[0..4].try_into().expect("count"));
+            assert_eq!(count, 1, "direct={direct}: the link must be listed");
+            close_document(handle);
+        }
+    }
+
+    /// A document whose catalog carries the given AcroForm.
+    fn form_doc(acroform: Dictionary) -> Document {
+        let mut doc = Document::with_version("1.7");
+        let acro = doc.add_object(acroform);
+        let pages = doc.add_object(dictionary! { "Type" => "Pages", "Kids" => Object::Array(vec![]), "Count" => 0 });
+        let cat = doc.add_object(dictionary! { "Type" => "Catalog", "Pages" => pages, "AcroForm" => acro });
+        doc.trailer.set("Root", cat);
+        doc
+    }
+
+    fn appearance_of(doc: &Document, widget: &Dictionary) -> String {
+        let (content, _, _, _) = super::widget_value_appearance(doc, widget, [0.0, 0.0, 100.0, 20.0])
+            .expect("a value appearance");
+        String::from_utf8_lossy(&content).into_owned()
+    }
+
+    /// §12.7.4.4: a choice field's `/V` holds the EXPORT value while the widget
+    /// shows the display string from `/Opt`. `set_choice_field` writes the export
+    /// and sets `/NeedAppearances`, so without the mapping back a field this
+    /// crate itself filled in would re-render showing the export code the user
+    /// never saw.
+    #[test]
+    fn a_choice_widgets_export_value_renders_as_its_display_string() {
+        let mut w = dictionary! {
+            "FT" => name_obj("Ch"),
+            "DA" => Object::string_literal("/Helv 10 Tf 0 g"),
+            "V" => Object::string_literal("US"),
+            "Opt" => Object::Array(vec![Object::Array(vec![
+                Object::string_literal("US"),
+                Object::string_literal("United States"),
+            ])]),
+        };
+        let doc = form_doc(Dictionary::new());
+        assert!(appearance_of(&doc, &w).contains("(United States) Tj"), "export must map to display");
+
+        // No /Opt entry matches: the raw value is better than nothing.
+        w.set("V", Object::string_literal("ZZ"));
+        assert!(appearance_of(&doc, &w).contains("(ZZ) Tj"), "unmatched value still renders");
+    }
+
+    /// The Multiline and Comb bits of §12.7.4.3 Table 226 are TEXT-field flags;
+    /// a choice field's `/Ff` uses those same bit positions for Combo, Sort and
+    /// friends. Honouring them on a `/Ch` wraps or combs the value on the
+    /// strength of an unrelated flag.
+    #[test]
+    fn choice_field_flags_are_not_read_as_text_field_layout_flags() {
+        let mut w = dictionary! {
+            "FT" => name_obj("Ch"),
+            "DA" => Object::string_literal("/Helv 10 Tf 0 g"),
+            "V" => Object::string_literal("ABCDE"),
+            "MaxLen" => 5,
+            // Bit 25 is Comb on a /Tx and CommitOnSelChange on a /Ch.
+            "Ff" => Object::Integer(1 << 24),
+        };
+        let doc = form_doc(Dictionary::new());
+        assert_eq!(appearance_of(&doc, &w).matches("Tj").count(), 1, "a choice value is one line");
+
+        w.set("FT", name_obj("Tx"));
+        assert_eq!(
+            appearance_of(&doc, &w).matches("Tj").count(),
+            5,
+            "the same flag on a text field IS Comb"
+        );
+    }
+
+    /// §12.7.2 Table 218 makes the AcroForm `/DA` and `/Q` the document-wide
+    /// defaults. The renderer resolves a widget from its DICTIONARY rather than
+    /// its id, so it cannot use `field_attr`; both routes must still land on the
+    /// same defaults.
+    #[test]
+    fn a_widget_resolved_by_dictionary_still_gets_the_acroform_defaults() {
+        let w = dictionary! {
+            "FT" => name_obj("Tx"),
+            "V" => Object::string_literal("Ab"),
+        };
+        let doc = form_doc(dictionary! {
+            "DA" => Object::string_literal("/Helv 9 Tf 1 0 0 rg"),
+            "Q" => 2,
+        });
+        let c = appearance_of(&doc, &w);
+        assert!(c.contains("9.000 Tf"), "AcroForm /DA size: {c}");
+        assert!(c.contains("1.000 0.000 0.000 rg"), "AcroForm /DA colour: {c}");
+        // Right-aligned: "Ab" at ~4.5pt per glyph sits near the right edge.
+        assert!(c.contains("1 0 0 1 89.00"), "AcroForm /Q right alignment: {c}");
     }
 }
 

@@ -450,9 +450,38 @@ pub fn decode_ccitt(data: &[u8], w: u32, h: u32, params: &CcittParams) -> Option
     let rows = rows_est;
     let rows_us = rows as usize;
     let cols_us = columns as usize;
-    if cols_us == 0 || rows_us == 0 || cols_us > 20000 || rows_us > 20000 { return None; }
+    if cols_us == 0
+        || rows_us == 0
+        || cols_us > crate::MAX_IMAGE_DIM as usize
+        || rows_us > crate::MAX_IMAGE_DIM as usize
+    {
+        return None;
+    }
     let row_bytes = cols_us.div_ceil(8);
-    if (cols_us * rows_us) > 16 * 1024 * 1024 { return None; }
+    // Budget the buffer this function actually allocates, in the unit it actually
+    // allocates it in.
+    //
+    // The test used to be `(cols_us * rows_us) > 16 * 1024 * 1024`, i.e. the value of
+    // `MAX_IMAGE_PIXELS` — a budget sized for a FOUR-BYTE-per-pixel RGBA raster —
+    // applied to the ONE-BIT raster below. That is 32x too strict for what it guards. A
+    // 300 dpi A0 engineering scan is 9933 x 14043 = 139 Mpx, which the cap refuses, but
+    // packs to `1242 * 14043` = 17.4 MB, which is entirely holdable. Large architectural
+    // and engineering scans are exactly what CCITT carries, and they rendered as nothing
+    // at all: `decode_ccitt` returned None and `images.rs` reported a failed decode.
+    //
+    // `MAX_UNPACKED_SAMPLE_BYTES` is the crate's existing ceiling for a decoded raster
+    // buffer at one byte per component. A packed bilevel raster is strictly cheaper per
+    // pixel than that, so reusing it keeps one policy number instead of inventing a
+    // second. With /Columns and /Rows already bounded to `MAX_IMAGE_DIM` above, the
+    // worst case here is 2500 * 20000 = 50 MB and the dimension cap is the binding one.
+    //
+    // This bounds only THIS buffer. The RGBA that `images.rs` builds from it is 32x
+    // larger and is bounded separately, by the decimation at its CCITT branch — the two
+    // have to stay paired, because raising this alone would hand that branch a 139 Mpx
+    // raster and a 558 MB allocation.
+    if row_bytes.saturating_mul(rows_us) > crate::MAX_UNPACKED_SAMPLE_BYTES {
+        return None;
+    }
 
     let black_is1 = params.black_is1;
     // Byte value meaning WHITE in the sample polarity this function emits (see

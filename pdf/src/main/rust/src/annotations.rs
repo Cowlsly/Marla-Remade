@@ -131,6 +131,20 @@ pub(crate) fn render_annotation(doc: &Document, dict: &lopdf::Dictionary, base: 
         None => return,
     };
 
+    // §12.7.2 Table 218: when the AcroForm sets /NeedAppearances the consumer
+    // SHALL construct field appearances from /V and /DA, so the flag wins over a
+    // /AP that is present but stale. Without the flag a real /AP wins, and a
+    // Widget reaches the same synthesis only through
+    // `synthesize_annotation_appearance` below — i.e. when there is no usable
+    // /AP at all.
+    if dict.get(b"Subtype").ok().and_then(|o| deref(doc, o).or(Some(o))).and_then(|o| o.as_name().ok())
+        == Some(b"Widget".as_ref())
+        && crate::forms::need_appearances(doc)
+        && render_widget_value(doc, dict, rect, base, prims)
+    {
+        return;
+    }
+
     // Resolve the normal appearance: /AP /N is either a stream or a subdictionary
     // of appearance states selected by /AS. When absent, synthesize a basic
     // appearance for common markup/shape annotation types.
@@ -145,13 +159,45 @@ pub(crate) fn render_annotation(doc: &Document, dict: &lopdf::Dictionary, base: 
     let normal = match ap.get(b"N").ok().and_then(|o| deref(doc, o)) {
         Some(Object::Stream(s)) => s,
         Some(Object::Dictionary(states)) => {
-            let as_name = dict.get(b"AS").ok().and_then(|o| o.as_name().ok());
+            // §7.3.10 lets any object be indirect. An indirect /AS read as a
+            // plain name yields None, which falls into the no-/AS branch below
+            // and renders a checkbox whose state was set indirectly as unchecked
+            // — or draws nothing at all. /F, /Subtype, /C and /CA are all
+            // dereferenced in this file; /AS was the outlier.
+            let as_name = dict
+                .get(b"AS")
+                .ok()
+                .and_then(|o| deref(doc, o).or(Some(o)))
+                .and_then(|o| o.as_name().ok());
             let picked = match as_name {
-                // /AS present: it selects the state. If it names a state that is
-                // absent, fall back to "Off" (a button's default) and otherwise
-                // draw nothing — NOT an arbitrary entry, which is
-                // nondeterministic and would render an unchecked box as checked.
-                Some(n) => states.get(n).ok().or_else(|| states.get(b"Off").ok()),
+                // §12.5.5 defines no fallback for an /AS that names a state the
+                // /N dictionary does not hold, so this is a judgement about
+                // malformed input. The name itself decides the direction:
+                //
+                //   /AS = /Off, absent — blank IS the off appearance, and
+                //   omitting the /Off entry is a normal way to encode it. Draw
+                //   nothing, which the synthesis fallback below does.
+                //
+                //   /AS = anything else, absent — the file is asserting this
+                //   widget is ON. Falling back to /Off then renders a checked
+                //   box as unchecked, and if /Off is absent too it renders
+                //   NOTHING at all. When exactly one non-Off state exists it is
+                //   unambiguously the on-art under a different export name
+                //   (/Yes vs /On vs /1), so use it. That is not the
+                //   "nondeterministic arbitrary entry" this used to warn about:
+                //   it is taken only when /AS has explicitly said not-Off, so it
+                //   cannot turn an unchecked box into a checked one.
+                Some(n) => states.get(n).ok().or_else(|| {
+                    if n == b"Off" {
+                        return None;
+                    }
+                    let mut on: Vec<&Object> =
+                        states.iter().filter(|(k, _)| k.as_slice() != b"Off").map(|(_, v)| v).collect();
+                    match on.len() {
+                        1 => Some(on.remove(0)),
+                        _ => states.get(b"Off").ok(),
+                    }
+                }),
                 // /AS absent is malformed (§12.5.5, Table 168 requires it when /N
                 // is a subdictionary). Prefer "Off"; failing that, a single entry
                 // is unambiguous, so use the real appearance rather than
@@ -200,6 +246,12 @@ pub(crate) fn render_annotation(doc: &Document, dict: &lopdf::Dictionary, base: 
 
     let ops = crate::content::stream_operations(doc, normal);
     if ops.is_empty() {
+        // `objects.rs` returns an empty operation list for a stream it could not
+        // decode at all (unknown filter, /Crypt, broken filter chain), which is
+        // indistinguishable here from a genuinely empty appearance. Every other
+        // unusable-/AP branch above falls back to the synthesized shape; this one
+        // returned, so the annotation vanished outright.
+        synthesize_annotation_appearance(doc, dict, rect, base, prims);
         return;
     }
 
@@ -391,14 +443,100 @@ fn finite_coords(doc: &Document, obj: &Object) -> Option<Vec<f64>> {
 /// Only shapes the file actually specifies are drawn: Square/Circle from `/Rect`,
 /// Line from `/L` (with `/LE` endings), Ink from `/InkList`, Polygon/PolyLine
 /// from `/Vertices`, the text markup types from `/QuadPoints`, Caret as an
-/// insertion wedge and Stamp as its `/Name` wording in a box.
+/// insertion wedge, Stamp as its `/Name` wording in a box, and a Widget's field
+/// value from `/V` and `/DA` (§12.7.2 Table 218).
 ///
-/// Everything else — Widget, Link, FileAttachment, Sound, Movie, Screen, and any
+/// Everything else — Link, FileAttachment, Sound, Movie, Screen, and any
 /// of the above missing its defining geometry — draws NOTHING. A crude wrong
 /// shape is worse than an absent one: a bare `/Rect` outline is
 /// indistinguishable from a Square annotation and asserts a geometry the file
 /// never gave. In particular Link must never draw chrome of its own (§12.5.6.5
 /// leaves the border to `/Border`, honoured only inside a real `/AP`).
+/// `/Rect` inset by HALF the border width, so a stroke laid on the result stays
+/// inside the annotation: §8.4.3.2 centres a pen on its path, and a ring laid on
+/// `/Rect` itself puts `bw/2` of the border outside. Collapses to the plain rect
+/// when the inset would invert it.
+fn border_inset_rect(rect: [f64; 4], bw: f64) -> [f64; 4] {
+    let r = normalize_rect(rect);
+    let i = bw / 2.0;
+    let inset = [r[0] + i, r[1] + i, r[2] - i, r[3] - i];
+    if inset[2] > inset[0] && inset[3] > inset[1] {
+        inset
+    } else {
+        r
+    }
+}
+
+/// The rectangle a FreeText annotation's text is laid out in: §12.5.6.6 Table
+/// 174's `/RD`, "the numerical differences between ... the Rect entry of the
+/// annotation and a rectangle contained within that rectangle. The inner
+/// rectangle is where the annotation's text should be displayed."
+///
+/// Distinct from Table 177's `/RD` in [`shape_rect`], which bounds the SHAPE.
+/// Applied to the already border-inset box, since the text sits inside the
+/// border. A malformed value is ignored, as for the shape form.
+fn free_text_rect(doc: &Document, dict: &lopdf::Dictionary, boxed: [f64; 4]) -> [f64; 4] {
+    let rd = match dict
+        .get(b"RD")
+        .ok()
+        .and_then(|o| finite_coords(doc, o))
+        .filter(|v| v.len() >= 4 && v.iter().all(|n| *n >= 0.0))
+    {
+        Some(v) => v,
+        None => return boxed,
+    };
+    let inset = [boxed[0] + rd[0], boxed[1] + rd[3], boxed[2] - rd[2], boxed[3] - rd[1]];
+    if inset[2] > inset[0] && inset[3] > inset[1] {
+        inset
+    } else {
+        boxed
+    }
+}
+
+/// The rectangle a Square/Circle annotation's shape actually occupies.
+///
+/// §12.5.6.8 Table 177: `/RD` gives "the numerical differences between two
+/// rectangles: the `Rect` entry of the annotation and the actual boundaries of
+/// the underlying square or circle", as differences in the left, top, right and
+/// bottom coordinates. It exists precisely so a shape with a wide border still
+/// fits inside `/Rect`, and it was not read anywhere in this crate — so an
+/// annotation carrying one was drawn oversized, out to the full `/Rect`.
+///
+/// Absent `/RD`, the shape is inset by HALF the border width instead: §8.4.3.2
+/// centres a stroke on its path, so a path laid on `/Rect` itself puts half the
+/// border outside the annotation.
+///
+/// A malformed `/RD` — negative, non-finite, or wider than the rect — is
+/// ignored rather than clamped: it would grow the shape beyond `/Rect` or
+/// collapse it, and the plain rect is the better-defined answer.
+///
+/// This is Table 177's `/RD` and applies ONLY to Square and Circle. §12.5.6.6
+/// Table 174 defines a `/RD` for FreeText with different semantics — it insets
+/// the TEXT AREA, not the shape boundary — so routing FreeText through here
+/// would use a text inset as a border inset.
+fn shape_rect(doc: &Document, dict: &lopdf::Dictionary, rect: [f64; 4], bw: f64) -> [f64; 4] {
+    let r = normalize_rect(rect);
+    let rd = dict
+        .get(b"RD")
+        .ok()
+        .and_then(|o| finite_coords(doc, o))
+        .filter(|v| v.len() >= 4 && v.iter().all(|n| *n >= 0.0));
+    let [dl, dt, dr, db] = match rd {
+        // Table 177 orders the differences left, top, right, bottom. Top is a
+        // difference from the TOP edge, so it comes off r[3].
+        Some(v) => [v[0], v[1], v[2], v[3]],
+        // /RD bounds the shape BORDER AND ALL, so it is never combined with the
+        // stroke inset — one or the other.
+        None => return border_inset_rect(r, bw),
+    };
+    let inset = [r[0] + dl, r[1] + db, r[2] - dr, r[3] - dt];
+    if inset[2] > inset[0] && inset[3] > inset[1] {
+        inset
+    } else {
+        r
+    }
+}
+
 pub(crate) fn synthesize_annotation_appearance(
     doc: &Document,
     dict: &lopdf::Dictionary,
@@ -406,7 +544,11 @@ pub(crate) fn synthesize_annotation_appearance(
     base: &Mat,
     prims: &mut Vec<Prim>,
 ) {
-    let subtype = match dict.get(b"Subtype").ok().and_then(|o| o.as_name().ok()) {
+    // Dereferenced per §7.3.10: an indirect /Subtype read as a plain name gives
+    // None and returns here, so the annotation synthesizes NOTHING — the same
+    // total loss the arms below exist to prevent. `annot_visible_on_screen_with`
+    // already derefs this key.
+    let subtype = match dict.get(b"Subtype").ok().and_then(|o| deref(doc, o).or(Some(o))).and_then(|o| o.as_name().ok()) {
         Some(s) => s.to_vec(),
         None => return,
     };
@@ -426,8 +568,8 @@ pub(crate) fn synthesize_annotation_appearance(
     // for — most visibly around a filled Square/Circle, which is exactly how
     // this codebase's own `set_shape_border` marks a filled shape.
     //
-    // Applied only to the two shapes that have a spec-defined interior (/IC), so
-    // suppressing the border still leaves the annotation's content. For Line,
+    // Applied only to shapes whose content survives losing the border: the
+    // Square/Circle interior (/IC) and the FreeText /Contents. For Line,
     // PolyLine and Ink the stroke IS the whole annotation, and dropping it on a
     // producer that wrote W=0 by accident would erase the annotation outright,
     // which is the larger risk of the two.
@@ -453,7 +595,10 @@ pub(crate) fn synthesize_annotation_appearance(
 
     match subtype.as_slice() {
         b"Square" => {
-            let poly = vec![dev(rect[0],rect[1]), dev(rect[2],rect[1]), dev(rect[2],rect[3]), dev(rect[0],rect[3])];
+            // §12.5.6.8: the square is /Rect inset by /RD, or by half the border
+            // width when /RD is absent — not /Rect itself.
+            let sr = shape_rect(doc, dict, rect, bw);
+            let poly = vec![dev(sr[0],sr[1]), dev(sr[2],sr[1]), dev(sr[2],sr[3]), dev(sr[0],sr[3])];
             if let Some(f) = fill { emit_fill(prims, std::slice::from_ref(&poly), apply_alpha_to_argb(f, ca), false, 1.0, BlendMode::Normal); }
             if let Some(s) = stroke.filter(|_| has_border) {
                 let mut ring = poly.clone(); ring.push(poly[0]);
@@ -464,9 +609,11 @@ pub(crate) fn synthesize_annotation_appearance(
             }
         }
         b"Circle" => {
-            // Approximate the inscribed ellipse with a polygon.
-            let (cx, cy) = ((rect[0]+rect[2])/2.0, (rect[1]+rect[3])/2.0);
-            let (rx, ry) = ((rect[2]-rect[0]).abs()/2.0, (rect[3]-rect[1]).abs()/2.0);
+            // Approximate the inscribed ellipse with a polygon, inscribed in the
+            // /RD- or border-inset rect rather than the full /Rect (§12.5.6.8).
+            let sr = shape_rect(doc, dict, rect, bw);
+            let (cx, cy) = ((sr[0]+sr[2])/2.0, (sr[1]+sr[3])/2.0);
+            let (rx, ry) = ((sr[2]-sr[0]).abs()/2.0, (sr[3]-sr[1]).abs()/2.0);
             let poly: Vec<(f64,f64)> = (0..48).map(|i| {
                 let t = i as f64 / 48.0 * std::f64::consts::TAU;
                 dev(cx + rx*t.cos(), cy + ry*t.sin())
@@ -533,6 +680,14 @@ pub(crate) fn synthesize_annotation_appearance(
         b"Highlight" => {
             let color = stroke.unwrap_or(0xFFFF_FF00); // default yellow
             if quads.is_empty() {
+                // §12.5.6.10 makes /QuadPoints required, so this is malformed
+                // input. The /Rect is still kept as the fallback region, unlike
+                // Polygon (which draws nothing without /Vertices) and unlike the
+                // sibling markup types below: a fill is well defined for ANY
+                // region, and §12.5.2 already makes /Rect the area the annotation
+                // occupies, so it claims nothing new. Underline and StrikeOut
+                // need a quad to locate a BASELINE, which a /Rect cannot supply
+                // at all — hence they draw nothing and this does not.
                 let poly = vec![dev(rect[0],rect[1]), dev(rect[2],rect[1]), dev(rect[2],rect[3]), dev(rect[0],rect[3])];
                 emit_fill(prims, std::slice::from_ref(&poly), apply_alpha_to_argb(color, ca), false, 1.0, BlendMode::Multiply);
             } else {
@@ -668,36 +823,89 @@ pub(crate) fn synthesize_annotation_appearance(
         }
         b"FreeText" => {
             // Border/background box plus the /Contents text (no /AP fallback).
-            let poly = vec![dev(rect[0],rect[1]), dev(rect[2],rect[1]), dev(rect[2],rect[3]), dev(rect[0],rect[3])];
+            //
+            // Normalized up front, and every read below goes through `r`: the
+            // box quad survives any corner ordering (inverting only reverses the
+            // winding) but the text layout does NOT, and mixing raw and
+            // normalized reads in one arm is what hid that. §7.9.5 lets /Rect be
+            // given by any two diagonally opposite corners and `read_rect` does
+            // not reorder them, so on an inverted rect `rect[3]` is the BOTTOM:
+            // the first line started below the box and the `y < rect[1]` guard
+            // — comparing against what is actually the TOP — broke the loop
+            // immediately, painting the box with none of its text inside.
+            let r = border_inset_rect(rect, bw);
+            let poly = vec![dev(r[0],r[1]), dev(r[2],r[1]), dev(r[2],r[3]), dev(r[0],r[3])];
             if let Some(f) = fill { emit_fill(prims, std::slice::from_ref(&poly), apply_alpha_to_argb(f, ca), false, 1.0, BlendMode::Normal); }
-            if let Some(s) = stroke {
+            if let Some(s) = stroke.filter(|_| has_border) {
                 let mut ring = poly.clone(); ring.push(poly[0]);
                 let mut sgs = gs.clone(); sgs.stroke = s;
+                let d = annot_border_dash(doc, dict);
+                if !d.is_empty() { sgs.dash = d; }
                 emit_stroke(prims, std::slice::from_ref(&ring), &sgs);
             }
             let text = dict.get(b"Contents").ok().and_then(|o| deref(doc, o)).and_then(|o| match o { Object::String(b,_) => Some(decode_pdf_text(b)), _ => None }).unwrap_or_default();
             if !text.is_empty() {
+                // §12.5.6.6 Table 174 gives FreeText its OWN /RD: the inner
+                // rectangle "is where the annotation's text should be
+                // displayed". Different meaning from Table 177's shape-bounding
+                // /RD, so this must not go through `shape_rect` — but ignoring
+                // it entirely runs the text under a thick border, which is the
+                // case /RD exists to describe.
+                let t = free_text_rect(doc, dict, r);
                 let size = 12.0_f64;
                 let dsize = (size * scale) as f32;
-                let mut y = rect[3] - size; // top-down in page space
+                let mut y = t[3] - size; // top-down in page space
                 for line in text.split(['\n', '\r']).filter(|l| !l.is_empty()) {
-                    if prims.len() >= MAX_PRIMITIVES || y < rect[1] { break; }
-                    let (px, py) = dev(rect[0] + 2.0, y);
+                    if prims.len() >= MAX_PRIMITIVES || y < t[1] { break; }
+                    let (px, py) = dev(t[0] + 2.0, y);
                     emit_annot_text(prims, px as f32, py as f32, dsize, 0xFF00_0000, line);
                     y -= size * 1.2;
                 }
             }
         }
         b"Text" => {
-            // Sticky-note icon: a small filled square marker at the annotation rect.
-            let x0 = rect[0]; let y1 = rect[3];
-            let s = 18.0_f64.min((rect[2]-rect[0]).abs().max(12.0));
+            // Sticky-note marker. This is the one place where "draw nothing
+            // rather than a crude shape" inverts, so the reasoning is worth
+            // recording: the rule exists because a synthesized shape must not
+            // assert geometry the file never gave (the /Rect outline that read as
+            // a Square) or hide content already on the page (the redaction fill,
+            // the translucent wash). A Text annotation is neither. §12.5.6.4
+            // makes it an ICON at /Rect that "shall not scale with the page" —
+            // position IS its whole geometry and the file always gives it, and a
+            // marker asserts only "a comment is here", which is true. Drawing
+            // nothing loses that fact entirely, and nothing else in the page view
+            // surfaces it.
+            //
+            // What was wrong was the execution, in two ways, both fixed here:
+            //   * `s` came from the rect WIDTH alone, so a wide, short /Rect got
+            //     a marker up to 18pt tall over a rect a fraction of that,
+            //     spilling onto the text below;
+            //   * an unconditional hard-black ring, which is the highest-contrast
+            //     mark available and read as an authored black box rather than
+            //     viewer chrome.
+            // The 12pt floor on each axis stays: §12.5.6.4's icon "shall not
+            // scale with the page", and producers do write a zero-size /Rect and
+            // rely on the viewer's fixed icon size, so clamping strictly to a
+            // degenerate rect would make those notes vanish.
+            //
+            // Table 172's /Name (Comment, Key, Note, Help, ...) is still ignored,
+            // deliberately: we ship none of that artwork, and inventing a
+            // distinct crude glyph per name IS the failure mode the rule is
+            // about. One neutral marker says only what we actually know.
+            // §7.9.5 lets a /Rect be given by any two diagonally opposite
+            // corners and `read_rect` does not reorder them, so anchor on the
+            // NORMALIZED rect as the Caret and Stamp arms do. Anchoring on the
+            // raw one put the marker below an inverted rect's real box, over
+            // unrelated page content — the sizing already used `.abs()`, so only
+            // the anchor was missing the same treatment.
+            let r = normalize_rect(rect);
+            let s = 18.0_f64
+                .min((r[2] - r[0]).max(12.0))
+                .min((r[3] - r[1]).max(12.0));
+            let (x0, y1) = (r[0], r[3]);
             let poly = vec![dev(x0, y1 - s), dev(x0 + s, y1 - s), dev(x0 + s, y1), dev(x0, y1)];
             let col = stroke.or(fill).unwrap_or(0xFFFF_E000); // note yellow
             emit_fill(prims, std::slice::from_ref(&poly), apply_alpha_to_argb(col, ca), false, 1.0, BlendMode::Normal);
-            let mut ring = poly.clone(); ring.push(poly[0]);
-            let mut sgs = gs.clone(); sgs.stroke = 0xFF00_0000;
-            emit_stroke(prims, std::slice::from_ref(&ring), &sgs);
         }
         b"Redact" => {
             // §12.5.6.24: a redaction is not applied until apply_redactions runs,
@@ -711,7 +919,12 @@ pub(crate) fn synthesize_annotation_appearance(
             // content is still there hides the very text the user has to read to
             // check the mark, which is the same "wash over the page" failure the
             // rest of this function exists to avoid.
-            let poly = vec![dev(rect[0],rect[1]), dev(rect[2],rect[1]), dev(rect[2],rect[3]), dev(rect[0],rect[3])];
+            // The ring is inset by half the border width for the same §8.4.3.2
+            // reason as Square: a path on /Rect leaves half the pen outside the
+            // annotation. Table 187 defines no /RD for Redact, so there is no
+            // author-supplied inset to honour here.
+            let r = border_inset_rect(rect, bw);
+            let poly = vec![dev(r[0],r[1]), dev(r[2],r[1]), dev(r[2],r[3]), dev(r[0],r[3])];
             let mut ring = poly.clone(); ring.push(poly[0]);
             let mut sgs = gs.clone();
             sgs.stroke = stroke.unwrap_or(0xFFFF_0000);
@@ -719,8 +932,63 @@ pub(crate) fn synthesize_annotation_appearance(
             if !d.is_empty() { sgs.dash = d; }
             emit_stroke(prims, std::slice::from_ref(&ring), &sgs);
         }
+        b"Widget" => {
+            // A form field with no usable /AP: §12.7.2 Table 218 makes /V and
+            // /DA sufficient to rebuild the appearance, and without doing so a
+            // form the user filled in — or received filled in — renders
+            // completely blank. Unlike the shape types above this asserts no
+            // geometry the file did not give: the value is the file's own.
+            render_widget_value(doc, dict, rect, base, prims);
+        }
         _ => {}
     }
+}
+
+/// Paint a Widget's field value, building the appearance from `/V` and `/DA`
+/// the way §12.7.2 Table 218 requires of a consumer when `/NeedAppearances` is
+/// set or no `/AP` was supplied. Returns whether anything was drawn.
+///
+/// The geometry deliberately mirrors `forms::set_text_field`: the same content
+/// builder, `/BBox` and `/Matrix`, played through `appearance_matrix` exactly as
+/// the baked stream would be, so synthesizing at render time and baking at edit
+/// time put the value in the same place.
+fn render_widget_value(
+    doc: &Document,
+    dict: &lopdf::Dictionary,
+    rect: [f64; 4],
+    base: &Mat,
+    prims: &mut Vec<Prim>,
+) -> bool {
+    let (content, res, bbox, apm) = match crate::forms::widget_value_appearance(doc, dict, rect) {
+        Some(v) => v,
+        None => return false,
+    };
+    let ops = crate::content::parse_operations_lenient(&content);
+    if ops.is_empty() {
+        return false;
+    }
+    let ctm = mat_mul(&appearance_matrix(rect, bbox, apm), base);
+    // §8.10.2's /BBox clip, for the same reason a real appearance gets one: a
+    // value longer than its field must stop at the field's edge rather than run
+    // out across the page.
+    let dev: Vec<(f64, f64)> = [
+        (bbox[0], bbox[1]),
+        (bbox[2], bbox[1]),
+        (bbox[2], bbox[3]),
+        (bbox[0], bbox[3]),
+    ]
+    .iter()
+    .map(|&(x, y)| transform(&ctm, x, y))
+    .collect();
+    let pts: Vec<(f32, f32)> = dev.iter().map(|&(x, y)| (x as f32, y as f32)).collect();
+    let mut path_ops = vec![PathOp::Move(pts[0].0, pts[0].1)];
+    path_ops.extend(pts[1..].iter().map(|&(x, y)| PathOp::Line(x, y)));
+    path_ops.push(PathOp::Close);
+    prims.push(Prim::ClipPush { even_odd: false, pts, path_ops: Some(path_ops) });
+    let gs = GraphicsState { ctm, ..Default::default() };
+    interpret_content_seeded(doc, &ops, Some(&res), gs, prims, 1, false, None);
+    prims.push(Prim::ClipPop);
+    true
 }
 
 /// Emit a single line of substitute-font text at a device-space baseline (used
@@ -1967,6 +2235,14 @@ pub(crate) fn list_annotations(handle: i64, page_index: i32) -> Option<Vec<u8>> 
         .and_then(|o| deref(doc, o))
     {
         for a in annots {
+            // Direct annotation dictionaries are skipped deliberately: the
+            // `encode_id` in the record below is the handle the editor uses to
+            // select, move and delete the annotation, and a direct dictionary
+            // has no ObjectId to fill it with. Surfacing one under a sentinel id
+            // would offer edit affordances that silently do nothing. §12.5.2
+            // permits the direct form and `render_annotations` paints it, so
+            // such an annotation is visible but not selectable — a known and
+            // accepted divergence, not an oversight.
             let id = match a.as_reference() {
                 Ok(id) => id,
                 Err(_) => continue,
@@ -1975,7 +2251,7 @@ pub(crate) fn list_annotations(handle: i64, page_index: i32) -> Option<Vec<u8>> 
                 Ok(d) => d,
                 Err(_) => continue,
             };
-            let subtype = dict.get(b"Subtype").ok().and_then(|o| o.as_name().ok());
+            let subtype = dict.get(b"Subtype").ok().and_then(|o| deref(doc, o).or(Some(o))).and_then(|o| o.as_name().ok());
             let code = subtype.map(subtype_code).unwrap_or(0);
             // Report rects in displayed space so the editor's hit-testing and
             // selection boxes line up with the (rotation-baked) render.
@@ -2642,5 +2918,671 @@ mod synthesis_tests {
                 }
             }
         }
+    }
+
+    /// Everything a run of `Prim::Text` would paint, concatenated in emission
+    /// order: the interpreter emits one prim per glyph, so a value only exists
+    /// as the whole run.
+    fn painted_text(prims: &[Prim]) -> String {
+        prims
+            .iter()
+            .filter_map(|p| match p {
+                Prim::Text { text, .. } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// A single-page document whose catalog carries an `/AcroForm`, optionally
+    /// with `/NeedAppearances` set.
+    fn form_doc(need_appearances: bool) -> Document {
+        let mut doc = Document::with_version("1.7");
+        let pages_id = doc.new_object_id();
+        let page = doc.add_object(dictionary! {
+            "Type" => name_obj("Page"),
+            "Parent" => Object::Reference(pages_id),
+            "MediaBox" => rect_obj([0.0, 0.0, 200.0, 200.0]),
+        });
+        doc.objects.insert(
+            pages_id,
+            Object::Dictionary(dictionary! {
+                "Type" => name_obj("Pages"),
+                "Kids" => Object::Array(vec![Object::Reference(page)]),
+                "Count" => 1,
+            }),
+        );
+        let mut acro = dictionary! { "Fields" => Object::Array(vec![]) };
+        if need_appearances {
+            acro.set("NeedAppearances", Object::Boolean(true));
+        }
+        let acro_id = doc.add_object(acro);
+        let catalog_id = doc.add_object(dictionary! {
+            "Type" => name_obj("Catalog"),
+            "Pages" => Object::Reference(pages_id),
+            "AcroForm" => Object::Reference(acro_id),
+        });
+        doc.trailer.set("Root", catalog_id);
+        doc
+    }
+
+    fn text_widget(value: &str) -> Dictionary {
+        let mut w = annot("Widget");
+        w.set("Rect", rect_obj([10.0, 10.0, 110.0, 30.0]));
+        w.set("FT", name_obj("Tx"));
+        w.set("T", Object::string_literal("field"));
+        w.set("DA", Object::string_literal("/Helv 10 Tf 0 g"));
+        w.set("V", Object::string_literal(value));
+        w
+    }
+
+    /// An `/AP /N` stream painting one unmistakable fill, to tell "the file's
+    /// appearance ran" apart from "we synthesized one".
+    fn fill_ap(doc: &mut Document) -> Dictionary {
+        let ap = doc.add_object(Stream::new(
+            dictionary! {
+                "Type" => name_obj("XObject"),
+                "Subtype" => name_obj("Form"),
+                "BBox" => Object::Array(vec![0.into(), 0.into(), 100.into(), 20.into()]),
+            },
+            b"1 0 0 rg 0 0 100 20 re f".to_vec(),
+        ));
+        dictionary! { "N" => ap }
+    }
+
+    /// §12.7.2 Table 218 makes /V plus /DA enough for a consumer to build the
+    /// appearance, and non-Acrobat producers routinely ship a filled-in form with
+    /// no /AP on its widgets at all. `/NeedAppearances` was write-only in this
+    /// crate and `synthesize_annotation_appearance` had no Widget arm, so such a
+    /// form rendered COMPLETELY BLANK — the value was nowhere on the page.
+    #[test]
+    fn a_widget_with_no_appearance_still_paints_its_value() {
+        let doc = form_doc(false);
+        let mut prims = Vec::new();
+        render_annotation(&doc, &text_widget("Ada Lovelace"), &IDENTITY, &mut prims);
+        assert_eq!(painted_text(&prims), "Ada Lovelace", "the field value must be painted");
+    }
+
+    /// An empty /V has nothing to draw, and a /Btn's value NAMES an /AP state
+    /// rather than supplying text — synthesizing "Off" or "Yes" as a caption
+    /// would be inventing content.
+    #[test]
+    fn only_a_variable_text_field_with_a_value_is_synthesized() {
+        let doc = form_doc(false);
+        for (ft, v) in [("Tx", ""), ("Btn", "Yes"), ("Sig", "x")] {
+            let mut w = text_widget(v);
+            w.set("FT", name_obj(ft));
+            if v.is_empty() {
+                w.remove(b"V");
+            }
+            let mut prims = Vec::new();
+            render_annotation(&doc, &w, &IDENTITY, &mut prims);
+            assert!(painted_text(&prims).is_empty(), "/FT {ft} with /V {v:?} must draw no text");
+        }
+    }
+
+    /// The precedence §12.7.2 Table 218 sets: `/NeedAppearances` means the
+    /// appearance in the file is stale and the consumer SHALL rebuild it, so it
+    /// overrides a present /AP. Without the flag the file's /AP is authoritative
+    /// and must be used as-is.
+    #[test]
+    fn need_appearances_overrides_a_present_ap_and_nothing_else_does() {
+        for need in [false, true] {
+            let mut doc = form_doc(need);
+            let ap = fill_ap(&mut doc);
+            let mut w = text_widget("Ada Lovelace");
+            w.set("AP", Object::Dictionary(ap));
+
+            let mut prims = Vec::new();
+            render_annotation(&doc, &w, &IDENTITY, &mut prims);
+            let fills = prims.iter().filter(|p| matches!(p, Prim::Fill { .. })).count();
+            let texts = painted_text(&prims);
+            if need {
+                assert_eq!(texts, "Ada Lovelace", "the appearance must be regenerated");
+                assert_eq!(fills, 0, "the stale /AP must not also be played");
+            } else {
+                assert_eq!(fills, 1, "the file's own /AP wins when the flag is absent");
+                assert!(texts.is_empty(), "nothing may be synthesized over a valid /AP");
+            }
+        }
+    }
+
+    /// §12.7.4.3 Table 226 bit 14: a Password field's value shall not be echoed
+    /// visually. Regenerating an appearance for one would put a stored password
+    /// on screen — the one case where drawing nothing is required, not merely
+    /// preferred.
+    #[test]
+    fn a_password_field_value_is_never_regenerated_on_screen() {
+        let doc = form_doc(true);
+        let mut w = text_widget("hunter2");
+        w.set("Ff", Object::Integer(1 << 13));
+        let mut prims = Vec::new();
+        render_annotation(&doc, &w, &IDENTITY, &mut prims);
+        assert!(painted_text(&prims).is_empty(), "a password must not be painted");
+    }
+
+    /// /V and /DA are field keys (§12.7.3.1), so a widget that is a separate
+    /// /Kids entry carries neither: both are inherited through /Parent. Reading
+    /// only the widget's own dictionary blanks every multi-widget field.
+    #[test]
+    fn a_kid_widget_inherits_its_value_from_the_parent_field() {
+        let mut doc = form_doc(false);
+        let field = doc.add_object(dictionary! {
+            "FT" => name_obj("Tx"),
+            "T" => Object::string_literal("field"),
+            "V" => Object::string_literal("inherited"),
+            "DA" => Object::string_literal("/Helv 10 Tf 0 g"),
+        });
+        let mut w = annot("Widget");
+        w.set("Rect", rect_obj([10.0, 10.0, 110.0, 30.0]));
+        w.set("Parent", Object::Reference(field));
+        let mut prims = Vec::new();
+        render_annotation(&doc, &w, &IDENTITY, &mut prims);
+        assert_eq!(painted_text(&prims), "inherited");
+    }
+
+    /// A value longer than its field must stop at the field's edge: §8.10.2
+    /// clips a form XObject to its /BBox, and a regenerated appearance is one
+    /// (§12.5.5). Without the clip an over-long value runs out across the page.
+    #[test]
+    fn a_regenerated_field_appearance_is_clipped_to_its_widget() {
+        let doc = form_doc(false);
+        let mut prims = Vec::new();
+        render_annotation(&doc, &text_widget(&"x".repeat(400)), &IDENTITY, &mut prims);
+        let clips: Vec<&Prim> = prims.iter().filter(|p| matches!(p, Prim::ClipPush { .. })).collect();
+        assert_eq!(clips.len(), 1, "exactly one /BBox clip");
+        let Prim::ClipPush { pts, .. } = clips[0] else { unreachable!() };
+        let xs = pts.iter().map(|p| p.0);
+        let ys = pts.iter().map(|p| p.1);
+        let (x0, x1) = (xs.clone().fold(f32::MAX, f32::min), xs.fold(f32::MIN, f32::max));
+        let (y0, y1) = (ys.clone().fold(f32::MAX, f32::min), ys.fold(f32::MIN, f32::max));
+        for (got, want) in [(x0, 10.0), (y0, 10.0), (x1, 110.0), (y1, 30.0)] {
+            assert!((got - want).abs() < 0.01, "clip must be the /Rect, got [{x0} {y0} {x1} {y1}]");
+        }
+        assert_eq!(
+            prims.iter().filter(|p| matches!(p, Prim::ClipPop)).count(),
+            1,
+            "the clip must be popped exactly once"
+        );
+    }
+
+    /// `objects.rs` deliberately yields an empty operation list rather than
+    /// still-encoded bytes when every decoder fails, so an /AP /N with a broken
+    /// filter chain is indistinguishable here from an empty appearance. Every
+    /// other unusable-/AP branch falls back to the synthesized shape; this one
+    /// returned early, so the annotation vanished outright.
+    #[test]
+    fn an_undecodable_appearance_stream_falls_back_to_synthesis() {
+        let mut doc = Document::with_version("1.7");
+        // Flate is implemented, and these bytes are not valid Flate, so the
+        // decoder judges them corrupt and yields nothing.
+        let ap = doc.add_object(Stream::new(
+            dictionary! {
+                "Type" => name_obj("XObject"),
+                "Subtype" => name_obj("Form"),
+                "BBox" => Object::Array(vec![0.into(), 0.into(), 20.into(), 20.into()]),
+                "Filter" => name_obj("FlateDecode"),
+            },
+            vec![0xFF, 0x00, 0xFF, 0x00, 0xFF],
+        ));
+        let mut sq = annot("Square");
+        sq.set("Rect", rect_obj([0.0, 0.0, 20.0, 20.0]));
+        sq.set("C", Object::Array(vec![1.into(), 0.into(), 0.into()]));
+        sq.set("AP", Object::Dictionary(dictionary! { "N" => ap }));
+
+        let mut prims = Vec::new();
+        render_annotation(&doc, &sq, &IDENTITY, &mut prims);
+        assert!(
+            prims.iter().any(|p| matches!(p, Prim::Stroke { .. })),
+            "the Square must fall back to its synthesized outline, got {} prims",
+            prims.len()
+        );
+    }
+
+    /// §12.5.4 Table 166: "if this value is 0, no border shall be drawn". The
+    /// Square arm honours it; FreeText did not, and `line_width`'s 0.5 floor
+    /// turned the declared zero into a hairline the file never asked for. The
+    /// /Contents text still has to survive losing the border.
+    #[test]
+    fn a_freetext_with_a_zero_border_width_draws_no_border() {
+        let mut ft = annot("FreeText");
+        ft.set("C", Object::Array(vec![0.into(), 0.into(), 1.into()]));
+        ft.set("Contents", Object::string_literal("note"));
+        ft.set("BS", dictionary! { "W" => 0 });
+        let prims = synth(&ft, [0.0, 0.0, 100.0, 40.0]);
+        assert!(
+            !prims.iter().any(|p| matches!(p, Prim::Stroke { .. })),
+            "/BS /W 0 must draw no border"
+        );
+        assert_eq!(painted_text(&prims), "note", "the text must remain");
+
+        ft.set("BS", dictionary! { "W" => 2 });
+        assert!(
+            synth(&ft, [0.0, 0.0, 100.0, 40.0]).iter().any(|p| matches!(p, Prim::Stroke { .. })),
+            "a declared non-zero width must still draw"
+        );
+    }
+
+    /// The same §7.9.5 corner-ordering trap as the sticky-note marker, but here
+    /// it silently swallowed the annotation's MESSAGE: on an inverted /Rect
+    /// `rect[3]` is the bottom, so the first line started below the box and the
+    /// `y < rect[1]` guard — against what is really the top — broke the loop on
+    /// iteration one. The /IC box still painted, so it read as an empty box
+    /// rather than as anything wrong.
+    #[test]
+    fn freetext_contents_survive_an_inverted_rect() {
+        let mut ft = annot("FreeText");
+        ft.set("IC", Object::Array(vec![1.into(), 1.into(), 0.into()]));
+        ft.set("Contents", Object::string_literal("first\nsecond"));
+
+        let upright = synth(&ft, [0.0, 0.0, 100.0, 40.0]);
+        assert_eq!(painted_text(&upright), "firstsecond", "precondition: upright draws both lines");
+
+        // The same box, every other corner ordering.
+        for rect in [
+            [100.0, 40.0, 0.0, 0.0],
+            [0.0, 40.0, 100.0, 0.0],
+            [100.0, 0.0, 0.0, 40.0],
+        ] {
+            let prims = synth(&ft, rect);
+            assert_eq!(painted_text(&prims), "firstsecond", "/Rect {rect:?} lost its /Contents");
+            let baselines: Vec<(f32, f32)> = prims
+                .iter()
+                .filter_map(|p| match p {
+                    Prim::Text { x, y, .. } => Some((*x, *y)),
+                    _ => None,
+                })
+                .collect();
+            for (x, y) in &baselines {
+                assert!(
+                    *x >= -0.01 && *x <= 100.01 && *y >= -0.01 && *y <= 40.01,
+                    "/Rect {rect:?} put a line at ({x}, {y}), outside the box"
+                );
+            }
+        }
+    }
+
+    /// The sticky-note marker is kept — losing it loses the only sign in the page
+    /// view that a comment exists — but it must not obscure. `s` came from the
+    /// rect WIDTH alone, so a wide, short /Rect got a marker up to 18pt tall over
+    /// a rect a fraction of that; and the unconditional black ring read as an
+    /// authored box rather than viewer chrome. A degenerate /Rect still gets the
+    /// nominal marker, since §12.5.6.4's icon does not scale with the page.
+    #[test]
+    fn the_sticky_note_marker_stays_inside_its_rect_and_draws_no_black_ring() {
+        let marker_height = |rect: [f64; 4]| -> f32 {
+            let prims = synth(&annot("Text"), rect);
+            assert!(
+                !prims.iter().any(|p| matches!(p, Prim::Stroke { .. })),
+                "no hard-black ring around the marker"
+            );
+            let fills: Vec<&Prim> = prims.iter().filter(|p| matches!(p, Prim::Fill { .. })).collect();
+            assert_eq!(fills.len(), 1, "exactly one marker");
+            let Prim::Fill { contours, .. } = fills[0] else { unreachable!() };
+            let ys: Vec<f32> = contours.iter().flatten().map(|p| p.1).collect();
+            ys.iter().copied().fold(f32::MIN, f32::max) - ys.iter().copied().fold(f32::MAX, f32::min)
+        };
+        // Wide and short: the marker follows the SHORTER axis, not the width.
+        let h = marker_height([0.0, 0.0, 200.0, 14.0]);
+        assert!((h - 14.0).abs() < 0.01, "expected a 14pt marker in a 14pt-tall rect, got {h}");
+        // Ordinary square note: capped at the 18pt nominal size.
+        let h = marker_height([0.0, 0.0, 40.0, 40.0]);
+        assert!((h - 18.0).abs() < 0.01, "expected the 18pt nominal marker, got {h}");
+        // Zero-size /Rect: still drawn, at the 12pt floor, so the note is visible.
+        let h = marker_height([10.0, 10.0, 10.0, 10.0]);
+        assert!((h - 12.0).abs() < 0.01, "a degenerate /Rect must still show a marker, got {h}");
+    }
+
+    /// §7.3.10 lets ANY object be indirect. `/AS` read as a plain name yields
+    /// None for an indirect one, which drops into the no-`/AS` branch — so a
+    /// checkbox whose state is set indirectly renders as its `/Off` appearance,
+    /// i.e. unchecked. The file already dereferences `/F`, `/Subtype`, `/C` and
+    /// `/CA`; `/AS` was the outlier.
+    #[test]
+    fn an_indirect_appearance_state_selects_the_right_appearance() {
+        for indirect in [false, true] {
+            let mut doc = Document::with_version("1.7");
+            let mk = |doc: &mut Document, colour: &str| {
+                doc.add_object(Stream::new(
+                    dictionary! {
+                        "Type" => name_obj("XObject"),
+                        "Subtype" => name_obj("Form"),
+                        "BBox" => Object::Array(vec![0.into(), 0.into(), 10.into(), 10.into()]),
+                    },
+                    format!("{colour} 0 0 10 10 re f").into_bytes(),
+                ))
+            };
+            let off = mk(&mut doc, "1 0 0 rg");
+            let on = mk(&mut doc, "0 1 0 rg");
+            let mut w = annot("Widget");
+            w.set("Rect", rect_obj([0.0, 0.0, 10.0, 10.0]));
+            w.set("AP", dictionary! { "N" => dictionary! { "Off" => off, "On" => on } });
+            let as_obj = name_obj("On");
+            w.set(
+                "AS",
+                if indirect { Object::Reference(doc.add_object(as_obj)) } else { as_obj },
+            );
+
+            let mut prims = Vec::new();
+            render_annotation(&doc, &w, &IDENTITY, &mut prims);
+            let fills: Vec<u32> = prims
+                .iter()
+                .filter_map(|p| match p {
+                    Prim::Fill { argb, .. } => Some(*argb),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(fills.len(), 1, "one appearance state must paint");
+            assert_eq!(
+                fills[0], 0xFF00_FF00,
+                "indirect={indirect}: /AS must select the \"On\" state, not fall back to \"Off\""
+            );
+        }
+    }
+
+    /// An indirect `/Subtype` read as a plain name gives None, and
+    /// `synthesize_annotation_appearance` returns immediately — so the whole
+    /// annotation draws NOTHING, which is the total loss its arms exist to
+    /// prevent. `annot_visible_on_screen_with` already dereferenced this key.
+    #[test]
+    fn an_indirect_subtype_still_selects_a_synthesis_arm() {
+        let mut doc = Document::with_version("1.7");
+        let subtype = doc.add_object(name_obj("Square"));
+        let mut sq = Dictionary::new();
+        sq.set("Type", name_obj("Annot"));
+        sq.set("Subtype", Object::Reference(subtype));
+        sq.set("C", Object::Array(vec![1.into(), 0.into(), 0.into()]));
+
+        let mut prims = Vec::new();
+        synthesize_annotation_appearance(&doc, &sq, [0.0, 0.0, 20.0, 20.0], &IDENTITY, &mut prims);
+        assert!(
+            prims.iter().any(|p| matches!(p, Prim::Stroke { .. })),
+            "an indirect /Subtype must still reach the Square arm"
+        );
+    }
+
+    /// The `/NeedAppearances` gate reads `/Subtype` too, so an indirect one there
+    /// silently skips regeneration and leaves the stale `/AP` — reintroducing the
+    /// blank-field symptom for exactly the files that set the flag.
+    #[test]
+    fn need_appearances_regenerates_even_with_an_indirect_subtype() {
+        let mut doc = form_doc(true);
+        let subtype = doc.add_object(name_obj("Widget"));
+        let ap = fill_ap(&mut doc);
+        let mut w = text_widget("Ada Lovelace");
+        w.set("Subtype", Object::Reference(subtype));
+        w.set("AP", Object::Dictionary(ap));
+
+        let mut prims = Vec::new();
+        render_annotation(&doc, &w, &IDENTITY, &mut prims);
+        assert_eq!(painted_text(&prims), "Ada Lovelace", "indirect /Subtype must still regenerate");
+    }
+
+    /// §12.5.6.8 Table 177: `/RD` is "the numerical differences between ... the
+    /// Rect entry of the annotation and the actual boundaries of the underlying
+    /// square or circle". It was read nowhere in the crate, so the shape was
+    /// drawn out to the full `/Rect`. Absent `/RD` the shape is inset by half the
+    /// border width instead, because §8.4.3.2 centres a stroke on its path and a
+    /// path laid on `/Rect` puts half the border outside the annotation.
+    #[test]
+    fn square_and_circle_honour_rd_and_the_border_inset() {
+        let bounds = |prims: &[Prim]| -> [f32; 4] {
+            let pts: Vec<(f32, f32)> = prims
+                .iter()
+                .filter_map(|p| match p {
+                    Prim::Fill { contours, .. } => Some(contours.iter().flatten().copied()),
+                    _ => None,
+                })
+                .flatten()
+                .collect();
+            assert!(!pts.is_empty(), "expected a filled shape");
+            [
+                pts.iter().map(|p| p.0).fold(f32::MAX, f32::min),
+                pts.iter().map(|p| p.1).fold(f32::MAX, f32::min),
+                pts.iter().map(|p| p.0).fold(f32::MIN, f32::max),
+                pts.iter().map(|p| p.1).fold(f32::MIN, f32::max),
+            ]
+        };
+        let rect = [0.0, 0.0, 100.0, 50.0];
+
+        for kind in ["Square", "Circle"] {
+            let mut a = annot(kind);
+            a.set("IC", Object::Array(vec![0.into(), 0.into(), 1.into()]));
+            // /RD [left top right bottom] — top comes off the TOP edge.
+            a.set("RD", Object::Array(vec![10.into(), 4.into(), 20.into(), 6.into()]));
+            let got = bounds(&synth(&a, rect));
+            for (g, want) in got.iter().zip([10.0, 6.0, 80.0, 46.0]) {
+                assert!(
+                    (g - want).abs() < 0.5,
+                    "{kind} with /RD: got {got:?}, expected [10, 6, 80, 46]"
+                );
+            }
+
+            // No /RD: inset by half the border width.
+            a.remove(b"RD");
+            a.set("BS", dictionary! { "W" => 8 });
+            let got = bounds(&synth(&a, rect));
+            for (g, want) in got.iter().zip([4.0, 4.0, 96.0, 46.0]) {
+                assert!(
+                    (g - want).abs() < 0.5,
+                    "{kind} with /BS /W 8: got {got:?}, expected [4, 4, 96, 46]"
+                );
+            }
+        }
+    }
+
+    /// A malformed `/RD` must not grow the shape past `/Rect` or collapse it —
+    /// the plain rect is the better-defined answer than a clamped guess.
+    #[test]
+    fn a_malformed_rd_falls_back_to_the_plain_rect() {
+        for rd in [
+            vec![(-5).into(), 0.into(), 0.into(), 0.into()],   // negative: would grow
+            vec![60.into(), 0.into(), 60.into(), 0.into()],    // wider than the rect
+            vec![1.into(), 2.into()],                          // too short
+        ] {
+            let mut a = annot("Square");
+            a.set("IC", Object::Array(vec![0.into(), 0.into(), 1.into()]));
+            a.set("BS", dictionary! { "W" => 0 });
+            a.set("RD", Object::Array(rd.clone()));
+            let prims = synth(&a, [0.0, 0.0, 100.0, 50.0]);
+            let xs: Vec<f32> = prims
+                .iter()
+                .filter_map(|p| match p {
+                    Prim::Fill { contours, .. } => Some(contours.iter().flatten().map(|q| q.0)),
+                    _ => None,
+                })
+                .flatten()
+                .collect();
+            let (x0, x1) = (
+                xs.iter().copied().fold(f32::MAX, f32::min),
+                xs.iter().copied().fold(f32::MIN, f32::max),
+            );
+            assert!(
+                (x0 - 0.0).abs() < 0.01 && (x1 - 100.0).abs() < 0.01,
+                "/RD {rd:?} must fall back to the plain /Rect, got [{x0}, {x1}]"
+            );
+        }
+    }
+
+    /// §12.5.5 defines no fallback for an `/AS` naming a state the `/N`
+    /// dictionary lacks. `/Off` was used for every such case, so a widget whose
+    /// `/AS` says it is ON but whose only state is stored under a different
+    /// export name (`/Yes` vs `/On` vs `/1`) rendered unchecked — or, with no
+    /// `/Off` entry at all, drew NOTHING. An `/AS` of `/Off` still draws nothing,
+    /// because a missing `/Off` entry IS the blank off appearance.
+    #[test]
+    fn an_as_naming_a_missing_state_resolves_by_whether_it_says_off() {
+        let paint = |states: Vec<(&str, &str)>, as_name: &str| -> Vec<u32> {
+            let mut doc = Document::with_version("1.7");
+            let mut n = Dictionary::new();
+            for (name, colour) in states {
+                let s = doc.add_object(Stream::new(
+                    dictionary! {
+                        "Type" => name_obj("XObject"),
+                        "Subtype" => name_obj("Form"),
+                        "BBox" => Object::Array(vec![0.into(), 0.into(), 10.into(), 10.into()]),
+                    },
+                    format!("{colour} 0 0 10 10 re f").into_bytes(),
+                ));
+                n.set(name, Object::Reference(s));
+            }
+            let mut w = annot("Widget");
+            w.set("Rect", rect_obj([0.0, 0.0, 10.0, 10.0]));
+            w.set("AP", dictionary! { "N" => n });
+            w.set("AS", name_obj(as_name));
+            let mut prims = Vec::new();
+            render_annotation(&doc, &w, &IDENTITY, &mut prims);
+            prims
+                .iter()
+                .filter_map(|p| match p {
+                    Prim::Fill { argb, .. } => Some(*argb),
+                    _ => None,
+                })
+                .collect()
+        };
+        const RED: u32 = 0xFFFF_0000;
+        const GREEN: u32 = 0xFF00_FF00;
+
+        // The on-art under a different export name: use it rather than /Off.
+        assert_eq!(paint(vec![("Off", "1 0 0 rg"), ("On", "0 1 0 rg")], "Yes"), vec![GREEN]);
+        // No /Off entry at all: previously drew nothing.
+        assert_eq!(paint(vec![("On", "0 1 0 rg")], "Yes"), vec![GREEN]);
+        // Ambiguous — two non-Off states, so fall back to /Off.
+        assert_eq!(
+            paint(vec![("Off", "1 0 0 rg"), ("On", "0 1 0 rg"), ("Two", "0 1 0 rg")], "Yes"),
+            vec![RED]
+        );
+        // /AS says Off and /Off is absent: blank IS the off appearance.
+        assert!(paint(vec![("On", "0 1 0 rg")], "Off").is_empty());
+        // An exact match always wins.
+        assert_eq!(paint(vec![("Off", "1 0 0 rg"), ("On", "0 1 0 rg")], "Off"), vec![RED]);
+    }
+
+    /// §8.4.3.2 centres a pen on its path, so the C6 stroke inset is not
+    /// specific to Square and Circle — FreeText and Redact ring their `/Rect`
+    /// too, and left half the border outside the annotation.
+    ///
+    /// FreeText must NOT reuse `shape_rect`: §12.5.6.6 Table 174 gives it a
+    /// `/RD` that insets the TEXT AREA, not the shape, so passing it through the
+    /// Table 177 path would apply a text inset as a border inset.
+    #[test]
+    fn freetext_and_redact_keep_their_border_inside_the_rect() {
+        let extent = |prims: &[Prim]| -> [f32; 4] {
+            let pts: Vec<(f32, f32)> = prims
+                .iter()
+                .filter_map(|p| match p {
+                    Prim::Stroke { pts, .. } => Some(pts.iter().copied()),
+                    _ => None,
+                })
+                .flatten()
+                .collect();
+            assert!(!pts.is_empty(), "expected a stroked ring");
+            [
+                pts.iter().map(|p| p.0).fold(f32::MAX, f32::min),
+                pts.iter().map(|p| p.1).fold(f32::MAX, f32::min),
+                pts.iter().map(|p| p.0).fold(f32::MIN, f32::max),
+                pts.iter().map(|p| p.1).fold(f32::MIN, f32::max),
+            ]
+        };
+        for kind in ["FreeText", "Redact"] {
+            let mut a = annot(kind);
+            a.set("C", Object::Array(vec![1.into(), 0.into(), 0.into()]));
+            a.set("BS", dictionary! { "W" => 6 });
+            let got = extent(&synth(&a, [0.0, 0.0, 100.0, 40.0]));
+            for (g, want) in got.iter().zip([3.0, 3.0, 97.0, 37.0]) {
+                assert!(
+                    (g - want).abs() < 0.01,
+                    "{kind}: ring at {got:?}, expected inset by half of /BS /W 6"
+                );
+            }
+        }
+    }
+
+    /// §12.5.6.6 Table 174: a FreeText `/RD` says where the TEXT goes, and it
+    /// was read nowhere — so an author asking for a wide text inset had the text
+    /// run under the border instead. The box itself must NOT move with it, which
+    /// is what distinguishes this from Table 177's shape `/RD`.
+    #[test]
+    fn a_freetext_rd_moves_the_text_but_not_the_box() {
+        let mut a = annot("FreeText");
+        a.set("C", Object::Array(vec![1.into(), 0.into(), 0.into()]));
+        a.set("BS", dictionary! { "W" => 0 });
+        a.set("Contents", Object::string_literal("hi"));
+
+        let baseline_of = |prims: &[Prim]| -> (f32, f32) {
+            prims
+                .iter()
+                .find_map(|p| match p {
+                    Prim::Text { x, y, .. } => Some((*x, *y)),
+                    _ => None,
+                })
+                .expect("a text line")
+        };
+        let ring_of = |prims: &[Prim]| -> f32 {
+            prims
+                .iter()
+                .filter_map(|p| match p {
+                    Prim::Stroke { pts, .. } => {
+                        Some(pts.iter().map(|q| q.0).fold(f32::MAX, f32::min))
+                    }
+                    _ => None,
+                })
+                .fold(f32::MAX, f32::min)
+        };
+        let plain = synth(&a, [0.0, 0.0, 100.0, 40.0]);
+        // /RD [left top right bottom]
+        a.set("RD", Object::Array(vec![12.into(), 5.into(), 0.into(), 0.into()]));
+        let inset = synth(&a, [0.0, 0.0, 100.0, 40.0]);
+
+        let (px, py) = baseline_of(&plain);
+        let (ix, iy) = baseline_of(&inset);
+        assert!((ix - px - 12.0).abs() < 0.01, "text x must move right by /RD left: {px} -> {ix}");
+        assert!((iy - py + 5.0).abs() < 0.01, "text y must drop by /RD top: {py} -> {iy}");
+        assert!(
+            (ring_of(&plain) - ring_of(&inset)).abs() < 0.01,
+            "the box must NOT move — Table 174 /RD insets only the text"
+        );
+    }
+
+    /// §7.9.5 lets a /Rect be given by ANY two diagonally opposite corners and
+    /// `read_rect` does not reorder them. The marker was sized with `.abs()` but
+    /// anchored on the raw `rect[3]`, which for an inverted rect is the BOTTOM
+    /// edge — so the opaque square landed entirely outside the annotation, over
+    /// unrelated page content.
+    #[test]
+    fn the_sticky_note_marker_anchors_on_a_normalized_rect() {
+        let bounds = |rect: [f64; 4]| -> [f32; 4] {
+            let prims = synth(&annot("Text"), rect);
+            let fills: Vec<&Prim> = prims.iter().filter(|p| matches!(p, Prim::Fill { .. })).collect();
+            assert_eq!(fills.len(), 1, "exactly one marker");
+            let Prim::Fill { contours, .. } = fills[0] else { unreachable!() };
+            let pts: Vec<(f32, f32)> = contours.iter().flatten().copied().collect();
+            [
+                pts.iter().map(|p| p.0).fold(f32::MAX, f32::min),
+                pts.iter().map(|p| p.1).fold(f32::MAX, f32::min),
+                pts.iter().map(|p| p.0).fold(f32::MIN, f32::max),
+                pts.iter().map(|p| p.1).fold(f32::MIN, f32::max),
+            ]
+        };
+        // The same box described by each of the four corner orderings must place
+        // the marker identically, at the box's top-left.
+        let want = bounds([10.0, 20.0, 50.0, 60.0]);
+        for rect in [
+            [50.0, 60.0, 10.0, 20.0], // both axes inverted
+            [10.0, 60.0, 50.0, 20.0], // y inverted
+            [50.0, 20.0, 10.0, 60.0], // x inverted
+        ] {
+            let got = bounds(rect);
+            for i in 0..4 {
+                assert!(
+                    (got[i] - want[i]).abs() < 0.01,
+                    "/Rect {rect:?} placed the marker at {got:?}, expected {want:?}"
+                );
+            }
+        }
+        // And it really is inside the box, not merely consistent.
+        assert!(
+            want[0] >= 9.99 && want[1] >= 19.99 && want[2] <= 50.01 && want[3] <= 60.01,
+            "marker {want:?} escaped the /Rect"
+        );
     }
 }

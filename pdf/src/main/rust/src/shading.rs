@@ -736,9 +736,12 @@ fn fill_tri(
             if a < -1e-6 || b < -1e-6 || c < -1e-6 {
                 continue;
             }
-            let r = (((c0 >> 16) & 0xFF) as f64 * a + ((c1 >> 16) & 0xFF) as f64 * b + ((c2 >> 16) & 0xFF) as f64 * c) as u8;
-            let g = (((c0 >> 8) & 0xFF) as f64 * a + ((c1 >> 8) & 0xFF) as f64 * b + ((c2 >> 8) & 0xFF) as f64 * c) as u8;
-            let bl = ((c0 & 0xFF) as f64 * a + (c1 & 0xFF) as f64 * b + (c2 & 0xFF) as f64 * c) as u8;
+            // `.round()`, not truncation: `c` is formed as `1 - a - b`, so a+b+c can be
+            // 0.9999999999999999 and a flat white triangle summed to 254.99999999999997,
+            // which `as u8` truncated to 254. The clamp covers the -1e-6 slack above.
+            let r = ((((c0 >> 16) & 0xFF) as f64 * a + ((c1 >> 16) & 0xFF) as f64 * b + ((c2 >> 16) & 0xFF) as f64 * c).round()).clamp(0.0, 255.0) as u8;
+            let g = ((((c0 >> 8) & 0xFF) as f64 * a + ((c1 >> 8) & 0xFF) as f64 * b + ((c2 >> 8) & 0xFF) as f64 * c).round()).clamp(0.0, 255.0) as u8;
+            let bl = (((c0 & 0xFF) as f64 * a + (c1 & 0xFF) as f64 * b + (c2 & 0xFF) as f64 * c).round()).clamp(0.0, 255.0) as u8;
             let idx = (py as usize * w + px as usize) * 4;
             rgba[idx] = r;
             rgba[idx + 1] = g;
@@ -1088,6 +1091,48 @@ mod tests {
         assert!(
             rgba.chunks(4).all(|px| px[3] == 0),
             "a triangle with non-finite vertices must leave every pixel transparent"
+        );
+    }
+
+    // A flat white triangle must paint 255, not 254. `c` is computed as `1 - a - b`,
+    // so a+b+c is 0.9999999999999999 for many interior pixels, the weighted sum is
+    // 254.99999999999997, and truncating `as u8` darkened every flat mesh by 1/255 —
+    // and every gradient by up to the same, systematically towards zero.
+    #[test]
+    fn flat_white_triangle_is_255_not_254() {
+        let (w, h) = (32usize, 32usize);
+        let mut rgba = vec![0u8; w * h * 4];
+        let v = |x: f64, y: f64| Vertex { x, y, color: vec![1.0, 1.0, 1.0] };
+        let (v0, v1, v2) = (v(0.05, 0.05), v(0.95, 0.05), v(0.5, 0.95));
+        let white = 0xFFFF_FFFF;
+        fill_tri(&mut rgba, w, h, &[0.0, 0.0, 1.0, 1.0], (&v0, &v1, &v2), (white, white, white));
+        let painted: Vec<&[u8]> = rgba.chunks(4).filter(|px| px[3] == 255).collect();
+        assert!(painted.len() > 100, "expected a filled triangle, got {} pixels", painted.len());
+        assert!(
+            painted.iter().all(|px| px[0] == 255 && px[1] == 255 && px[2] == 255),
+            "a triangle white at all three corners must be white everywhere inside; \
+             darkest pixel was {:?}",
+            painted.iter().min_by_key(|px| px[0]).unwrap()
+        );
+    }
+
+    // The same rounding, on a colour that is not a channel extreme, so the clamp
+    // cannot be what rescues it: a flat (100,150,200) triangle truncated to
+    // (99,149,199) on every interior pixel whose barycentric sum fell short of 1.
+    #[test]
+    fn flat_midtone_triangle_keeps_its_exact_colour() {
+        let (w, h) = (32usize, 32usize);
+        let mut rgba = vec![0u8; w * h * 4];
+        let v = |x: f64, y: f64| Vertex { x, y, color: vec![0.4, 0.6, 0.8] };
+        let (v0, v1, v2) = (v(0.05, 0.05), v(0.95, 0.05), v(0.5, 0.95));
+        let c = 0xFF64_96C8; // 100, 150, 200
+        fill_tri(&mut rgba, w, h, &[0.0, 0.0, 1.0, 1.0], (&v0, &v1, &v2), (c, c, c));
+        let painted: Vec<&[u8]> = rgba.chunks(4).filter(|px| px[3] == 255).collect();
+        assert!(!painted.is_empty(), "expected a filled triangle");
+        assert!(
+            painted.iter().all(|px| px[0] == 100 && px[1] == 150 && px[2] == 200),
+            "flat triangle must keep its colour; saw {:?}",
+            painted.iter().find(|px| px[0] != 100 || px[1] != 150 || px[2] != 200)
         );
     }
 

@@ -68,10 +68,11 @@ class DrawSafePageTextTest {
         content: String = "Hamburgefonstiv",
         outline: Boolean = false,
         y: Float = 40f,
+        color: Int = 0xFF000000.toInt(),
     ) = PdfPrimitive.Text(
         origin = Offset(4f, y),
         size = 24f,
-        color = 0xFF000000.toInt(),
+        color = color,
         text = content,
         strokeColor = strokeColor,
         strokeWidth = strokeWidth,
@@ -166,13 +167,7 @@ class DrawSafePageTextTest {
                 PdfPrimitive.ClipPop,
             )
         )
-        val unclipped = inkedPixels(
-            rasterize(
-                PdfPrimitive.TextClipApply,
-                pageFill(),
-                PdfPrimitive.ClipPop,
-            )
-        )
+        val unclipped = inkedPixels(rasterize(pageFill()))
         assertEquals(
             (pageWidth * pageHeight).toInt(),
             unclipped,
@@ -183,6 +178,147 @@ class DrawSafePageTextTest {
             clipped < unclipped / 2,
             "the fill was not clipped to the glyphs: $clipped of $unclipped pixels survived",
         )
+    }
+
+    /**
+     * The empty case, in pixels. §9.4.3 combines the accumulated outlines with the current clip
+     * by INTERSECTION, so a `TextClipApply` that accumulated NO outlines clips to empty and the
+     * fill after it must paint nothing at all. Treating "no outlines" as "no clip" is the one
+     * direction that adds ink: the fill would cover the entire page instead, which is exactly
+     * how the "image visible through text" idiom turns into an opaque rectangle over the page.
+     */
+    @Test
+    fun aTextClipWithNoAccumulatedGlyphsClipsEverythingAway() {
+        val inked = inkedPixels(
+            rasterize(
+                PdfPrimitive.TextClipApply,
+                pageFill(),
+                PdfPrimitive.ClipPop,
+            )
+        )
+        assertEquals(
+            0,
+            inked,
+            "an empty text clip let the fill through: $inked pixels painted where the " +
+                "intersection with an empty accumulation must keep nothing",
+        )
+    }
+
+    /** The clip is released by its `ClipPop`, so content after it paints normally again. */
+    @Test
+    fun anEmptyTextClipIsReleasedByItsClipPop() {
+        val inked = inkedPixels(
+            rasterize(
+                PdfPrimitive.TextClipApply,
+                PdfPrimitive.ClipPop,
+                pageFill(),
+            )
+        )
+        assertEquals(
+            (pageWidth * pageHeight).toInt(),
+            inked,
+            "the empty text clip outlived its ClipPop and suppressed later content",
+        )
+    }
+
+    /**
+     * A CROSS-LANGUAGE CONTRACT. Rust emits the clip-mode Text record for a Type 3 font with
+     * `argb: 0` (draw.rs), because the CharProc already supplies the real ink and a painted
+     * substitute glyph would double-draw over it. The record exists ONLY to carry an outline to
+     * this accumulator, so accumulation must not be gated on colour or alpha. If it ever were,
+     * every Type 3 run in modes 4-6 would accumulate nothing, and — now that an empty text clip
+     * correctly clips to NOTHING — that content would vanish rather than merely lose its clip.
+     */
+    @Test
+    fun aFullyTransparentClipRecordStillNarrowsTheTextClip() {
+        val clipped = inkedPixels(
+            rasterize(
+                text(renderMode = 4, color = 0),
+                PdfPrimitive.TextClipApply,
+                pageFill(),
+                PdfPrimitive.ClipPop,
+            )
+        )
+        assertTrue(
+            clipped > 0,
+            "a transparent (argb 0) clip record contributed no outline, so the clip kept " +
+                "nothing — Type 3 content in modes 4-6 would disappear",
+        )
+        assertTrue(
+            clipped < (pageWidth * pageHeight).toInt() / 2,
+            "the fill was not clipped to the glyphs: $clipped pixels survived",
+        )
+    }
+
+    /**
+     * The other half of that contract: `outline = true` means Rust already painted the glyph
+     * from its embedded outline as Fill prims and this record is selection/search only, so it
+     * is skipped before the accumulator. Rust only sets it for modes 0-2, never for a clip
+     * mode; pin the Kotlin side so the two cannot drift into silently dropping a clip.
+     */
+    @Test
+    fun anOutlineRecordContributesNothingToTheTextClip() {
+        val inked = inkedPixels(
+            rasterize(
+                text(renderMode = 4, outline = true),
+                PdfPrimitive.TextClipApply,
+                pageFill(),
+                PdfPrimitive.ClipPop,
+            )
+        )
+        assertEquals(0, inked, "an outline=true record must not reach the clip accumulator")
+    }
+
+    /**
+     * Whitespace-only clip runs, settled by measurement rather than by reading.
+     *
+     * A space has no contours in any standard face, so `getTextPath(" ")` yields an EMPTY path.
+     * That means the `isBlank()` skip in the Text arm is inert FOR CLIPPING — accumulating a
+     * whitespace record would add nothing anyway, so the clip comes out empty either way, and
+     * an empty clip is what §9.4.3 requires for a run that shows no glyph outlines. The skip is
+     * load-bearing for the PAINT path, not this one. Recorded so nobody "fixes" the blank case
+     * by falling through to NO clip, which would let the fill paint over the whole page again.
+     */
+    @Test
+    fun aWhitespaceOnlyClipRunHasNoOutlinesAndSoClipsEverythingAway() {
+        val paint = android.graphics.Paint().apply { isAntiAlias = true; textSize = 24f }
+        val spacePath = android.graphics.Path()
+        paint.getTextPath("   ", 0, 3, 4f, 40f, spacePath)
+        assertTrue(
+            spacePath.isEmpty,
+            "a space produced glyph contours, so the reasoning below does not hold",
+        )
+
+        val inked = inkedPixels(
+            rasterize(
+                text(renderMode = 7, content = "   "),
+                PdfPrimitive.TextClipApply,
+                pageFill(),
+                PdfPrimitive.ClipPop,
+            )
+        )
+        assertEquals(0, inked, "a whitespace-only text clip must keep nothing")
+    }
+
+    /**
+     * The precondition for emitting real-outline ink in modes 4-6 alongside a clip record:
+     * a fully transparent record must PAINT nothing while still being accumulable. Kotlin has
+     * no "non-painting" flag for modes 4-6 — `outline = true` would suppress the paint but is
+     * read before the accumulator and would drop the clip too — so transparency is the only
+     * lever that separates the two roles. Pinned because a change to the paint path (a colour
+     * floor, an alpha coercion, a blend default) would silently start double-painting a
+     * substitute face over the real glyph contours.
+     */
+    @Test
+    fun aFullyTransparentClipRecordPaintsNoInkOfItsOwn() {
+        for (rm in 4..6) {
+            assertEquals(
+                0,
+                inkedPixels(rasterize(text(renderMode = rm, color = 0))),
+                "a transparent mode-$rm clip record painted ink, so it would double-draw a " +
+                    "substitute face over glyphs already inked from their real outline",
+            )
+        }
     }
 
     /**

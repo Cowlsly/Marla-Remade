@@ -509,19 +509,31 @@ pub(crate) fn flatten_document(handle: i64) -> bool {
     let oc = crate::images::OcConfig::from_doc(doc);
     for page_id in page_ids {
         // Collect (xobject name, appearance id, placement matrix) for each annot.
-        let annot_ids: Vec<ObjectId> = match doc
+        // The ORIGINAL array is kept, not just the ids: every entry that does not get
+        // baked has to be written back below, and a direct-dictionary entry has no id
+        // to write back with.
+        let annots_arr: Vec<Object> = match doc
             .get_dictionary(page_id)
             .ok()
             .and_then(|d| d.get(b"Annots").ok())
             .and_then(|o| deref(doc, o))
         {
-            Some(Object::Array(a)) => a.iter().filter_map(|o| o.as_reference().ok()).collect(),
+            Some(Object::Array(a)) => a.clone(),
             _ => continue,
         };
+        // §12.5.2 does not require an /Annots entry to be indirect, so a direct
+        // dictionary is legal here. It cannot be BAKED — the bake path needs an
+        // ObjectId to reference the annotation's appearance from the page's
+        // /XObject — but the retain below keeps it in /Annots, so it survives the
+        // flatten and goes on rendering instead of being erased.
+        let annot_ids: Vec<ObjectId> = annots_arr.iter().filter_map(|o| o.as_reference().ok()).collect();
         if annot_ids.is_empty() {
             continue;
         }
         let mut placements: Vec<(String, ObjectId, Mat, f64)> = Vec::new();
+        // Exactly the annotations whose art reached the content stream. Everything
+        // else must stay in /Annots — see the retain at the end of this loop.
+        let mut baked_ids: Vec<ObjectId> = Vec::new();
         for (i, aid) in annot_ids.iter().enumerate() {
             let dict = match doc.get_dictionary(*aid) {
                 Ok(d) => d,
@@ -552,7 +564,11 @@ pub(crate) fn flatten_document(handle: i64) -> bool {
             };
             let picked = match deref(doc, ap_n) {
                 Some(Object::Dictionary(states)) => {
-                    match dict.get(b"AS").ok().and_then(|o| o.as_name().ok()) {
+                    // §7.3.10: /AS may be an indirect reference like any other value.
+                    // Without the deref it read as None, so a checkbox fell through to
+                    // the /Off branch and the UNCHECKED art was baked permanently over a
+                    // checked box — a wrong answer written to the file, not a missing one.
+                    match dict.get(b"AS").ok().and_then(|o| deref(doc, o)).and_then(|o| o.as_name().ok()) {
                         Some(a) => states.get(a).ok().or_else(|| states.get(b"Off").ok()),
                         None => states.get(b"Off").ok().or_else(|| {
                             if states.len() == 1 {
@@ -601,6 +617,7 @@ pub(crate) fn flatten_document(handle: i64) -> bool {
                 .unwrap_or(1.0)
                 .clamp(0.0, 1.0);
             placements.push((format!("Fl{}_{}", page_id.0, i), ap_id, m, ca));
+            baked_ids.push(*aid);
         }
         if placements.is_empty() {
             continue;
@@ -641,8 +658,35 @@ pub(crate) fn flatten_document(handle: i64) -> bool {
         for (name, gid) in &gstates {
             add_page_resource(doc, page_id, "ExtGState", name, *gid);
         }
+        // Retain everything that was NOT baked instead of removing /Annots wholesale.
+        //
+        // Every failure path in the loop above is a `continue`, and this used to be an
+        // unconditional `p.remove(b"Annots")`, so "skipped by the bake loop" and "erased
+        // from the saved file" were the same outcome. An annotation with no /AP renders
+        // through `synthesize_annotation_appearance`, so it is on screen right up until
+        // a flatten deletes it — and unlike a dropped image this is written to the
+        // user's document and cannot be recovered by reopening it.
+        //
+        // The comment at the /AP /N lookup above records this mechanism biting once
+        // already: a cause was found and fixed while the mechanism was left in place,
+        // which is how the remaining ways in went on erasing content. Fixing the
+        // mechanism covers all of them, including the deliberate skips — a NoView, /OC
+        // -disabled or /Popup annotation must not be baked (it would become permanently
+        // visible), and it must not be destroyed either.
         if let Ok(p) = doc.get_dictionary_mut(page_id) {
-            p.remove(b"Annots");
+            let survivors: Vec<Object> = annots_arr
+                .into_iter()
+                .filter(|o| match o.as_reference() {
+                    Ok(id) => !baked_ids.contains(&id),
+                    // A direct dictionary was never a bake candidate, so it always survives.
+                    Err(_) => true,
+                })
+                .collect();
+            if survivors.is_empty() {
+                p.remove(b"Annots");
+            } else {
+                p.set("Annots", Object::Array(survivors));
+            }
         }
     }
     true
@@ -1171,6 +1215,215 @@ mod redaction_tests {
 
     /// One-page document carrying a single annotation whose `/AP /N` has the
     /// given `/BBox` and `/Matrix`.
+    /// Flatten must not DESTROY an annotation it could not bake.
+    ///
+    /// Every failure path in the bake loop is a `continue`, and `/Annots` used to be
+    /// removed unconditionally afterwards, so "we could not bake this" and "this is
+    /// erased from the user's saved file" were the same outcome. The severe case is an
+    /// annotation with no `/AP`: it renders through `synthesize_annotation_appearance`,
+    /// so it is visible on screen right up to the moment a flatten deletes it — and
+    /// unlike a dropped image this is written to disk, so reopening cannot recover it.
+    ///
+    /// Note the precondition, which narrows the blast radius: the page needs at least
+    /// one BAKEABLE annotation, because `placements.is_empty()` already skips the page
+    /// entirely. So the loss needs a MIXED page — a stamp beside a synthesised square,
+    /// which is the ordinary shape.
+    #[test]
+    fn flatten_keeps_an_annotation_it_could_not_bake() {
+        let (dw, dh) = (40.0_f64, 20.0_f64);
+        let (handle, page_id) =
+            flattenable_doc([10.0, 20.0, 10.0 + dw, 20.0 + dh], [0.0, 0.0, dw, dh], IDENTITY);
+        // A second annotation with NO /AP — exactly what the renderer synthesises an
+        // appearance for, and exactly what the bake loop skips.
+        let no_ap_id = {
+            let mut reg = registry().lock().unwrap_or_else(|e| e.into_inner());
+            let doc = reg.get_mut(&handle).expect("handle is registered");
+            let id = doc.add_object(dictionary! {
+                "Type" => name_obj("Annot"),
+                "Subtype" => name_obj("Square"),
+                "Rect" => rect_obj([100.0, 100.0, 200.0, 150.0]),
+            });
+            let mut annots = doc
+                .get_dictionary(page_id)
+                .ok()
+                .and_then(|d| d.get(b"Annots").ok())
+                .and_then(|o| o.as_array().ok())
+                .expect("fixture has /Annots")
+                .clone();
+            annots.push(Object::Reference(id));
+            doc.get_dictionary_mut(page_id).expect("page").set("Annots", Object::Array(annots));
+            id
+        };
+
+        assert!(flatten_document(handle), "flatten failed");
+
+        let text = String::from_utf8_lossy(&page_bytes(handle, page_id)).into_owned();
+        assert!(text.contains("Do"), "the bakeable annotation must still flatten: {text}");
+
+        let reg = registry().lock().unwrap_or_else(|e| e.into_inner());
+        let doc = reg.get(&handle).expect("handle is registered");
+        let annots: Vec<ObjectId> = doc
+            .get_dictionary(page_id)
+            .ok()
+            .and_then(|d| d.get(b"Annots").ok())
+            .and_then(|o| deref(doc, o))
+            .and_then(|o| o.as_array().ok())
+            .map(|a| a.iter().filter_map(|o| o.as_reference().ok()).collect())
+            .unwrap_or_default();
+        assert_eq!(
+            annots,
+            vec![no_ap_id],
+            "the un-bakeable annotation must survive in /Annots, and the baked one must not"
+        );
+        assert!(doc.get_dictionary(no_ap_id).is_ok(), "its object must still be in the document");
+        drop(reg);
+        close_document(handle);
+    }
+
+    /// A direct-dictionary `/Annots` entry is legal — §12.5.2 does not require the
+    /// indirection — and cannot be baked, because the bake path needs an ObjectId to
+    /// reference the appearance from the page's /XObject. So it must be left alone
+    /// rather than erased.
+    #[test]
+    fn flatten_keeps_a_direct_dictionary_annotation() {
+        let (dw, dh) = (40.0_f64, 20.0_f64);
+        let (handle, page_id) =
+            flattenable_doc([10.0, 20.0, 10.0 + dw, 20.0 + dh], [0.0, 0.0, dw, dh], IDENTITY);
+        {
+            let mut reg = registry().lock().unwrap_or_else(|e| e.into_inner());
+            let doc = reg.get_mut(&handle).expect("handle is registered");
+            let mut annots = doc
+                .get_dictionary(page_id)
+                .ok()
+                .and_then(|d| d.get(b"Annots").ok())
+                .and_then(|o| o.as_array().ok())
+                .expect("fixture has /Annots")
+                .clone();
+            annots.push(Object::Dictionary(dictionary! {
+                "Type" => name_obj("Annot"),
+                "Subtype" => name_obj("Square"),
+                "Rect" => rect_obj([100.0, 100.0, 200.0, 150.0]),
+            }));
+            doc.get_dictionary_mut(page_id).expect("page").set("Annots", Object::Array(annots));
+        }
+        assert!(flatten_document(handle), "flatten failed");
+
+        let reg = registry().lock().unwrap_or_else(|e| e.into_inner());
+        let doc = reg.get(&handle).expect("handle is registered");
+        let annots = doc
+            .get_dictionary(page_id)
+            .ok()
+            .and_then(|d| d.get(b"Annots").ok())
+            .and_then(|o| deref(doc, o))
+            .and_then(|o| o.as_array().ok())
+            .cloned()
+            .unwrap_or_default();
+        assert_eq!(annots.len(), 1, "only the direct dictionary should remain: {annots:?}");
+        assert!(
+            matches!(annots.first(), Some(Object::Dictionary(_))),
+            "and it must survive verbatim: {annots:?}"
+        );
+        drop(reg);
+        close_document(handle);
+    }
+
+    /// When everything on the page IS baked, `/Annots` still goes away entirely: the
+    /// retain must not leave an empty array behind, and flatten must still mean
+    /// flattened.
+    #[test]
+    fn flatten_still_removes_annots_when_everything_baked() {
+        let (dw, dh) = (40.0_f64, 20.0_f64);
+        let (handle, page_id) =
+            flattenable_doc([10.0, 20.0, 10.0 + dw, 20.0 + dh], [0.0, 0.0, dw, dh], IDENTITY);
+        assert!(flatten_document(handle));
+        let reg = registry().lock().unwrap_or_else(|e| e.into_inner());
+        let doc = reg.get(&handle).expect("handle is registered");
+        assert!(
+            doc.get_dictionary(page_id).ok().and_then(|d| d.get(b"Annots").ok()).is_none(),
+            "a fully baked page must have no /Annots at all"
+        );
+        drop(reg);
+        close_document(handle);
+    }
+
+    /// §7.3.10: `/AS` may be indirect. Without a deref it read as absent, the /Off
+    /// branch was taken, and the UNCHECKED art was baked permanently over a checked
+    /// box — a wrong answer written into the file rather than a missing one.
+    #[test]
+    fn flatten_follows_an_indirect_appearance_state() {
+        let mut doc = Document::with_version("1.7");
+        let form = |content: &[u8]| -> Stream {
+            Stream::new(
+                dictionary! {
+                    "Type" => name_obj("XObject"),
+                    "Subtype" => name_obj("Form"),
+                    "BBox" => rect_obj([0.0, 0.0, 10.0, 10.0]),
+                },
+                content.to_vec(),
+            )
+        };
+        let on_id = doc.add_object(form(b"1 0 0 rg 0 0 10 10 re f"));
+        let off_id = doc.add_object(form(b"0 1 0 rg 0 0 10 10 re f"));
+        // The checked state, reachable only if /AS is dereferenced.
+        let as_ref = doc.add_object(Object::Name(b"On".to_vec()));
+        let annot_id = doc.add_object(dictionary! {
+            "Type" => name_obj("Annot"),
+            "Subtype" => name_obj("Widget"),
+            "Rect" => rect_obj([0.0, 0.0, 10.0, 10.0]),
+            "AS" => Object::Reference(as_ref),
+            "AP" => dictionary! { "N" => dictionary! { "On" => on_id, "Off" => off_id } },
+        });
+        let pages_id = doc.new_object_id();
+        let page_id = doc.add_object(dictionary! {
+            "Type" => name_obj("Page"),
+            "Parent" => Object::Reference(pages_id),
+            "MediaBox" => rect_obj([0.0, 0.0, 612.0, 792.0]),
+            "Annots" => Object::Array(vec![Object::Reference(annot_id)]),
+        });
+        doc.objects.insert(
+            pages_id,
+            Object::Dictionary(dictionary! {
+                "Type" => name_obj("Pages"),
+                "Kids" => Object::Array(vec![Object::Reference(page_id)]),
+                "Count" => 1,
+            }),
+        );
+        let cat = doc.add_object(dictionary! {
+            "Type" => name_obj("Catalog"),
+            "Pages" => Object::Reference(pages_id),
+        });
+        doc.trailer.set("Root", cat);
+        let handle = next_handle();
+        registry().lock().unwrap_or_else(|e| e.into_inner()).insert(handle, doc);
+
+        assert!(flatten_document(handle), "flatten failed");
+
+        let text = String::from_utf8_lossy(&page_bytes(handle, page_id)).into_owned();
+        let name = text
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .windows(2)
+            .find(|w| w[1] == "Do")
+            .map(|w| w[0].trim_start_matches('/').to_string())
+            .unwrap_or_else(|| panic!("no `Do` in the flattened content: {text}"));
+
+        let reg = registry().lock().unwrap_or_else(|e| e.into_inner());
+        let doc = reg.get(&handle).expect("handle is registered");
+        let res = resources_dict(doc, page_id).expect("resources");
+        let baked = res
+            .get(b"XObject")
+            .ok()
+            .and_then(|o| deref(doc, o))
+            .and_then(|o| o.as_dict().ok())
+            .and_then(|xo| xo.get(name.as_bytes()).ok())
+            .and_then(|o| o.as_reference().ok())
+            .expect("the baked appearance must be in /Resources /XObject");
+        assert_ne!(baked, off_id, "an indirect /AS must not fall through to the /Off art");
+        assert_eq!(baked, on_id, "an indirect /AS On must bake the CHECKED art");
+        drop(reg);
+        close_document(handle);
+    }
+
     fn flattenable_doc(rect: [f64; 4], bbox: [f64; 4], matrix: Mat) -> (i64, ObjectId) {
         let mut doc = Document::with_version("1.7");
         let ap_dict = dictionary! {

@@ -240,10 +240,13 @@ pub(crate) mod jp2 {
         if w == 0 || h == 0 || w > 20000 || h > 20000 || img.numcomps == 0 {
             return None;
         }
-        // A dimension-only cap still permits 20000x20000 = 1.6 GB.
-        if w.saturating_mul(h) > crate::MAX_IMAGE_PIXELS {
-            return None;
-        }
+        // A dimension-only cap still permits 20000x20000 = 1.6 GB. `opj_decode` has
+        // already committed the component buffers by the time we get here, so refusing
+        // spent the memory and rendered nothing; decimate the RGBA instead. `sample`
+        // below already maps an output coordinate onto each component's own grid, so
+        // sampling every `step`th pixel needs no other change.
+        let step = super::decimation_step(w as u32, h as u32);
+        let (dw, dh) = (w.div_ceil(step), h.div_ceil(step));
         if img.comps.is_null() {
             return None;
         }
@@ -298,10 +301,12 @@ pub(crate) mod jp2 {
         let (alpha_comp, unpremultiply) =
             resolve_alpha(opts.smask_in_data, n, interp.ncolour(), cdef_alpha);
 
-        let mut rgba = vec![0u8; w * h * 4];
-        for y in 0..h {
-            for x in 0..w {
-                let idx = (y * w + x) * 4;
+        let mut rgba = vec![0u8; dw * dh * 4];
+        for dy in 0..dh {
+            let y = dy * step;
+            for dx in 0..dw {
+                let x = dx * step;
+                let idx = (dy * dw + dx) * 4;
                 let (r, g, b) = match interp {
                     Interp::Gray => {
                         let v = sample(&comps[0], x, y);
@@ -361,7 +366,7 @@ pub(crate) mod jp2 {
                 rgba[idx + 3] = a;
             }
         }
-        Some((w as u32, h as u32, rgba))
+        Some((dw as u32, dh as u32, rgba))
     }
 }
 
@@ -611,22 +616,26 @@ fn image_samples_to_rgba(
                 && (0..ncomp).any(|c| decode_arr[c * 2] != 0.0 || (decode_arr[c * 2 + 1] - 1.0).abs() > 1e-9);
             for i in 0..w * h {
                 let base = i * ncomp;
-                let (r, g, b) = if base + ncomp <= decoded_comps.len() {
-                    if has_decode {
-                        let mut tmp = [0u8; 4];
-                        for c in 0..ncomp.min(4) {
-                            let dmin = decode_arr[c * 2];
-                            let dmax = decode_arr[c * 2 + 1];
-                            let v = decoded_comps[base + c] as f64 / 255.0;
-                            let mapped = (dmin + v * (dmax - dmin)).clamp(0.0, 1.0);
-                            tmp[c] = (mapped * 255.0).round() as u8;
-                        }
-                        comps_to_rgb(&tmp[..ncomp.min(4)], ncomp as u8)
-                    } else {
-                        comps_to_rgb(&decoded_comps[base..base + ncomp], ncomp as u8)
+                // A pixel the sample buffer does not cover is left fully transparent
+                // rather than painted opaque black. The `samples.len()` guard in
+                // `extract_image_inner` means a short buffer cannot reach here today,
+                // but nothing pins that, and a solid black rectangle over the page is a
+                // far worse degradation than a hole. Matches the general path below.
+                if base + ncomp > decoded_comps.len() {
+                    continue;
+                }
+                let (r, g, b) = if has_decode {
+                    let mut tmp = [0u8; 4];
+                    for c in 0..ncomp.min(4) {
+                        let dmin = decode_arr[c * 2];
+                        let dmax = decode_arr[c * 2 + 1];
+                        let v = decoded_comps[base + c] as f64 / 255.0;
+                        let mapped = (dmin + v * (dmax - dmin)).clamp(0.0, 1.0);
+                        tmp[c] = (mapped * 255.0).round() as u8;
                     }
+                    comps_to_rgb(&tmp[..ncomp.min(4)], ncomp as u8)
                 } else {
-                    (0, 0, 0)
+                    comps_to_rgb(&decoded_comps[base..base + ncomp], ncomp as u8)
                 };
                 let idx = i * 4;
                 rgba[idx] = r;
@@ -781,6 +790,68 @@ fn invert_rgb(rgba: &mut [u8]) {
         px[1] = 255 - px[1];
         px[2] = 255 - px[2];
     }
+}
+
+/// True when the image dictionary's `/Decode` is the fully inverted form `[1 0]`
+/// repeated once per component.
+///
+/// §8.9.5.2 Table 89 puts `/Decode` on the image XObject dictionary and scopes it to
+/// no particular filter, so it applies to DCTDecode too — but the JPEG passthrough
+/// hands raw codestream bytes to the platform decoder, which cannot apply it. Only
+/// this one array shape is detected: it is the form prepress and Distiller output
+/// carries (`[1 0 1 0 1 0 1 0]` on CMYK JPEGs), and it is exactly the per-component
+/// complement, so it can be honoured by inverting samples inside the codec decode
+/// without building a general `Dmin + v(Dmax-Dmin)` mapping there. Any other array
+/// keeps the existing passthrough.
+///
+/// Indexed and Lab are excluded: their `/Decode` operates on a palette index range
+/// and on L*a*b* ranges respectively, so `1 - v` is not the complement there.
+fn decode_array_is_inverted(
+    doc: &Document,
+    dict: &Dictionary,
+    ncomp: usize,
+    cs_resources: &HashMap<Vec<u8>, ObjectId>,
+) -> bool {
+    if ncomp == 0 {
+        return false;
+    }
+    let Some(Object::Array(a)) = dict
+        .get(b"Decode")
+        .or_else(|_| dict.get(b"D"))
+        .ok()
+        .and_then(|o| deref(doc, o))
+    else {
+        return false;
+    };
+    let inverted = a.len() >= ncomp * 2
+        && (0..ncomp).all(|c| {
+            deref(doc, &a[c * 2]).and_then(num) == Some(1.0)
+                && deref(doc, &a[c * 2 + 1]).and_then(num) == Some(0.0)
+        });
+    if !inverted {
+        return false;
+    }
+    let cs = dict
+        .get(b"ColorSpace")
+        .or_else(|_| dict.get(b"CS"))
+        .ok()
+        .and_then(|o| parse_cs_kind(doc, Some(o), cs_resources));
+    !matches!(cs, Some(CsKind::Indexed { .. }) | Some(CsKind::Lab { .. }))
+}
+
+/// Per-axis decimation factor that brings `w * h` inside `MAX_IMAGE_PIXELS`.
+///
+/// Returns 1 whenever the image already fits, which is all but a handful of images, so
+/// the sampling loops that use it are unchanged for the common case. An oversized image
+/// is DECIMATED rather than dropped: a 300 dpi A0 engineering scan is 9933 x 14043 =
+/// 139 Mpx, which is legal, common, and was rendering as nothing at all.
+fn decimation_step(w: u32, h: u32) -> usize {
+    let px = (w as usize).saturating_mul(h as usize);
+    let mut s = 1usize;
+    while s < 64 && px / (s * s) > MAX_IMAGE_PIXELS {
+        s += 1;
+    }
+    s
 }
 
 /// Area-average downscale of an RGBA8888 buffer so its longer side is at most
@@ -993,8 +1064,12 @@ fn extract_image_inner(doc: &Document, stream: &lopdf::Stream, fill_argb: u32, c
     // A missing or non-numeric /Width or /Height dropped the image with no diagnostic —
     // one of the paths that renders as an invisible hole (§8.9.5.1 makes both required).
     let (Some(w), Some(h)) = (
-        dict.get(b"Width").ok().and_then(num),
-        dict.get(b"Height").ok().and_then(num),
+        // §7.3.10: any dictionary value may be an indirect reference, and these are
+        // routinely written as one by producers that share a size object across a
+        // scanned page's images. Without the deref `num` sees `Object::Reference`,
+        // returns None, and the `let ... else` below deletes the image.
+        dict.get(b"Width").ok().and_then(|o| deref(doc, o)).and_then(num),
+        dict.get(b"Height").ok().and_then(|o| deref(doc, o)).and_then(num),
     ) else {
         image_warn!("image XObject has no usable /Width or /Height - dropped");
         return None;
@@ -1180,14 +1255,30 @@ fn extract_image_inner(doc: &Document, stream: &lopdf::Stream, fill_argb: u32, c
             let columns = if params.columns > 0 { params.columns as usize } else { w as usize };
             let rows_est = if params.rows > 0 { params.rows as usize } else { h as usize };
             // Guard: packed already accounts for BlackIs1
-            let out_w = columns as u32;
-            let out_h = rows_est as u32;
-            if (out_w as usize) * (out_h as usize) > MAX_IMAGE_PIXELS {
-                image_warn!("CCITT raster {}x{} over the {} pixel budget - image dropped", out_w, out_h, MAX_IMAGE_PIXELS);
-                return None;
+            // `packed` is one bit per pixel, so it is cheap even for a huge fax — a 300 dpi
+            // A0 scan is 139 Mpx but only 17 MB packed. It is the RGBA below that is 32x
+            // that, so decimate the SAMPLING rather than refuse the image: dropping it
+            // deleted exactly the large engineering and architectural scans that CCITT
+            // exists to carry.
+            //
+            // NOTE: `step` is always 1 as the tree stands, because `filters.rs`'s
+            // `decode_ccitt` applies `(cols * rows) > 16 * 1024 * 1024 { return None; }`
+            // to the ONE-BIT buffer before we ever get here, using the same 16 Mpx number
+            // that is sized for 4-byte RGBA. That cap is the live blocker for a large fax
+            // and it is in a file this round does not assign; until it is raised, this
+            // branch cannot see an oversized raster. It is still the correct shape here,
+            // and it has to be, because raising the filters.rs cap alone would just move
+            // the drop to this line.
+            let step = decimation_step(columns as u32, rows_est as u32);
+            let (out_w, out_h) = (columns.div_ceil(step) as u32, rows_est.div_ceil(step) as u32);
+            if step > 1 {
+                image_warn!(
+                    "CCITT raster {}x{} over the {} pixel budget: decimated by {} to {}x{}",
+                    columns, rows_est, MAX_IMAGE_PIXELS, step, out_w, out_h
+                );
             }
             let row_bytes = columns.div_ceil(8);
-            let mut rgba = vec![255u8; (out_w * out_h * 4) as usize]; // white init
+            let mut rgba = vec![255u8; out_w as usize * out_h as usize * 4]; // white init
             // This is one-bit DeviceGray, so sample 0 is black and sample 1 is white, and
             // only `/Decode` may swap them (§8.9.5.2). `decode_ccitt` does NOT normalise to
             // that convention: it emits the polarity `/BlackIs1` asks for (§7.4.6 Table 11 —
@@ -1199,10 +1290,12 @@ fn extract_image_inner(doc: &Document, stream: &lopdf::Stream, fill_argb: u32, c
             // black instead rendered every default-parameter fax as its own negative, which
             // is where the solid dark blocks over scanned pages came from.
             let black_bit = if decode_inverts_1bit { 1 } else { 0 };
-            for y in 0..rows_est {
-                for x in 0..columns {
-                    let byte = packed.get(y * row_bytes + x / 8).copied().unwrap_or(0);
-                    let bit = (byte >> (7 - (x % 8))) & 1;
+            for y in 0..out_h as usize {
+                let sy = y * step;
+                for x in 0..out_w as usize {
+                    let sx = x * step;
+                    let byte = packed.get(sy * row_bytes + sx / 8).copied().unwrap_or(0);
+                    let bit = (byte >> (7 - (sx % 8))) & 1;
                     if bit == black_bit {
                         let idx = (y * out_w as usize + x) * 4;
                         if idx + 3 < rgba.len() { rgba[idx] = 0; rgba[idx+1] = 0; rgba[idx+2] = 0; rgba[idx+3] = 255; }
@@ -1238,8 +1331,19 @@ fn extract_image_inner(doc: &Document, stream: &lopdf::Stream, fill_argb: u32, c
             image_warn!("DCT {}x{}: filter chain before the codec failed to decode - image dropped", w, h);
             return None;
         };
-        if smask_present || mask_present {
-            if let Some((jw,jh,mut rgba)) = decode_jpeg_rgba(&jpeg_bytes) {
+        // §8.9.5.2: /Decode remaps samples for every image, DCT included. Only the
+        // fully inverted form is honoured (see `decode_array_is_inverted`); when it is
+        // present the platform passthrough below cannot be used, because Android's
+        // decoder has no way to apply it.
+        let decode_inverted = decode_array_is_inverted(
+            doc,
+            dict,
+            jpeg_num_components(&jpeg_bytes).unwrap_or(0) as usize,
+            cs_resources,
+        );
+        let mask_arm = smask_present || mask_present;
+        if mask_arm {
+            if let Some((jw,jh,mut rgba)) = decode_jpeg_rgba_decoded(&jpeg_bytes, decode_inverted) {
                 let smask = read_smask(doc, dict, jw, jh);
                 apply_smask(&mut rgba, &smask);
                 if smask.is_some() { if let Some(matte) = read_matte(doc, dict) { apply_matte(&mut rgba, matte); } }
@@ -1254,6 +1358,7 @@ fn extract_image_inner(doc: &Document, stream: &lopdf::Stream, fill_argb: u32, c
                 let mut rgba = vec![0u8; (jw*jh*4) as usize];
                 for i in 0..(jw*jh) as usize {
                     let g = gray.get(i).copied().unwrap_or(0);
+                    let g = if decode_inverted { 255 - g } else { g };
                     rgba[i*4]=g; rgba[i*4+1]=g; rgba[i*4+2]=g; rgba[i*4+3]=255;
                 }
                 let smask = read_smask(doc, dict, jw, jh);
@@ -1264,32 +1369,53 @@ fn extract_image_inner(doc: &Document, stream: &lopdf::Stream, fill_argb: u32, c
                 if let Some(ck) = read_color_key_mask(doc, dict) { apply_color_key_mask(&mut rgba, &Some(ck)); }
                 return Some(ImageData{ w: jw, h: jh, format: 0, data: rgba });
             }
+            // Both Rust decodes failed (they share `jpeg_decoder`, so if one cannot read
+            // the codestream neither can the other). Fall through to the passthrough
+            // below rather than dropping: an image was being deleted ONLY because it
+            // carried an /SMask, while the identical bytes without one were handed to
+            // the platform decoder and rendered. `decode_mask_stream_gray` already makes
+            // this call the same way — a mask it cannot decode leaves the image
+            // "unmasked, visible, but not silently so" — and the damage is bounded by
+            // the image's own rectangle, unlike a clip or a full-bleed fill.
+            image_warn!(
+                "DCT {}x{} decode failed with mask present - passing through UNMASKED rather than dropping",
+                w, h
+            );
         }
-        if !smask_present && !mask_present {
-            // Android's bitmap decoder cannot handle CMYK/YCCK JPEGs, so decode
-            // those (and any Adobe-marked JPEG) in Rust; RGB/gray pass through.
-            let cmyk = jpeg_num_components(&jpeg_bytes) == Some(4)
-                || jpeg_adobe_transform(&jpeg_bytes).is_some();
-            if cmyk {
-                if let Some((jw, jh, rgba)) = decode_jpeg_rgba(&jpeg_bytes) {
-                    return Some(ImageData { w: jw, h: jh, format: 0, data: rgba });
-                }
-                // Passing a CMYK/YCCK JPEG through to the platform decoder is the same
-                // as dropping it (Android cannot decode one), so say so rather than
-                // leaving an unexplained hole.
-                image_warn!("DCT {}x{} CMYK/Adobe decode failed - passing through, likely to render nothing", w, h);
+        // Android's bitmap decoder cannot handle CMYK/YCCK JPEGs, so decode those in
+        // Rust; RGB and gray pass through.
+        //
+        // The test used to be `jpeg_adobe_transform(..).is_some()`, i.e. ANY APP14
+        // "Adobe" segment. Every Photoshop "Save As JPEG" writes one, so ordinary
+        // 3-component RGB photographs took this branch, gave up the passthrough (and
+        // with it the platform decoder's subsampling) for a full RGBA buffer, and on a
+        // decode failure logged a warning claiming Android could not render them. The
+        // marker's mere presence says nothing; only transform 2 (YCCK) is a colour
+        // transform the platform cannot undo, and that implies 4 components anyway —
+        // it is kept as a separate term only for a codestream whose SOF we failed to
+        // find.
+        let cmyk = jpeg_num_components(&jpeg_bytes) == Some(4)
+            || jpeg_adobe_transform(&jpeg_bytes) == Some(2);
+        if (cmyk || decode_inverted) && !mask_arm {
+            if let Some((jw, jh, rgba)) = decode_jpeg_rgba_decoded(&jpeg_bytes, decode_inverted) {
+                return Some(ImageData { w: jw, h: jh, format: 0, data: rgba });
             }
-            // efficient passthrough
-            return Some(ImageData { w, h, format: 1, data: jpeg_bytes });
+            // Passing a CMYK/YCCK JPEG through to the platform decoder is the same
+            // as dropping it (Android cannot decode one), so say so rather than
+            // leaving an unexplained hole. With /Decode [1 0 ...] the passthrough is
+            // wrong in a different way — it paints the negative — but a negative is
+            // more recoverable than nothing.
+            image_warn!(
+                "DCT {}x{} CMYK/YCCK/inverted-Decode decode failed - passing through, likely to render nothing or inverted",
+                w, h
+            );
         }
-        // DCT with a mask but JPEG decode failed: avoid reinterpreting the
-        // encoded JPEG stream as raw samples.
-        image_warn!("DCT {}x{} decode failed with mask present - image dropped", w, h);
-        return None;
+        // efficient passthrough
+        return Some(ImageData { w, h, format: 1, data: jpeg_bytes });
     }
 
     let image_mask = dict_true(doc, dict, b"ImageMask");
-    let bpc = if image_mask { 1 } else { dict.get(b"BitsPerComponent").ok().and_then(num).unwrap_or(8.0) as u32 };
+    let bpc = if image_mask { 1 } else { dict.get(b"BitsPerComponent").ok().and_then(|o| deref(doc, o)).and_then(num).unwrap_or(8.0) as u32 };
     // This project's own chain, not lopdf's: lopdf cannot undo RunLength, ASCIIHex or a
     // predictor, and returns the still-compressed bytes on failure. Unpacked as one-bit
     // samples those are noise, and a stencil of noise is a solid block of fill colour.
@@ -1319,14 +1445,7 @@ fn extract_image_inner(doc: &Document, stream: &lopdf::Stream, fill_argb: u32, c
         // raster (the contone path decimates, the codecs cap their decoded size); this
         // one did not, so a tiny file could OOM the process. Decimate with the same
         // rule the contone path uses, which is the identity for any sane stencil.
-        let step = {
-            let px = (w as usize).saturating_mul(h as usize);
-            let mut s = 1usize;
-            while s < 64 && px / (s * s) > MAX_IMAGE_PIXELS {
-                s += 1;
-            }
-            s
-        };
+        let step = decimation_step(w, h);
         let (ow, oh) = ((w as usize).div_ceil(step), (h as usize).div_ceil(step));
         if step > 1 {
             image_warn!("stencil /ImageMask {}x{} over pixel budget: decimated by {} to {}x{}", w, h, step, ow, oh);
@@ -1393,14 +1512,7 @@ fn extract_image_inner(doc: &Document, stream: &lopdf::Stream, fill_argb: u32, c
     // An image over the pixel budget is DECIMATED, not dropped: the old guard
     // deleted every 600 dpi scan and every >16 MP photo outright. Keeping one
     // sample in `step` per axis bounds the RGBA buffer while still rendering.
-    let step = {
-        let px = (w as usize).saturating_mul(h as usize);
-        let mut s = 1usize;
-        while s < 64 && px / (s * s) > MAX_IMAGE_PIXELS {
-            s += 1;
-        }
-        s
-    };
+    let step = decimation_step(w, h);
     let (dw, dh, decoded_comps) = match unpack_samples_decimated(&samples, w as usize, h as usize, ncomp as usize, bpc, step) {
         Some(t) => t,
         None => {
@@ -1530,7 +1642,13 @@ fn extract_inline_image_inner(doc: &Document, stream: &lopdf::Stream, fill_argb:
     if all_has_dct {
         let smask = read_smask(doc, dict, w, h);
         let colorkey = read_color_key_mask(doc, dict);
-        if let Some((jw,jh,mut rgba)) = decode_jpeg_rgba(&samples) {
+        let decode_inverted = decode_array_is_inverted(
+            doc,
+            dict,
+            jpeg_num_components(&samples).unwrap_or(0) as usize,
+            cs_resources,
+        );
+        if let Some((jw,jh,mut rgba)) = decode_jpeg_rgba_decoded(&samples, decode_inverted) {
             apply_smask(&mut rgba, &smask);
             apply_color_key_mask(&mut rgba, &colorkey);
             return Some(ImageData { w: jw, h: jh, format: 0, data: rgba });
@@ -1810,7 +1928,7 @@ fn rasterize_shading_inner(doc: &Document, shading_obj: &Object, base_ctm: &Mat,
         Object::Stream(s) => (&s.dict, Some(stream_data_with_doc(doc, s))),
         _ => return None,
     };
-    let shading_type = dict.get(b"ShadingType").ok().and_then(num).unwrap_or(0.0) as i64;
+    let shading_type = dict.get(b"ShadingType").ok().and_then(|o| deref(doc, o)).and_then(num).unwrap_or(0.0) as i64;
     // When the caller passes size==0, derive an effective resolution from the
     // device footprint of the clip region (falls back to 256 if unknown).
     let auto_size = || -> u32 {
@@ -2671,7 +2789,7 @@ pub(crate) fn read_color_key_mask(doc: &Document, dict: &lopdf::Dictionary) -> O
     let bpc = if dict_true(doc, dict, b"ImageMask") {
         1u32
     } else {
-        dict.get(b"BitsPerComponent").ok().and_then(num).unwrap_or(8.0) as u32
+        dict.get(b"BitsPerComponent").ok().and_then(|o| deref(doc, o)).and_then(num).unwrap_or(8.0) as u32
     }
     .clamp(1, 16);
     let maxval = ((1u64 << bpc) - 1).max(1);
@@ -2751,6 +2869,20 @@ pub(crate) fn apply_color_key_mask_samples(
 }
 
 pub(crate) fn decode_jpeg_rgba(data: &[u8]) -> Option<(u32,u32,Vec<u8>)> {
+    decode_jpeg_rgba_decoded(data, false)
+}
+
+/// As `decode_jpeg_rgba`, but with `invert_components` applying `255 - v` to every
+/// COMPONENT of the decoded samples, i.e. the image dictionary's `/Decode [1 0 ...]`
+/// (§8.9.5.2).
+///
+/// The inversion has to happen on the components, before any colour conversion. For
+/// gray and RGB that is the same thing as complementing the output pixel, but for
+/// CMYK it is not: `cmyk_to_argb` gives r = (1-c)(1-k), and complementing the two
+/// inputs gives (1-(1-c))(1-(1-k)) = c*k, which is not 1 - (1-c)(1-k). Inverting the
+/// finished RGB of a CMYK JPEG would trade one wrong image for another.
+pub(crate) fn decode_jpeg_rgba_decoded(data: &[u8], invert_components: bool) -> Option<(u32,u32,Vec<u8>)> {
+    let inv = |v: u8| if invert_components { 255 - v } else { v };
     let mut decoder = jpeg_decoder::Decoder::new(Cursor::new(data));
     let pixels = decoder.decode().ok()?;
     let info = decoder.info()?;
@@ -2760,28 +2892,49 @@ pub(crate) fn decode_jpeg_rgba(data: &[u8]) -> Option<(u32,u32,Vec<u8>)> {
     // A dimension-only cap still allows 20000x20000 = 1.6 GB. The codestream's
     // dimensions can differ from the dict's /Width and /Height, so the caller's
     // guard does not cover this.
-    if (w as usize).saturating_mul(h as usize) > MAX_IMAGE_PIXELS {
-        image_warn!("JPEG codestream {}x{} exceeds pixel budget - refusing to decode", w, h);
-        return None;
+    //
+    // DECIMATE, do not refuse. `decoder.decode()` above has already committed the
+    // sample buffer, so returning None here spent the memory and then rendered
+    // nothing — a >16 Mpx photo or scan simply vanished. Sampling every `step`th
+    // pixel bounds the RGBA (4 bytes/px, the larger of the two buffers) and still
+    // puts the image on the page. It does not bound the decoder's own allocation;
+    // doing that needs jpeg-decoder's DCT-domain `scale()` before `decode()`, which
+    // is a larger change to a path every JPEG takes.
+    let step = decimation_step(w, h);
+    let (dw, dh) = ((w as usize).div_ceil(step), (h as usize).div_ceil(step));
+    if step > 1 {
+        image_warn!(
+            "JPEG codestream {}x{} over the {} pixel budget: decimated by {} to {}x{}",
+            w, h, MAX_IMAGE_PIXELS, step, dw, dh
+        );
     }
+    // Source index of destination pixel (x, y).
+    let src = |x: usize, y: usize| (y * step) * (w as usize) + (x * step);
     let rgba = match info.pixel_format {
         jpeg_decoder::PixelFormat::L8 => {
             // gray -> rgba
-            let mut out = vec![0u8; (w*h*4) as usize];
-            for i in 0..(w*h) as usize {
-                let g = pixels.get(i).copied().unwrap_or(0);
-                out[i*4]=g; out[i*4+1]=g; out[i*4+2]=g; out[i*4+3]=255;
+            let mut out = vec![0u8; dw * dh * 4];
+            for y in 0..dh {
+                for x in 0..dw {
+                    let g = inv(pixels.get(src(x, y)).copied().unwrap_or(0));
+                    let o = (y * dw + x) * 4;
+                    out[o]=g; out[o+1]=g; out[o+2]=g; out[o+3]=255;
+                }
             }
             out
         }
         jpeg_decoder::PixelFormat::RGB24 => {
-            if pixels.len() < (w*h*3) as usize { return None; }
-            let mut out = vec![0u8; (w*h*4) as usize];
-            for i in 0..(w*h) as usize {
-                out[i*4]=pixels[i*3];
-                out[i*4+1]=pixels[i*3+1];
-                out[i*4+2]=pixels[i*3+2];
-                out[i*4+3]=255;
+            if pixels.len() < (w as usize * h as usize * 3) { return None; }
+            let mut out = vec![0u8; dw * dh * 4];
+            for y in 0..dh {
+                for x in 0..dw {
+                    let s = src(x, y) * 3;
+                    let o = (y * dw + x) * 4;
+                    out[o]=inv(pixels[s]);
+                    out[o+1]=inv(pixels[s+1]);
+                    out[o+2]=inv(pixels[s+2]);
+                    out[o+3]=255;
+                }
             }
             out
         }
@@ -2792,40 +2945,50 @@ pub(crate) fn decode_jpeg_rgba(data: &[u8]) -> Option<(u32,u32,Vec<u8>)> {
             // four again produced a lurid negative for transform 0, and blew out blacks
             // for transform 2. Correct residual correction: invert CMY only for YCCK
             // (transform 2), and never invert K.
-            if pixels.len() < (w*h*4) as usize { return None; }
+            if pixels.len() < (w as usize * h as usize * 4) { return None; }
             let invert_cmy = jpeg_adobe_transform(data) == Some(2);
-            let mut out = vec![0u8; (w*h*4) as usize];
-            for i in 0..(w*h) as usize {
-                let (mut c, mut m, mut y) = (pixels[i*4], pixels[i*4+1], pixels[i*4+2]);
-                let k = pixels[i*4+3];
-                if invert_cmy { c = 255 - c; m = 255 - m; y = 255 - y; }
-                let cf = c as f64 /255.0;
-                let mf = m as f64 /255.0;
-                let yf = y as f64 /255.0;
-                let kf = k as f64 /255.0;
-                let r = ((1.0 - cf)*(1.0 - kf)*255.0) as u8;
-                let g = ((1.0 - mf)*(1.0 - kf)*255.0) as u8;
-                let b = ((1.0 - yf)*(1.0 - kf)*255.0) as u8;
-                out[i*4]=r; out[i*4+1]=g; out[i*4+2]=b; out[i*4+3]=255;
+            let mut out = vec![0u8; dw * dh * 4];
+            for y in 0..dh {
+                for x in 0..dw {
+                    let s = src(x, y) * 4;
+                    let (mut c, mut m, mut yy) = (pixels[s], pixels[s+1], pixels[s+2]);
+                    let mut k = pixels[s+3];
+                    if invert_cmy { c = 255 - c; m = 255 - m; yy = 255 - yy; }
+                    // /Decode applies to the finished samples, so it comes after the
+                    // Adobe/YCCK correction above and covers K as well as CMY.
+                    if invert_components { c = 255 - c; m = 255 - m; yy = 255 - yy; k = 255 - k; }
+                    let cf = c as f64 /255.0;
+                    let mf = m as f64 /255.0;
+                    let yf = yy as f64 /255.0;
+                    let kf = k as f64 /255.0;
+                    let r = ((1.0 - cf)*(1.0 - kf)*255.0) as u8;
+                    let g = ((1.0 - mf)*(1.0 - kf)*255.0) as u8;
+                    let b = ((1.0 - yf)*(1.0 - kf)*255.0) as u8;
+                    let o = (y * dw + x) * 4;
+                    out[o]=r; out[o+1]=g; out[o+2]=b; out[o+3]=255;
+                }
             }
             out
         }
         // 9..=16-bit precision (§7.4.8 permits 12-bit DCT). Previously fell into the
         // `_ =>` arm and the image vanished with no diagnostic.
         jpeg_decoder::PixelFormat::L16 => {
-            if pixels.len() < (w*h*2) as usize { return None; }
-            let mut out = vec![0u8; (w*h*4) as usize];
-            for i in 0..(w*h) as usize {
-                // Little-endian u16 pairs; the high byte is the 8-bit approximation.
-                let g = pixels.get(i*2+1).copied().unwrap_or(0);
-                out[i*4]=g; out[i*4+1]=g; out[i*4+2]=g; out[i*4+3]=255;
+            if pixels.len() < (w as usize * h as usize * 2) { return None; }
+            let mut out = vec![0u8; dw * dh * 4];
+            for y in 0..dh {
+                for x in 0..dw {
+                    // Little-endian u16 pairs; the high byte is the 8-bit approximation.
+                    let g = inv(pixels.get(src(x, y) * 2 + 1).copied().unwrap_or(0));
+                    let o = (y * dw + x) * 4;
+                    out[o]=g; out[o+1]=g; out[o+2]=g; out[o+3]=255;
+                }
             }
             out
         }
         // All four PixelFormat variants are handled above; jpeg-decoder's enum has no
         // others, so an exhaustive match is preferable to a catch-all that drops images.
     };
-    Some((w,h,rgba))
+    Some((dw as u32, dh as u32, rgba))
 }
 
 /// Read the component count from a JPEG's SOF marker (1 = gray, 3 = YCbCr/RGB,
@@ -2897,54 +3060,81 @@ pub(crate) fn decode_jpeg_gray(data: &[u8]) -> Option<(u32,u32,Vec<u8>)> {
     if w==0 || h==0 || w>20000 || h>20000 { return None; }
     // A dimension-only cap still permits 20000x20000. The codestream's dimensions can
     // differ from the dict's /Width and /Height, so the caller's guard misses this.
-    if (w as usize).saturating_mul(h as usize) > MAX_IMAGE_PIXELS {
-        image_warn!("JPEG (gray) codestream {}x{} exceeds pixel budget - refusing to decode", w, h);
-        return None;
+    // Decimated rather than refused, for the same reason as `decode_jpeg_rgba_decoded`:
+    // the decode is already paid for above, and both callers resample the result to the
+    // base image's raster anyway, so the smaller buffer is transparent to them.
+    let step = decimation_step(w, h);
+    let (dw, dh) = ((w as usize).div_ceil(step), (h as usize).div_ceil(step));
+    if step > 1 {
+        image_warn!(
+            "JPEG (gray) codestream {}x{} over the {} pixel budget: decimated by {} to {}x{}",
+            w, h, MAX_IMAGE_PIXELS, step, dw, dh
+        );
     }
+    let src = |x: usize, y: usize| (y * step) * (w as usize) + (x * step);
+    let wh = w as usize * h as usize;
     let gray = match info.pixel_format {
         jpeg_decoder::PixelFormat::L8 => {
-            if pixels.len() < (w*h) as usize { return None; }
-            pixels[..(w*h) as usize].to_vec()
+            if pixels.len() < wh { return None; }
+            if step == 1 {
+                pixels[..wh].to_vec()
+            } else {
+                let mut out = vec![0u8; dw * dh];
+                for y in 0..dh {
+                    for x in 0..dw {
+                        out[y * dw + x] = pixels[src(x, y)];
+                    }
+                }
+                out
+            }
         }
         jpeg_decoder::PixelFormat::RGB24 => {
-            if pixels.len() < (w*h*3) as usize { return None; }
-            let mut out = vec![0u8; (w*h) as usize];
-            for i in 0..(w*h) as usize {
-                let r = pixels[i*3] as u16;
-                let g = pixels[i*3+1] as u16;
-                let b = pixels[i*3+2] as u16;
-                out[i] = ((r*30 + g*59 + b*11)/100) as u8;
+            if pixels.len() < wh * 3 { return None; }
+            let mut out = vec![0u8; dw * dh];
+            for y in 0..dh {
+                for x in 0..dw {
+                    let s = src(x, y) * 3;
+                    let r = pixels[s] as u16;
+                    let g = pixels[s+1] as u16;
+                    let b = pixels[s+2] as u16;
+                    out[y * dw + x] = ((r*30 + g*59 + b*11)/100) as u8;
+                }
             }
             out
         }
         jpeg_decoder::PixelFormat::CMYK32 => {
             // A CMYK JPEG used as an /SMask previously fell into `_ =>`, and the caller's
             // RGBA fallback then took the R channel as luminance. Convert properly here.
-            if pixels.len() < (w*h*4) as usize { return None; }
+            if pixels.len() < wh * 4 { return None; }
             let invert_cmy = jpeg_adobe_transform(data) == Some(2);
-            let mut out = vec![0u8; (w*h) as usize];
-            for i in 0..(w*h) as usize {
-                let (mut c, mut m, mut y) = (pixels[i*4], pixels[i*4+1], pixels[i*4+2]);
-                let k = pixels[i*4+3] as u16;
-                if invert_cmy { c = 255 - c; m = 255 - m; y = 255 - y; }
-                let kf = 255u16.saturating_sub(k);
-                let r = (255u16 - c as u16) * kf / 255;
-                let g = (255u16 - m as u16) * kf / 255;
-                let b = (255u16 - y as u16) * kf / 255;
-                out[i] = ((r*30 + g*59 + b*11)/100) as u8;
+            let mut out = vec![0u8; dw * dh];
+            for y in 0..dh {
+                for x in 0..dw {
+                    let s = src(x, y) * 4;
+                    let (mut c, mut m, mut yy) = (pixels[s], pixels[s+1], pixels[s+2]);
+                    let k = pixels[s+3] as u16;
+                    if invert_cmy { c = 255 - c; m = 255 - m; yy = 255 - yy; }
+                    let kf = 255u16.saturating_sub(k);
+                    let r = (255u16 - c as u16) * kf / 255;
+                    let g = (255u16 - m as u16) * kf / 255;
+                    let b = (255u16 - yy as u16) * kf / 255;
+                    out[y * dw + x] = ((r*30 + g*59 + b*11)/100) as u8;
+                }
             }
             out
         }
         jpeg_decoder::PixelFormat::L16 => {
-            if pixels.len() < (w*h*2) as usize { return None; }
-            let mut out = vec![0u8; (w*h) as usize];
-            for i in 0..(w*h) as usize {
-                out[i] = pixels.get(i*2+1).copied().unwrap_or(0);
+            if pixels.len() < wh * 2 { return None; }
+            let mut out = vec![0u8; dw * dh];
+            for y in 0..dh {
+                for x in 0..dw {
+                    out[y * dw + x] = pixels.get(src(x, y) * 2 + 1).copied().unwrap_or(0);
+                }
             }
             out
         }
     };
-    Some((w,h,gray))
+    Some((dw as u32, dh as u32, gray))
 }
 
 // Generic bit unpacker for BPC 2,4,12,16
@@ -3128,7 +3318,7 @@ fn decode_mask_stream_gray(
     let has_jbig2 = specs.iter().any(|(k, _)| *k == filters::FilterKind::Jbig2);
     let has_dct = specs.iter().any(|(k, _)| *k == filters::FilterKind::Dct);
     let has_jpx = specs.iter().any(|(k, _)| *k == filters::FilterKind::Jpx);
-    let sbpc = s.dict.get(b"BitsPerComponent").ok().and_then(num).unwrap_or(1.0) as u32;
+    let sbpc = s.dict.get(b"BitsPerComponent").ok().and_then(|o| deref(doc, o)).and_then(num).unwrap_or(1.0) as u32;
 
     if has_jbig2 {
         // Attempt JBIG2 path
@@ -3324,8 +3514,8 @@ pub(crate) fn read_explicit_mask(doc: &Document, dict: &lopdf::Dictionary, w: u3
         image_warn!("/Mask stream is not an /ImageMask - mask ignored, image left unmasked");
         return None;
     }
-    let sw = s.dict.get(b"Width").ok().and_then(num)? as usize;
-    let sh = s.dict.get(b"Height").ok().and_then(num)? as usize;
+    let sw = s.dict.get(b"Width").ok().and_then(|o| deref(doc, o)).and_then(num)? as usize;
+    let sh = s.dict.get(b"Height").ok().and_then(|o| deref(doc, o)).and_then(num)? as usize;
     if sw == 0 || sh == 0 || sw > 20000 || sh > 20000 {
         image_warn!("/Mask stream {}x{} outside 1..20000 - mask ignored", sw, sh);
         return None;
@@ -3417,8 +3607,8 @@ pub(crate) fn read_smask(doc: &Document, dict: &lopdf::Dictionary, w: u32, h: u3
         Object::Stream(s) => s,
         _ => return None,
     };
-    let sw = s.dict.get(b"Width").ok().and_then(num).unwrap_or(w as f64) as usize;
-    let sh = s.dict.get(b"Height").ok().and_then(num).unwrap_or(h as f64) as usize;
+    let sw = s.dict.get(b"Width").ok().and_then(|o| deref(doc, o)).and_then(num).unwrap_or(w as f64) as usize;
+    let sh = s.dict.get(b"Height").ok().and_then(|o| deref(doc, o)).and_then(num).unwrap_or(h as f64) as usize;
     if sw == 0 || sh == 0 || sw > 20000 || sh > 20000 {
         image_warn!("/SMask stream {}x{} outside 1..20000 - mask ignored", sw, sh);
         return None;
@@ -3811,7 +4001,7 @@ mod mask_tests {
 
     /// Group 4 (T.6) encode `rows` of `true` = black pels, as `/CCITTFaxDecode`
     /// with `/K -1` expects.
-    fn g4_encode(rows: &[Vec<bool>], width: u32) -> Vec<u8> {
+    pub(super) fn g4_encode(rows: &[Vec<bool>], width: u32) -> Vec<u8> {
         let mut enc = fax::encoder::Encoder::new(fax::VecWriter::new());
         for row in rows {
             let pels = row
@@ -3824,7 +4014,7 @@ mod mask_tests {
 
     /// 8x2, left half black. Returned with the row pattern so a test can state
     /// the expectation in terms of ink rather than bits.
-    fn half_black_g4() -> (Vec<u8>, usize) {
+    pub(super) fn half_black_g4() -> (Vec<u8>, usize) {
         let row: Vec<bool> = (0..8).map(|x| x < 4).collect();
         (g4_encode(&[row.clone(), row], 8), 8)
     }
@@ -5384,5 +5574,482 @@ mod radial_tests {
         // On the segment between centers, near the start circle boundary.
         let s = radial_shading_param(&coords, true, true, 10.0, 0.0).unwrap();
         assert!((0.0..=1.0).contains(&s), "s={s}");
+    }
+}
+
+#[cfg(test)]
+mod dct_decode_tests {
+    use super::*;
+
+    fn dict_with_decode(entries: Vec<Object>) -> Dictionary {
+        dictionary! {
+            "Width" => 1, "Height" => 1, "BitsPerComponent" => 8,
+            "ColorSpace" => "DeviceCMYK",
+            "Decode" => entries,
+        }
+    }
+
+    #[test]
+    fn inverted_decode_array_detected_only_in_its_exact_form() {
+        let doc = Document::with_version("1.7");
+        let none = HashMap::new();
+        let one = Object::Integer;
+
+        let cmyk = dict_with_decode(vec![one(1), one(0), one(1), one(0), one(1), one(0), one(1), one(0)]);
+        assert!(decode_array_is_inverted(&doc, &cmyk, 4, &none), "[1 0]x4 on a CMYK image is the inverted form");
+
+        // The identity is the Table 90 default and must stay a no-op.
+        let identity = dict_with_decode(vec![one(0), one(1), one(0), one(1), one(0), one(1), one(0), one(1)]);
+        assert!(!decode_array_is_inverted(&doc, &identity, 4, &none));
+
+        // Too short for the component count: not every component is inverted.
+        let short = dict_with_decode(vec![one(1), one(0)]);
+        assert!(!decode_array_is_inverted(&doc, &short, 4, &none));
+
+        // Mixed: only some components inverted. Not the complement.
+        let mixed = dict_with_decode(vec![one(1), one(0), one(0), one(1)]);
+        assert!(!decode_array_is_inverted(&doc, &mixed, 2, &none));
+
+        // A general affine remap is NOT the complement and must keep the passthrough.
+        let partial = dict_with_decode(vec![Object::Real(0.2), Object::Real(0.8)]);
+        assert!(!decode_array_is_inverted(&doc, &partial, 1, &none));
+
+        // Absent /Decode, and an unknown component count.
+        let bare = dictionary! { "Width" => 1, "Height" => 1, "ColorSpace" => "DeviceGray" };
+        assert!(!decode_array_is_inverted(&doc, &bare, 1, &none));
+        assert!(!decode_array_is_inverted(&doc, &cmyk, 0, &none));
+    }
+
+    // Inline images abbreviate /Decode to /D (Table 93) and carry the same bug.
+    #[test]
+    fn inline_abbreviation_d_is_read() {
+        let doc = Document::with_version("1.7");
+        let d = dictionary! {
+            "W" => 1, "H" => 1, "BPC" => 8, "CS" => "DeviceGray",
+            "D" => vec![1.into(), 0.into()],
+        };
+        assert!(decode_array_is_inverted(&doc, &d, 1, &HashMap::new()));
+    }
+
+    // An Indexed image's /Decode maps onto the PALETTE INDEX range (Table 90), not a
+    // 0..1 colour range, so `1 - v` is not its complement and the component-inversion
+    // path must not claim it. Lab's ranges are the same argument.
+    #[test]
+    fn indexed_and_lab_are_excluded() {
+        let mut doc = Document::with_version("1.7");
+        let lookup = doc.add_object(Object::Stream(Stream::new(dictionary! {}, vec![0u8; 6])));
+        let idx = Object::Array(vec![
+            Object::Name(b"Indexed".to_vec()),
+            Object::Name(b"DeviceRGB".to_vec()),
+            Object::Integer(1),
+            Object::Reference(lookup),
+        ]);
+        let d = dictionary! {
+            "Width" => 1, "Height" => 1, "BitsPerComponent" => 8,
+            "ColorSpace" => idx,
+            "Decode" => vec![1.into(), 0.into()],
+        };
+        assert!(!decode_array_is_inverted(&doc, &d, 1, &HashMap::new()));
+
+        let lab = Object::Array(vec![
+            Object::Name(b"Lab".to_vec()),
+            Object::Dictionary(dictionary! {
+                "WhitePoint" => vec![Object::Real(0.9505), Object::Real(1.0), Object::Real(1.089)],
+            }),
+        ]);
+        let dl = dictionary! {
+            "Width" => 1, "Height" => 1, "BitsPerComponent" => 8,
+            "ColorSpace" => lab,
+            "Decode" => vec![1.into(), 0.into(), 1.into(), 0.into(), 1.into(), 0.into()],
+        };
+        assert!(!decode_array_is_inverted(&doc, &dl, 3, &HashMap::new()));
+    }
+
+    /// A hand-assembled 1x1 baseline CMYK JPEG whose four DC coefficients decode to
+    /// raw samples C=0, M=Y=K=255. `jpeg-decoder` un-inverts the Adobe convention, so
+    /// this reaches our CMYK arm as components (255, 0, 0, 0) — pure cyan.
+    ///
+    /// The quant table is all 8s, so a DC diff of +127 dequantizes to 1016, the DC-only
+    /// IDCT gives 127 and the level shift makes it 255; a diff of -128 gives 0. The DC
+    /// Huffman table codes category 7 as "0" and category 8 as "10"; the AC table codes
+    /// EOB as "0". The five entropy bytes are
+    ///   C: "10"+"01111111"+"0", then M,Y,K: "0"+"1111111"+"0", padded with 1s.
+    pub(super) fn cyan_cmyk_jpeg() -> Vec<u8> {
+        let mut d: Vec<u8> = vec![0xFF, 0xD8];
+        // APP14 Adobe, transform 0 (CMYK, not YCCK).
+        d.extend_from_slice(&[0xFF, 0xEE, 0x00, 0x0E]);
+        d.extend_from_slice(b"Adobe");
+        d.extend_from_slice(&[0x00, 0x64, 0x00, 0x00, 0x00, 0x00, 0x00]);
+        // DQT, 8-bit, table 0, every entry 8.
+        d.extend_from_slice(&[0xFF, 0xDB, 0x00, 0x43, 0x00]);
+        d.extend_from_slice(&[0x08; 64]);
+        // SOF0: 8-bit, 1x1, four 1x1-sampled components sharing quant table 0.
+        d.extend_from_slice(&[0xFF, 0xC0, 0x00, 0x14, 0x08, 0x00, 0x01, 0x00, 0x01, 0x04]);
+        d.extend_from_slice(&[0x01, 0x11, 0x00, 0x02, 0x11, 0x00, 0x03, 0x11, 0x00, 0x04, 0x11, 0x00]);
+        // DHT: DC table 0 (a 1-bit code for cat 7, a 2-bit code for cat 8) and
+        //      AC table 0 (a 1-bit code for EOB).
+        d.extend_from_slice(&[0xFF, 0xC4, 0x00, 0x27]);
+        d.push(0x00);
+        d.extend_from_slice(&[0x01, 0x01]);
+        d.extend_from_slice(&[0x00; 14]);
+        d.extend_from_slice(&[0x07, 0x08]);
+        d.push(0x10);
+        d.push(0x01);
+        d.extend_from_slice(&[0x00; 15]);
+        d.push(0x00);
+        // SOS over all four components, then the entropy-coded MCU.
+        d.extend_from_slice(&[0xFF, 0xDA, 0x00, 0x0E, 0x04]);
+        d.extend_from_slice(&[0x01, 0x00, 0x02, 0x00, 0x03, 0x00, 0x04, 0x00]);
+        d.extend_from_slice(&[0x00, 0x3F, 0x00]);
+        d.extend_from_slice(&[0x9F, 0xCF, 0xE7, 0xF3, 0xFB]);
+        d.extend_from_slice(&[0xFF, 0xD9]);
+        d
+    }
+
+    /// The headline of finding 1, and the part that is easy to get backwards.
+    ///
+    /// `/Decode [1 0 1 0 1 0 1 0]` on a CMYK JPEG must complement the four COMPONENTS
+    /// before `cmyk_to_argb`, not the RGB it produces: r = (1-c)(1-k), and
+    /// (1-(1-c))(1-(1-k)) = ck is not 1 - (1-c)(1-k). Pure cyan separates the three
+    /// possible answers:
+    ///   - no /Decode at all       -> (0, 255, 255)  cyan
+    ///   - components complemented -> (0, 0, 0)      black  [correct]
+    ///   - RGB complemented        -> (255, 0, 0)    red    [the plausible wrong fix]
+    #[test]
+    fn cmyk_decode_inverts_components_not_the_converted_rgb() {
+        let jpeg = cyan_cmyk_jpeg();
+        assert_eq!(jpeg_num_components(&jpeg), Some(4), "fixture must declare four components");
+        assert_eq!(jpeg_adobe_transform(&jpeg), Some(0), "fixture must be Adobe transform 0");
+
+        let (w, h, plain) = decode_jpeg_rgba_decoded(&jpeg, false).expect("fixture must decode");
+        assert_eq!((w, h), (1, 1));
+        assert_eq!(&plain[0..3], &[0, 255, 255], "baseline must be cyan");
+
+        let (_, _, inverted) = decode_jpeg_rgba_decoded(&jpeg, true).expect("fixture must decode");
+        assert_eq!(
+            &inverted[0..3], &[0, 0, 0],
+            "complementing C,M,Y,K gives (0,255,255,255), which is black; \
+             (255,0,0) would mean the inversion was applied to the converted RGB"
+        );
+        assert_eq!(inverted[3], 255, "alpha is untouched by /Decode");
+    }
+
+    /// End to end: the same JPEG in an image XObject with `/Decode [1 0 1 0 1 0 1 0]`
+    /// must come back as decoded RGBA, NOT as `format: 1` passthrough bytes — Android's
+    /// decoder has no way to apply /Decode, so the passthrough was the negative.
+    #[test]
+    fn a_cmyk_jpeg_with_inverted_decode_is_not_passed_through() {
+        let doc = Document::with_version("1.7");
+        let base = dictionary! {
+            "Type" => "XObject", "Subtype" => "Image",
+            "Width" => 1, "Height" => 1, "BitsPerComponent" => 8,
+            "ColorSpace" => "DeviceCMYK",
+            "Filter" => "DCTDecode",
+        };
+        let mut inverted = base.clone();
+        inverted.set("Decode", vec![1.into(), 0.into(), 1.into(), 0.into(), 1.into(), 0.into(), 1.into(), 0.into()]);
+        let out = extract_image(&doc, &Stream::new(inverted, cyan_cmyk_jpeg()), 0xFF00_0000, &HashMap::new())
+            .expect("image must not be dropped");
+        assert_eq!(out.format, 0, "an inverted /Decode must take the Rust decode path");
+        assert_eq!(&out.data[0..3], &[0, 0, 0], "cyan complemented through CMYK is black");
+
+        // Without /Decode the same bytes stay cyan: the fix is scoped to the array.
+        let plain = extract_image(&doc, &Stream::new(base, cyan_cmyk_jpeg()), 0xFF00_0000, &HashMap::new())
+            .expect("image must not be dropped");
+        assert_eq!(&plain.data[0..3], &[0, 255, 255]);
+    }
+
+    /// Finding 3: the short-buffer fallback used to write opaque black, so a
+    /// regression in the `samples.len()` guard would have put a solid black rectangle
+    /// over the page. Uncovered pixels must be fully transparent instead.
+    #[test]
+    fn samples_shorter_than_the_raster_leave_transparent_pixels_not_black_ones() {
+        let doc = Document::with_version("1.7");
+        let dict = dictionary! {
+            "Width" => 2, "Height" => 2, "BitsPerComponent" => 8,
+            "ColorSpace" => "DeviceGray",
+        };
+        // Four pixels' worth of raster, one pixel's worth of samples.
+        let rgba = image_samples_to_rgba(&doc, &dict, &HashMap::new(), &[0x40u8], 2, 2, 1, 8);
+        assert_eq!(rgba.len(), 16);
+        assert_eq!(rgba[3], 255, "the covered pixel is opaque");
+        assert_eq!(&rgba[0..3], &[0x40, 0x40, 0x40]);
+        for i in 1..4 {
+            assert_eq!(
+                &rgba[i * 4..i * 4 + 4], &[0, 0, 0, 0],
+                "pixel {i} has no samples and must be transparent, not opaque black"
+            );
+        }
+    }
+
+    /// And pin the guard that keeps the case above unreachable in the first place: a
+    /// stream that cannot supply even one scanline is a failed decode, not a short
+    /// image, and must be dropped rather than unpacked into noise.
+    #[test]
+    fn a_stream_shorter_than_one_row_is_dropped() {
+        let doc = Document::with_version("1.7");
+        let dict = dictionary! {
+            "Type" => "XObject", "Subtype" => "Image",
+            "Width" => 8, "Height" => 8, "BitsPerComponent" => 8,
+            "ColorSpace" => "DeviceRGB",
+        };
+        // One row needs 8 * 3 = 24 bytes.
+        assert!(
+            extract_image(&doc, &Stream::new(dict.clone(), vec![0u8; 23]), 0xFF00_0000, &HashMap::new()).is_none(),
+            "23 bytes cannot fill a 24-byte row"
+        );
+        let full = extract_image(&doc, &Stream::new(dict, vec![0u8; 24]), 0xFF00_0000, &HashMap::new())
+            .expect("exactly one row is a short image, not a failed decode");
+        assert_eq!((full.w, full.h), (8, 8));
+    }
+}
+
+#[cfg(test)]
+mod pixel_budget_tests {
+    use super::*;
+
+    /// The step is the identity for every image that fits, which is what makes it safe
+    /// to put in the sampling loops. It only grows once `w * h` passes the budget, and
+    /// it is capped so a hostile /Width x /Height cannot spin.
+    #[test]
+    fn decimation_step_is_identity_below_the_budget_and_bounded_above_it() {
+        assert_eq!(decimation_step(0, 0), 1);
+        assert_eq!(decimation_step(1, 1), 1);
+        // 4096 * 4096 = 16 Mpx exactly, which is the budget, not over it.
+        assert_eq!(decimation_step(4096, 4096), 1);
+        assert_eq!(decimation_step(4097, 4096), 2);
+        // A 300 dpi A0 engineering scan: 9933 x 14043 = 139 Mpx.
+        let s = decimation_step(9933, 14043);
+        assert_eq!(s, 3, "139 Mpx needs 3x3 to reach 15.5 Mpx");
+        let (dw, dh) = (9933usize.div_ceil(s), 14043usize.div_ceil(s));
+        assert!(
+            dw * dh <= MAX_IMAGE_PIXELS,
+            "decimated {}x{} = {} must fit the budget",
+            dw, dh, dw * dh
+        );
+        // Never unbounded, and never zero, for the largest raster the dimension cap allows.
+        let worst = decimation_step(MAX_IMAGE_DIM, MAX_IMAGE_DIM);
+        assert!((1..=64).contains(&worst), "step {worst} out of range");
+    }
+
+    /// Decimation must not disturb the overwhelmingly common case. A small CCITT fax
+    /// has step 1, so it has to come out byte-identical to what the pre-decimation code
+    /// produced — same dimensions, same ink in the same places.
+    #[test]
+    fn a_small_ccitt_fax_is_untouched_by_the_decimation_path() {
+        let doc = Document::with_version("1.7");
+        let (data, w) = super::mask_tests::half_black_g4();
+        let d = dictionary! {
+            "Width" => w as i64, "Height" => 2, "BitsPerComponent" => 1,
+            "ColorSpace" => "DeviceGray",
+            "Filter" => "CCITTFaxDecode",
+            "DecodeParms" => dictionary! { "K" => -1, "Columns" => w as i64, "Rows" => 2 },
+        };
+        let img = extract_image(&doc, &Stream::new(d, data), 0xFF00_0000, &HashMap::new())
+            .expect("a small G4 fax must still decode");
+        assert_eq!((img.w, img.h), (8, 2), "step 1 must not resize");
+        // Left half black, right half white, on both rows.
+        for y in 0..2usize {
+            for x in 0..8usize {
+                let px = &img.data[(y * 8 + x) * 4..(y * 8 + x) * 4 + 3];
+                let expected: &[u8] = if x < 4 { &[0, 0, 0] } else { &[255, 255, 255] };
+                assert_eq!(px, expected, "pixel ({x},{y})");
+            }
+        }
+    }
+
+    /// A JPEG that fits the budget must decode at its full size and be unaffected by
+    /// the decimating sampler — same dimensions, same pixel.
+    #[test]
+    fn a_small_jpeg_is_untouched_by_the_decimation_path() {
+        let jpeg = super::dct_decode_tests::cyan_cmyk_jpeg();
+        let (w, h, rgba) = decode_jpeg_rgba_decoded(&jpeg, false).expect("must decode");
+        assert_eq!((w, h), (1, 1), "step 1 must not resize");
+        assert_eq!(&rgba[0..3], &[0, 255, 255]);
+        let (gw, gh, gray) = decode_jpeg_gray(&jpeg).expect("must decode");
+        assert_eq!((gw, gh), (1, 1));
+        assert_eq!(gray.len(), 1);
+    }
+
+    /// END TO END for the paired CCITT fix, which needed BOTH halves to land: the byte
+    /// budget in `filters.rs::decode_ccitt` and the decimation in the CCITT branch here.
+    ///
+    /// The raster is 20000 x 839 = 16.8 Mpx, one pixel-row past `MAX_IMAGE_PIXELS`,
+    /// which is the smallest shape that crosses the old cap without needing an A0's
+    /// worth of memory in a unit test. Before the pair, `decode_ccitt` refused it on a
+    /// pixel budget sized for RGBA and the page rendered NOTHING.
+    #[test]
+    fn a_ccitt_raster_over_the_pixel_budget_renders_decimated_instead_of_vanishing() {
+        const COLS: usize = 20000;
+        const ROWS: usize = 839;
+        assert!(
+            COLS * ROWS > MAX_IMAGE_PIXELS,
+            "fixture must cross the budget: {} vs {}",
+            COLS * ROWS, MAX_IMAGE_PIXELS
+        );
+        // Packed at one bit per pixel this is only ~2.1 MB, which is the whole point.
+        assert!(COLS.div_ceil(8) * ROWS < MAX_UNPACKED_SAMPLE_BYTES);
+
+        // Left 1/4 black so there is unambiguous ink to find after decimation.
+        let row: Vec<bool> = (0..COLS).map(|x| x < COLS / 4).collect();
+        let rows: Vec<Vec<bool>> = vec![row; ROWS];
+        let data = super::mask_tests::g4_encode(&rows, COLS as u32);
+
+        let doc = Document::with_version("1.7");
+        let dict = dictionary! {
+            "Type" => "XObject", "Subtype" => "Image",
+            "Width" => COLS as i64, "Height" => ROWS as i64,
+            "BitsPerComponent" => 1,
+            "ColorSpace" => "DeviceGray",
+            "Filter" => "CCITTFaxDecode",
+            "DecodeParms" => dictionary! { "K" => -1, "Columns" => COLS as i64, "Rows" => ROWS as i64 },
+        };
+        let img = extract_image(&doc, &Stream::new(dict, data), 0xFF00_0000, &HashMap::new())
+            .expect("a large fax must render decimated, not vanish");
+
+        // Decimated by `decimation_step`, then area-downscaled to IMAGE_DOWNSCALE_MAX_DIM
+        // by `extract_image` like every other raster.
+        assert!(img.w > 0 && img.h > 0);
+        assert_eq!(img.format, 0);
+        assert_eq!(img.data.len(), img.w as usize * img.h as usize * 4);
+        assert!(
+            (img.w as usize) * (img.h as usize) <= MAX_IMAGE_PIXELS,
+            "output {}x{} must be inside the budget",
+            img.w, img.h
+        );
+        // Ink on the left quarter, white on the right. Sampled well inside each region so
+        // the downscale's edge blending cannot make this flaky.
+        let px = |x: u32, y: u32| -> &[u8] {
+            let i = (y as usize * img.w as usize + x as usize) * 4;
+            &img.data[i..i + 3]
+        };
+        let mid_y = img.h / 2;
+        assert_eq!(px(img.w / 8, mid_y), &[0, 0, 0], "left quarter is fax ink");
+        assert_eq!(px(img.w * 3 / 4, mid_y), &[255, 255, 255], "right side is page white");
+    }
+}
+
+#[cfg(test)]
+mod indirect_and_adobe_tests {
+    use super::*;
+
+    /// §7.3.10: any dictionary value may be an indirect reference. `num` does not
+    /// follow one, so every numeric read on an image dictionary has to deref first.
+    /// `/Width` and `/Height` are the ones that delete the image outright — they feed a
+    /// `let ... else { return None }`.
+    #[test]
+    fn indirect_width_and_height_still_produce_an_image() {
+        let mut doc = Document::with_version("1.7");
+        let w_ref = doc.add_object(Object::Integer(2));
+        let h_ref = doc.add_object(Object::Integer(2));
+        let dict = dictionary! {
+            "Type" => "XObject", "Subtype" => "Image",
+            "Width" => Object::Reference(w_ref),
+            "Height" => Object::Reference(h_ref),
+            "BitsPerComponent" => 8,
+            "ColorSpace" => "DeviceGray",
+        };
+        let img = extract_image(&doc, &Stream::new(dict, vec![0x20u8; 4]), 0xFF00_0000, &HashMap::new())
+            .expect("an indirect /Width and /Height must not delete the image");
+        assert_eq!((img.w, img.h), (2, 2));
+        assert_eq!(&img.data[0..3], &[0x20, 0x20, 0x20]);
+    }
+
+    /// An indirect `/BitsPerComponent` used to read as the 8 default. At a true 1 bpc
+    /// that makes the computed stride 8x too wide, which trips the one-row guard and
+    /// drops the image.
+    #[test]
+    fn indirect_bits_per_component_is_not_read_as_the_default() {
+        let mut doc = Document::with_version("1.7");
+        let bpc = doc.add_object(Object::Integer(1));
+        let dict = dictionary! {
+            "Type" => "XObject", "Subtype" => "Image",
+            "Width" => 16, "Height" => 2,
+            "BitsPerComponent" => Object::Reference(bpc),
+            "ColorSpace" => "DeviceGray",
+        };
+        // 16 px at 1 bpc is 2 bytes per row, 4 bytes total. Read as 8 bpc the guard
+        // would demand 16 bytes for one row and drop the image.
+        let img = extract_image(&doc, &Stream::new(dict, vec![0b1010_1010u8; 4]), 0xFF00_0000, &HashMap::new())
+            .expect("an indirect /BitsPerComponent must not be read as 8");
+        assert_eq!((img.w, img.h), (16, 2));
+        assert_eq!(&img.data[0..3], &[255, 255, 255], "sample 1 at 1 bpc is white");
+        assert_eq!(&img.data[4..7], &[0, 0, 0], "sample 0 at 1 bpc is black");
+    }
+
+    /// F14: an APP14 "Adobe" segment is written by every Photoshop JPEG export, so
+    /// keying the "the platform cannot decode this" branch on its mere presence sent
+    /// ordinary RGB photographs down the Rust decode path and gave up the passthrough.
+    /// Only YCCK (transform 2) is a transform the platform cannot undo.
+    #[test]
+    fn an_adobe_marked_rgb_jpeg_keeps_the_passthrough() {
+        let doc = Document::with_version("1.7");
+        // Transform 1 = YCbCr, the marker Photoshop writes for an ordinary RGB save.
+        let mut jpeg: Vec<u8> = vec![0xFF, 0xD8];
+        jpeg.extend_from_slice(&[0xFF, 0xEE, 0x00, 0x0E]);
+        jpeg.extend_from_slice(b"Adobe");
+        jpeg.extend_from_slice(&[0x00, 0x64, 0x00, 0x00, 0x00, 0x00, 0x01]);
+        // SOF0 declaring 3 components.
+        jpeg.extend_from_slice(&[0xFF, 0xC0, 0x00, 0x11, 0x08, 0x00, 0x08, 0x00, 0x08, 0x03]);
+        jpeg.extend_from_slice(&[0u8; 9]);
+        jpeg.extend_from_slice(&[0xFF, 0xDA, 0x00, 0x08, 0x01, 0x01, 0x00, 0x00, 0x3F, 0x00]);
+        jpeg.extend_from_slice(&[0xFF, 0xD9]);
+        assert_eq!(jpeg_num_components(&jpeg), Some(3));
+        assert_eq!(jpeg_adobe_transform(&jpeg), Some(1), "Photoshop RGB writes transform 1");
+
+        let dict = dictionary! {
+            "Type" => "XObject", "Subtype" => "Image",
+            "Width" => 8, "Height" => 8, "BitsPerComponent" => 8,
+            "ColorSpace" => "DeviceRGB",
+            "Filter" => "DCTDecode",
+        };
+        let img = extract_image(&doc, &Stream::new(dict, jpeg), 0xFF00_0000, &HashMap::new())
+            .expect("an Adobe-marked RGB JPEG must not be dropped");
+        assert_eq!(
+            img.format, 1,
+            "a 3-component Adobe JPEG belongs on the platform passthrough, not the Rust path"
+        );
+    }
+
+    /// F14, second half: an undecodable JPEG was dropped ONLY when it carried a mask,
+    /// while the identical bytes without one were passed through. The mask arm now
+    /// falls through to the same passthrough — visible but unmasked, matching what
+    /// `decode_mask_stream_gray` already does when it cannot decode a mask.
+    #[test]
+    fn an_undecodable_jpeg_with_an_smask_passes_through_instead_of_vanishing() {
+        let mut doc = Document::with_version("1.7");
+        // Markers only, no entropy data: jpeg-decoder cannot produce pixels from this.
+        let mut jpeg: Vec<u8> = vec![0xFF, 0xD8];
+        jpeg.extend_from_slice(&[0xFF, 0xC0, 0x00, 0x11, 0x08, 0x00, 0x08, 0x00, 0x08, 0x03]);
+        jpeg.extend_from_slice(&[0u8; 9]);
+        jpeg.extend_from_slice(&[0xFF, 0xD9]);
+        assert!(decode_jpeg_rgba_decoded(&jpeg, false).is_none(), "fixture must be undecodable");
+
+        let base = dictionary! {
+            "Type" => "XObject", "Subtype" => "Image",
+            "Width" => 8, "Height" => 8, "BitsPerComponent" => 8,
+            "ColorSpace" => "DeviceRGB",
+            "Filter" => "DCTDecode",
+        };
+        let no_mask = extract_image(&doc, &Stream::new(base.clone(), jpeg.clone()), 0xFF00_0000, &HashMap::new())
+            .expect("without a mask these bytes already passed through");
+        assert_eq!(no_mask.format, 1);
+
+        let smask = doc.add_object(Object::Stream(Stream::new(
+            dictionary! {
+                "Type" => "XObject", "Subtype" => "Image",
+                "Width" => 8, "Height" => 8, "BitsPerComponent" => 8,
+                "ColorSpace" => "DeviceGray",
+            },
+            vec![255u8; 64],
+        )));
+        let mut masked = base;
+        masked.set("SMask", Object::Reference(smask));
+        let with_mask = extract_image(&doc, &Stream::new(masked, jpeg), 0xFF00_0000, &HashMap::new())
+            .expect("carrying an /SMask must not be the reason an image disappears");
+        assert_eq!(
+            with_mask.format, 1,
+            "same bytes, same passthrough — the /SMask is lost, but the image is not"
+        );
     }
 }

@@ -79,6 +79,28 @@ pub(crate) fn patterns_from_resources(doc: &Document, res_dict: &lopdf::Dictiona
     out
 }
 
+/// The `&Object` a resource NAME denotes, whether the entry is an indirect
+/// reference or written directly in the resource dictionary.
+///
+/// §7.3.8.1 requires only STREAMS to be indirect. §8.7.4.2 makes a `/Shading`
+/// resource value "a dictionary or a stream", and ShadingTypes 1-3 are
+/// dictionaries, so they are legally DIRECT; the same holds for a PatternType 2
+/// dictionary (§8.7.3.3 Table 76). [`shadings_from_resources`] and
+/// [`patterns_from_resources`] collect only `as_reference()` entries, so a
+/// direct one misses the map entirely and `/Sh0 sh` paints nothing at all.
+///
+/// Mirrors the shape [`parse_named_cs`] already uses for `/ColorSpace`.
+pub(crate) fn resolve_named_resource<'a>(
+    doc: &'a Document,
+    resources: Option<&'a lopdf::Dictionary>,
+    key: &[u8],
+    name: &[u8],
+) -> Option<&'a Object> {
+    let sub = resources?.get(key).ok().and_then(|o| deref(doc, o))?;
+    let entry = sub.as_dict().ok()?.get(name).ok()?;
+    deref(doc, entry)
+}
+
 // Parse a colorspace object (Name or Array) into CsKind, using resources map for named entries
 /// Depth ceiling for colour-space nesting. §8.6 nests only a handful of levels deep in
 /// practice (Indexed over ICCBased over an /Alternate, say), so this only ever stops a

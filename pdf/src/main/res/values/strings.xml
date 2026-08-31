@@ -90,4 +90,6 @@
     <string name="outline">Outline</string>
     <!-- Button: add signature annotation -->
     <string name="sign">Sign</string>
+    <!-- PDF viewer, shown in place of a page that could not be decoded -->
+    <string name="pdf_page_failed">This page could not be displayed</string>
 </resources>

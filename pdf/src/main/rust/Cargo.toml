@@ -37,6 +37,25 @@ getrandom.workspace = true
 rand.workspace = true
 der.workspace = true
 
+[dev-dependencies]
+# Independent reference renderer for `reference_diff_tests.rs`. TEST-ONLY.
+#
+# Every other test in this crate is self-referential: it asserts the renderer
+# does what this team decided it should do, so a clause misread the same way by
+# the implementer and by the reviewers passes every test. `hayro` is a second,
+# unrelated implementation of the same spec (pure Rust, CPU-only via vello_cpu,
+# `#![forbid(unsafe_code)]`, Apache-2.0 OR MIT — the MIT arm is compatible with
+# this crate's GPL-2.0-only, and a dev-dependency is not distributed anyway).
+#
+# It CANNOT reach the shipped cdylib: cargo only builds dev-dependencies for
+# test/bench/example targets, never for `--lib`. Verified with
+#   cargo tree -p pdf_render --edges normal --target aarch64-linux-android
+# which does not mention hayro. See the module header of
+# `src/reference_diff_tests.rs` for the full argument and the caveat that
+# `hayro-jbig2` is a SHARED component (also a normal dependency above), so JBIG2
+# is deliberately outside the differential corpus.
+hayro = "0.7.1"
+
 [profile.release]
 opt-level = 3
 lto = true

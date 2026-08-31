@@ -1,5 +1,18 @@
 use crate::*;
 
+/// Nesting depth allowed for expanding a Type 3 CharProc.
+///
+/// This shares the interpreter's single `depth` counter with form XObjects, so it
+/// must match the `depth < 10` guard in the `Do` arm ([`MAX_GROUP_DEPTH`]) rather
+/// than [`MAX_PATTERN_RECURSION`]. It was gated on the latter (4), which is the
+/// SOFT-MASK expansion cap and is deliberately low for reasons `interpret.rs`
+/// documents — an unmetered mask branches unbounded. Borrowing it here meant two
+/// subsystems capped the same counter at different depths: an annotation appearance
+/// enters at depth 1, so just three nested form XObjects inside one exhausted the
+/// Type 3 budget and every glyph of the run vanished, unsearchable as well as
+/// unpainted, while a plain form at the same depth carried on to 10.
+const MAX_TYPE3_DEPTH: u32 = MAX_GROUP_DEPTH;
+
 /// Everything on `Prim::Text` is derived from unvalidated file input (`Tf`, `Tz`,
 /// `/Widths`, the CTM), and a non-finite value can survive even validated operands:
 /// `f64 as f32` saturates to infinity above ~3.4e38. It cannot be left to the
@@ -209,13 +222,29 @@ pub(crate) fn show_string_in(
     // must still reach the text index or the document is unsearchable. `argb: 0`
     // here plus the `rm != 3` paint guard in SafePdfViewerScreen.kt keep it unseen.
     let invisible = gs.render_mode == 3;
+    let clip_only = gs.render_mode == 7;
 
     let fi = match fonts.get(&gs.font_key) {
         Some(fi) => fi,
         None => {
             // No font metrics: emit the run at the origin and estimate advance.
             let run_advance = bytes.len() as f64 * 0.5 * tfs * th;
-            if (drawable || invisible) && !bytes.is_empty() {
+            // Mode 7 is included deliberately. §9.3.6 Table 106 separates 4-6 from 7
+            // only by whether ink is laid down; their §9.4.3 clip contribution is
+            // identical, and 4-6 already emit here. Excluding 7 made the operator a
+            // total no-op whenever the font resource was missing, which also broke the
+            // commitment in `hidden_render_mode`: it maps a 4-6 run inside an OFF
+            // optional-content group to 7 precisely so the clip still contributes, and
+            // that clip then disappeared. This gate and the latch must stay IDENTICAL:
+            // `latches_text_clip`'s no-font arm is `!bytes.is_empty()`, the same
+            // condition as here, so every clip it latches has a record to accumulate
+            // from. The latch does NOT follow prim emission — that predicate was
+            // considered and rejected there, and a run whose glyphs all drop still
+            // latches and clips to EMPTY. So narrowing this gate alone would not drop
+            // the clip, it would apply an empty one and blank the rest of the text
+            // object. The outline is a substitute face, so the shape is approximate;
+            // that is the same approximation 4-6 already accept.
+            if (drawable || invisible || clip_only) && !bytes.is_empty() {
                 let (x, y) = transform(&trm, 0.0, gs.rise);
                 let text: String =
                     bytes.iter().filter_map(|&b| char::from_u32(b as u32)).collect();
@@ -224,7 +253,7 @@ pub(crate) fn show_string_in(
                         x: x as f32,
                         y: y as f32,
                         size,
-                        argb: if invisible { 0 } else { apply_alpha_to_argb(gs.fill, gs.alpha_fill) },
+                        argb: if invisible || clip_only { 0 } else { apply_alpha_to_argb(gs.fill, gs.alpha_fill) },
                         text,
                         stroke_argb: None,
                         stroke_width: None,
@@ -255,12 +284,14 @@ pub(crate) fn show_string_in(
     }
 
     let mut pen = 0.0_f64;
-    // Fix high #12: device stroke width should use Trm scale (includes Tm·Tfs·Th), not just CTM
-    let trm = mat_mul(text_matrix, &gs.ctm);
-    let sx_trm = (trm[0] * trm[0] + trm[1] * trm[1]).sqrt();
-    let sy_trm = (trm[2] * trm[2] + trm[3] * trm[3]).sqrt();
-    let avg_trm_scale = (sx_trm + sy_trm) * 0.5;
-    let device_stroke_w = (gs.line_width * avg_trm_scale) as f32;
+    // §8.4.3.2: the line width is a distance in USER space, so the pen is scaled by
+    // the CTM alone. The text matrix and font size scale the GLYPH, not the pen —
+    // §9.3.6 does not override this. Scaling by Trm made a `12 0 0 12 ...` Tm (the
+    // shape cairo emits) paint a 0.5pt pen as 6pt, closing every counter.
+    let ctm = &gs.ctm;
+    let sx_ctm = (ctm[0] * ctm[0] + ctm[1] * ctm[1]).sqrt();
+    let sy_ctm = (ctm[2] * ctm[2] + ctm[3] * ctm[3]).sqrt();
+    let device_stroke_w = (gs.line_width * (sx_ctm + sy_ctm) * 0.5) as f32;
     // Constant per-font attributes hoisted out of the per-glyph closure.
     let bold = fi.style.bold;
     let italic = fi.style.italic;
@@ -328,9 +359,20 @@ pub(crate) fn show_string_in(
                 // `advance > 0f` guard PASSES infinity, so one overflowed glyph
                 // would stretch every remaining glyph's rectangle in the run.
                 let glyph_device_adv = finite_or_zero(glyph_device_adv);
-                // Real embedded outline for pure paint modes (0/1/2). Clip modes
-                // (4-7) keep the substitute-glyph path so Kotlin can build the clip.
-                let outline = if has_program && matches!(gs.render_mode, 0..=2) {
+                // Real embedded outline for every mode that lays down ink: 0-2 and
+                // 4-6. Restricting this to 0-2 meant an embedded font in a clip mode
+                // was PAINTED with a substitute system face — wrong letterforms,
+                // weight and widths — while its own outline sat unused, so the same
+                // font rendered correctly at Tr 0 and wrongly at Tr 4.
+                //
+                // 3 and 7 stay out, and 7 deliberately so: `has_fill` is 0|2|4|6 and
+                // `has_stroke` is 1|2|5|6, so mode 7 is in neither and this branch
+                // would emit no Fill, no Stroke, and a Text record tagged
+                // `outline: true` that the consumer drops before its clip
+                // accumulator — no ink AND no clip, which under an unconditional
+                // §9.4.3 clip is total content loss after every ET. Mode 7 has no
+                // ink to improve, so it keeps the substitute path.
+                let outline = if has_program && matches!(gs.render_mode, 0..=2 | 4..=6) {
                     crate::outlines::glyph_outline(fi, code)
                 } else {
                     None
@@ -384,12 +426,31 @@ pub(crate) fn show_string_in(
                         // Non-painting Text carrying the glyph for selection/search.
                         // Skipped when no Unicode was recoverable — the ink above is
                         // already on the page either way.
+                        //
+                        // The two flags must DISAGREE between the mode groups, and
+                        // they are the same two fields, so this branches rather than
+                        // mirroring modes 0-2:
+                        //   0-2: `outline: true` — the consumer skips the record
+                        //        entirely, which is right, the Fill/Stroke above is
+                        //        the ink and there is no clip to build.
+                        //   4-6: `outline: false` so the record REACHES the clip
+                        //        accumulator (the consumer's `if prim.outline
+                        //        continue` sits above it), and `argb: 0` so it still
+                        //        paints nothing on top of the real contours above.
+                        //        The accumulator keys on render mode and text only —
+                        //        it never reads colour — so transparency costs the
+                        //        clip nothing. Same shape as the Type 3 record.
                         if !s.is_empty() {
+                            let clip_mode = matches!(gs.render_mode, 4..=6);
                             prims.push(Prim::Text {
                                 x: x as f32,
                                 y: y as f32,
                                 size,
-                                argb: apply_alpha_to_argb(gs.fill, fill_alpha),
+                                argb: if clip_mode {
+                                    0
+                                } else {
+                                    apply_alpha_to_argb(gs.fill, fill_alpha)
+                                },
                                 text: s.clone(),
                                 advance: glyph_device_adv.max(size * 0.1),
                                 stroke_argb: None,
@@ -399,7 +460,7 @@ pub(crate) fn show_string_in(
                                 is_bold: bold,
                                 is_italic: italic,
                                 font_family: family,
-                                outline: true,
+                                outline: !clip_mode,
                                 h_scale: wire_h_scale,
                             });
                         }
@@ -527,9 +588,26 @@ fn show_string_type3(
     let tfs = gs.font_size;
     let th = gs.h_scale;
     let drawable = gs.render_mode != 3 && gs.render_mode != 7;
-    // Mode 3 in a Type 3 font is still an OCR layer: skip the CharProc (it would
-    // paint ink) but emit the non-painting Text record so the glyph is selectable.
-    let invisible = gs.render_mode == 3;
+    // Which modes need the non-painting `Prim::Text` record, independently of
+    // whether the CharProc also runs (§9.3.6 Table 106):
+    //   3     — invisible, but a scan's OCR layer: needed for the search index.
+    //   7     — clip only: no ink, but the clip still has to be built.
+    //   4..=6 — paint AND clip: the CharProc supplies the ink, this record is the
+    //           only thing the consumer can accumulate an outline from.
+    // Mode 7 used to match neither branch and emit nothing at all, and 4-6 emitted
+    // the CharProc alone. The consumer accumulates text clips ONLY from Text prims
+    // with render_mode 4..7, so a Type 3 run contributed nothing to the clip in any
+    // mode — art clipped to Type 3 letterforms painted as a full rectangle, and
+    // once an empty accumulation correctly clips to EMPTY (§9.4.3) it would instead
+    // blank the page. `argb: 0` keeps 4-6 from double-painting the CharProc's ink
+    // with substitute-face glyphs; the consumer skips painting 3 and 7 outright.
+    //
+    // The outline the consumer derives is a SUBSTITUTE-face glyph, not the Type 3
+    // procedure, so the clip shape is approximate. That is a known and much smaller
+    // error than clipping to nothing: a Type 3 CharProc is arbitrary drawing
+    // operators, and recovering a true outline from it needs a path-accumulating
+    // interpreter mode that does not exist here.
+    let needs_text_record = gs.render_mode == 3 || (4..=7).contains(&gs.render_mode);
     let trm = mat_mul(text_matrix, &gs.ctm);
     let x_scale = (trm[0] * trm[0] + trm[1] * trm[1]).sqrt();
     let y_scale = (trm[2] * trm[2] + trm[3] * trm[3]).sqrt();
@@ -556,7 +634,7 @@ fn show_string_type3(
         let advance = advance * th;
         if drawable
             && glyphs < MAX_TYPE3_GLYPHS
-            && depth < MAX_PATTERN_RECURSION
+            && depth < MAX_TYPE3_DEPTH
             && prims.len() < MAX_PRIMITIVES
         {
             if let Some(&proc_id) = t3.char_procs.get(&code) {
@@ -694,7 +772,12 @@ fn show_string_type3(
                     }
                 }
             }
-        } else if invisible && prims.len() < MAX_PRIMITIVES {
+        }
+        // Deliberately a separate `if`, not an `else`: modes 4-6 need BOTH the
+        // CharProc's ink and this record. It also now fires for a glyph the caps
+        // above rejected, so a capped Type 3 run stays searchable instead of
+        // vanishing from the index entirely.
+        if needs_text_record && prims.len() < MAX_PRIMITIVES {
             let mut s = String::new();
             fi.push_code(code, &mut s);
             if !s.is_empty() {
@@ -940,7 +1023,195 @@ mod blind_reaudit_r5_text_tests {
         }
     }
 
-    /// §9.3.6 Table 106: mode 3 is "Neither fill nor stroke text (invisible)" and
+    /// §8.4.3.2: `w` is "a nonnegative number expressed in USER SPACE units", and
+    /// stroking paints the points whose perpendicular distance from the path IN USER
+    /// SPACE is at most half of it. So the pen is scaled by the CTM alone; the text
+    /// matrix and font size scale the GLYPH, not the pen, and §9.3.6 grants text no
+    /// exemption. pdf.js, pdfium and MuPDF all do exactly this.
+    ///
+    /// The pen used to be scaled by Trm = Tm·CTM, which on the shape cairo emits by
+    /// default — `0.5 w BT 12 0 0 12 100 700 Tm 2 Tr (Hg) Tj ET` — turned a 0.5pt pen
+    /// into 6.0pt. A 12pt glyph has ~1.2pt stems, so a 6pt pen adds 3pt each side,
+    /// every counter in H/g/e/o closes and the word paints as a solid black slab.
+    ///
+    /// Nothing else in the tree pins this value, so this test is the only thing
+    /// stopping it. Both consumers of the width — `Prim::Stroke.width` on the
+    /// embedded-outline path and `Prim::Text.stroke_width` on the substitute path —
+    /// read the one binding, so the outline path is asserted here as the strict case
+    /// (`Prim::Stroke.width` is additionally floored at 0.1, which 0.5 clears).
+    #[test]
+    fn a_text_pen_is_scaled_by_the_ctm_not_by_the_text_matrix() {
+        let stroke_width = |line_width: f64, ctm: Mat, tm: Mat| -> f32 {
+            let doc = Document::with_version("1.7");
+            let mut fonts = HashMap::new();
+            fonts.insert(b"F1".to_vec(), embedded_box_font(0));
+            let gs = GraphicsState {
+                font_key: b"F1".to_vec(),
+                font_size: 12.0,
+                render_mode: 1, // stroke only, so the outline path emits Prim::Stroke
+                line_width,
+                ctm,
+                ..Default::default()
+            };
+            let mut prims = Vec::new();
+            show_string(&doc, &mut prims, &gs, &fonts, &tm, b"A", 0);
+            prims
+                .iter()
+                .find_map(|p| match p {
+                    Prim::Stroke { width, .. } => Some(*width),
+                    _ => None,
+                })
+                .expect("mode 1 with an embedded program must emit a Prim::Stroke")
+        };
+
+        let identity: Mat = [1.0, 0.0, 0.0, 1.0, 0.0, 0.0];
+        let cairo_tm: Mat = [12.0, 0.0, 0.0, 12.0, 100.0, 700.0];
+
+        // The regression itself: a 12x text matrix must not touch the pen.
+        let w = stroke_width(0.5, identity, cairo_tm);
+        assert!(
+            (w - 0.5).abs() < 1e-5,
+            "Tm [12 0 0 12] with 0.5 w must give a 0.5 pen, got {w} \
+             (the old Trm scaling gave 6.0 — 12x too heavy)"
+        );
+
+        // The second reported shape, 3x too heavy.
+        let w = stroke_width(1.0, identity, [3.0, 0.0, 0.0, 3.0, 0.0, 0.0]);
+        assert!((w - 1.0).abs() < 1e-5, "Tm [3 0 0 3] with 1 w must give 1.0, got {w}");
+
+        // The CTM, and only the CTM, still scales it — a zoomed/scaled page must
+        // not lose its stroke weight, or the fix would just be a different bug.
+        let w = stroke_width(0.5, [4.0, 0.0, 0.0, 4.0, 0.0, 0.0], cairo_tm);
+        assert!((w - 2.0).abs() < 1e-5, "0.5 w under a 4x CTM must give 2.0, got {w}");
+
+        // The case that was already correct and must not regress.
+        let w = stroke_width(2.0, identity, [1.0, 0.0, 0.0, 1.0, 100.0, 700.0]);
+        assert!((w - 2.0).abs() < 1e-5, "identity Tm and CTM must give line_width, got {w}");
+    }
+
+    /// A non-empty string can show ZERO glyphs, so "the string was non-empty" is not
+    /// a safe stand-in for "a glyph was shown".
+    ///
+    /// `fonts.rs`'s Identity-H/V branch is `while i + 1 < bytes.len()`, so a 2-byte
+    /// font consumes codes in pairs and an ODD-length string drops its final byte —
+    /// a 1-byte string yields no codes at all and emits nothing.
+    ///
+    /// This matters beyond this file. `interpret.rs::latches_text_clip` latches the
+    /// §9.4.3 text clip on `shown_mode >= 4 && !bytes.is_empty()`. On this input that
+    /// latches a clip for a run that produced no glyph outline, so `ET` emits the
+    /// marker, the consumer's accumulation is empty, and an empty accumulation clips
+    /// to NOTHING — blanking every following prim up to the matching pop. The
+    /// predicate needs "a glyph was actually iterated", which is knowable only here
+    /// and not from the byte string at the show site.
+    ///
+    /// The sibling branch differs: the non-Identity CMap path advances by
+    /// `min(bytes.len() - i, ..)` and so DOES yield a code for a 1-byte remainder.
+    /// The defect is specific to Identity-H/V, which is why reading the show sites
+    /// alone cannot reveal it.
+    #[test]
+    fn an_odd_length_identity_h_string_shows_no_glyph_despite_non_empty_bytes() {
+        let identity_h = || {
+            let mut fi = embedded_box_font(0);
+            fi.two_byte = true;
+            fi.cmap = None; // Identity-H: fixed 2-byte codes
+            fi.glyph_program = None; // substitute path, so `s` alone decides emission
+            fi
+        };
+        let run = |bytes: &[u8]| -> usize {
+            let doc = Document::with_version("1.7");
+            let mut fonts = HashMap::new();
+            fonts.insert(b"F1".to_vec(), identity_h());
+            // Mode 7: clip-only, which is where the latch mistake becomes destructive.
+            let gs = GraphicsState {
+                font_key: b"F1".to_vec(),
+                font_size: 12.0,
+                render_mode: 7,
+                ..Default::default()
+            };
+            let mut prims = Vec::new();
+            show_string(&doc, &mut prims, &gs, &fonts, &IDENTITY, bytes, 0);
+            prims.len()
+        };
+
+        // Precondition: a complete 2-byte code does show a glyph, so the assertion
+        // below measures the odd length rather than a broken fixture.
+        assert!(run(&[0x00, 0x41]) > 0, "precondition: a complete 2-byte code must show a glyph");
+
+        assert_eq!(
+            run(&[0x41]),
+            0,
+            "a 1-byte string in an Identity-H font is non-empty yet shows no glyph; \
+             latches_text_clip's `!bytes.is_empty()` therefore latches a clip with no \
+             outline behind it, which clips the following content to nothing"
+        );
+    }
+
+    /// C4: an embedded font in a clip mode must paint from its OWN outline.
+    ///
+    /// The outline was gated on modes 0..=2, so an embedded font in Tr 4/5/6 fell to
+    /// the substitute branch and was painted with a system face — wrong letterforms,
+    /// weight and intra-glyph widths — while its real outline sat unused. The same
+    /// font rendered correctly at Tr 0 and wrongly at Tr 4.
+    ///
+    /// This pins the two traps that make the obvious one-line version wrong:
+    ///   - mode 7 must STAY on the substitute path. It is in neither `has_fill` nor
+    ///     `has_stroke`, so the outline branch would emit no ink at all, and tag its
+    ///     record `outline: true`, which the consumer drops before the clip
+    ///     accumulator — no ink and no clip, i.e. total loss after every ET.
+    ///   - the 4-6 record must be `outline: false` (so it reaches the accumulator)
+    ///     AND `argb: 0` (so it does not paint over the contours). Those two flags
+    ///     have to disagree with what modes 0-2 set.
+    #[test]
+    fn an_embedded_font_paints_its_own_outline_in_clip_modes() {
+        let ink = |ps: &[Prim]| ps.iter().filter(|p| matches!(p, Prim::Fill { .. } | Prim::Stroke { .. })).count();
+        let text_rec = |ps: &[Prim]| -> Option<(u8, u32, bool)> {
+            ps.iter().find_map(|p| match p {
+                Prim::Text { render_mode, argb, outline, .. } => Some((*render_mode, *argb, *outline)),
+                _ => None,
+            })
+        };
+
+        // Modes 0-2 keep their existing contract: real ink, record flagged as
+        // already-drawn so the consumer ignores it.
+        let prims = show(embedded_box_font(0), state(0));
+        assert!(ink(&prims) > 0, "mode 0 must paint the embedded outline");
+        assert_eq!(
+            text_rec(&prims).map(|t| t.2),
+            Some(true),
+            "mode 0's record must stay outline:true — it is not a clip contribution"
+        );
+
+        // Modes 4-6: real ink AND a record the accumulator can use.
+        for rm in [4i64, 5, 6] {
+            let prims = show(embedded_box_font(0), state(rm));
+            assert!(
+                ink(&prims) > 0,
+                "mode {rm} must paint from the EMBEDDED outline, not a substitute face"
+            );
+            let (got_rm, argb, outline) =
+                text_rec(&prims).expect("mode {rm} must still emit a clip record");
+            assert_eq!(got_rm, rm as u8);
+            assert!(
+                !outline,
+                "mode {rm} record must be outline:false or the consumer drops it \
+                 before the clip accumulator — that is total content loss, not a \
+                 fidelity bug"
+            );
+            assert_eq!(
+                argb, 0,
+                "mode {rm} record must be transparent so it does not paint a \
+                 substitute face on top of the real contours"
+            );
+        }
+
+        // Mode 7 stays on the substitute path: no ink, and a usable clip record.
+        let prims = show(embedded_box_font(0), state(7));
+        assert_eq!(ink(&prims), 0, "mode 7 is clip-only and must lay down no ink");
+        let (got_rm, argb, outline) =
+            text_rec(&prims).expect("mode 7 must still emit a clip record");
+        assert_eq!((got_rm, argb, outline), (7u8, 0u32, false));
+    }
+
     /// mode 7 is "Add to path for clipping" — neither marks the page. Mode 3 is how
     /// every scanned document carries its OCR layer, so if it paints, the scan is
     /// overprinted with a second copy of its own text.
@@ -1173,9 +1444,181 @@ mod blind_reaudit_r5_text_tests {
 
 #[cfg(test)]
 mod type3_cap_tests {
+    use super::MAX_TYPE3_DEPTH;
     use crate::*;
     use lopdf::content::{Content, Operation};
     use lopdf::{dictionary, Stream};
+
+    /// The clip record must survive the recursion/glyph caps.
+    ///
+    /// A capped glyph takes the `drawable` branch and is then skipped, so when the
+    /// record was emitted in an `else` on `drawable` it was lost: the run vanished
+    /// from the search index AND contributed nothing to the text clip, which under
+    /// an unconditional §9.4.3 clip means a capped Type 3 run blanks the page rather
+    /// than merely losing its glyphs. Asserted with `depth == MAX_TYPE3_DEPTH`
+    /// because that is the cheapest cap to reach deterministically; the glyph and
+    /// primitive caps share the same `if`.
+    #[test]
+    fn a_capped_type3_glyph_still_emits_its_clip_record() {
+        let build = |render_mode: i64, depth: u32| -> Vec<Prim> {
+            let mut doc = Document::with_version("1.7");
+            let proc_id = doc.add_object(Stream::new(
+                dictionary! {},
+                Content { operations: vec![
+                    // §9.6.5 makes d0/d1 mandatory as the CharProc's first operator,
+                    // so a fixture without one is not a shape the renderer ever sees.
+                    Operation::new("d0", vec![1000.into(), 0.into()]),
+                    Operation::new("re", vec![0.into(), 0.into(), 750.into(), 750.into()]),
+                    Operation::new("f", vec![]),
+                ]}.encode().unwrap(),
+            ));
+            let font = dictionary! {
+                "Type" => "Font", "Subtype" => "Type3",
+                "FontMatrix" => vec![0.001.into(), 0.into(), 0.into(), 0.001.into(), 0.into(), 0.into()],
+                "FontBBox" => vec![0.into(), 0.into(), 750.into(), 750.into()],
+                "CharProcs" => doc.add_object(dictionary! { "a" => proc_id }),
+                "Encoding" => doc.add_object(dictionary! {
+                    "Type" => "Encoding", "Differences" => vec![97.into(), "a".into()],
+                }),
+                "FirstChar" => 97, "LastChar" => 97, "Widths" => vec![1000.into()],
+            };
+            let mut fonts = HashMap::new();
+            fonts.insert(b"F1".to_vec(), font_info(&doc, &font));
+            let gs = GraphicsState {
+                font_key: b"F1".to_vec(),
+                font_size: 100.0,
+                render_mode,
+                ..Default::default()
+            };
+            let mut prims = Vec::new();
+            show_string(&doc, &mut prims, &gs, &fonts, &IDENTITY, b"a", depth);
+            prims
+        };
+
+        // Precondition: under the cap this glyph really does paint, so the capped
+        // comparison below is measuring the cap and not a broken fixture.
+        assert!(
+            build(4, 0).iter().any(|p| matches!(p, Prim::Fill { .. })),
+            "precondition: an uncapped mode-4 glyph must paint its CharProc"
+        );
+
+        for rm in [4u8, 5, 6, 7] {
+            let prims = build(rm as i64, MAX_TYPE3_DEPTH);
+            assert!(
+                !prims.iter().any(|p| matches!(p, Prim::Fill { .. } | Prim::Stroke { .. })),
+                "precondition: the cap must actually suppress the CharProc for mode {rm}"
+            );
+            let texts: Vec<_> = prims
+                .iter()
+                .filter_map(|p| match p {
+                    Prim::Text { render_mode, .. } => Some(*render_mode),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(
+                texts,
+                vec![rm],
+                "a capped mode-{rm} Type 3 glyph must STILL emit its clip record — \
+                 dropping it makes an unconditional text clip blank the page"
+            );
+        }
+    }
+
+    /// §9.3.6 Table 106 + §9.4.3: every clip mode (4, 5, 6, 7) must put something on
+    /// the wire that the consumer can accumulate into the text clip, and §9.6.5
+    /// grants Type 3 no exemption.
+    ///
+    /// The consumer builds text clips ONLY from `Prim::Text` with `render_mode`
+    /// 4..=7. A Type 3 run emitted its CharProc's own Fill/Stroke prims, which carry
+    /// no glyph outline, and mode 7 emitted nothing whatsoever — so a Type 3 run
+    /// contributed nothing to the clip in ANY mode. While an empty accumulation
+    /// installed no clip that merely painted art unclipped; once an empty
+    /// accumulation correctly clips to EMPTY it blanks the page instead, so this is
+    /// what keeps mode 4-6 Type 3 content from disappearing.
+    ///
+    /// Modes 4-6 must ALSO still emit the CharProc's ink, and must not paint the
+    /// substitute glyph on top of it — hence `argb == 0` on the record.
+    #[test]
+    fn type3_clip_modes_all_emit_an_accumulable_text_record() {
+        let build = |render_mode: i64| -> Vec<Prim> {
+            let mut doc = Document::with_version("1.7");
+            let proc_id = doc.add_object(Stream::new(
+                dictionary! {},
+                Content { operations: vec![
+                    // §9.6.5 makes d0/d1 mandatory as the CharProc's first operator,
+                    // so a fixture without one is not a shape the renderer ever sees.
+                    Operation::new("d0", vec![1000.into(), 0.into()]),
+                    Operation::new("re", vec![0.into(), 0.into(), 750.into(), 750.into()]),
+                    Operation::new("f", vec![]),
+                ]}.encode().unwrap(),
+            ));
+            let font = dictionary! {
+                "Type" => "Font", "Subtype" => "Type3",
+                "FontMatrix" => vec![0.001.into(), 0.into(), 0.into(), 0.001.into(), 0.into(), 0.into()],
+                "FontBBox" => vec![0.into(), 0.into(), 750.into(), 750.into()],
+                "CharProcs" => doc.add_object(dictionary! { "a" => proc_id }),
+                "Encoding" => doc.add_object(dictionary! {
+                    "Type" => "Encoding", "Differences" => vec![97.into(), "a".into()],
+                }),
+                "FirstChar" => 97, "LastChar" => 97, "Widths" => vec![1000.into()],
+            };
+            let mut fonts = HashMap::new();
+            fonts.insert(b"F1".to_vec(), font_info(&doc, &font));
+            let gs = GraphicsState {
+                font_key: b"F1".to_vec(),
+                font_size: 100.0,
+                render_mode,
+                ..Default::default()
+            };
+            let mut prims = Vec::new();
+            show_string(&doc, &mut prims, &gs, &fonts, &IDENTITY, b"a", 0);
+            prims
+        };
+
+        // Control: a pure paint mode must emit the CharProc's ink and NO clip record.
+        let prims = build(0);
+        assert!(
+            prims.iter().any(|p| matches!(p, Prim::Fill { .. })),
+            "precondition: mode 0 must paint the CharProc, or this test proves nothing"
+        );
+        assert!(
+            !prims.iter().any(|p| matches!(p, Prim::Text { .. })),
+            "mode 0 needs no clip record"
+        );
+
+        for rm in [4u8, 5, 6, 7] {
+            let prims = build(rm as i64);
+            let texts: Vec<_> = prims
+                .iter()
+                .filter_map(|p| match p {
+                    Prim::Text { render_mode, argb, .. } => Some((*render_mode, *argb)),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(
+                texts.len(),
+                1,
+                "mode {rm} must emit exactly one accumulable Text record, got {texts:?}"
+            );
+            assert_eq!(texts[0].0, rm, "the record must carry its real render mode");
+            assert_eq!(
+                texts[0].1, 0,
+                "mode {rm} clip record must be transparent — the CharProc already \
+                 supplies the ink, and painting the substitute glyph would double it"
+            );
+
+            // 4-6 paint as well as clip; 7 is clip-only and must lay down no ink.
+            let ink = prims
+                .iter()
+                .filter(|p| matches!(p, Prim::Fill { .. } | Prim::Stroke { .. }))
+                .count();
+            if rm == 7 {
+                assert_eq!(ink, 0, "mode 7 is clip-only and must paint nothing");
+            } else {
+                assert!(ink > 0, "mode {rm} must still paint the CharProc's ink");
+            }
+        }
+    }
 
     /// §9.6.5 + §11.6.5.1: when the per-glyph primitive bound falls inside a
     /// soft-mask bracket, the glyph must keep painting AND keep its real mask.

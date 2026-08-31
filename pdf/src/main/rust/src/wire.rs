@@ -545,17 +545,8 @@ mod tests {
     /// across the language boundary against the real file.
     #[test]
     fn wire_version_is_not_ahead_of_the_kotlin_parser() {
-        let path = concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/../java/com/vayunmathur/pdf/util/SafePdfParser.kt"
-        );
-        let src = std::fs::read_to_string(path)
-            .unwrap_or_else(|e| panic!("cannot read the wire format's only consumer {path}: {e}"));
-        let decl = |prefix: &str| -> String {
-            src.lines()
-                .find_map(|l| l.trim().strip_prefix(prefix).map(|v| v.to_string()))
-                .unwrap_or_else(|| panic!("SafePdfParser.kt must declare `{prefix}<value>`"))
-        };
+        let src = kotlin_parser_src();
+        let decl = |prefix: &str| kotlin_decl(&src, prefix);
         let kotlin_version: u32 = decl("const val WIRE_VERSION: Int = ")
             .split_whitespace()
             .next()
@@ -575,6 +566,70 @@ mod tests {
         assert_eq!(
             WIRE_MAGIC, kotlin_magic,
             "the magic disagrees, so the parser takes every buffer for a headerless v1 one"
+        );
+    }
+
+    /// The wire format's only consumer, read from source so an assertion can be made
+    /// across the language boundary against the real file rather than a transcription.
+    fn kotlin_parser_src() -> String {
+        let path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../java/com/vayunmathur/pdf/util/SafePdfParser.kt"
+        );
+        std::fs::read_to_string(path)
+            .unwrap_or_else(|e| panic!("cannot read the wire format's only consumer {path}: {e}"))
+    }
+
+    /// The text following `prefix` on the first line that starts with it.
+    fn kotlin_decl(src: &str, prefix: &str) -> String {
+        src.lines()
+            .find_map(|l| l.trim().strip_prefix(prefix).map(|v| v.to_string()))
+            .unwrap_or_else(|| panic!("SafePdfParser.kt must declare `{prefix}<value>`"))
+    }
+
+    /// The image budgets are declared TWICE, once per language, and nothing tied them
+    /// together. Rust decimates an oversized image down to its own bound; Kotlin drops
+    /// anything above its own. So the invariant is directional — the consumer's ceiling
+    /// must be at or above the producer's — and it is asymmetric in consequence:
+    ///
+    ///   kotlin >= rust  the image Rust decimated fits, and is drawn. Correct.
+    ///   kotlin <  rust  Rust decimates to ITS bound, hands over an image that clears
+    ///                   every Rust guard, and the parser silently drops the primitive.
+    ///                   No bitmap, no warning on either side, nothing in logcat.
+    ///
+    /// That second row is exactly the defect that made every JPEG over 16 Mpx — an
+    /// ordinary phone photo — render as nothing, and the whole-image loss the CCITT
+    /// budget fix in `filters.rs` and the codec decimation in `images.rs` were landed to
+    /// stop. All three are undone by one side moving.
+    ///
+    /// Asserted as an INEQUALITY, deliberately, not equality: a Kotlin ceiling above
+    /// Rust's is strictly safe, and failing the build on a strictly-safer configuration
+    /// would train the next person to widen the assertion rather than think about it.
+    #[test]
+    fn the_kotlin_image_budgets_are_not_below_the_rust_ones() {
+        let src = kotlin_parser_src();
+        let int_after = |prefix: &str| -> u64 {
+            kotlin_decl(&src, prefix)
+                .split_whitespace()
+                .next()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or_else(|| panic!("`{prefix}` must be followed by a bare integer literal"))
+        };
+        let kotlin_pixels = int_after("private const val MAX_IMAGE_PIXELS: Long = ");
+        let kotlin_dim = int_after("private const val MAX_IMAGE_DIM: Int = ");
+        assert!(
+            kotlin_pixels >= crate::MAX_IMAGE_PIXELS as u64,
+            "SafePdfParser.kt caps images at {kotlin_pixels} pixels but images.rs decimates \
+             only to {}, so every image between the two is produced, passes every Rust \
+             guard, and is then dropped by the parser with no diagnostic on either side. \
+             Raise the Kotlin constant, or lower MAX_IMAGE_PIXELS in graphics_state.rs.",
+            crate::MAX_IMAGE_PIXELS
+        );
+        assert!(
+            kotlin_dim >= crate::MAX_IMAGE_DIM as u64,
+            "SafePdfParser.kt refuses images wider or taller than {kotlin_dim} but images.rs \
+             admits up to {}, so an image between the two is emitted and silently dropped.",
+            crate::MAX_IMAGE_DIM
         );
     }
 

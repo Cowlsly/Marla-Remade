@@ -335,14 +335,21 @@ class DrawSafePageTest {
      * `TextClipApply` always saves, because Rust incremented its clip depth and will send the
      * matching `ClipPop`. Skipping the save when no glyphs were accumulated would leave that pop
      * to release an enclosing clip early.
+     *
+     * It must also always CLIP. §9.4.3 combines the accumulated outlines with the current clip
+     * by INTERSECTION, and an empty accumulation intersects to empty rather than to absent, so
+     * a run that accumulated nothing narrows the clip to nothing. Saving and clipping to empty
+     * are both satisfiable at once; treating "no outlines" as "no clip" is the one direction
+     * that adds ink, and paints the following content over the whole page.
      */
     @Test
-    fun textClipApplyAlwaysOpensALevelEvenWithNoAccumulatedGlyphs() {
+    fun textClipApplyWithNoAccumulatedGlyphsOpensALevelAndClipsToNothing() {
         val spy = render(
             PdfPrimitive.TextClipApply,
             PdfPrimitive.ClipPop,
         )
         assertEquals(1, spy.saves)
+        assertEquals(1, spy.clipPaths, "an empty text clip must still narrow to nothing")
         assertEquals(0, spy.depth)
     }
 

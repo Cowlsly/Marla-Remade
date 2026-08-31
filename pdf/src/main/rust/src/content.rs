@@ -177,14 +177,65 @@ fn nesting_is_too_deep(data: &[u8], max: u32) -> bool {
 
 /// Strict parse first, lenient tokenizer only if that fails, yields nothing, or is
 /// unsafe to attempt at all.
-fn strict_operations(bytes: &[u8]) -> Option<Vec<Operation>> {
+pub(crate) fn strict_operations(bytes: &[u8]) -> Option<Vec<Operation>> {
     if nesting_is_too_deep(bytes, MAX_DEPTH) {
         return None;
     }
     match Content::decode(bytes) {
-        Ok(content) if !content.operations.is_empty() => Some(content.operations),
+        Ok(content) if !content.operations.is_empty() => Some(repair_d0_d1(content.operations)),
         _ => None,
     }
+}
+
+/// Undo lopdf 0.36's mis-tokenisation of `d0`/`d1` (§9.6.5, Table 113).
+///
+/// lopdf ends an operator token at the first digit, so `700 0 d0` decodes as the
+/// DASH operator `d` with operands `[700, 0]` and the orphaned `0` becomes the
+/// FIRST OPERAND OF THE NEXT OPERATION. §9.6.5 requires every Type 3 glyph
+/// description to begin with `d0` or `d1`, so untreated this corrupts the first
+/// painting operator of every conforming Type 3 glyph — `re` arrives with five
+/// operands and is dropped, `m` starts the subpath at the wrong point.
+///
+/// A conforming `d` takes an ARRAY then a number (§8.4.3.6, Table 52), so a `d`
+/// whose operands are ALL NUMERIC cannot be a dash and is unambiguously the
+/// mangled form: two operands mean `d0` (`wx wy`), six mean `d1`
+/// (`wx wy llx lly urx ury`).
+///
+/// The rename happens only AFTER the leaked digit is confirmed to be sitting
+/// there as the next operation's first operand, so a genuinely malformed `d` in
+/// a real dash context is left alone. A `d0`/`d1` that is the final operator of
+/// a stream — the shape of every blank glyph, `wx 0 d0` and nothing else —
+/// leaves no next operation and so no digit to confirm, and is renamed on the
+/// strength of the operand signature alone.
+///
+/// The lenient tokenizer needs no equivalent: its [`OPERATORS`] table lists
+/// `d0`/`d1` and matches the whole token.
+fn repair_d0_d1(mut ops: Vec<Operation>) -> Vec<Operation> {
+    for i in 0..ops.len() {
+        let mangled = ops[i].operator == "d"
+            && matches!(ops[i].operands.len(), 2 | 6)
+            && ops[i]
+                .operands
+                .iter()
+                .all(|o| matches!(o, Object::Integer(_) | Object::Real(_)));
+        if !mangled {
+            continue;
+        }
+        let is_d1 = ops[i].operands.len() == 6;
+        if let Some(next) = ops.get_mut(i + 1) {
+            let leaked = match next.operands.first() {
+                Some(Object::Integer(v)) => *v == i64::from(is_d1),
+                Some(Object::Real(v)) => *v == f32::from(u8::from(is_d1)),
+                _ => false,
+            };
+            if !leaked {
+                continue;
+            }
+            let _ = next.operands.remove(0);
+        }
+        ops[i].operator = if is_d1 { "d1" } else { "d0" }.to_string();
+    }
+    ops
 }
 
 /// Operations for a page's content, preferring lopdf's strict parser and falling
@@ -1038,6 +1089,17 @@ mod tests {
         ops.iter().map(|o| o.operator.clone()).collect()
     }
 
+    fn num_operands(op: &Operation) -> Vec<f64> {
+        op.operands
+            .iter()
+            .filter_map(|o| match o {
+                Object::Integer(i) => Some(*i as f64),
+                Object::Real(r) => Some(*r as f64),
+                _ => None,
+            })
+            .collect()
+    }
+
     /// Raw data of every recovered inline image, in order.
     fn inline_data(ops: &[Operation]) -> Vec<Vec<u8>> {
         ops.iter()
@@ -1432,6 +1494,72 @@ mod tests {
         let (ops, recovered) = page_operations(&doc, page_id);
         assert!(!recovered, "the strict parser's result must be preferred");
         assert_eq!(operators(&ops), operators(&strict));
+    }
+
+    /// §9.6.5: every Type 3 glyph description begins with `d0`/`d1`, and lopdf
+    /// 0.36 ends an operator token at the first digit — so without
+    /// [`repair_d0_d1`] the glyph's first painting operator is corrupted.
+    #[test]
+    fn strict_operations_repairs_lopdf_mistokenised_d0_and_d1() {
+        // Precondition: lopdf really does mangle these, so this is not a test
+        // that would pass anyway.
+        let raw = Content::decode(b"700 0 d0\n50 0 600 600 re\nf").expect("decode").operations;
+        assert_eq!(raw[0].operator, "d", "precondition: lopdf produces the dash operator");
+        assert_eq!(raw[1].operands.len(), 5, "precondition: the digit leaks into `re`");
+
+        let ops = strict_operations(b"700 0 d0\n50 0 600 600 re\nf").expect("strict");
+        assert_eq!(operators(&ops), vec!["d0", "re", "f"]);
+        assert_eq!(ops[0].operands.len(), 2);
+        assert_eq!(ops[1].operands.len(), 4, "`re` must get exactly its four operands");
+
+        let ops = strict_operations(b"0 0 0 0 750 750 d1\n30 0 m\n370 0 l\nh\nf").expect("strict");
+        assert_eq!(operators(&ops), vec!["d1", "m", "l", "h", "f"]);
+        assert_eq!(ops[0].operands.len(), 6);
+        assert_eq!(ops[1].operands.len(), 2, "`m` must start the subpath at (30, 0)");
+        assert_eq!(num_operands(&ops[1]), vec![30.0, 0.0]);
+    }
+
+    /// The blank-glyph shape — `wx 0 d0` and nothing after it — leaves no next
+    /// operation to carry the leaked digit.
+    #[test]
+    fn strict_operations_repairs_d0_as_the_final_operator() {
+        let ops = strict_operations(b"600 0 d0\n").expect("strict");
+        assert_eq!(operators(&ops), vec!["d0"]);
+        assert_eq!(num_operands(&ops[0]), vec![600.0, 0.0]);
+    }
+
+    /// §8.4.3.6 Table 52: a conforming `d` takes an ARRAY then a number, so the
+    /// repair must never touch one — including the empty-array "solid" form,
+    /// which has the same operand COUNT as a mangled `d0`.
+    #[test]
+    fn strict_operations_leaves_a_real_dash_operator_alone() {
+        for src in [
+            &b"[3 3] 0 d\n0 0 m\n"[..],
+            &b"[] 0 d\n0 0 m\n"[..],
+            &b"[2 2] 0 d\n"[..],
+        ] {
+            let ops = strict_operations(src).expect("strict");
+            assert_eq!(ops[0].operator, "d", "rewrote a conforming dash in {src:?}");
+            if let Some(next) = ops.get(1) {
+                assert_eq!(next.operands.len(), 2, "ate an operand of the next op in {src:?}");
+            }
+        }
+    }
+
+    /// The precondition that keeps a genuinely malformed `d` intact: the leaked
+    /// digit must actually be sitting there as the next operation's first
+    /// operand. `3 3 d` is not a legal dash, but nothing follows it that looks
+    /// like the split-off `0`, so it stays a `d`.
+    #[test]
+    fn strict_operations_requires_the_leaked_digit_before_rewriting() {
+        let ops = strict_operations(b"3 3 d\n5 7 m\n").expect("strict");
+        assert_eq!(ops[0].operator, "d", "rewrote a `d` with no leaked digit after it");
+        assert_eq!(num_operands(&ops[1]), vec![5.0, 7.0]);
+
+        // Six numeric operands, but the next op does not begin with `1`.
+        let ops = strict_operations(b"0 0 0 0 750 750 d\n5 7 m\n").expect("strict");
+        assert_eq!(ops[0].operator, "d");
+        assert_eq!(num_operands(&ops[1]), vec![5.0, 7.0]);
     }
 
     #[test]

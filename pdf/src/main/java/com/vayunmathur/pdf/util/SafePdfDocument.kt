@@ -64,26 +64,47 @@ class SafePdfDocument private constructor(
         return bytes
     }
 
+    /**
+     * Outcome of decoding one page. The viewer needs to tell "not decoded yet" apart from
+     * "decode failed permanently": both used to surface as a null page, so a caught Rust panic,
+     * a null JNI return and a wire parse failure all rendered as the same indefinite spinner and
+     * the whole class of missing-content bugs was invisible in the field.
+     */
+    sealed interface PageLoad {
+        data class Decoded(val page: SafePdfPage) : PageLoad
+        /** [reason] is a log/diagnostic string, not user-facing copy. */
+        data class Failed(val reason: String) : PageLoad
+    }
+
     /** Decode page [index] (0-based), or `null` if the native render fails. */
-    suspend fun renderPage(index: Int): SafePdfPage? = withContext(Dispatchers.IO) {
-        synchronized(cache) { cache[index] }?.let { return@withContext it }
+    suspend fun renderPage(index: Int): SafePdfPage? =
+        (renderPageResult(index) as? PageLoad.Decoded)?.page
+
+    /** As [renderPage], but reports WHY a page is absent so the UI can say so. */
+    suspend fun renderPageResult(index: Int): PageLoad = withContext(Dispatchers.IO) {
+        synchronized(cache) { cache[index] }?.let { return@withContext PageLoad.Decoded(it) }
         // A single unrenderable page must not take down the viewer: the native
         // side throws a RuntimeException on an uncaught panic (see the
         // catch_unwind boundary in jni_bindings.rs), and a corrupt wire buffer
-        // could throw during parse. Degrade either to a skipped (null) page.
-        val bytes = runCatching { PdfNative.renderPage(handle, index) }
+        // could throw during parse. Degrade either to a failed page.
+        val rendered = runCatching { PdfNative.renderPage(handle, index) }
             .onFailure { android.util.Log.w(TAG, "native renderPage threw for page $index", it) }
-            .getOrNull()
+        rendered.exceptionOrNull()?.let {
+            return@withContext PageLoad.Failed("native renderer failed: ${it.javaClass.simpleName}")
+        }
+        val bytes = rendered.getOrNull()
         if (bytes == null) {
             android.util.Log.w(TAG, "native renderPage returned no data for page $index")
-            return@withContext null
+            return@withContext PageLoad.Failed("native renderer returned no data")
         }
-        val page = runCatching { SafePdfParser.parse(bytes) }
+        val parsed = runCatching { SafePdfParser.parse(bytes) }
             .onFailure {
                 android.util.Log.w(TAG, "wire parse failed for page $index (${bytes.size} bytes)", it)
             }
-            .getOrNull()
-            ?: return@withContext null
+        val page = parsed.getOrNull()
+            ?: return@withContext PageLoad.Failed(
+                "wire parse failed: ${parsed.exceptionOrNull()?.javaClass?.simpleName}"
+            )
         pageSizes[index] = floatArrayOf(page.width, page.height)
         synchronized(cache) {
             cachedBytes += pageWeightBytes(page)
@@ -102,7 +123,7 @@ class SafePdfDocument private constructor(
                 cachedBytes = (cachedBytes - pageWeightBytes(displaced)).coerceAtLeast(0L)
             }
         }
-        page
+        PageLoad.Decoded(page)
     }
 
     /**
