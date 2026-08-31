@@ -600,6 +600,14 @@ mod tests {
         // the trailing period and language tag that `to_ids` is responsible for.
         let raw = "\u{201C}Ready?\u{201D} she asked \u{2014} e.g., [softly] \u{1F600} me@here";
         assert_eq!(normalise(raw), "\"Ready?\" she asked - for example, softly me at here");
+
+        // Both abbreviations in one sentence, each followed by ordinary words.
+        let two = "\u{201C}Ready?\u{201D} she asked \u{2014} e.g., the meeting\u{2019}s at three, \
+                   i.e., after lunch";
+        assert_eq!(
+            normalise(two),
+            "\"Ready?\" she asked - for example, the meeting's at three, that is, after lunch"
+        );
     }
 
     #[test]
