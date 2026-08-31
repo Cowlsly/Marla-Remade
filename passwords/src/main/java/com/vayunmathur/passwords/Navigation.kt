@@ -2,6 +2,7 @@ package com.vayunmathur.passwords
 
 import androidx.compose.runtime.Composable
 import com.vayunmathur.library.util.ListDetailPage
+import com.vayunmathur.library.util.MorphPage
 import com.vayunmathur.library.util.ListPage
 import com.vayunmathur.library.util.MainNavigation
 import com.vayunmathur.library.util.openSettingsIfRequested
@@ -25,7 +26,7 @@ fun Navigation(
         entry<Route.Menu>(metadata = ListPage()) {
             MenuPage(backStack, passwordsViewModel)
         }
-        entry<Route.PasswordPage>(metadata = ListDetailPage()) {
+        entry<Route.PasswordPage>(metadata = ListDetailPage() + MorphPage()) {
             PasswordPage(backStack, it.id, passwordsViewModel)
         }
         entry<Route.PasswordEditPage>(metadata = ListDetailPage()) {

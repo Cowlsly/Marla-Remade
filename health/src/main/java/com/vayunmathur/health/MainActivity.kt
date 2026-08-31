@@ -49,6 +49,7 @@ import androidx.health.connect.client.records.TotalCaloriesBurnedRecord
 import androidx.health.connect.client.records.Vo2MaxRecord
 import androidx.health.connect.client.records.WeightRecord
 import androidx.health.connect.client.records.WheelchairPushesRecord
+import com.vayunmathur.library.util.MorphPage
 import com.vayunmathur.library.util.NavKey
 import com.vayunmathur.health.data.HealthRepository
 import com.vayunmathur.health.ui.ActivityPage
@@ -240,13 +241,13 @@ fun Navigation(viewModel: HealthViewModel) {
         entry<Route.RecipeEditor> {
             RecipeEditorPage(backStack, viewModel, it.recipeId)
         }
-        entry<Route.BarChartDetails> {
+        entry<Route.BarChartDetails>(metadata = MorphPage()) {
             BarChartDetails(backStack, viewModel, it.healthMetric)
         }
-        entry<Route.SleepDetails> {
+        entry<Route.SleepDetails>(metadata = MorphPage()) {
             com.vayunmathur.health.ui.SleepDetailsPage(backStack, viewModel)
         }
-        entry<Route.ExerciseDetails> {
+        entry<Route.ExerciseDetails>(metadata = MorphPage()) {
             ExerciseDetailsPage(backStack, viewModel)
         }
     }
