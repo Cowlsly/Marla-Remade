@@ -15,6 +15,19 @@
     <!-- LocationTrackingService: Notification channel description for waypoint entry/exit events -->
     <string name="notification_channel_entry_exit_desc">Notifications for when family members enter or leave waypoints</string>
 
+    <!-- Per-person arrival channel name. %1$s = person name, e.g. Alice -->
+    <string name="notification_channel_arrival_name"><xliff:g id="person_name" example="Alice">%1$s</xliff:g> · Arrivals</string>
+    <!-- Per-person arrival channel description. %1$s = person name -->
+    <string name="notification_channel_arrival_desc">Notifications when <xliff:g id="person_name" example="Alice">%1$s</xliff:g> arrives at a place</string>
+    <!-- Per-person departure channel name. %1$s = person name -->
+    <string name="notification_channel_departure_name"><xliff:g id="person_name" example="Alice">%1$s</xliff:g> · Departures</string>
+    <!-- Per-person departure channel description. %1$s = person name -->
+    <string name="notification_channel_departure_desc">Notifications when <xliff:g id="person_name" example="Alice">%1$s</xliff:g> leaves a place</string>
+    <!-- PersonDetailSheet: button opening system settings for this person's arrival notifications -->
+    <string name="notification_settings_arrival">Arrival alerts</string>
+    <!-- PersonDetailSheet: button opening system settings for this person's departure notifications -->
+    <string name="notification_settings_departure">Departure alerts</string>
+
     <!-- LocationTrackingService: Foreground service notification title when tracking is active. Noun phrase -->
     <string name="notification_tracking_title">FindFamily is active</string>
     <!-- LocationTrackingService: Foreground service notification body. Sentence explaining sharing state -->

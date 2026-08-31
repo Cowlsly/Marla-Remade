@@ -106,6 +106,7 @@ import com.vayunmathur.findfamily.ui.dialogs.encodeBase26
 import com.vayunmathur.findfamily.ui.dialogs.GpsFallbackWarningDialog
 import com.vayunmathur.findfamily.ui.dialogs.SecurityCodeDialog
 import com.vayunmathur.findfamily.util.FamilyListActions
+import com.vayunmathur.findfamily.util.FindFamilyNotificationChannels
 import com.vayunmathur.findfamily.util.FamilyListUiState
 import com.vayunmathur.findfamily.util.FindFamilyViewModel
 import com.vayunmathur.findfamily.util.MainPageActions
@@ -713,6 +714,35 @@ fun PersonDetailSheet(state: PersonUiState, actions: PersonActions) {
             // Auto-toggle: "Turn on/off after" + duration/arrival dropdown (Never default)
             Spacer(Modifier.height(4.dp))
             AutoToggleRow(user, state.waypoints, actions)
+            Spacer(Modifier.height(4.dp))
+            // Per-person arrival/departure notification settings (issue #618). Each opens the
+            // system channel settings so sound/vibration/DND can be tuned independently.
+            val context = LocalContext.current
+            Row(
+                Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                OutlinedButton(
+                    {
+                        FindFamilyNotificationChannels.openChannelSettings(
+                            context, user.id, user.name, arrival = true
+                        )
+                    },
+                    Modifier.weight(1f)
+                ) {
+                    Text(stringResource(R.string.notification_settings_arrival))
+                }
+                OutlinedButton(
+                    {
+                        FindFamilyNotificationChannels.openChannelSettings(
+                            context, user.id, user.name, arrival = false
+                        )
+                    },
+                    Modifier.weight(1f)
+                ) {
+                    Text(stringResource(R.string.notification_settings_departure))
+                }
+            }
             Spacer(Modifier.height(4.dp))
         }
         OutlinedButton(

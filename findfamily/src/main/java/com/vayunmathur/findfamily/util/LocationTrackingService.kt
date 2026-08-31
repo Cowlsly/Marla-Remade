@@ -363,10 +363,10 @@ class LocationTrackingService : Service(), SensorEventListener {
             if (currentId != prevId && user.id != Networking.userid) {
                 if (currentId != null) {
                     val enteredName = currentWaypoint?.name ?: displayName
-                    createNotificationWithCategory(user.name, getString(R.string.notification_entered_waypoint, user.name, enteredName), "ENTRY_EXIT", user.id)
+                    notifyEntryExit(user, getString(R.string.notification_entered_waypoint, user.name, enteredName), arrival = true)
                 } else if (prevId != null) {
                     val exitedName = currentWaypoints.find { it.id == prevId }?.name ?: user.locationName
-                    createNotificationWithCategory(user.name, getString(R.string.notification_exited_waypoint, user.name, exitedName), "ENTRY_EXIT", user.id)
+                    notifyEntryExit(user, getString(R.string.notification_exited_waypoint, user.name, exitedName), arrival = false)
                 }
             }
         }
@@ -754,6 +754,25 @@ class LocationTrackingService : Service(), SensorEventListener {
 
         // Stable per-(user, category) ID so repeat notifications replace rather than stack.
         val notificationId = "$userId::$category".hashCode()
+        manager.notify(notificationId, notification)
+    }
+
+    /**
+     * Post an arrival/departure notification on the person's own per-event channel (issue #618),
+     * so its sound, vibration and DND behaviour can be tuned independently in system settings.
+     */
+    private fun notifyEntryExit(user: User, message: String, arrival: Boolean) {
+        val manager = getSystemService(NOTIFICATION_SERVICE) as NotificationManager
+        FindFamilyNotificationChannels.ensureEntryExitChannels(this, user.id, user.name)
+        val channelId = FindFamilyNotificationChannels.entryExitChannelId(user.id, arrival)
+        val notification = NotificationCompat.Builder(this, channelId)
+            .setContentTitle(user.name)
+            .setContentText(message)
+            .setSmallIcon(R.drawable.ic_launcher_foreground)
+            .setAutoCancel(true)
+            .build()
+        val event = if (arrival) "ARRIVAL" else "DEPARTURE"
+        val notificationId = "${user.id}::ENTRY_EXIT::$event".hashCode()
         manager.notify(notificationId, notification)
     }
 
