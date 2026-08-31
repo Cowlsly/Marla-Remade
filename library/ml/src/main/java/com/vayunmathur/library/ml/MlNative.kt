@@ -136,6 +136,11 @@ internal object MlNative {
      * characters. Doing the decomposition natively would mean carrying Unicode tables in the
      * APK when the platform already has them.
      *
+     * NFKD is the only preparation the caller owes. Everything the upstream SDK does after it -
+     * folding curly quotes and dashes, dropping emoji, expanding `e.g.,`, ending an
+     * unpunctuated sentence - happens natively, so the host tests and this call see one front
+     * end rather than two.
+     *
      * [language] is the ISO-639-1 code, or `na` for one the model does not list. It is not a
      * hint. Supertonic 3 is the multilingual model and was trained with every utterance wrapped
      * in a `<en>...</en>` tag, so the wrong code reads the text in the wrong language and no

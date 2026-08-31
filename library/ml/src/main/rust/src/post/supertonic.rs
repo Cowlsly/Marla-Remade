@@ -158,6 +158,84 @@ pub fn style_keys(weights: Reader, conditional: bool) -> Result<Vec<f32>, String
 /// Entries in the codepoint table: every code unit of the Basic Multilingual Plane.
 pub const INDEXER_ENTRIES: usize = 65_536;
 
+/// The characters the model treats as ending a sentence, so [`to_ids`] adds no period after one.
+///
+/// Exactly `UnicodeProcessor`'s `_ENDING_PUNCTUATION_PATTERN`, including the CJK and guillemet
+/// closers — this is the 31-language model, and a Japanese sentence ends in `。` not `.`.
+const TERMINAL: [char; 20] = [
+    '.', '!', '?', ';', ':', ',', '\'', '"', ')', ']', '}', '…', '。', '」', '』', '】', '〉',
+    '》', '›', '»',
+];
+
+/// Whether `codepoint` is in one of the emoji blocks the SDK strips.
+fn is_emoji(codepoint: char) -> bool {
+    matches!(codepoint as u32,
+        0x1F600..=0x1F64F      // emoticons
+        | 0x1F300..=0x1F5FF    // symbols and pictographs
+        | 0x1F680..=0x1F6FF    // transport and map
+        | 0x1F700..=0x1F8FF
+        | 0x1F900..=0x1F9FF
+        | 0x1FA00..=0x1FAFF
+        | 0x2600..=0x26FF
+        | 0x2700..=0x27BF
+        | 0x1F1E6..=0x1F1FF)   // regional indicators
+}
+
+/// The SDK's single-character substitutions, or `None` to leave the character as it is.
+///
+/// `U+2011` is in the SDK's table and never fires: NFKD, which runs ahead of this, has already
+/// turned it into `U+2010`. Kept anyway, so this reads as the port of that table it is.
+fn substitute(codepoint: char) -> Option<char> {
+    Some(match codepoint {
+        '\u{2013}' | '\u{2011}' | '\u{2014}' => '-',
+        '\u{00AF}' | '_' | '[' | ']' | '|' | '/' | '#' | '→' | '←' => ' ',
+        '\u{201C}' | '\u{201D}' => '"',
+        '\u{2018}' | '\u{2019}' | '\u{00B4}' | '`' => '\'',
+        _ => return None,
+    })
+}
+
+/// The text clean-up `supertonic`'s Python SDK does before indexing, minus the NFKD it opens
+/// with — see [`to_ids`] for why that half stays on the Kotlin side.
+///
+/// Ported from `UnicodeProcessor._preprocess_text`, in its order, because the order is load
+/// bearing: `/` becomes a space here, so this has to run *before* `to_ids` wraps the text in
+/// `</xx>` or the closing tag would be shredded.
+///
+/// None of it is cosmetic. The model has no token for `♥` or an emoji and would drop them
+/// mid-word; `"` and `“` are different codepoints and only one is in the table; and a sentence
+/// with no final punctuation is out of distribution for a model trained on sentences, which
+/// reads as a clipped or run-on ending rather than as an error.
+///
+/// The trailing period is *not* added here — [`to_ids`] adds it after deciding whether anything
+/// in the text mapped, so that unreadable text is refused rather than synthesised as one dot.
+pub fn normalise(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    for codepoint in text.chars() {
+        if is_emoji(codepoint) || matches!(codepoint, '♥' | '☆' | '♡' | '©' | '\\') {
+            continue;
+        }
+        out.push(substitute(codepoint).unwrap_or(codepoint));
+    }
+
+    // Expansions, then the spacing fixes that a stray space before punctuation would leave.
+    out = out.replace('@', " at ").replace("e.g.,", "for example, ").replace("i.e.,", "that is, ");
+    for mark in [',', '.', '!', '?', ';', ':', '\''] {
+        out = out.replace(&format!(" {mark}"), &mark.to_string());
+    }
+
+    // Runs of one quote character collapse to a single one; `` ` `` is already an apostrophe.
+    let mut collapsed = String::with_capacity(out.len());
+    for codepoint in out.chars() {
+        let repeated = matches!(codepoint, '"' | '\'') && collapsed.ends_with(codepoint);
+        if !repeated {
+            collapsed.push(codepoint);
+        }
+    }
+
+    collapsed.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
 /// Character ids for text that is **already NFKD-decomposed**, wrapped in its language tag and
 /// dropping what the model has no token for.
 ///
@@ -185,6 +263,9 @@ pub const INDEXER_ENTRIES: usize = 65_536;
 /// `niño`, `안녕` and `привет` index completely under NFKD and partially or not at all otherwise.
 /// The Kotlin side calls `java.text.Normalizer.normalize(text, Form.NFKD)`, which is a platform
 /// API and free; doing it here would mean carrying Unicode decomposition tables in the APK.
+///
+/// Everything the SDK does *after* NFKD is [`normalise`], which runs here rather than on the
+/// Kotlin side so the host tests and the reference harness see the same front end the app does.
 ///
 /// # Unmapped codepoints are dropped, not substituted
 ///
@@ -223,9 +304,15 @@ pub fn to_ids(indexer: &[u8], text: &str, language: &str) -> Result<Vec<u32>, St
 
     // The tag is indexed apart from the text so that text which maps to nothing is still refused.
     // Tagged, the ids would never be empty, and the model would read out an empty utterance.
-    let body = index(text);
+    let cleaned = normalise(text);
+    let mut body = index(&cleaned);
     if body.is_empty() {
         return Err("nothing in this text is in the model's vocabulary".into());
+    }
+    // A sentence the model can read, so now it is worth giving it an ending. Added after the
+    // emptiness check so unreadable text is refused rather than spoken as a lone full stop.
+    if !cleaned.ends_with(TERMINAL) {
+        body.extend(index("."));
     }
     let mut ids = index(&format!("<{language}>"));
     ids.extend(body);
@@ -507,9 +594,78 @@ mod tests {
     }
 
     #[test]
+    fn normalising_matches_the_sdk_on_a_sentence_that_uses_all_of_it() {
+        // Curly quotes, an em dash, an abbreviation, a bracket, an emoji and an `@`, in one
+        // string. The expected value is `UnicodeProcessor._preprocess_text`'s own output, less
+        // the trailing period and language tag that `to_ids` is responsible for.
+        let raw = "\u{201C}Ready?\u{201D} she asked \u{2014} e.g., [softly] \u{1F600} me@here";
+        assert_eq!(normalise(raw), "\"Ready?\" she asked - for example, softly me at here");
+    }
+
+    #[test]
     fn the_indexer_refuses_a_table_of_the_wrong_size() {
         let error = to_ids(&[0u8; 16], "a", "en").expect_err("a short table");
         assert!(error.contains("codepoint table"), "{error}");
+    }
+
+    #[test]
+    fn normalising_folds_the_symbols_the_model_has_no_token_for() {
+        // Verified against `UnicodeProcessor._preprocess_text`, less the trailing period it adds
+        // and this does not. Note the quotes close up: the space before `'b'` is eaten by the
+        // spacing pass, which runs after the curly quotes have become straight ones.
+        assert_eq!(normalise("\u{201C}a\u{201D} \u{2018}b\u{2019}"), "\"a\"'b'");
+        assert_eq!(normalise("a\u{2013}b a\u{2014}b"), "a-b a-b");
+        assert_eq!(normalise("a[b]c|d/e#f"), "a b c d e f");
+        assert_eq!(normalise("i \u{2665}\u{2606} it \u{1F600}"), "i it");
+        assert_eq!(normalise("a`b"), "a'b");
+    }
+
+    #[test]
+    fn normalising_expands_abbreviations_and_tidies_the_spacing_it_leaves() {
+        assert_eq!(normalise("me@here"), "me at here");
+        assert_eq!(normalise("fruit, e.g., apples"), "fruit, for example, apples");
+        assert_eq!(normalise("that is i.e., this"), "that is that is, this");
+        // The expansions and the bracket-to-space rule both strand spaces before punctuation.
+        assert_eq!(normalise("hello , world ."), "hello, world.");
+        assert_eq!(normalise("a  \t\n b"), "a b");
+    }
+
+    #[test]
+    fn normalising_collapses_a_run_of_one_quote_but_not_two_different_ones() {
+        assert_eq!(normalise("he said \"\"hi\"\""), "he said \"hi\"");
+        assert_eq!(normalise("it''s"), "it's");
+        assert_eq!(normalise("\"'a'\""), "\"'a'\"");
+    }
+
+    #[test]
+    fn the_indexer_ends_an_unpunctuated_sentence_and_leaves_a_punctuated_one() {
+        // The model is trained on sentences, so a missing final stop is out of distribution.
+        let table = table_of(&[('<', 1), ('>', 2), ('/', 3), ('e', 4), ('n', 5), ('a', 6), ('.', 7), ('\u{3002}', 8)]);
+        let tag_open = vec![1, 4, 5, 2];
+        let tag_close = vec![1, 3, 4, 5, 2];
+
+        let mut wanted = tag_open.clone();
+        wanted.extend([6, 7]);
+        wanted.extend(tag_close.clone());
+        assert_eq!(to_ids(&table, "a", "en").expect("indexes"), wanted, "<en>a.</en>");
+
+        // Already ended, so nothing is appended and the ids are the same length.
+        assert_eq!(to_ids(&table, "a.", "en").expect("indexes"), wanted, "<en>a.</en>");
+
+        // A Japanese sentence ends in the ideographic full stop, and gets no second ending. The
+        // tag stays `en` so this tests the terminal set rather than the tag.
+        let mut ideographic = tag_open;
+        ideographic.extend([6, 8]);
+        ideographic.extend(tag_close);
+        assert_eq!(to_ids(&table, "a\u{3002}", "en").expect("indexes"), ideographic);
+    }
+
+    #[test]
+    fn the_indexer_refuses_text_that_is_only_an_ending() {
+        // Without the emptiness check running ahead of the period, this would synthesise a dot.
+        let table = table_of(&[('<', 1), ('>', 2), ('/', 3), ('e', 4), ('n', 5), ('.', 7)]);
+        let error = to_ids(&table, "\u{1F600}", "en").expect_err("nothing readable");
+        assert!(error.contains("vocabulary"), "{error}");
     }
 
     #[test]
@@ -608,7 +764,7 @@ mod tests {
         for entry in 0..INDEXER_ENTRIES {
             let token = if (b'a' as usize..=b'z' as usize).contains(&entry) {
                 (entry - b'a' as usize + 1) as i16
-            } else if entry < 128 && [b'<', b'>', b'/'].contains(&(entry as u8)) {
+            } else if entry < 128 && b"<>/".contains(&(entry as u8)) {
                 27
             } else {
                 -1
