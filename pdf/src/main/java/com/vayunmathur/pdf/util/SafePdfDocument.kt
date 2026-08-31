@@ -122,21 +122,37 @@ class SafePdfDocument private constructor(
         }
     }
 
+    /**
+     * Decode a listing buffer, degrading a malformed one to an empty list.
+     *
+     * [renderPage] already catches a wire-parse failure because a throw there becomes a null
+     * page. These listings had no equivalent: the decoders throw on a truncated or desynced
+     * buffer, none of the callers below caught, and every one of them is consumed from a
+     * `produceState` in [com.vayunmathur.pdf.ui.SafePdfViewerScreen] — so the exception left
+     * the coroutine and took the composition down. An empty overlay is a far better outcome
+     * than losing the viewer, and it matches what a null buffer from the native side already
+     * produces.
+     */
+    private fun <T> decodeListing(what: String, index: Int, bytes: ByteArray?, decode: (ByteArray) -> List<T>): List<T> {
+        if (bytes == null) return emptyList()
+        return runCatching { decode(bytes) }
+            .onFailure { android.util.Log.w(TAG, "$what listing failed to decode for page $index", it) }
+            .getOrDefault(emptyList())
+    }
+
     /** Annotations on [index] for the editing overlay. */
     suspend fun annotations(index: Int): List<SafeAnnotation> = withContext(Dispatchers.IO) {
-        PdfNative.listAnnotations(handle, index)
-            ?.let { SafePdfParser.parseAnnotations(it) } ?: emptyList()
+        decodeListing("annotation", index, PdfNative.listAnnotations(handle, index), SafePdfParser::parseAnnotations)
     }
 
     /** AcroForm widget fields on [index]. */
     suspend fun formFields(index: Int): List<SafeFormField> = withContext(Dispatchers.IO) {
-        PdfNative.listFormFields(handle, index)
-            ?.let { SafePdfParser.parseFormFields(it) } ?: emptyList()
+        decodeListing("form field", index, PdfNative.listFormFields(handle, index), SafePdfParser::parseFormFields)
     }
 
     /** Link annotations on [index]. */
     suspend fun links(index: Int): List<SafeLink> = withContext(Dispatchers.IO) {
-        PdfNative.listLinks(handle, index)?.let { SafePdfParser.parseLinks(it) } ?: emptyList()
+        decodeListing("link", index, PdfNative.listLinks(handle, index), SafePdfParser::parseLinks)
     }
 
     suspend fun addText(
@@ -295,7 +311,7 @@ class SafePdfDocument private constructor(
 
     /** The document outline (bookmarks), empty if none. */
     suspend fun outline(): List<SafeOutlineItem> = withContext(Dispatchers.IO) {
-        PdfNative.listOutline(handle)?.let { SafePdfParser.parseOutline(it) } ?: emptyList()
+        decodeListing("outline", -1, PdfNative.listOutline(handle), SafePdfParser::parseOutline)
     }
 
     /** Full-text search across all pages with case-sensitive toggle (Phase 7). Default case-insensitive for backward compat. */
@@ -307,7 +323,7 @@ class SafePdfDocument private constructor(
             } else {
                 PdfNative.searchDocument(handle, query)
             }
-            bytes?.let { SafePdfParser.parseSearchMatches(it) } ?: emptyList()
+            decodeListing("search match", -1, bytes, SafePdfParser::parseSearchMatches)
         }
     }
 

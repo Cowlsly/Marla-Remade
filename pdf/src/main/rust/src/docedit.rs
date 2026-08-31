@@ -553,7 +553,15 @@ pub(crate) fn flatten_document(handle: i64) -> bool {
                 }
                 None => continue,
             };
-            let m = appearance_matrix(rect, bbox, matrix);
+            // §12.5.5 computes AA = Matrix x A, but AA is for a caller that plays
+            // the appearance's operators itself. This bakes the appearance as a
+            // `cm ... Do`, and §8.10.2 makes `Do` concatenate the form's own
+            // /Matrix with the CTM — so emitting AA applies /Matrix TWICE. Only
+            // the fit matrix A belongs in the `cm`. Every appearance this app
+            // authors for a rotated page carries a /Matrix (see
+            // `display_orientation`), so flattening one used to rotate it a
+            // second time and translate it clean off its /Rect.
+            let m = appearance_fit_matrix(rect, bbox, matrix);
             placements.push((format!("Fl{}_{}", page_id.0, i), ap_id, m));
         }
         if placements.is_empty() {
@@ -893,6 +901,96 @@ mod redaction_tests {
         let reg = registry().lock().unwrap_or_else(|e| e.into_inner());
         let doc = reg.get(&handle).expect("handle is registered");
         doc.get_dictionary(annot_id).is_ok()
+    }
+
+    /// §8.10.2: `Do` concatenates the invoked form's own `/Matrix` with the CTM.
+    /// §12.5.5's `AA = Matrix × A` already contains `/Matrix`, so baking an
+    /// appearance as `cm AA ... Do` applies it TWICE. Every appearance this app
+    /// authors for a rotated page carries a `/Matrix` (`display_orientation`), so
+    /// flattening one rotated it again and translated it clean off its `/Rect`.
+    /// The emitted `cm` must be `A`, i.e. `Matrix × cm` must map the `/BBox` onto
+    /// the `/Rect`.
+    #[test]
+    fn flatten_emits_the_fit_matrix_not_the_one_do_will_double() {
+        let (dw, dh) = (160.0_f64, 40.0_f64);
+        let bbox = [0.0, 0.0, dw, dh];
+        for rot in [0i64, 90, 180, 270] {
+            let (_, _, apm) = display_orientation(rot, dw, dh);
+            let rect = match rot {
+                90 | 270 => [10.0, 20.0, 10.0 + dh, 20.0 + dw],
+                _ => [10.0, 20.0, 10.0 + dw, 20.0 + dh],
+            };
+            let (handle, page_id) = flattenable_doc(rect, bbox, apm);
+            assert!(flatten_document(handle), "rot={rot}: flatten failed");
+            let cm = emitted_cm(handle, page_id);
+            // What the renderer will build: the form's /Matrix on top of the `cm`.
+            let effective = mat_mul(&apm, &cm);
+            for (x, y) in [(0.0, 0.0), (dw, 0.0), (dw, dh), (0.0, dh)] {
+                let (px, py) = transform(&effective, x, y);
+                assert!(
+                    px >= rect[0] - 0.01 && px <= rect[2] + 0.01
+                        && py >= rect[1] - 0.01 && py <= rect[3] + 0.01,
+                    "rot={rot}: flattened BBox corner ({px},{py}) landed outside {rect:?}"
+                );
+            }
+            close_document(handle);
+        }
+    }
+
+    /// One-page document carrying a single annotation whose `/AP /N` has the
+    /// given `/BBox` and `/Matrix`.
+    fn flattenable_doc(rect: [f64; 4], bbox: [f64; 4], matrix: Mat) -> (i64, ObjectId) {
+        let mut doc = Document::with_version("1.7");
+        let ap_dict = dictionary! {
+            "Type" => name_obj("XObject"),
+            "Subtype" => name_obj("Form"),
+            "BBox" => rect_obj(bbox),
+            "Matrix" => Object::Array(matrix.iter().map(|v| Object::Real(*v as f32)).collect()),
+        };
+        let ap_id = doc.add_object(Stream::new(ap_dict, b"0 0 1 rg 0 0 1 1 re f".to_vec()));
+        let annot_id = doc.add_object(dictionary! {
+            "Type" => name_obj("Annot"),
+            "Subtype" => name_obj("FreeText"),
+            "Rect" => rect_obj(rect),
+            "AP" => dictionary! { "N" => ap_id },
+        });
+        let pages_id = doc.new_object_id();
+        let page_id = doc.add_object(dictionary! {
+            "Type" => name_obj("Page"),
+            "Parent" => Object::Reference(pages_id),
+            "MediaBox" => rect_obj([0.0, 0.0, 612.0, 792.0]),
+            "Annots" => Object::Array(vec![Object::Reference(annot_id)]),
+        });
+        doc.objects.insert(
+            pages_id,
+            Object::Dictionary(dictionary! {
+                "Type" => name_obj("Pages"),
+                "Kids" => Object::Array(vec![Object::Reference(page_id)]),
+                "Count" => 1,
+            }),
+        );
+        let cat = doc.add_object(dictionary! {
+            "Type" => name_obj("Catalog"),
+            "Pages" => Object::Reference(pages_id),
+        });
+        doc.trailer.set("Root", cat);
+        let handle = next_handle();
+        registry().lock().unwrap_or_else(|e| e.into_inner()).insert(handle, doc);
+        (handle, page_id)
+    }
+
+    /// The six operands of the single `cm` the flatten overlay emitted.
+    fn emitted_cm(handle: i64, page_id: ObjectId) -> Mat {
+        let bytes = page_bytes(handle, page_id);
+        let text = String::from_utf8_lossy(&bytes).into_owned();
+        let toks: Vec<&str> = text.split_whitespace().collect();
+        let at = toks.iter().position(|t| *t == "cm").expect("no `cm` in the flattened content");
+        assert!(at >= 6, "malformed `cm`: {text}");
+        let mut m = IDENTITY;
+        for i in 0..6 {
+            m[i] = toks[at - 6 + i].parse::<f64>().expect("cm operand");
+        }
+        m
     }
 
     /// An inline image makes lopdf reject the whole stream, and the lenient tokenizer

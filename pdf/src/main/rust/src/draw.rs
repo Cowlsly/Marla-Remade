@@ -45,7 +45,32 @@ pub(crate) fn emit_stroke(prims: &mut Vec<Prim>, subpaths: &[Vec<(f64, f64)>], g
     // == dst` turned white knockout rectangles into no-ops and let content that
     // was meant to be covered show through.
     let blend = gs.blend_mode;
+    // §8.5.3.2: "If a subpath is degenerate (consists of a single-point closed
+    // subpath or of two or more points at the same coordinates), S shall paint it
+    // only if round line caps have been specified, producing a filled circle
+    // centred at the single point. If butt or projecting square line caps have
+    // been specified, S shall paint nothing." A single-point subpath (`x y m S`,
+    // or `x y m h S` once `h` drops the duplicate) never reached the renderer at
+    // all, so the dot idiom used for stippled leader lines and map symbols
+    // vanished. The circle is emitted directly rather than left to the renderer's
+    // stroker, because what the spec asks for here is a fill, not a stroke.
+    let dot_radius = (width as f64 / 2.0).max(0.05);
     for sp in subpaths {
+        if sp.is_empty() { continue; }
+        let (fx, fy) = sp[0];
+        if sp.iter().all(|&(x, y)| (x - fx).abs() < 1e-9 && (y - fy).abs() < 1e-9) {
+            if gs.line_cap == 1 {
+                const DOT_SEGMENTS: usize = 16;
+                let circle: Vec<(f32, f32)> = (0..DOT_SEGMENTS)
+                    .map(|i| {
+                        let a = i as f64 / DOT_SEGMENTS as f64 * std::f64::consts::TAU;
+                        ((fx + dot_radius * a.cos()) as f32, (fy + dot_radius * a.sin()) as f32)
+                    })
+                    .collect();
+                prims.push(Prim::Fill { argb, even_odd: false, contours: vec![circle], blend });
+            }
+            continue;
+        }
         if sp.len() >= 2 {
             prims.push(Prim::Stroke {
                 argb,
@@ -77,14 +102,14 @@ pub(crate) fn emit_fill(prims: &mut Vec<Prim>, subpaths: &[Vec<(f64, f64)>], arg
     }
 }
 
-/// Emit a text primitive for `bytes` at the current text matrix (unless the
-/// render mode is invisible/clip-only) and return the horizontal advance in
-/// user-space units so the caller can step the text matrix.
-/// Emit one text primitive per glyph, each positioned at its exact device-space
-/// origin computed from the PDF glyph widths + text state. Drawing glyph-by-glyph
-/// (rather than one run) keeps kerned/justified text aligned even though a
-/// substitute system font renders the glyph shapes. Returns the total advance in
-/// text space so the caller can step the text matrix.
+/// Show `bytes` with no ambient resource dictionary — see [`show_string_in`],
+/// which is what the interpreter calls.
+///
+/// `#[cfg(test)]` because the only remaining callers are test modules (here,
+/// `golden_tests.rs` and `tests.rs`). It is kept rather than folded into them so
+/// those files, which belong to other owners, did not have to change when
+/// §9.6.5's Type 3 resource fallback added the `ambient_resources` parameter.
+#[cfg(test)]
 pub(crate) fn show_string(
     doc: &Document,
     prims: &mut Vec<Prim>,
@@ -93,6 +118,30 @@ pub(crate) fn show_string(
     text_matrix: &Mat,
     bytes: &[u8],
     depth: u32,
+) -> f64 {
+    show_string_in(doc, prims, gs, fonts, text_matrix, bytes, depth, None)
+}
+
+/// Emit one text primitive per glyph, each positioned at its exact device-space
+/// origin computed from the PDF glyph widths + text state. Drawing glyph-by-glyph
+/// (rather than one run) keeps kerned/justified text aligned even though a
+/// substitute system font renders the glyph shapes. Returns the total advance in
+/// text space so the caller can step the text matrix.
+///
+/// `ambient_resources` is the resource dictionary in force at the showing
+/// operator. Only Type 3 needs it: §9.6.5 makes a Type 3 font's own `/Resources`
+/// optional and says the names "shall be looked up in the resource dictionary of
+/// the page on which the font is used" when it is absent.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn show_string_in(
+    doc: &Document,
+    prims: &mut Vec<Prim>,
+    gs: &GraphicsState,
+    fonts: &HashMap<Vec<u8>, FontInfo>,
+    text_matrix: &Mat,
+    bytes: &[u8],
+    depth: u32,
+    ambient_resources: Option<&lopdf::Dictionary>,
 ) -> f64 {
     let tfs = gs.font_size;
     let th = gs.h_scale;
@@ -143,7 +192,7 @@ pub(crate) fn show_string(
 
     // Type 3 fonts: draw each glyph by interpreting its CharProc content stream.
     if let Some(t3) = &fi.t3 {
-        return show_string_type3(doc, prims, gs, fi, t3, text_matrix, bytes, depth);
+        return show_string_type3(doc, prims, gs, fi, t3, text_matrix, bytes, depth, ambient_resources);
     }
 
     let mut pen = 0.0_f64;
@@ -395,6 +444,7 @@ fn push_closers(prims: &mut Vec<Prim>, mut open: Vec<bool>) {
 
 /// Render a Type 3 text run by interpreting each glyph's CharProc content stream
 /// into the current graphics state. Returns the total text-space advance.
+#[allow(clippy::too_many_arguments)]
 fn show_string_type3(
     doc: &Document,
     prims: &mut Vec<Prim>,
@@ -404,6 +454,7 @@ fn show_string_type3(
     text_matrix: &Mat,
     bytes: &[u8],
     depth: u32,
+    ambient_resources: Option<&lopdf::Dictionary>,
 ) -> f64 {
     let tfs = gs.font_size;
     let th = gs.h_scale;
@@ -442,7 +493,15 @@ fn show_string_type3(
                         interpret_content(
                             doc,
                             &glyph_ops,
-                            t3.resources.as_ref(),
+                            // §9.6.5: the Type 3 `/Resources` entry is optional, and
+                            // "if any glyph descriptions refer to named resources but
+                            // this dictionary is absent, the names shall be looked up
+                            // in the resource dictionary of the page on which the font
+                            // is used". Passing `None` instead made a CharProc that
+                            // does `/Im0 Do`, `/GS0 gs` or `/Sh0 sh` against the page's
+                            // resources draw nothing at all — common in TeX/dvips
+                            // output, which routinely omits the font's own /Resources.
+                            t3.resources.as_ref().or(ambient_resources),
                             glyph_gs,
                             prims,
                             depth + 1,
@@ -585,6 +644,135 @@ fn show_string_type3(
 // ---------------------------------------------------------------------------
 // Image XObjects
 // ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod type3_resource_fallback_tests {
+    use crate::*;
+    use lopdf::content::Operation;
+    use lopdf::{dictionary, Stream};
+
+    /// §9.6.5: a Type 3 font's `/Resources` is optional, and "if any glyph
+    /// descriptions refer to named resources but this dictionary is absent, the
+    /// names shall be looked up in the resource dictionary of the page on which
+    /// the font is used". `show_string_type3` passed `t3.resources` straight
+    /// through, so with no `/Resources` on the font the CharProc's resource
+    /// lookups all missed and the glyph drew NOTHING — not even a fallback shape.
+    /// TeX/dvips bitmap-font output routinely omits the entry. Reported by
+    /// `a-text2`.
+    #[test]
+    fn a_type3_charproc_falls_back_to_the_page_resources() {
+        let mut doc = Document::with_version("1.7");
+        // The CharProc paints through an ExtGState it can only reach via the page.
+        let egs = doc.add_object(dictionary! { "ca" => 0.5 });
+        let proc_id = doc.add_object(Stream::new(
+            dictionary! {},
+            b"/GSP gs 0 0 700 700 re f".to_vec(),
+        ));
+        let font = dictionary! {
+            "Type" => "Font", "Subtype" => "Type3",
+            "FontMatrix" => vec![0.001.into(), 0.into(), 0.into(), 0.001.into(), 0.into(), 0.into()],
+            "FontBBox" => vec![0.into(), 0.into(), 750.into(), 750.into()],
+            "CharProcs" => doc.add_object(dictionary! { "a" => proc_id }),
+            "Encoding" => doc.add_object(dictionary! {
+                "Type" => "Encoding", "Differences" => vec![65.into(), "a".into()],
+            }),
+            "FirstChar" => 65, "LastChar" => 65, "Widths" => vec![700.into()],
+            // Deliberately NO /Resources on the font: the whole point of the test.
+        };
+        let font_id = doc.add_object(font.clone());
+        let res = dictionary! {
+            "Font" => dictionary! { "F1" => Object::Reference(font_id) },
+            "ExtGState" => dictionary! { "GSP" => Object::Reference(egs) },
+        };
+        let ops = vec![
+            Operation::new("BT", vec![]),
+            Operation::new("Tf", vec![Object::Name(b"F1".to_vec()), 100.into()]),
+            Operation::new("Tj", vec![Object::string_literal("A")]),
+            Operation::new("ET", vec![]),
+        ];
+        let mut prims = Vec::new();
+        interpret_content(&doc, &ops, Some(&res), GraphicsState::default(), &mut prims, 0, false);
+
+        let alpha = prims
+            .iter()
+            .find_map(|p| match p {
+                Prim::Fill { argb, .. } => Some((argb >> 24) as u8),
+                _ => None,
+            })
+            .expect("the Type 3 glyph must paint");
+        assert_eq!(
+            alpha, 0x80,
+            "the CharProc's /GSP must resolve through the page resources"
+        );
+    }
+}
+
+#[cfg(test)]
+mod degenerate_stroke_tests {
+    use crate::*;
+
+    fn stroke(subpaths: &[Vec<(f64, f64)>], cap: u8) -> Vec<Prim> {
+        let gs = GraphicsState { line_cap: cap, line_width: 4.0, ..Default::default() };
+        let mut prims = Vec::new();
+        emit_stroke(&mut prims, subpaths, &gs);
+        prims
+    }
+
+    /// §8.5.3.2: "If a subpath is degenerate (consists of a single-point closed
+    /// subpath or of two or more points at the same coordinates), `S` shall paint
+    /// it only if round line caps have been specified, producing a filled circle
+    /// centred at the single point. If butt or projecting square line caps have
+    /// been specified, `S` shall paint nothing."
+    ///
+    /// A single-point subpath — what `x y m S` and `x y m h S` produce — was
+    /// dropped before it reached the renderer, so the round-cap dot idiom used for
+    /// stipple patterns, leader-line dots and map symbols painted nothing at all.
+    #[test]
+    fn a_degenerate_subpath_paints_a_dot_only_with_round_caps() {
+        for sp in [vec![(5.0, 7.0)], vec![(5.0, 7.0), (5.0, 7.0)]] {
+            let round = stroke(std::slice::from_ref(&sp), 1);
+            let contours = round
+                .iter()
+                .find_map(|p| match p {
+                    Prim::Fill { contours, .. } => Some(contours.clone()),
+                    _ => None,
+                })
+                .unwrap_or_else(|| panic!("round caps must paint a dot for {sp:?}"));
+            assert_eq!(contours.len(), 1);
+            // Centred on the point, radius = half the (device) line width.
+            for &(x, y) in &contours[0] {
+                let r = ((x as f64 - 5.0).hypot(y as f64 - 7.0) - 2.0).abs();
+                assert!(r < 1e-3, "dot vertex ({x}, {y}) is not on the r=2 circle");
+            }
+
+            for butt_or_square in [0u8, 2] {
+                let out = stroke(std::slice::from_ref(&sp), butt_or_square);
+                assert!(
+                    out.is_empty(),
+                    "cap {butt_or_square} must paint nothing for a degenerate \
+                     subpath, got {} prims",
+                    out.len()
+                );
+            }
+        }
+    }
+
+    /// The dot path must not swallow real strokes: a subpath with distinct points
+    /// still strokes, round caps or not.
+    #[test]
+    fn a_non_degenerate_subpath_still_strokes() {
+        let sp = vec![vec![(0.0, 0.0), (10.0, 0.0)]];
+        for cap in [0u8, 1, 2] {
+            let out = stroke(&sp, cap);
+            assert_eq!(
+                out.iter().filter(|p| matches!(p, Prim::Stroke { .. })).count(),
+                1,
+                "cap {cap}"
+            );
+            assert!(!out.iter().any(|p| matches!(p, Prim::Fill { .. })));
+        }
+    }
+}
 
 #[cfg(test)]
 mod type3_cap_tests {

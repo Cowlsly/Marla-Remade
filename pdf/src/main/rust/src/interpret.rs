@@ -12,6 +12,76 @@ pub(crate) const MAX_GROUP_DEPTH: u32 = 10;
 /// document so the lossy path is unreachable in practice.
 pub(crate) const MAX_GRAPHICS_STACK_HARD: usize = MAX_GRAPHICS_STACK * 16;
 
+/// Total form-XObject invocations allowed per top-level content stream.
+///
+/// §8.10.1 imposes no limit, and the `depth < 10` guard in the `Do` arm bounds the
+/// DEPTH of `Do` recursion but not its BRANCHING. A ~200-byte form whose own
+/// `/Resources` name it six times therefore reaches 6^10 = 60M invocations — each
+/// re-decoding the stream and rebuilding six resource maps — which measured 48 s in
+/// a release build and grows by an order of magnitude per extra `Do` in the cell.
+/// The depth cap cannot express that; only a total budget can. Set far above any
+/// real page (a heavily stamped map is a few thousand) so it binds only on an attack.
+pub(crate) const MAX_FORM_INVOCATIONS: u32 = 50_000;
+
+thread_local! {
+    /// Remaining [`MAX_FORM_INVOCATIONS`] for the render in progress on this
+    /// thread. Refilled by the OUTERMOST [`FormBudgetScope`], never by a nested
+    /// one, so a whole render tree shares one budget however deep its root sits.
+    static FORM_BUDGET: std::cell::Cell<u32> = const { std::cell::Cell::new(MAX_FORM_INVOCATIONS) };
+    /// Number of live [`FormBudgetScope`]s, i.e. whether a render is already in
+    /// progress on this thread. Zero means the next scope is the outermost one.
+    static FORM_BUDGET_SCOPES: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+}
+
+/// Establishes the form-invocation budget for one top-level render.
+///
+/// This deliberately does NOT key off the interpreter's `depth` parameter.
+/// `depth` counts `Do`/pattern/glyph NESTING for the §8.10.1 recursion cap, and
+/// several legitimate top-level entries start it above 0:
+/// `annotations::render_annotation` enters at 1 for an appearance stream (as
+/// does a form-field appearance through it), and the tiling-pattern, soft-mask
+/// group and Type 3 CharProc paths all enter at `depth + 1`. Refilling only at
+/// `depth == 0` therefore left every one of those running on whatever the
+/// previous render had left over — zero, once anything had exhausted it — so
+/// every `Do` inside an annotation or field appearance was silently dropped and
+/// the appearance rendered as nothing. A budget that can silently reach zero on
+/// a legitimate path is worse than no budget, because it fails closed with no
+/// error anywhere; the depth-independent scope is what makes that unreachable.
+///
+/// RAII rather than a manual decrement so an early return or a panic unwinding
+/// out of the interpreter cannot leave the thread permanently "inside" a render.
+struct FormBudgetScope;
+
+impl FormBudgetScope {
+    fn enter() -> Self {
+        FORM_BUDGET_SCOPES.with(|n| {
+            if n.get() == 0 {
+                FORM_BUDGET.with(|b| b.set(MAX_FORM_INVOCATIONS));
+            }
+            n.set(n.get() + 1);
+        });
+        FormBudgetScope
+    }
+}
+
+impl Drop for FormBudgetScope {
+    fn drop(&mut self) {
+        FORM_BUDGET_SCOPES.with(|n| n.set(n.get().saturating_sub(1)));
+    }
+}
+
+/// Consume one form-XObject invocation, or report the budget exhausted.
+fn take_form_budget() -> bool {
+    FORM_BUDGET.with(|b| {
+        let n = b.get();
+        if n == 0 {
+            return false;
+        }
+        b.set(n - 1);
+        true
+    })
+}
+
 pub(crate) fn bezier_steps_for_flatness(hull: [(f64, f64); 4], flatness: f64) -> usize {
     // §10.6.2 defines flatness as a tolerance in DEVICE space, so the segment
     // count has to scale with the curve's device-space size. A fixed count made
@@ -128,6 +198,12 @@ pub(crate) fn interpret_page(doc: &Document, page_id: ObjectId) -> Result<PageDa
 
     let mut prims = Vec::new();
     let init = GraphicsState { ctm: base, ..Default::default() };
+    // One budget for the whole page, annotations included. Each appearance
+    // stream is a separate top-level entry into the interpreter, so without this
+    // outer scope a page carrying N annotations would get N+1 full budgets —
+    // the branching blow-up [`MAX_FORM_INVOCATIONS`] exists to bound, multiplied
+    // by however many annotations the file declares.
+    let _form_budget = FormBudgetScope::enter();
     // §8.7.4.1: with no clipping path, `sh` paints across the whole page, so seed
     // the clip extent with the page box. Prims are emitted in page space, so that
     // box is simply [0, 0, width, height].
@@ -202,6 +278,10 @@ pub(crate) fn interpret_content_seeded(
         .unwrap_or_default();
 
     let mut gs = init;
+    // Establishes the form-invocation budget when this is the outermost
+    // interpretation on the thread, at whatever `depth` it was entered with.
+    // See [`FormBudgetScope`].
+    let _form_budget = FormBudgetScope::enter();
     // Pattern matrices are relative to the coordinate system in effect when this
     // content stream begins (the page default CTM, or the form's CTM).
     let pattern_base_ctm = gs.ctm;
@@ -325,6 +405,21 @@ pub(crate) fn interpret_content_seeded(
     let mut text_clip_used = false;
 
     let dev = |gs: &GraphicsState, x: f64, y: f64| transform(&gs.ctm, x, y);
+    // §7.3.3 bounds a real to the implementation limit, and lopdf's `Object::Real`
+    // is an f32, so a content stream carrying `1e40` parses to INFINITY and every
+    // device coordinate derived from it is non-finite. Nothing between here and
+    // `Canvas.drawPath` filters those: not `wire.rs`, not the parser, not the
+    // renderer. One such point in a contour is not a locally wrong point — it makes
+    // the WHOLE path non-finite, and a non-finite path is dropped rather than
+    // clipped to something sane, so a single bad number can silently erase an entire
+    // fill. As a `W n` clip path it can erase everything drawn after it.
+    //
+    // This is the same hazard the `cm` arm already guards ("a non-finite CTM poisons
+    // every coordinate derived from it"), reached by the other route: bad operands
+    // rather than a bad matrix. Guarding one and not the other was the inconsistency.
+    // Checked AFTER the transform so an inherited non-finite CTM — a form `/Matrix`,
+    // which is not finite-checked — is caught too.
+    let finite2 = |a: (f64, f64)| a.0.is_finite() && a.1.is_finite();
 
     for op in ops.iter().take(MAX_CONTENT_OPS) {
         let o = &op.operands;
@@ -401,23 +496,35 @@ pub(crate) fn interpret_content_seeded(
                     });
                     // Helper to apply a dict to gs
                     let apply_dict = |dict: &lopdf::Dictionary, gs: &mut GraphicsState, doc: &Document| {
+                        // §7.3.10: ANY object may be an indirect reference, including a
+                        // Table 58 scalar. These were read with a bare `num`, so `/ca
+                        // 5 0 R` was silently ignored and the element painted fully
+                        // opaque instead of at the requested alpha — a silent failure,
+                        // and inconsistent with the `w`/`J`/`j`/`M`/`i` operator arms
+                        // above, which all deref their operands.
+                        let scalar = |key: &[u8]| {
+                            dict.get(key)
+                                .ok()
+                                .and_then(|o| deref(doc, o).or(Some(o)))
+                                .and_then(num)
+                        };
                         // ISO 32000: /CA is the stroking alpha, /ca is the nonstroking (fill) alpha.
-                        if let Some(v) = dict.get(b"CA").ok().and_then(num) {
+                        if let Some(v) = scalar(b"CA") {
                             gs.alpha_stroke = v.clamp(0.0,1.0);
                         }
-                        if let Some(v) = dict.get(b"ca").ok().and_then(num) {
+                        if let Some(v) = scalar(b"ca") {
                             gs.alpha_fill = v.clamp(0.0,1.0);
                         }
-                        if let Some(v) = dict.get(b"LW").ok().and_then(num) {
+                        if let Some(v) = scalar(b"LW") {
                             gs.line_width = v;
                         }
-                        if let Some(v) = dict.get(b"LC").ok().and_then(num) {
+                        if let Some(v) = scalar(b"LC") {
                             gs.line_cap = (v as i64).clamp(0,2) as u8;
                         }
-                        if let Some(v) = dict.get(b"LJ").ok().and_then(num) {
+                        if let Some(v) = scalar(b"LJ") {
                             gs.line_join = (v as i64).clamp(0,2) as u8;
                         }
-                        if let Some(v) = dict.get(b"ML").ok().and_then(num) {
+                        if let Some(v) = scalar(b"ML") {
                             gs.miter_limit = v;
                         }
                         // §8.4.5 Table 58 `/FL` is the flatness tolerance, i.e. the
@@ -426,9 +533,8 @@ pub(crate) fn interpret_content_seeded(
                         // Table 58 key with existing plumbing and no parser, so a
                         // document that set flatness via `gs` instead of `i` got the
                         // default tolerance and visibly faceted large curves. The clamp
-                        // is the `i` arm's; the operand is read WITHOUT `deref`, matching
-                        // every other Table 58 scalar here rather than the `i` arm.
-                        if let Some(v) = dict.get(b"FL").ok().and_then(num) {
+                        // is the `i` arm's.
+                        if let Some(v) = scalar(b"FL") {
                             gs.flatness = v.clamp(0.0, 100.0);
                         }
                         if let Some(d_obj) = dict.get(b"D").ok().and_then(|obj| deref(doc, obj).or(Some(obj))) {
@@ -441,15 +547,23 @@ pub(crate) fn interpret_content_seeded(
                             if let Ok(n) = bm_obj.as_name() {
                                 gs.blend_mode = BlendMode::from_name(n);
                             } else if let Ok(arr) = bm_obj.as_array() {
-                                // BM can be array, take first that is not Normal
-                                for el in arr {
-                                    if let Ok(n) = el.as_name() {
-                                        let bm = BlendMode::from_name(n);
-                                        if bm != BlendMode::Normal {
-                                            gs.blend_mode = bm;
-                                            break;
-                                        }
-                                    }
+                                // §11.6.3: when `/BM` is an array the reader shall use
+                                // the FIRST name in it that it RECOGNISES. The array
+                                // form exists so a file can name a future or vendor
+                                // blend mode first and a supported fallback after it —
+                                // it is not "the first non-Normal name". Skipping a
+                                // leading /Normal inverts the rule: `/BM [/Normal
+                                // /Multiply]` means Normal, and treating it as Multiply
+                                // darkens content that should composite normally, twice
+                                // over wherever it overlaps itself. Recognition lives in
+                                // `from_name_checked` next to the name table, so it
+                                // cannot drift from it when a mode is added.
+                                if let Some(bm) = arr
+                                    .iter()
+                                    .filter_map(|el| el.as_name().ok())
+                                    .find_map(BlendMode::from_name_checked)
+                                {
+                                    gs.blend_mode = bm;
                                 }
                             }
                         }
@@ -626,9 +740,11 @@ pub(crate) fn interpret_content_seeded(
                 let xn = o.first().and_then(|x| deref(doc, x).and_then(num).or_else(|| num(x)));
                 let yn = o.get(1).and_then(|x| deref(doc, x).and_then(num).or_else(|| num(x)));
                 if let (Some(x), Some(y)) = (xn, yn) {
+                    let (dx, dy) = dev(&gs, x, y);
+                    // A non-finite moveto starts no subpath: see `finite2`.
+                    if !finite2((dx, dy)) { continue; }
                     cur_user = (x, y);
                     start_user = (x, y);
-                    let (dx, dy) = dev(&gs, x, y);
                     if subpaths.len() < MAX_SUBPATHS {
                         subpaths.push(vec![(dx, dy)]);
                         clip_path_ops.push(PathOp::Move(dx as f32, dy as f32));
@@ -643,8 +759,11 @@ pub(crate) fn interpret_content_seeded(
                     // subpath here desynchronised `subpaths` from `clip_path_ops`,
                     // and an unmatched Line makes Android's Path start at (0,0).
                     if subpaths.is_empty() { continue; }
-                    cur_user = (x, y);
                     let (dx, dy) = dev(&gs, x, y);
+                    // A non-finite point would make the whole contour undrawable,
+                    // not just this vertex: see `finite2`.
+                    if !finite2((dx, dy)) { continue; }
+                    cur_user = (x, y);
                     if let Some(sp) = subpaths.last_mut() {
                         sp.push((dx, dy));
                     }
@@ -674,6 +793,13 @@ pub(crate) fn interpret_content_seeded(
                 let (c1x, c1y) = dev(&gs, p1.0, p1.1);
                 let (c2x, c2y) = dev(&gs, p2.0, p2.1);
                 let (c3x, c3y) = dev(&gs, p3.0, p3.1);
+                // One non-finite control point makes every flattened vertex
+                // non-finite: see `finite2`.
+                if !(finite2((d0x, d0y)) && finite2((c1x, c1y))
+                    && finite2((c2x, c2y)) && finite2((c3x, c3y)))
+                {
+                    continue;
+                }
                 let bez_steps = bezier_steps_for_flatness(
                     [(d0x, d0y), (c1x, c1y), (c2x, c2y), (c3x, c3y)],
                     gs.flatness,
@@ -693,19 +819,26 @@ pub(crate) fn interpret_content_seeded(
                 let nums: Vec<f64> = o.iter().filter_map(|x| deref(doc, x).and_then(num).or_else(|| num(x))).collect();
                 if nums.len() == 4 {
                     let (x, y, w, h) = (nums[0], nums[1], nums[2], nums[3]);
-                    let rect = vec![
-                        dev(&gs, x, y),
-                        dev(&gs, x + w, y),
-                        dev(&gs, x + w, y + h),
-                        dev(&gs, x, y + h),
-                        dev(&gs, x, y),
-                    ];
-                    if subpaths.len() >= MAX_SUBPATHS { continue; }
-                    subpaths.push(rect);
                     let (mx, my) = dev(&gs, x, y);
                     let (x1, y1d) = dev(&gs, x + w, y);
                     let (x2, y2d) = dev(&gs, x + w, y + h);
                     let (x3, y3d) = dev(&gs, x, y + h);
+                    // See `finite2`: a non-finite corner makes the whole rect
+                    // undrawable, and `re` is the usual shape of a `W n` clip.
+                    if !(finite2((mx, my)) && finite2((x1, y1d))
+                        && finite2((x2, y2d)) && finite2((x3, y3d)))
+                    {
+                        continue;
+                    }
+                    let rect = vec![
+                        (mx, my),
+                        (x1, y1d),
+                        (x2, y2d),
+                        (x3, y3d),
+                        (mx, my),
+                    ];
+                    if subpaths.len() >= MAX_SUBPATHS { continue; }
+                    subpaths.push(rect);
                     clip_path_ops.push(PathOp::Move(mx as f32, my as f32));
                     clip_path_ops.push(PathOp::Line(x1 as f32, y1d as f32));
                     clip_path_ops.push(PathOp::Line(x2 as f32, y2d as f32));
@@ -716,6 +849,11 @@ pub(crate) fn interpret_content_seeded(
                 }
             }
             "h" => {
+                // §8.5.2.1: `h` closes the CURRENT subpath; with no current point
+                // there is nothing to close. Emitting a bare `Close` desynchronised
+                // `clip_path_ops` from `subpaths` and moved the current point to a
+                // stale `start_user`.
+                if subpaths.is_empty() { continue; }
                 // P0 fix: avoid duplicate close point causing zero-length segment
                 if let Some(sp) = subpaths.last_mut() {
                     let (sx, sy) = dev(&gs, start_user.0, start_user.1);
@@ -726,9 +864,6 @@ pub(crate) fn interpret_content_seeded(
                 cur_user = start_user;
             }
             "S" | "s" => {
-                if let Some(pc) = pending_clip.take() {
-                    emit_one_clip(prims, pc, &mut clip_depth, &mut current_clip_bbox, text_only, oc_stack.last().copied().unwrap_or(false));
-                }
                 if op.operator == "s" {
                     if let Some(sp) = subpaths.last_mut() {
                         sp.push(dev(&gs, start_user.0, start_user.1));
@@ -742,15 +877,20 @@ pub(crate) fn interpret_content_seeded(
                         emit_stroke(prims, &subpaths, &gs);
                     }
                     if let Some(m) = gs.soft_mask.clone() {
-                        wrap_with_soft_mask(prims, sm_start, doc, resources, &m, depth, &mut mask_bracket);
+                        wrap_with_soft_mask(prims, sm_start, doc, resources, &m, depth, &mut mask_bracket, current_clip_bbox);
                     }
+                }
+                // §8.5.4: a pending `W` takes effect only AFTER the painting
+                // operator that ends the path object — "the painting operation
+                // shall be unaffected by the new clipping path". Committing it
+                // first clipped a stroke to its own centreline, so `W S` came out
+                // at half width.
+                if let Some(pc) = pending_clip.take() {
+                    emit_one_clip(prims, pc, &mut clip_depth, &mut current_clip_bbox, text_only, oc_stack.last().copied().unwrap_or(false));
                 }
                 subpaths.clear(); clip_path_ops.clear();
             }
             "f" | "F" | "f*" => {
-                if let Some(pc) = pending_clip.take() {
-                    emit_one_clip(prims, pc, &mut clip_depth, &mut current_clip_bbox, text_only, oc_stack.last().copied().unwrap_or(false));
-                }
                 if !text_only && !oc_stack.last().copied().unwrap_or(false) {
                     let sm_start = prims.len();
                     if let Some(pid) = gs.fill_pattern {
@@ -759,15 +899,16 @@ pub(crate) fn interpret_content_seeded(
                         emit_fill(prims, &subpaths, gs.fill, op.operator == "f*", gs.alpha_fill, gs.blend_mode);
                     }
                     if let Some(m) = gs.soft_mask.clone() {
-                        wrap_with_soft_mask(prims, sm_start, doc, resources, &m, depth, &mut mask_bracket);
+                        wrap_with_soft_mask(prims, sm_start, doc, resources, &m, depth, &mut mask_bracket, current_clip_bbox);
                     }
+                }
+                // §8.5.4: see the `S` arm — the clip lands after the paint.
+                if let Some(pc) = pending_clip.take() {
+                    emit_one_clip(prims, pc, &mut clip_depth, &mut current_clip_bbox, text_only, oc_stack.last().copied().unwrap_or(false));
                 }
                 subpaths.clear(); clip_path_ops.clear();
             }
             "B" | "B*" | "b" | "b*" => {
-                if let Some(pc) = pending_clip.take() {
-                    emit_one_clip(prims, pc, &mut clip_depth, &mut current_clip_bbox, text_only, oc_stack.last().copied().unwrap_or(false));
-                }
                 if op.operator.starts_with('b') {
                     if let Some(sp) = subpaths.last_mut() {
                         sp.push(dev(&gs, start_user.0, start_user.1));
@@ -786,8 +927,12 @@ pub(crate) fn interpret_content_seeded(
                         emit_stroke(prims, &subpaths, &gs);
                     }
                     if let Some(m) = gs.soft_mask.clone() {
-                        wrap_with_soft_mask(prims, sm_start, doc, resources, &m, depth, &mut mask_bracket);
+                        wrap_with_soft_mask(prims, sm_start, doc, resources, &m, depth, &mut mask_bracket, current_clip_bbox);
                     }
+                }
+                // §8.5.4: see the `S` arm — the clip lands after the paint.
+                if let Some(pc) = pending_clip.take() {
+                    emit_one_clip(prims, pc, &mut clip_depth, &mut current_clip_bbox, text_only, oc_stack.last().copied().unwrap_or(false));
                 }
                 subpaths.clear(); clip_path_ops.clear();
             }
@@ -806,7 +951,7 @@ pub(crate) fn interpret_content_seeded(
                         if let Some(img) = extract_inline_image(doc, stream, gs.fill, &colorspaces) {
                             let sm_start = prims.len();
                             if prims.len() < MAX_PRIMITIVES { prims.push(Prim::Image { ctm: gs.ctm, w: img.w, h: img.h, format: img.format, data: img.data, alpha: gs.alpha_fill as f32, blend: gs.blend_mode }); }
-                            if let Some(m) = gs.soft_mask.clone() { wrap_with_soft_mask(prims, sm_start, doc, resources, &m, depth, &mut mask_bracket); }
+                            if let Some(m) = gs.soft_mask.clone() { wrap_with_soft_mask(prims, sm_start, doc, resources, &m, depth, &mut mask_bracket, current_clip_bbox); }
                         }
                     }
                 }
@@ -832,7 +977,7 @@ pub(crate) fn interpret_content_seeded(
                                     if let Some(img) = extract_image(doc, stream, gs.fill, &colorspaces) {
                                         let sm_start = prims.len();
                                         if prims.len() < MAX_PRIMITIVES { prims.push(Prim::Image { ctm: gs.ctm, w: img.w, h: img.h, format: img.format, data: img.data, alpha: gs.alpha_fill as f32, blend: gs.blend_mode }); }
-                                        if let Some(m) = gs.soft_mask.clone() { wrap_with_soft_mask(prims, sm_start, doc, resources, &m, depth, &mut mask_bracket); }
+                                        if let Some(m) = gs.soft_mask.clone() { wrap_with_soft_mask(prims, sm_start, doc, resources, &m, depth, &mut mask_bracket, current_clip_bbox); }
                                     }
                                 }
                             } else if subtype == Some(b"Form")
@@ -854,6 +999,14 @@ pub(crate) fn interpret_content_seeded(
                                 // keeping the index is exactly what mode 3 achieves there.
                                 && !(oc_stack.last().copied().unwrap_or(false) && !text_only)
                             {
+                                // Bounds BRANCHING, which `depth < 10` above does
+                                // not: see [`MAX_FORM_INVOCATIONS`]. Checked before
+                                // anything is emitted, so exhausting it drops the
+                                // whole `Do` cleanly rather than leaving a clip or
+                                // group bracket half-open.
+                                if !take_form_budget() {
+                                    continue;
+                                }
                                 let form_matrix = stream
                                     .dict
                                     .get(b"Matrix")
@@ -1044,7 +1197,7 @@ pub(crate) fn interpret_content_seeded(
                                 // append the mask group (rendered at the mask's set-time CTM).
                                 if use_smask {
                                     if let Some(mask) = active_smask {
-                                        wrap_with_soft_mask(prims, sm_start, doc, resources, &mask, depth, &mut mask_bracket);
+                                        wrap_with_soft_mask(prims, sm_start, doc, resources, &mask, depth, &mut mask_bracket, current_clip_bbox);
                                     }
                                 }
                             }
@@ -1184,7 +1337,7 @@ pub(crate) fn interpret_content_seeded(
                                     if prims.len() < MAX_PRIMITIVES && !oc_stack.last().copied().unwrap_or(false) {
                                         let sm_start = prims.len();
                                         prims.push(Prim::Image { ctm, w, h, format: 0, data, alpha: gs.alpha_fill as f32, blend: gs.blend_mode });
-                                        if let Some(m) = gs.soft_mask.clone() { wrap_with_soft_mask(prims, sm_start, doc, resources, &m, depth, &mut mask_bracket); }
+                                        if let Some(m) = gs.soft_mask.clone() { wrap_with_soft_mask(prims, sm_start, doc, resources, &m, depth, &mut mask_bracket, current_clip_bbox); }
                                     }
                                 }
                             }
@@ -1263,7 +1416,13 @@ pub(crate) fn interpret_content_seeded(
             }
             "ET" => {
                 // If the text object added glyphs to the clip (Tr 4-7), apply it.
-                if text_clip_used && !text_only && !oc_stack.last().copied().unwrap_or(false) && prims.len() < MAX_PRIMITIVES {
+                // Deliberately NOT gated on optional-content visibility: the
+                // renderer accumulates glyph outlines as they are shown, so a
+                // BDC/EMC that hides only the tail of the text object would
+                // otherwise leave those outlines pending and fold them into the
+                // NEXT text object's clip. When nothing was accumulated the
+                // marker is a bare save/restore, which is harmless.
+                if text_clip_used && !text_only && prims.len() < MAX_PRIMITIVES {
                     prims.push(Prim::TextClipApply);
                     clip_depth += 1;
                 }
@@ -1345,7 +1504,7 @@ pub(crate) fn interpret_content_seeded(
                     let oc_hidden = oc_stack.last().copied().unwrap_or(false);
                     let shown_mode = gs.render_mode;
                     if oc_hidden { gs.render_mode = 3; }
-                    let adv = show_string(doc, prims, &gs, &fonts, &text_matrix, bytes, depth);
+                    let adv = show_string_in(doc, prims, &gs, &fonts, &text_matrix, bytes, depth, resources);
                     gs.render_mode = shown_mode;
                     if fonts.get(&gs.font_key).map(|f| f.wmode == 1).unwrap_or(false) {
                         text_matrix = mat_mul(&translate(0.0, adv), &text_matrix);
@@ -1354,7 +1513,7 @@ pub(crate) fn interpret_content_seeded(
                     }
                     // Soft-mask must also cover invisible-clip modes 4-6, not only 0-2.
                     if !oc_hidden && matches!(gs.render_mode, 0|1|2|4|5|6) {
-                        if let Some(m) = gs.soft_mask.clone() { wrap_with_soft_mask(prims, sm_start, doc, resources, &m, depth, &mut mask_bracket); }
+                        if let Some(m) = gs.soft_mask.clone() { wrap_with_soft_mask(prims, sm_start, doc, resources, &m, depth, &mut mask_bracket, current_clip_bbox); }
                     }
                 }
             }
@@ -1368,7 +1527,7 @@ pub(crate) fn interpret_content_seeded(
                     let oc_hidden = oc_stack.last().copied().unwrap_or(false);
                     let shown_mode = gs.render_mode;
                     if oc_hidden { gs.render_mode = 3; }
-                    let adv = show_string(doc, prims, &gs, &fonts, &text_matrix, bytes, depth);
+                    let adv = show_string_in(doc, prims, &gs, &fonts, &text_matrix, bytes, depth, resources);
                     gs.render_mode = shown_mode;
                     if fonts.get(&gs.font_key).map(|f| f.wmode == 1).unwrap_or(false) {
                         text_matrix = mat_mul(&translate(0.0, adv), &text_matrix);
@@ -1376,7 +1535,7 @@ pub(crate) fn interpret_content_seeded(
                         text_matrix = mat_mul(&translate(adv, 0.0), &text_matrix);
                     }
                     if !oc_hidden && matches!(gs.render_mode, 0|1|2|4|5|6) {
-                        if let Some(m) = gs.soft_mask.clone() { wrap_with_soft_mask(prims, sm_start, doc, resources, &m, depth, &mut mask_bracket); }
+                        if let Some(m) = gs.soft_mask.clone() { wrap_with_soft_mask(prims, sm_start, doc, resources, &m, depth, &mut mask_bracket, current_clip_bbox); }
                     }
                 }
             }
@@ -1392,7 +1551,7 @@ pub(crate) fn interpret_content_seeded(
                     let oc_hidden = oc_stack.last().copied().unwrap_or(false);
                     let shown_mode = gs.render_mode;
                     if oc_hidden { gs.render_mode = 3; }
-                    let adv = show_string(doc, prims, &gs, &fonts, &text_matrix, bytes, depth);
+                    let adv = show_string_in(doc, prims, &gs, &fonts, &text_matrix, bytes, depth, resources);
                     gs.render_mode = shown_mode;
                     if fonts.get(&gs.font_key).map(|f| f.wmode == 1).unwrap_or(false) {
                         text_matrix = mat_mul(&translate(0.0, adv), &text_matrix);
@@ -1400,7 +1559,7 @@ pub(crate) fn interpret_content_seeded(
                         text_matrix = mat_mul(&translate(adv, 0.0), &text_matrix);
                     }
                     if !oc_hidden && matches!(gs.render_mode, 0|1|2|4|5|6) {
-                        if let Some(m) = gs.soft_mask.clone() { wrap_with_soft_mask(prims, sm_start, doc, resources, &m, depth, &mut mask_bracket); }
+                        if let Some(m) = gs.soft_mask.clone() { wrap_with_soft_mask(prims, sm_start, doc, resources, &m, depth, &mut mask_bracket, current_clip_bbox); }
                     }
                 }
             }
@@ -1414,7 +1573,7 @@ pub(crate) fn interpret_content_seeded(
                     for el in arr {
                         match el {
                             Object::String(bytes, _) => {
-                                let adv = show_string(doc, prims, &gs, &fonts, &text_matrix, bytes, depth);
+                                let adv = show_string_in(doc, prims, &gs, &fonts, &text_matrix, bytes, depth, resources);
                                 if fonts.get(&gs.font_key).map(|f| f.wmode == 1).unwrap_or(false) {
                         text_matrix = mat_mul(&translate(0.0, adv), &text_matrix);
                     } else {
@@ -1438,7 +1597,7 @@ pub(crate) fn interpret_content_seeded(
                 }
                 if oc_hidden { gs.render_mode = shown_mode; }
                 if !oc_hidden && matches!(gs.render_mode, 0|1|2|4|5|6) {
-                    if let Some(m) = gs.soft_mask.clone() { wrap_with_soft_mask(prims, sm_start, doc, resources, &m, depth, &mut mask_bracket); }
+                    if let Some(m) = gs.soft_mask.clone() { wrap_with_soft_mask(prims, sm_start, doc, resources, &m, depth, &mut mask_bracket, current_clip_bbox); }
                 }
             }
             // Explicit no-ops (documented): rendering intent, and compatibility
@@ -1458,8 +1617,28 @@ pub(crate) fn interpret_content_seeded(
 
 pub(crate) fn read_matrix(operands: &[Object]) -> Option<Mat> {
     let n: Vec<f64> = operands.iter().filter_map(num).collect();
-    if n.len() == 6 {
-        Some([n[0], n[1], n[2], n[3], n[4], n[5]])
+    if n.len() != 6 {
+        return None;
+    }
+    let m = [n[0], n[1], n[2], n[3], n[4], n[5]];
+    // §8.3.3 defines a matrix as six NUMBERS. lopdf's `Object::Real` is an f32, so a
+    // file carrying `1e40` yields INFINITY here, and every coordinate derived from
+    // the matrix is then non-finite. `read_rect` already rejects a non-finite
+    // rectangle for the same reason; this is the other half of the same boundary,
+    // and it was the one still open.
+    //
+    // Rejecting rather than patching, because every caller already has a correct
+    // meaning for `None`: `cm` and `Tm` leave the current matrix alone (matching the
+    // `cm` arm's existing guard on its own product), and the four `/Matrix` reads —
+    // form XObject §8.10.2, tiling and shading patterns §8.7.3.1, soft-mask group
+    // §11.6.5.2 — all fall back to IDENTITY, which is precisely what the spec says an
+    // ABSENT `/Matrix` means. A malformed optional entry is treated as absent.
+    //
+    // `Tm` is the one that was not covered transitively: `cm` guards the product it
+    // computes, but `Tm` assigns the matrix straight to the text matrix, so a
+    // non-finite one placed every subsequent glyph at a non-finite origin.
+    if m.iter().all(|v| v.is_finite()) {
+        Some(m)
     } else {
         None
     }
@@ -1577,15 +1756,23 @@ pub(crate) struct MaskBracket {
 
 /// Render an ExtGState soft-mask group into `prims` as the mask content of a
 /// SoftMaskPush/Content/Pop bracket. The group is placed at the CTM captured
-/// when the mask was set. For a luminosity mask with a `/BC` backdrop, a
-/// backdrop-colored rectangle is painted first so uncovered areas take the
-/// backdrop luminance (default black otherwise).
+/// when the mask was set.
+///
+/// `masked_extent` is the device-space clip extent the masked content is being
+/// painted under. §11.6.5.2 composites the group against a FULLY OPAQUE backdrop
+/// of `/BC` and converts the result to luminosity, so the mask value at every
+/// point the group does not paint — including everywhere outside its `/BBox` —
+/// is the luminosity of `/BC`, not zero. Painting the backdrop only over the
+/// `/BBox` left the rest of the mask surface at luminosity 0, which for a bright
+/// `/BC` HIDES content that the file asked to be revealed. Reported by
+/// `a-shading`.
 pub(crate) fn render_soft_mask_group(
     doc: &Document,
     resources: Option<&lopdf::Dictionary>,
     mask: &SoftMask,
     prims: &mut Vec<Prim>,
     depth: u32,
+    masked_extent: Option<[f64; 4]>,
 ) {
     if depth >= MAX_PATTERN_RECURSION || prims.len() >= MAX_PRIMITIVES {
         return;
@@ -1600,7 +1787,7 @@ pub(crate) fn render_soft_mask_group(
         .and_then(|o| deref(doc, o))
         .and_then(|o| o.as_dict().ok())
         .cloned();
-    // /BC backdrop rectangle for luminosity masks.
+    // /BC backdrop for luminosity masks.
     if mask.mask_type == 1 {
         if let Some(bc) = &mask.backdrop {
             if let Some(rect) = mstream.dict.get(b"BBox").ok().and_then(|o| read_rect(doc, o)) {
@@ -1615,13 +1802,35 @@ pub(crate) fn render_soft_mask_group(
                         4 => cmyk_to_argb(bc[0], bc[1], bc[2], bc[3]),
                         _ => 0xFF00_0000,
                     });
-                let corners = [
-                    transform(&group_ctm, rect[0], rect[1]),
-                    transform(&group_ctm, rect[2], rect[1]),
-                    transform(&group_ctm, rect[2], rect[3]),
-                    transform(&group_ctm, rect[0], rect[3]),
-                ];
-                let poly: Vec<(f64, f64)> = corners.to_vec();
+                // The backdrop covers everything the mask is applied to, not just
+                // the group's /BBox — see this function's doc comment. Falling
+                // back to the /BBox quad when there is no extent is deliberate:
+                // that reproduces the OLD, known-wrong behaviour in a case that
+                // already had it, whereas an unbounded fill would flood the page
+                // with the backdrop colour, which is a worse new failure.
+                //
+                // Capturing the extent at bracket creation is sound even though
+                // `wrap_with_soft_mask` later splices more content into the SAME
+                // bracket, because coalescing requires `b.end == start` — the
+                // bracket must still be the tail of `prims`. The only operator
+                // that can GROW the clip is `Q`, and it pushes a `Prim::ClipPop`
+                // per level before restoring the saved bbox, so any growth emits
+                // a prim, fails that check and forces a fresh bracket with a
+                // freshly sized backdrop. The extent therefore cannot go stale
+                // for anything that coalesces in. (Sizing it to the masked
+                // CONTENT's extent has no such guarantee and silently
+                // under-covers every operation after the first.)
+                let poly: Vec<(f64, f64)> = match masked_extent {
+                    Some([x0, y0, x1, y1]) => {
+                        vec![(x0, y0), (x1, y0), (x1, y1), (x0, y1)]
+                    }
+                    None => vec![
+                        transform(&group_ctm, rect[0], rect[1]),
+                        transform(&group_ctm, rect[2], rect[1]),
+                        transform(&group_ctm, rect[2], rect[3]),
+                        transform(&group_ctm, rect[0], rect[3]),
+                    ],
+                };
                 emit_fill(prims, std::slice::from_ref(&poly), argb, false, 1.0, BlendMode::Normal);
             }
         }
@@ -1695,6 +1904,7 @@ pub(crate) fn wrap_with_soft_mask(
     mask: &SoftMask,
     depth: u32,
     bracket: &mut Option<MaskBracket>,
+    masked_extent: Option<[f64; 4]>,
 ) {
     if start >= prims.len() || prims.len() >= MAX_PRIMITIVES {
         return;
@@ -1728,7 +1938,7 @@ pub(crate) fn wrap_with_soft_mask(
     }
     let content = prims.len();
     prims.push(Prim::SoftMaskContent);
-    render_soft_mask_group(doc, resources, mask, prims, depth);
+    render_soft_mask_group(doc, resources, mask, prims, depth, masked_extent);
     prims.push(Prim::SoftMaskPop);
     *bracket = Some(MaskBracket { key, push: start, content, end: prims.len() });
 }
@@ -1846,7 +2056,12 @@ pub(crate) fn paint_pattern_stroke(
     prims.push(Prim::ClipPush { even_odd: false, pts, path_ops: Some(path_ops) });
     if ptype == 2 {
         if let Some(shobj) = dict.get(b"Shading").ok().and_then(|o| deref(doc, o)) {
-            if let Some((ctm, w, h, data)) = rasterize_shading(doc, shobj, &pmat, &HashMap::new(), 0, stroke_bbox) {
+            // §8.7.4.3 Table 78: `/Background` fills the parts of the painted area
+            // outside the shading's own extent, and applies ONLY when the shading is
+            // painted as a shading pattern — it "shall be ignored by the `sh`
+            // operator". This is PatternType 2, so it opts in; the `sh` arm keeps the
+            // plain entry point.
+            if let Some((ctm, w, h, data)) = rasterize_shading_as_pattern(doc, shobj, &pmat, &HashMap::new(), 0, stroke_bbox) {
                 if prims.len() < MAX_PRIMITIVES {
                     prims.push(Prim::Image { ctm, w, h, format: 0, data, alpha: gs.alpha_stroke as f32, blend: gs.blend_mode });
                 }
@@ -1920,7 +2135,9 @@ pub(crate) fn paint_pattern_fill(
     if ptype == 2 {
         if let Some(shobj) = dict.get(b"Shading").ok().and_then(|o| deref(doc, o)) {
             let fill_bbox = polys_device_bbox(polys);
-            if let Some((ctm, w, h, data)) = rasterize_shading(doc, shobj, &pmat, &HashMap::new(), 0, fill_bbox) {
+            // §8.7.4.3 Table 78: see `paint_pattern_stroke` — PatternType 2 honours
+            // `/Background`, the `sh` operator ignores it.
+            if let Some((ctm, w, h, data)) = rasterize_shading_as_pattern(doc, shobj, &pmat, &HashMap::new(), 0, fill_bbox) {
                 if prims.len() < MAX_PRIMITIVES {
                     prims.push(Prim::Image { ctm, w, h, format: 0, data, alpha: alpha_fill, blend });
                 }
@@ -2200,7 +2417,20 @@ pub(crate) fn read_rect(doc: &Document, obj: &Object) -> Option<[f64; 4]> {
     for (i, v) in arr.iter().enumerate() {
         out[i] = deref(doc, v).and_then(num)?;
     }
-    Some(out)
+    // §7.9.5 defines a rectangle as four NUMBERS; NaN and the infinities are not
+    // numbers a rectangle can be made of. Rejecting the whole rect rather than
+    // patching a component matches the `cm` arm's treatment of a non-finite CTM,
+    // and for the same reason: one poisoned coordinate propagates through every
+    // transform derived from it, and the rasterizer drops a path containing a
+    // NaN point silently, so a region of the page vanishes with no error
+    // anywhere. Every caller already handles `None` — as an absent /BBox, an
+    // unclipped form, or a skipped annotation — which are all visibly wrong in
+    // the way a malformed file should be, instead of invisibly wrong.
+    if out.iter().all(|v| v.is_finite()) {
+        Some(out)
+    } else {
+        None
+    }
 }
 
 #[cfg(test)]
@@ -2314,7 +2544,7 @@ mod coverage_gap_tests {
             tr: None,
         };
         let mut prims = Vec::new();
-        render_soft_mask_group(&doc, None, &mask, &mut prims, 0);
+        render_soft_mask_group(&doc, None, &mask, &mut prims, 0, None);
         assert!(
             prims.iter().any(|p| matches!(p, Prim::Image { .. })),
             "an all-black mask hides everything it should reveal"
@@ -2613,6 +2843,774 @@ mod coverage_gap_tests {
             prims2.iter().filter(|p| matches!(p, Prim::Text { .. })).count(),
             2,
             "a dangling /Font must not discard the font Tf already selected"
+        );
+    }
+}
+
+#[cfg(test)]
+mod blind_reaudit_r4_tests {
+    use crate::*;
+    use lopdf::content::Operation;
+    use lopdf::{dictionary, Stream};
+
+    fn op(name: &str, operands: Vec<Object>) -> Operation {
+        Operation::new(name, operands)
+    }
+
+    fn run(ops: &[Operation], res: Option<&lopdf::Dictionary>) -> Vec<Prim> {
+        let doc = Document::with_version("1.7");
+        let mut prims = Vec::new();
+        interpret_content(&doc, ops, res, GraphicsState::default(), &mut prims, 0, false);
+        prims
+    }
+
+    /// §8.5.4: "the clipping path operator shall not alter the current clipping
+    /// path at the time it is invoked... the painting operation shall be
+    /// unaffected by the new clipping path" — the pending `W` becomes the clip
+    /// only AFTER the painting operator that terminates the path object.
+    ///
+    /// Committing it first clips the stroke to its own centreline, so `W S`
+    /// renders at half width (and `W B`'s stroke loses its outer half). The
+    /// order of `Prim::Stroke` and `Prim::ClipPush` in the stream IS the order
+    /// the renderer applies them, so it is the thing to assert.
+    #[test]
+    fn a_pending_clip_takes_effect_only_after_the_painting_operator() {
+        for painter in ["S", "f", "B"] {
+            let ops = vec![
+                op("re", vec![0.into(), 0.into(), 100.into(), 100.into()]),
+                op("W", vec![]),
+                op(painter, vec![]),
+            ];
+            let prims = run(&ops, None);
+            let clip = prims
+                .iter()
+                .position(|p| matches!(p, Prim::ClipPush { .. }))
+                .unwrap_or_else(|| panic!("`W {painter}` must still commit the clip"));
+            let paint = prims
+                .iter()
+                .position(|p| matches!(p, Prim::Fill { .. } | Prim::Stroke { .. }))
+                .unwrap_or_else(|| panic!("`W {painter}` must still paint"));
+            assert!(
+                paint < clip,
+                "`W {painter}`: paint at {paint} must precede the clip at {clip}, \
+                 otherwise the operator paints through its own clip"
+            );
+        }
+        // `n` paints nothing but must still commit the clip (§8.5.3 Table 60).
+        let ops = vec![
+            op("re", vec![0.into(), 0.into(), 100.into(), 100.into()]),
+            op("W", vec![]),
+            op("n", vec![]),
+        ];
+        assert!(
+            run(&ops, None).iter().any(|p| matches!(p, Prim::ClipPush { .. })),
+            "`W n` must commit the pending clip"
+        );
+    }
+
+    /// §8.5.2.1: `h` closes the current subpath. With no current point there is
+    /// nothing to close, so it must be a no-op — emitting a bare `Close` put a
+    /// `PathOp::Close` into the clip path ahead of its first `Move`, which
+    /// desynchronised `clip_path_ops` from `subpaths`.
+    #[test]
+    fn h_with_no_current_point_is_a_no_op() {
+        let ops = vec![
+            op("h", vec![]),
+            op("m", vec![0.into(), 0.into()]),
+            op("l", vec![10.into(), 0.into()]),
+            op("l", vec![10.into(), 10.into()]),
+            op("W", vec![]),
+            op("n", vec![]),
+        ];
+        let prims = run(&ops, None);
+        let po = prims
+            .iter()
+            .find_map(|p| match p {
+                Prim::ClipPush { path_ops: Some(po), .. } => Some(po.clone()),
+                _ => None,
+            })
+            .expect("the clip must still be emitted");
+        assert!(
+            matches!(po.first(), Some(PathOp::Move(..))),
+            "clip path must start with a Move, got {:?}",
+            po.first()
+        );
+    }
+
+    /// §9.3.6 modes 4-7 add the glyphs to the clipping path, applied at `ET`.
+    /// Gating that marker on optional-content visibility left the renderer's
+    /// accumulated outlines pending when a BDC/EMC hid only the TAIL of the text
+    /// object, so they were folded into the next text object's clip and erased
+    /// unrelated content. The marker also resets that accumulator, so it has to
+    /// be emitted whenever any glyph was shown in a clip mode.
+    #[test]
+    fn et_applies_the_text_clip_even_when_the_tail_of_the_object_is_hidden() {
+        let mut doc = Document::with_version("1.7");
+        let ocg = doc.add_object(dictionary! {
+            "Type" => "OCG", "Name" => Object::string_literal("off"),
+        });
+        let catalog = doc.add_object(dictionary! {
+            "Type" => "Catalog",
+            "OCProperties" => dictionary! {
+                "OCGs" => vec![Object::Reference(ocg)],
+                "D" => dictionary! { "OFF" => vec![Object::Reference(ocg)] },
+            },
+        });
+        doc.trailer.set("Root", Object::Reference(catalog));
+        let font = doc.add_object(dictionary! {
+            "Type" => "Font", "Subtype" => "Type1", "BaseFont" => "Helvetica",
+            "FirstChar" => 65, "LastChar" => 66,
+            "Widths" => vec![1000.into(), 1000.into()],
+        });
+        let res = dictionary! {
+            "Font" => dictionary! { "F1" => Object::Reference(font) },
+            "Properties" => dictionary! { "P1" => Object::Reference(ocg) },
+        };
+        let ops = vec![
+            op("BT", vec![]),
+            op("Tf", vec![Object::Name(b"F1".to_vec()), 12.into()]),
+            op("Tr", vec![7.into()]),
+            // Shown while the layer is still visible: these glyphs reach the
+            // renderer's clip accumulator.
+            op("Tj", vec![Object::string_literal("AB")]),
+            op("BDC", vec![Object::Name(b"OC".to_vec()), Object::Name(b"P1".to_vec())]),
+            op("ET", vec![]),
+        ];
+        let mut prims = Vec::new();
+        interpret_content(&doc, &ops, Some(&res), GraphicsState::default(), &mut prims, 0, false);
+        assert!(
+            prims.iter().any(|p| matches!(p, Prim::TextClipApply)),
+            "ET must apply (and reset) the accumulated text clip"
+        );
+        // And it must stay balanced: the interpreter closes its own clip levels.
+        let mut d = 0i32;
+        for p in &prims {
+            match p {
+                Prim::ClipPush { .. } | Prim::TextClipApply => d += 1,
+                Prim::ClipPop => d -= 1,
+                _ => {}
+            }
+            assert!(d >= 0, "clip stack underflowed");
+        }
+        assert_eq!(d, 0, "{d} clip level(s) left open");
+    }
+
+    /// §8.10.1 puts no limit on `Do` recursion, so the interpreter caps it — but
+    /// the cap was on DEPTH alone, which does not bound BRANCHING. A ~200-byte
+    /// form whose own `/Resources` name it six times is 6^10 = 60M invocations;
+    /// measured at 48 s in a release build (minutes in debug), and one more `Do`
+    /// in the cell multiplies that by six again. The user-visible symptom is a
+    /// viewer that hangs on open, from a file small enough to arrive by email.
+    #[test]
+    fn a_branching_self_referential_form_is_bounded_by_a_total_budget() {
+        let mut doc = Document::with_version("1.7");
+        let id = doc.new_object_id();
+        doc.set_object(
+            id,
+            Stream::new(
+                dictionary! {
+                    "Type" => "XObject", "Subtype" => "Form",
+                    "BBox" => vec![0.into(), 0.into(), 10.into(), 10.into()],
+                    "Resources" => dictionary! {
+                        "XObject" => dictionary! { "A" => Object::Reference(id) },
+                    },
+                },
+                b"/A Do /A Do /A Do /A Do /A Do /A Do".to_vec(),
+            ),
+        );
+        let res = dictionary! { "XObject" => dictionary! { "A" => Object::Reference(id) } };
+        let ops = vec![op("Do", vec![Object::Name(b"A".to_vec())])];
+        let mut prims = Vec::new();
+        let started = std::time::Instant::now();
+        interpret_content(&doc, &ops, Some(&res), GraphicsState::default(), &mut prims, 0, false);
+        let elapsed = started.elapsed();
+        println!("branching form bomb: {elapsed:?}, {} prims", prims.len());
+        // Deliberately loose: the unbounded version needs minutes even in release,
+        // so anything in seconds proves the budget bound it without being flaky on
+        // a loaded machine.
+        assert!(
+            elapsed < std::time::Duration::from_secs(30),
+            "took {elapsed:?} — the form-invocation budget is not binding"
+        );
+        // Each surviving invocation emits its /BBox clip as a balanced pair.
+        let mut d = 0i32;
+        for p in &prims {
+            match p {
+                Prim::ClipPush { .. } => d += 1,
+                Prim::ClipPop => d -= 1,
+                _ => {}
+            }
+            assert!(d >= 0, "clip stack underflowed");
+        }
+        assert_eq!(d, 0, "the budget must not leave {d} clip level(s) open");
+    }
+
+    /// §11.6.3: when `/BM` is an array the reader shall use the FIRST name in it
+    /// that it RECOGNISES. The array form exists so a file can name a future or
+    /// vendor blend mode first and a supported fallback after it — it is NOT
+    /// "the first non-Normal name". `/BM [/Normal /Multiply]` therefore means
+    /// Normal; reading it as Multiply darkens content that should composite
+    /// normally, and doubly so wherever that content overlaps itself.
+    /// Reported by `a-shading`.
+    #[test]
+    fn a_bm_array_uses_the_first_recognised_name() {
+        let blend_of = |names: Vec<Object>| -> BlendMode {
+            let mut doc = Document::with_version("1.7");
+            let gs_id = doc.add_object(dictionary! { "BM" => names });
+            let res = dictionary! {
+                "ExtGState" => dictionary! { "GS1" => Object::Reference(gs_id) },
+            };
+            let ops = vec![
+                op("gs", vec![Object::Name(b"GS1".to_vec())]),
+                op("re", vec![0.into(), 0.into(), 10.into(), 10.into()]),
+                op("f", vec![]),
+            ];
+            let mut prims = Vec::new();
+            interpret_content(&doc, &ops, Some(&res), GraphicsState::default(), &mut prims, 0, false);
+            prims
+                .iter()
+                .find_map(|p| match p {
+                    Prim::Fill { blend, .. } => Some(*blend),
+                    _ => None,
+                })
+                .expect("the fill must be emitted")
+        };
+        let name = |s: &str| Object::Name(s.as_bytes().to_vec());
+
+        assert_eq!(
+            blend_of(vec![name("Normal"), name("Multiply")]),
+            BlendMode::Normal,
+            "a leading /Normal is a recognised name and wins"
+        );
+        assert_eq!(
+            blend_of(vec![name("Compatible"), name("Screen")]),
+            BlendMode::Normal,
+            "/Compatible is a Table 136 alias for Normal, not an unrecognised name"
+        );
+        // The point of the array form: an unrecognised leading name falls through
+        // to the first one the reader does support.
+        assert_eq!(
+            blend_of(vec![name("FutureVendorMode"), name("Multiply")]),
+            BlendMode::Multiply,
+            "an unrecognised leading name must fall through to the supported one"
+        );
+        assert_eq!(blend_of(vec![name("Darken")]), BlendMode::Darken);
+    }
+
+    /// §7.3.10: any object may be an indirect reference, including a Table 58
+    /// scalar. These were read with a bare `num`, which returns `None` for a
+    /// reference, so `/ca 5 0 R` was silently dropped and the element painted
+    /// fully opaque at the very moment the file asked for transparency — while
+    /// the `w`/`J`/`j`/`M`/`i` operator arms deref theirs. Reported by `a-shading`.
+    #[test]
+    fn extgstate_scalars_may_be_indirect_references() {
+        let mut doc = Document::with_version("1.7");
+        let half = doc.add_object(Object::Real(0.5));
+        let wide = doc.add_object(Object::Real(9.0));
+        let gs_id = doc.add_object(dictionary! {
+            "ca" => Object::Reference(half),
+            "CA" => Object::Reference(half),
+            "LW" => Object::Reference(wide),
+        });
+        let res = dictionary! {
+            "ExtGState" => dictionary! { "GS1" => Object::Reference(gs_id) },
+        };
+        let ops = vec![
+            op("gs", vec![Object::Name(b"GS1".to_vec())]),
+            op("re", vec![0.into(), 0.into(), 10.into(), 10.into()]),
+            op("B", vec![]),
+        ];
+        let mut prims = Vec::new();
+        interpret_content(&doc, &ops, Some(&res), GraphicsState::default(), &mut prims, 0, false);
+
+        let fill_alpha = prims.iter().find_map(|p| match p {
+            Prim::Fill { argb, .. } => Some((argb >> 24) as u8),
+            _ => None,
+        });
+        assert_eq!(fill_alpha, Some(0x80), "/ca behind a reference was dropped");
+        let stroke = prims.iter().find_map(|p| match p {
+            Prim::Stroke { argb, width, .. } => Some(((argb >> 24) as u8, *width)),
+            _ => None,
+        });
+        let (sa, sw) = stroke.expect("the stroke must be emitted");
+        assert_eq!(sa, 0x80, "/CA behind a reference was dropped");
+        assert!((sw - 9.0).abs() < 1e-3, "/LW behind a reference was dropped, got {sw}");
+    }
+
+    /// §8.7.4.3 Table 78 `/Background`: it fills the parts of the painted area that
+    /// lie outside the shading's own extent, and "shall be ignored by the `sh`
+    /// operator" — it applies only when the shading is painted as a shading
+    /// PATTERN. `images.rs` exposes that as two entry points with IDENTICAL
+    /// signatures, so nothing but this test stops a future edit from swapping them
+    /// back, and the failure is silent in both directions:
+    ///   - `sh` honouring it floods the whole clip with the background colour,
+    ///     painting a solid block over content (the damaging direction);
+    ///   - a pattern ignoring it drops a legitimate, if rare, entry.
+    /// Handoff from `a-images`/`a-shading`, who landed the images.rs side.
+    #[test]
+    fn background_applies_to_shading_patterns_but_not_to_the_sh_operator() {
+        // An AXIAL shading whose axis spans only the middle of the paint area, with
+        // /Extend false at both ends, so "outside the shading's extent" is a large,
+        // unambiguous region: t < 0 left of x=90, t > 1 right of x=110. That makes it
+        // a direct witness — those two arms in `images.rs` read `bg_argb`, which is
+        // exactly what the entry point this test pins decides.
+        //
+        // Radial reaches the background by a DIFFERENT route, worth knowing before
+        // anyone "simplifies" this fixture: `radial_shading_param` enforces /Extend
+        // itself and returns None for an out-of-extent point, so for ShadingType 3
+        // the t < 0 and t > 1 arms are real, correct and DEAD, and the background is
+        // applied in the NaN branch instead. Both routes are gated on `bg_argb`, so
+        // either shading type witnesses the split today; axial just witnesses it
+        // without depending on that second route.
+        //
+        // History kept deliberately: radial used to lose /Background entirely,
+        // because the NaN branch skipped the pixel. The natural reading of that is
+        // "the §8.7.4.5 extent rule is not firing" — which is the mistake I made, and
+        // it is backwards. The extent rule is what PRODUCES the None. Diagnosed by
+        // `a-shading`, fixed by `a-images`.
+        let build = || {
+            let mut doc = Document::with_version("1.7");
+            let func = doc.add_object(dictionary! {
+                "FunctionType" => 2,
+                "Domain" => vec![0.into(), 1.into()],
+                "C0" => vec![0.0.into(), 0.0.into(), 0.0.into()],
+                "C1" => vec![0.0.into(), 0.0.into(), 0.0.into()],
+                "N" => 1,
+            });
+            let shading = dictionary! {
+                "ShadingType" => 2,
+                "ColorSpace" => "DeviceRGB",
+                "Coords" => vec![90.into(), 100.into(), 110.into(), 100.into()],
+                "Function" => Object::Reference(func),
+                "Extend" => vec![false.into(), false.into()],
+                // Pure red: unmistakable against the all-black gradient itself.
+                "Background" => vec![1.0.into(), 0.0.into(), 0.0.into()],
+            };
+            (doc, shading)
+        };
+
+        // Count strongly-red opaque pixels in the rasterised gradient.
+        let reds = |prims: &[Prim]| -> usize {
+            prims
+                .iter()
+                .filter_map(|p| match p {
+                    Prim::Image { data, .. } => Some(data),
+                    _ => None,
+                })
+                .flat_map(|d| d.chunks(4))
+                .filter(|px| px[3] > 128 && px[0] > 200 && px[1] < 64 && px[2] < 64)
+                .count()
+        };
+
+        // 1. `sh` must IGNORE /Background.
+        let (mut doc, shading) = build();
+        let sh_id = doc.add_object(shading.clone());
+        let res = dictionary! { "Shading" => dictionary! { "Sh" => Object::Reference(sh_id) } };
+        let ops = vec![
+            op("re", vec![0.into(), 0.into(), 200.into(), 200.into()]),
+            op("W", vec![]),
+            op("n", vec![]),
+            op("sh", vec![Object::Name(b"Sh".to_vec())]),
+        ];
+        let mut sh_prims = Vec::new();
+        interpret_content_seeded(
+            &doc, &ops, Some(&res), GraphicsState::default(), &mut sh_prims, 0, false,
+            Some([0.0, 0.0, 200.0, 200.0]),
+        );
+        assert!(
+            sh_prims.iter().any(|p| matches!(p, Prim::Image { .. })),
+            "precondition: the sh fixture must rasterize something"
+        );
+        assert_eq!(
+            reds(&sh_prims),
+            0,
+            "`sh` must ignore /Background — flooding the clip with it paints a \
+             solid block over whatever is underneath"
+        );
+
+        // 2. The same shading as a PatternType 2 fill must HONOUR it.
+        let (mut doc2, shading2) = build();
+        let sh_id2 = doc2.add_object(shading2);
+        let pat = doc2.add_object(dictionary! {
+            "Type" => "Pattern",
+            "PatternType" => 2,
+            "Shading" => Object::Reference(sh_id2),
+        });
+        let res2 = dictionary! { "Pattern" => dictionary! { "P0" => Object::Reference(pat) } };
+        let ops2 = vec![
+            op("cs", vec![Object::Name(b"Pattern".to_vec())]),
+            op("scn", vec![Object::Name(b"P0".to_vec())]),
+            op("re", vec![0.into(), 0.into(), 200.into(), 200.into()]),
+            op("f", vec![]),
+        ];
+        let mut pat_prims = Vec::new();
+        interpret_content_seeded(
+            &doc2, &ops2, Some(&res2), GraphicsState::default(), &mut pat_prims, 0, false,
+            Some([0.0, 0.0, 200.0, 200.0]),
+        );
+        assert!(
+            pat_prims.iter().any(|p| matches!(p, Prim::Image { .. })),
+            "precondition: the pattern fixture must rasterize something"
+        );
+        assert!(
+            reds(&pat_prims) > 0,
+            "a PatternType 2 shading must honour /Background outside its extent"
+        );
+    }
+
+    /// §7.3.3 bounds a real to the implementation limit, and lopdf's `Object::Real`
+    /// is an `f32`, so a content stream carrying `1e40` parses to INFINITY. Nothing
+    /// between the interpreter and `Canvas.drawPath` filters a non-finite coordinate
+    /// — not `wire.rs`, not the parser, not the renderer (verified by inspection: no
+    /// `is_finite`/`isFinite` guard in any of them).
+    ///
+    /// The damage is not local. One non-finite vertex makes the WHOLE contour
+    /// non-finite, so a single bad number erases an entire fill rather than one
+    /// point of it; as a `W n` clip path it can erase everything drawn after it. The
+    /// `cm` arm already guards exactly this ("a non-finite CTM poisons every
+    /// coordinate derived from it"), so the operand route was the same hazard left
+    /// open beside a guarded one.
+    ///
+    /// The downstream symptom is asserted at the wire boundary only — what Skia does
+    /// with a non-finite path is not verified here, which is precisely why the poison
+    /// is dropped at the source instead of relying on the renderer to cope.
+    #[test]
+    fn non_finite_path_operands_never_reach_the_primitive_stream() {
+        let doc = Document::with_version("1.7");
+        let inf = Object::Real(f32::INFINITY);
+        let nf = |p: &Prim| -> usize {
+            match p {
+                Prim::Fill { contours, .. } => contours
+                    .iter()
+                    .flatten()
+                    .filter(|(x, y)| !x.is_finite() || !y.is_finite())
+                    .count(),
+                Prim::Stroke { pts, .. } => pts
+                    .iter()
+                    .filter(|(x, y)| !x.is_finite() || !y.is_finite())
+                    .count(),
+                Prim::ClipPush { pts, path_ops, .. } => {
+                    pts.iter().filter(|(x, y)| !x.is_finite() || !y.is_finite()).count()
+                        + path_ops.iter().flatten().filter(|o| match o {
+                            PathOp::Move(x, y) | PathOp::Line(x, y) => !x.is_finite() || !y.is_finite(),
+                            PathOp::Cubic(a, b, c, d, e, f) => {
+                                [a, b, c, d, e, f].iter().any(|v| !v.is_finite())
+                            }
+                            PathOp::Close => false,
+                        }).count()
+                }
+                _ => 0,
+            }
+        };
+
+        let cases: Vec<(&str, Vec<Operation>)> = vec![
+            ("l", vec![
+                op("m", vec![0.into(), 0.into()]),
+                op("l", vec![inf.clone(), 0.into()]),
+                op("l", vec![10.into(), 10.into()]),
+                op("f", vec![]),
+            ]),
+            ("m", vec![
+                op("m", vec![inf.clone(), inf.clone()]),
+                op("l", vec![10.into(), 10.into()]),
+                op("S", vec![]),
+            ]),
+            ("re", vec![
+                op("re", vec![0.into(), 0.into(), inf.clone(), 10.into()]),
+                op("S", vec![]),
+            ]),
+            ("c", vec![
+                op("m", vec![0.into(), 0.into()]),
+                op("c", vec![inf.clone(), 0.into(), 5.into(), 5.into(), 10.into(), 0.into()]),
+                op("S", vec![]),
+            ]),
+            // As a clip path, which is the case that can erase later content.
+            ("re W n", vec![
+                op("re", vec![0.into(), 0.into(), inf.clone(), 10.into()]),
+                op("W", vec![]),
+                op("n", vec![]),
+                op("re", vec![0.into(), 0.into(), 10.into(), 10.into()]),
+                op("f", vec![]),
+            ]),
+        ];
+
+        for (label, ops) in cases {
+            let mut prims = Vec::new();
+            interpret_content(&doc, &ops, None, GraphicsState::default(), &mut prims, 0, false);
+            let bad: usize = prims.iter().map(nf).sum();
+            assert_eq!(bad, 0, "`{label}` leaked {bad} non-finite coordinate(s) to the wire");
+        }
+
+        // The guard must drop only the poison, not the drawing: a wholly finite path
+        // alongside the same operators still paints.
+        let ops = vec![
+            op("re", vec![0.into(), 0.into(), 10.into(), 10.into()]),
+            op("f", vec![]),
+        ];
+        let mut prims = Vec::new();
+        interpret_content(&doc, &ops, None, GraphicsState::default(), &mut prims, 0, false);
+        assert!(
+            prims.iter().any(|p| matches!(p, Prim::Fill { .. })),
+            "the guard must not suppress finite geometry"
+        );
+    }
+
+    /// The matrix half of the same boundary. §8.3.3 defines a matrix as six numbers,
+    /// and lopdf's `Object::Real` is an f32, so `1e40` in any `/Matrix` — or in `cm`
+    /// or `Tm` — yields INFINITY. `read_rect` already rejected a non-finite
+    /// rectangle; `read_matrix` did not, which left three carriers open that the
+    /// path-operand guard cannot see, because they do not go through path
+    /// construction at all:
+    ///   - a form `/Matrix`, which poisons `form_ctm` and with it the `/BBox`
+    ///     ClipPush corners — a non-finite CLIP is the case that erases everything
+    ///     drawn after it, not merely the form;
+    ///   - a pattern `/Matrix`, which reaches the shading placement matrix;
+    ///   - `Tm`, which assigns straight to the text matrix and so places every
+    ///     subsequent glyph at a non-finite origin.
+    /// `cm` was already safe, but only because it guards the product it computes.
+    /// Found by `a-images`, who hit the same class in shading matrices.
+    #[test]
+    fn a_non_finite_matrix_is_treated_as_absent() {
+        let inf = Object::Real(f32::INFINITY);
+        let bad = vec![inf.clone(), 0.into(), 0.into(), 1.into(), 0.into(), 0.into()];
+        assert!(
+            read_matrix(&bad).is_none(),
+            "a non-finite matrix must be rejected at the parse boundary"
+        );
+        assert!(
+            read_matrix(&[1.into(), 0.into(), 0.into(), 1.into(), 5.into(), 5.into()]).is_some(),
+            "a finite matrix must still parse"
+        );
+
+        // A form whose /Matrix is non-finite: it must fall back to IDENTITY (the
+        // §8.10.2 default for an ABSENT /Matrix) and emit a finite BBox clip, rather
+        // than a clip whose corners are NaN.
+        let mut doc = Document::with_version("1.7");
+        let form = doc.add_object(Stream::new(
+            dictionary! {
+                "Type" => "XObject", "Subtype" => "Form",
+                "BBox" => vec![0.into(), 0.into(), 100.into(), 100.into()],
+                "Matrix" => bad.clone(),
+            },
+            b"0 0 50 50 re f".to_vec(),
+        ));
+        let res = dictionary! {
+            "XObject" => dictionary! { "Fm" => Object::Reference(form) },
+        };
+        let ops = vec![op("Do", vec![Object::Name(b"Fm".to_vec())])];
+        let mut prims = Vec::new();
+        interpret_content(&doc, &ops, Some(&res), GraphicsState::default(), &mut prims, 0, false);
+
+        let mut clips = 0;
+        for p in &prims {
+            if let Prim::ClipPush { pts, path_ops, .. } = p {
+                clips += 1;
+                assert!(
+                    pts.iter().all(|(x, y)| x.is_finite() && y.is_finite()),
+                    "a non-finite /Matrix produced a non-finite CLIP, which erases \
+                     everything drawn after it"
+                );
+                for o in path_ops.iter().flatten() {
+                    if let PathOp::Move(x, y) | PathOp::Line(x, y) = o {
+                        assert!(x.is_finite() && y.is_finite(), "non-finite clip path op");
+                    }
+                }
+            }
+        }
+        assert_eq!(clips, 1, "the form's /BBox clip must still be emitted");
+        assert!(
+            prims.iter().any(|p| matches!(p, Prim::Fill { .. })),
+            "falling back to IDENTITY must still draw the form, not drop it"
+        );
+    }
+
+    /// The form-invocation budget must be established once per top-level render
+    /// at WHATEVER depth that render is entered, not only at `depth == 0`.
+    ///
+    /// `depth` is the §8.10.1 recursion counter, and legitimate top-level entries
+    /// start it above zero — `annotations::render_annotation` enters an appearance
+    /// stream at 1, and form-field appearances reach the interpreter through it.
+    /// Keyed on `depth == 0`, such a render inherited whatever the previous one
+    /// had left, which is ZERO after anything exhausted the budget (the branching
+    /// bomb above does exactly that, and the thread is reused). Every `Do` in the
+    /// appearance was then dropped with no error: the annotation, stamp or filled
+    /// field simply rendered as nothing, which is the invisible, fail-closed
+    /// failure the budget was never meant to be able to cause. Found by
+    /// `a-annots`, whose
+    /// `annotation_ca_is_applied_once_over_a_transparency_group` this broke.
+    #[test]
+    fn the_form_budget_is_refilled_for_an_entry_at_a_non_zero_depth() {
+        let mut doc = Document::with_version("1.7");
+        let inner = doc.add_object(Stream::new(
+            dictionary! {
+                "Type" => "XObject", "Subtype" => "Form",
+                "BBox" => vec![0.into(), 0.into(), 10.into(), 10.into()],
+            },
+            b"0 0 10 10 re f".to_vec(),
+        ));
+        let res = dictionary! {
+            "XObject" => dictionary! { "A" => Object::Reference(inner) },
+        };
+        let ops = vec![op("Do", vec![Object::Name(b"A".to_vec())])];
+
+        // Drain this thread's budget the way the branching-bomb test does, so the
+        // next render starts from a genuinely exhausted budget rather than the
+        // full one a fresh thread happens to hold.
+        let bomb = doc.new_object_id();
+        doc.set_object(
+            bomb,
+            Stream::new(
+                dictionary! {
+                    "Type" => "XObject", "Subtype" => "Form",
+                    "BBox" => vec![0.into(), 0.into(), 10.into(), 10.into()],
+                    "Resources" => dictionary! {
+                        "XObject" => dictionary! { "B" => Object::Reference(bomb) },
+                    },
+                },
+                b"/B Do /B Do /B Do /B Do /B Do /B Do".to_vec(),
+            ),
+        );
+        let bomb_res = dictionary! { "XObject" => dictionary! { "B" => Object::Reference(bomb) } };
+        let mut drained = Vec::new();
+        interpret_content(
+            &doc,
+            &[op("Do", vec![Object::Name(b"B".to_vec())])],
+            Some(&bomb_res),
+            GraphicsState::default(),
+            &mut drained,
+            0,
+            false,
+        );
+
+        // Entry at depth 1 — the annotation-appearance path.
+        let mut prims = Vec::new();
+        interpret_content(&doc, &ops, Some(&res), GraphicsState::default(), &mut prims, 1, false);
+        assert!(
+            prims.iter().any(|p| matches!(p, Prim::Fill { .. })),
+            "a `Do` at depth 1 after an exhausted render emitted nothing: the budget \
+             is still keyed on depth 0"
+        );
+
+        // Depth 0 must keep working. Sharing WITHIN one render is structural —
+        // nested `Do`s run inside the outer scope — and is pinned by
+        // `a_branching_self_referential_form_is_bounded_by_a_total_budget`.
+        let mut prims = Vec::new();
+        interpret_content(&doc, &ops, Some(&res), GraphicsState::default(), &mut prims, 0, false);
+        assert!(prims.iter().any(|p| matches!(p, Prim::Fill { .. })));
+    }
+
+    /// §7.9.5: a rectangle is four NUMBERS. A `/Rect` or `/BBox` carrying NaN or
+    /// an infinity used to be read through verbatim, and one poisoned component
+    /// propagates through every transform derived from it. The rasterizer drops a
+    /// path containing a NaN point silently, so the result is a region of the page
+    /// that vanishes with no error anywhere — the same failure mode the `cm` arm's
+    /// non-finite CTM guard exists to prevent, and rejected the same way.
+    #[test]
+    fn read_rect_rejects_non_finite_components() {
+        let doc = Document::with_version("1.7");
+        let rect = |v: Vec<Object>| read_rect(&doc, &Object::Array(v));
+        let n = |x: f64| Object::Real(x as f32);
+
+        assert_eq!(
+            rect(vec![n(0.0), n(0.0), n(10.0), n(10.0)]),
+            Some([0.0, 0.0, 10.0, 10.0]),
+            "a finite rect must still be read"
+        );
+        for bad in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            for i in 0..4 {
+                let mut v = vec![n(0.0), n(0.0), n(10.0), n(10.0)];
+                v[i] = n(bad);
+                assert_eq!(rect(v), None, "component {i} = {bad} must be rejected");
+            }
+        }
+    }
+
+    /// §11.6.5.2: a luminosity soft mask composites its group against a FULLY
+    /// OPAQUE backdrop of `/BC` and converts the result to luminosity, so the
+    /// mask value everywhere the group does not paint — including outside its
+    /// `/BBox` — is luminosity(`/BC`). The backdrop fill was clipped to the
+    /// `/BBox` quad, leaving the rest of the mask surface at luminosity 0, so a
+    /// BRIGHT `/BC` hid the very content it was asking to reveal. Silent, and in
+    /// the content-disappears direction. Found with `a-shading`, who traced the
+    /// renderer side (the mask `saveLayer` starts transparent-black, and the
+    /// alpha row of the luminosity ColorMatrix ignores input alpha, so an
+    /// unpainted mask pixel is luminosity 0 and `DST_IN` erases under it).
+    ///
+    /// The default-`/BC` case is deliberately NOT changed by this: absent `/BC`
+    /// means luminosity 0, which the transparent-black surface already gives.
+    #[test]
+    fn a_bright_bc_backdrop_covers_the_clip_not_just_the_group_bbox() {
+        let mut doc = Document::with_version("1.7");
+        // Mask group with a deliberately SMALL /BBox, painting nothing itself.
+        let group = doc.add_object(Stream::new(
+            dictionary! {
+                "Type" => "XObject", "Subtype" => "Form",
+                "BBox" => vec![0.into(), 0.into(), 10.into(), 10.into()],
+                "Group" => dictionary! {
+                    "S" => "Transparency", "CS" => "DeviceGray",
+                },
+            },
+            Vec::new(),
+        ));
+        // /BC white — luminosity 1 — so everything outside the /BBox must be
+        // REVEALED, which is the opposite of what a black backdrop would do.
+        let gs_id = doc.add_object(dictionary! {
+            "SMask" => dictionary! {
+                "S" => "Luminosity",
+                "G" => Object::Reference(group),
+                "BC" => vec![1.0.into()],
+            },
+        });
+        let res = dictionary! {
+            "ExtGState" => dictionary! { "GS1" => Object::Reference(gs_id) },
+        };
+        // Masked content far outside the mask group's 10x10 /BBox.
+        let ops = vec![
+            op("gs", vec![Object::Name(b"GS1".to_vec())]),
+            op("re", vec![0.into(), 0.into(), 200.into(), 200.into()]),
+            op("f", vec![]),
+        ];
+        let mut prims = Vec::new();
+        interpret_content_seeded(
+            &doc,
+            &ops,
+            Some(&res),
+            GraphicsState::default(),
+            &mut prims,
+            0,
+            false,
+            Some([0.0, 0.0, 200.0, 200.0]),
+        );
+
+        // The backdrop is the fill between SoftMaskPush and SoftMaskContent.
+        let push = prims
+            .iter()
+            .position(|p| matches!(p, Prim::SoftMaskPush { .. }))
+            .expect("a soft-mask bracket must be emitted");
+        let content = prims
+            .iter()
+            .position(|p| matches!(p, Prim::SoftMaskContent))
+            .expect("the bracket must have a content separator");
+        let backdrop = prims[content..]
+            .iter()
+            .find_map(|p| match p {
+                Prim::Fill { contours, .. } => Some(contours.clone()),
+                _ => None,
+            })
+            .expect("a /BC backdrop fill must be emitted for a luminosity mask");
+        assert!(push < content, "malformed bracket");
+
+        let xs: Vec<f64> = backdrop.iter().flatten().map(|p| p.0 as f64).collect();
+        let ys: Vec<f64> = backdrop.iter().flatten().map(|p| p.1 as f64).collect();
+        let (w, h) = (
+            xs.iter().cloned().fold(f64::MIN, f64::max) - xs.iter().cloned().fold(f64::MAX, f64::min),
+            ys.iter().cloned().fold(f64::MIN, f64::max) - ys.iter().cloned().fold(f64::MAX, f64::min),
+        );
+        assert!(
+            w > 190.0 && h > 190.0,
+            "the /BC backdrop covers only {w}x{h}: it is still clipped to the group's \
+             10x10 /BBox, so a bright /BC leaves everything outside it at luminosity 0 \
+             and hides content that must be revealed"
         );
     }
 }

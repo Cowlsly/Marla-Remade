@@ -130,10 +130,21 @@ object SafePdfParser {
      * content size from whichever cap is smaller rather than hard-coding one.
      */
     const val MAX_PRIMITIVES = 1_000_000
-    const val MAX_ANNOTATIONS = 10000
 
     /** A /TR transfer function is transmitted as this many u8 samples over the mask value. */
     private const val TRANSFER_LUT_SIZE = 256
+    /**
+     * Largest raster payload this decoder will materialise for one image, in bytes.
+     *
+     * It is a LOCAL heap policy, not a wire invariant: Rust's own bound is looser in both
+     * arms that reach it. `extract_image` downscales a decoded raster to 2048px on its long
+     * side (16 MB of RGBA at worst, exactly this), but `extract_inline_image` only enforces
+     * `MAX_IMAGE_PIXELS` (16 MP -> 64 MB of RGBA), and the format-1 JPEG passthrough hands
+     * over the stream bytes with only a 64 MB ceiling on them. So a payload above this is a
+     * legitimate stream we choose not to decode, NOT evidence that the buffer is corrupt —
+     * which is why exceeding it skips the one primitive instead of ending the page.
+     */
+    private const val MAX_IMAGE_DATA_BYTES = 16 * 1024 * 1024
     /**
      * Cap on a tiling pattern's lattice extent per axis. The extent only decides how large a
      * region the REPEAT shader is asked to cover, so a big count is not itself expensive, but
@@ -440,8 +451,21 @@ object SafePdfParser {
                         buf.get().toInt() != 0
                     } else true
                     val len = buf.int
-                    if (len < 0 || len > 16*1024*1024) throw IllegalArgumentException("Image data length out of bounds $len")
+                    if (len < 0) throw IllegalArgumentException("Negative image data length $len")
                     if (buf.remaining() < len) throw IllegalArgumentException("Image data truncated")
+                    if (len > MAX_IMAGE_DATA_BYTES) {
+                        // The buffer is intact here — the length field is exactly how many
+                        // bytes to step over — so this resyncs. Throwing instead would break
+                        // out of the loop and discard every LATER primitive too, blanking the
+                        // rest of the page below a single over-sized JPEG or inline image.
+                        android.util.Log.w(
+                            TAG,
+                            "image payload $len exceeds $MAX_IMAGE_DATA_BYTES, dropping this " +
+                                "image and continuing the page",
+                        )
+                        buf.position(buf.position() + len)
+                        continue
+                    }
                     val data = ByteArray(len)
                     buf.get(data)
                     val bmp = decodeBitmap(w, h, format, data)
@@ -525,8 +549,17 @@ object SafePdfParser {
                     val tileAlpha = buf.float.coerceIn(0f, 1f)
                     val tileBlend = BlendMode.fromCode(buf.get().toInt() and 0xFF)
                     val len = buf.int
-                    if (len < 0 || len > 16*1024*1024) throw IllegalArgumentException("ImageTiled data length out of bounds $len")
+                    if (len < 0) throw IllegalArgumentException("Negative ImageTiled data length $len")
                     if (buf.remaining() < len) throw IllegalArgumentException("ImageTiled data truncated")
+                    if (len > MAX_IMAGE_DATA_BYTES) {
+                        android.util.Log.w(
+                            TAG,
+                            "tiling cell payload $len exceeds $MAX_IMAGE_DATA_BYTES, dropping " +
+                                "this pattern and continuing the page",
+                        )
+                        buf.position(buf.position() + len)
+                        continue
+                    }
                     val data = ByteArray(len)
                     buf.get(data)
                     // Format 0: the cell is always raw RGBA8888, so there is no format byte.
@@ -545,7 +578,7 @@ object SafePdfParser {
                     // The payload length of an unknown tag is unknowable, so the read
                     // position is now inside a payload and every later tag byte would be
                     // random data — which decodes into plausible-looking garbage primitives.
-                    // Kotlin knows all 12 tags Rust emits, so an unknown tag means the stream
+                    // Kotlin knows all 14 tags Rust emits, so an unknown tag means the stream
                     // has desynced: keep what decoded cleanly and stop.
                     android.util.Log.w(
                         TAG,
@@ -588,7 +621,7 @@ object SafePdfParser {
     fun parseAnnotations(bytes: ByteArray): List<SafeAnnotation> {
         val buf = ByteBuffer.wrap(bytes).order(ByteOrder.LITTLE_ENDIAN)
         val count = buf.int
-        val out = ArrayList<SafeAnnotation>(count.coerceAtLeast(0))
+        val out = ArrayList<SafeAnnotation>(buf.listCapacity(count, ANNOTATION_MIN_BYTES))
         repeat(count) {
             val id = buf.long
             val subtype = buf.get().toInt()
@@ -604,7 +637,7 @@ object SafePdfParser {
     fun parseFormFields(bytes: ByteArray): List<SafeFormField> {
         val buf = ByteBuffer.wrap(bytes).order(ByteOrder.LITTLE_ENDIAN)
         val count = buf.int
-        val out = ArrayList<SafeFormField>(count.coerceAtLeast(0))
+        val out = ArrayList<SafeFormField>(buf.listCapacity(count, FORM_FIELD_MIN_BYTES))
         repeat(count) {
             val id = buf.long
             val type = buf.get().toInt()
@@ -621,7 +654,7 @@ object SafePdfParser {
     fun parseSearchMatches(bytes: ByteArray): List<SafeSearchMatch> {
         val buf = ByteBuffer.wrap(bytes).order(ByteOrder.LITTLE_ENDIAN)
         val count = buf.int
-        val out = ArrayList<SafeSearchMatch>(count.coerceAtLeast(0))
+        val out = ArrayList<SafeSearchMatch>(buf.listCapacity(count, SEARCH_MATCH_BYTES))
         repeat(count) {
             val page = buf.int
             out.add(SafeSearchMatch(page, buf.float, buf.float, buf.float, buf.float))
@@ -633,7 +666,7 @@ object SafePdfParser {
     fun parseLinks(bytes: ByteArray): List<SafeLink> {
         val buf = ByteBuffer.wrap(bytes).order(ByteOrder.LITTLE_ENDIAN)
         val count = buf.int
-        val out = ArrayList<SafeLink>(count.coerceAtLeast(0))
+        val out = ArrayList<SafeLink>(buf.listCapacity(count, LINK_MIN_BYTES))
         repeat(count) {
             val x0 = buf.float; val y0 = buf.float; val x1 = buf.float; val y1 = buf.float
             val dest = buf.int
@@ -643,10 +676,54 @@ object SafePdfParser {
         return out
     }
 
+    /**
+     * Initial capacity for a listing whose header claims [count] records of at least
+     * [minRecordBytes] each.
+     *
+     * The count is read straight off the wire, so a bare `ArrayList(count)` allocates an
+     * `Object[count]` before a single record has been validated — a corrupt or truncated
+     * header reading as ~2e9 raises OutOfMemoryError, which is an Error and so escapes
+     * every `runCatching` between here and the composition rather than degrading to an
+     * empty listing. The buffer cannot physically hold more than
+     * `remaining / minRecordBytes` records, so cap on that: it can never clip a count a
+     * well-formed buffer could justify, and it needs no invented constant. The `repeat`
+     * loop still runs to `count` and stops on the underflow, so this only bounds the
+     * pre-allocation, never the result.
+     */
+    private fun ByteBuffer.listCapacity(count: Int, minRecordBytes: Int): Int =
+        count.coerceIn(0, remaining() / minRecordBytes)
+
+    /** u64 id + u8 subtype + 4xf32 rect + u32 colour + the u16 /Contents length. */
+    private const val ANNOTATION_MIN_BYTES = 8 + 1 + 16 + 4 + 2
+    /** u64 id + u8 type + 4xf32 rect + two u16 string lengths + u8 checked. */
+    private const val FORM_FIELD_MIN_BYTES = 8 + 1 + 16 + 2 + 2 + 1
+    /** u32 page + 4xf32 rect, fixed width. */
+    private const val SEARCH_MATCH_BYTES = 4 + 16
+    /** 4xf32 rect + i32 destination page + the u16 URI length. */
+    private const val LINK_MIN_BYTES = 16 + 4 + 2
+    /** u16 level + i32 page + the u16 title length. */
+    private const val OUTLINE_MIN_BYTES = 2 + 4 + 2
+
+    /**
+     * A u16-length-prefixed UTF-8 string, as every listing buffer writes them.
+     *
+     * No upper-bound rejection. Rust truncates each of these at `u16::MAX` — annotation
+     * /Contents (annotations.rs:1980), form field /T and /V (forms.rs:452), a link URI
+     * (forms.rs:351) and an outline title (forms.rs:1088) all use
+     * `b.len().min(u16::MAX as usize)` — so any length the field can express is a length the
+     * producer will legitimately send. The old 4096 cap sat below that and THREW on a longer
+     * one, which is not survivable here the way it is inside [parse]: these parsers have no
+     * per-record recovery, so a single 5 KB sticky-note comment or multi-line form value took
+     * out the whole listing, and the throw propagates out of [SafePdfDocument.annotations] and
+     * its siblings — none of which catch — into the composition. Exactly the reasoning already
+     * applied to the Text primitive's length above.
+     *
+     * `len` is u16-bounded, so the allocation is capped at 64 KB regardless, and the remaining
+     * check below is the real guard against a truncated buffer.
+     */
     private fun readString(buf: ByteBuffer): String {
         if (buf.remaining() < 2) throw IllegalArgumentException("readString header truncated")
         val len = buf.short.toInt() and 0xFFFF
-        if (len > 4096) throw IllegalArgumentException("readString length $len exceeds 4096 cap (v9 guard)")
         if (buf.remaining() < len) throw IllegalArgumentException("readString truncated len=$len remaining=${buf.remaining()}")
         val b = ByteArray(len)
         buf.get(b)
@@ -657,7 +734,7 @@ object SafePdfParser {
     fun parseOutline(bytes: ByteArray): List<SafeOutlineItem> {
         val buf = ByteBuffer.wrap(bytes).order(ByteOrder.LITTLE_ENDIAN)
         val count = buf.int
-        val out = ArrayList<SafeOutlineItem>(count.coerceAtLeast(0))
+        val out = ArrayList<SafeOutlineItem>(buf.listCapacity(count, OUTLINE_MIN_BYTES))
         repeat(count) {
             val level = buf.short.toInt() and 0xFFFF
             val page = buf.int
@@ -711,7 +788,7 @@ object SafePdfParser {
         return try {
             when (format) {
                 1 -> {
-                    if (data.size > 16*1024*1024) {
+                    if (data.size > MAX_IMAGE_DATA_BYTES) {
                         android.util.Log.w("SafePdfParser", "JPEG too large ${data.size}")
                         null
                     } else {

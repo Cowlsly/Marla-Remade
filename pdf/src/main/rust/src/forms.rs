@@ -273,7 +273,14 @@ pub(crate) fn list_links(handle: i64, page_index: i32) -> Option<Vec<u8>> {
                     }
                 } else if s == Some(b"GoTo".as_ref()) {
                     if let Ok(d) = action.get(b"D") {
-                        dest_page = resolve_dest_page(doc, d, &page_of);
+                        // §12.6.4.2: a GoTo action's /D "shall be" a name, a byte
+                        // string or an array — the first two being named
+                        // destinations resolved through /Dests or the /Names
+                        // name tree (§12.3.2.3). Accepting only the array form
+                        // left dest_page at -1, and the record filter below then
+                        // dropped the link entirely, so every named-destination
+                        // link in the document was untappable.
+                        dest_page = resolve_dest(doc, deref(doc, d).unwrap_or(d), &page_of);
                     }
                 } else if s == Some(b"GoToR".as_ref()) {
                     if let Ok(d) = action.get(b"D") {
@@ -1175,6 +1182,70 @@ mod da_tests {
         ))
         .expect("utf8");
         assert_eq!(c.matches("Tj").count(), 2, "expected exactly two lines: {c}");
+    }
+
+    /// §12.6.4.2: a GoTo action's `/D` "shall be" a name, a byte string or an
+    /// array — the first two naming a destination resolved through `/Dests` or
+    /// the `/Names` name tree (§12.3.2.3). Accepting only the array form left
+    /// `dest_page` at -1, and `list_links` drops any record with neither a page
+    /// nor a URI, so every named-destination link was silently untappable.
+    #[test]
+    fn a_goto_link_to_a_named_destination_resolves() {
+        for (name, dest) in [
+            ("array", Object::Array(vec![])),           // placeholder, replaced below
+            ("name", name_obj("Chapter2")),
+            ("string", Object::string_literal("Chapter2")),
+        ] {
+            let mut doc = Document::with_version("1.7");
+            let pages_id = doc.new_object_id();
+            let p0 = doc.add_object(dictionary! {
+                "Type" => name_obj("Page"), "Parent" => Object::Reference(pages_id),
+                "MediaBox" => rect_obj([0.0, 0.0, 612.0, 792.0]),
+            });
+            let p1 = doc.add_object(dictionary! {
+                "Type" => name_obj("Page"), "Parent" => Object::Reference(pages_id),
+                "MediaBox" => rect_obj([0.0, 0.0, 612.0, 792.0]),
+            });
+            let target = Object::Array(vec![Object::Reference(p1), name_obj("Fit")]);
+            let dest = if name == "array" { target.clone() } else { dest };
+            let action = doc.add_object(dictionary! { "S" => name_obj("GoTo"), "D" => dest });
+            let link = doc.add_object(dictionary! {
+                "Type" => name_obj("Annot"), "Subtype" => name_obj("Link"),
+                "Rect" => rect_obj([10.0, 10.0, 100.0, 30.0]),
+                "A" => Object::Reference(action),
+            });
+            if let Ok(Object::Dictionary(d)) = doc.get_object_mut(p0) {
+                d.set("Annots", Object::Array(vec![Object::Reference(link)]));
+            }
+            doc.objects.insert(
+                pages_id,
+                Object::Dictionary(dictionary! {
+                    "Type" => name_obj("Pages"),
+                    "Kids" => Object::Array(vec![Object::Reference(p0), Object::Reference(p1)]),
+                    "Count" => 2,
+                }),
+            );
+            let names = doc.add_object(dictionary! {
+                "Dests" => dictionary! {
+                    "Names" => Object::Array(vec![Object::string_literal("Chapter2"), target]),
+                },
+            });
+            let cat = doc.add_object(dictionary! {
+                "Type" => name_obj("Catalog"),
+                "Pages" => Object::Reference(pages_id),
+                "Names" => Object::Reference(names),
+            });
+            doc.trailer.set("Root", cat);
+            let handle = next_handle();
+            registry().lock().unwrap_or_else(|e| e.into_inner()).insert(handle, doc);
+
+            let buf = list_links(handle, 0).expect("links");
+            let count = u32::from_le_bytes(buf[0..4].try_into().expect("count"));
+            assert_eq!(count, 1, "/D as {name}: the link was dropped entirely");
+            let dest_page = i32::from_le_bytes(buf[20..24].try_into().expect("dest"));
+            assert_eq!(dest_page, 1, "/D as {name}: resolved to the wrong page");
+            close_document(handle);
+        }
     }
 
     /// A document with one AcroForm `/DR /Font /Fx` entry.

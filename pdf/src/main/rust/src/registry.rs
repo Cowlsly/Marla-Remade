@@ -306,7 +306,15 @@ fn xref_stream_is_degenerate(bytes: &[u8]) -> bool {
             }
         }
         if let Some(index) = int_array_after_key(dict, b"/Index") {
-            let declared: i64 = index.iter().skip(1).step_by(2).sum();
+            // Saturating, not `sum()`: every count here came out of the file, and
+            // `i64 + i64` panics on overflow in debug and WRAPS in release - where a
+            // wrap to a negative total would make the very file this check exists to
+            // catch (`/Index [0 <i64::MAX> 0 <i64::MAX>]`) read as harmless.
+            let declared = index
+                .iter()
+                .skip(1)
+                .step_by(2)
+                .fold(0i64, |acc, &n| acc.saturating_add(n.max(0)));
             if declared > bytes.len() as i64 {
                 return true;
             }
@@ -846,5 +854,22 @@ mod recovery_tests {
         assert!(!xref_stream_is_degenerate(
             b"%PDF-1.7\n4 0 obj\n<< /Type /XRef /Widths [0 0 0] /W [1 2 1] /Index [0 5] >>\nstream\n\0\nendstream\n"
         ));
+    }
+
+    /// Every `/Index` count is a number read from the file, so summing them with `+`
+    /// panics in debug and WRAPS in release - and a wrap to a negative total makes the
+    /// very file this check exists to catch look harmless.
+    #[test]
+    fn a_huge_index_count_neither_panics_nor_wraps_past_the_check() {
+        let bytes = format!(
+            "%PDF-1.7\n4 0 obj\n<< /Type /XRef /Size 5 /Root 1 0 R /W [1 2 1] \
+             /Index [0 {max} 0 {max} 0 {max}] /Length 8 >>\nstream\n\0\0\0\0\0\0\0\0\nendstream\nendobj\n",
+            max = i64::MAX
+        )
+        .into_bytes();
+        assert!(
+            xref_stream_is_degenerate(&bytes),
+            "a file cannot describe more xref entries than it has bytes"
+        );
     }
 }

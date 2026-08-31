@@ -173,7 +173,10 @@ pub(crate) mod jp2 {
     /// Decode JP2/J2K bytes honouring `/SMaskInData` and a `/ColorSpace` override.
     pub fn decode_with_opts(bytes: &[u8], opts: JpxOpts) -> Option<(u32, u32, Vec<u8>)> {
         // JP2 signature box vs raw codestream.
-        let fmt = if bytes.len() > 4 && &bytes[4..8] == b"jP  " {
+        // `bytes.len() > 4` is not enough to slice 4..8: a 5..7-byte stream panicked
+        // with "range end index 8 out of range", and a panic at the JNI boundary
+        // takes the whole document down for one short image.
+        let fmt = if bytes.len() >= 8 && &bytes[4..8] == b"jP  " {
             OPJ_CODEC_JP2
         } else {
             OPJ_CODEC_J2K
@@ -258,9 +261,12 @@ pub(crate) mod jp2 {
             let mut v = *c.data.add(sy * cw + sx);
             // prec == 0 underflows `1 << (prec-1)`, and prec >= 40 makes the shift
             // below panic (or wrap in release). Clamp to the representable range.
-            let prec = (c.prec as i32).clamp(1, 32);
+            // The bias itself is a saturating add: a 32-bit signed component whose
+            // value is already near i32::MAX overflows, which PANICS in a debug build
+            // and takes the whole document down at the JNI boundary.
+            let prec = (c.prec as i32).clamp(1, 31);
             if c.sgnd != 0 {
-                v += 1 << (prec - 1);
+                v = v.saturating_add(1 << (prec - 1));
             }
             let v = if prec > 8 {
                 v >> (prec - 8)
@@ -588,7 +594,11 @@ fn image_samples_to_rgba(
         rgba[idx] = ((argb >> 16) & 0xFF) as u8;
         rgba[idx + 1] = ((argb >> 8) & 0xFF) as u8;
         rgba[idx + 2] = (argb & 0xFF) as u8;
-        rgba[idx + 3] = 255;
+        // Carry the alpha rather than forcing 255. Every colour space yields an opaque
+        // 0xFF... except the /None colorant (§8.6.6.4), which "shall never produce any
+        // visible output" — forcing 255 painted a /None Separation image as a SOLID
+        // BLACK rectangle over the page instead of nothing at all.
+        rgba[idx + 3] = ((argb >> 24) & 0xFF) as u8;
     };
 
     let kind = match cs_kind {
@@ -899,10 +909,19 @@ fn dict_true(doc: &Document, dict: &Dictionary, key: &[u8]) -> bool {
 /// Whether the source image had two colours per component: a stencil, or one bit per
 /// component. Fax-encoded images are bilevel by definition even without `/BitsPerComponent`.
 fn is_bilevel(doc: &Document, dict: &Dictionary) -> bool {
-    if dict_true(doc, dict, b"ImageMask") {
+    // `/IM` and `/BPC` are the §8.9.7 Table 93 abbreviations. Checking only the long
+    // forms made every INLINE stencil and every inline one-bit image look contone, so
+    // it got area-averaged on downscale and smoothed on magnification.
+    if dict_true(doc, dict, b"ImageMask") || dict_true(doc, dict, b"IM") {
         return true;
     }
-    if dict.get(b"BitsPerComponent").ok().and_then(num) == Some(1.0) {
+    if dict
+        .get(b"BitsPerComponent")
+        .or_else(|_| dict.get(b"BPC"))
+        .ok()
+        .and_then(num)
+        == Some(1.0)
+    {
         return true;
     }
     let specs = filters::filter_specs_from_dict(doc, dict);
@@ -960,8 +979,16 @@ fn jbig2_globals(
 
 fn extract_image_inner(doc: &Document, stream: &lopdf::Stream, fill_argb: u32, cs_resources: &HashMap<Vec<u8>, ObjectId>) -> Option<ImageData> {
     let dict = &stream.dict;
-    let w = dict.get(b"Width").ok().and_then(num)? as u32;
-    let h = dict.get(b"Height").ok().and_then(num)? as u32;
+    // A missing or non-numeric /Width or /Height dropped the image with no diagnostic —
+    // one of the paths that renders as an invisible hole (§8.9.5.1 makes both required).
+    let (Some(w), Some(h)) = (
+        dict.get(b"Width").ok().and_then(num),
+        dict.get(b"Height").ok().and_then(num),
+    ) else {
+        image_warn!("image XObject has no usable /Width or /Height - dropped");
+        return None;
+    };
+    let (w, h) = (w as u32, h as u32);
     if w == 0 || h == 0 || w > MAX_IMAGE_DIM || h > MAX_IMAGE_DIM {
         image_warn!("image {}x{} outside 1..{} - dropped", w, h, MAX_IMAGE_DIM);
         return None;
@@ -1011,6 +1038,10 @@ fn extract_image_inner(doc: &Document, stream: &lopdf::Stream, fill_argb: u32, c
             if mask_stencil { stencilize(&mut rgba, fill_argb, mask_invert); return Some(ImageData{ w: jw, h: jh, format: 0, data: rgba }); }
             let smask = read_smask(doc, dict, jw, jh);
             apply_smask(&mut rgba, &smask);
+            // §8.9.6.4: a stencil /Mask applies to ANY base image, codec-compressed or
+            // not. Only the raw-sample path honoured it, so a JBIG2/CCITT/JPX base with
+            // an explicit mask rendered as an uncut opaque rectangle.
+            if let Some(mask_alpha) = read_explicit_mask(doc, dict, jw, jh) { apply_explicit_mask(&mut rgba, &mask_alpha); }
             if let Some(ck) = read_color_key_mask(doc, dict) { apply_color_key_mask(&mut rgba, &Some(ck)); }
             return Some(ImageData{ w: jw, h: jh, format: 0, data: rgba });
         }
@@ -1021,6 +1052,7 @@ fn extract_image_inner(doc: &Document, stream: &lopdf::Stream, fill_argb: u32, c
                 if mask_stencil { stencilize(&mut rgba, fill_argb, mask_invert); return Some(ImageData{ w: jw, h: jh, format: 0, data: rgba }); }
                 let smask = read_smask(doc, dict, jw, jh);
                 apply_smask(&mut rgba, &smask);
+                if let Some(mask_alpha) = read_explicit_mask(doc, dict, jw, jh) { apply_explicit_mask(&mut rgba, &mask_alpha); }
                 if let Some(ck) = read_color_key_mask(doc, dict) { apply_color_key_mask(&mut rgba, &Some(ck)); }
                 return Some(ImageData { w: jw, h: jh, format: 0, data: rgba });
             }
@@ -1085,6 +1117,7 @@ fn extract_image_inner(doc: &Document, stream: &lopdf::Stream, fill_argb: u32, c
                     }
                 }
                 if let Some(ck) = read_color_key_mask(doc, dict) { apply_color_key_mask(&mut rgba, &Some(ck)); }
+                if let Some(mask_alpha) = read_explicit_mask(doc, dict, jw, jh) { apply_explicit_mask(&mut rgba, &mask_alpha); }
                 return Some(ImageData { w: jw, h: jh, format: 0, data: rgba });
             }
         }
@@ -1116,7 +1149,14 @@ fn extract_image_inner(doc: &Document, stream: &lopdf::Stream, fill_argb: u32, c
         };
         // Try chain decode first for possible Ascii/Flate wrappers before CCITT
         let raw = stream.content.clone();
-        let chain_bytes = filters::decode_stream_chain(raw.clone(), &specs, doc).unwrap_or(raw);
+        // `decode_stream_chain` returns None for a corrupt Flate/LZW/ASCII85 wrapper or
+        // an unrecognised filter name, NOT just for an unknown filter. `unwrap_or(raw)`
+        // then fed the still-COMPRESSED bytes to the fax decoder as if they were a
+        // codestream. Bail instead: a fax decoded from zlib bytes is noise.
+        let Some(chain_bytes) = filters::decode_stream_chain(raw, &specs, doc) else {
+            image_warn!("CCITT {}x{}: filter chain before the codec failed to decode - image dropped", w, h);
+            return None;
+        };
         // If chain_bytes is CCITT, decode — fix #11 Columns vs Width: output raster is Columns, not max
         if let Some(packed) = filters::decode_ccitt(&chain_bytes, w, h, &params) {
             let columns = if params.columns > 0 { params.columns as usize } else { w as usize };
@@ -1152,6 +1192,7 @@ fn extract_image_inner(doc: &Document, stream: &lopdf::Stream, fill_argb: u32, c
             }
             let smask = read_smask(doc, dict, out_w, out_h);
             apply_smask(&mut rgba, &smask);
+            if let Some(mask_alpha) = read_explicit_mask(doc, dict, out_w, out_h) { apply_explicit_mask(&mut rgba, &mask_alpha); }
             if let Some(ck) = read_color_key_mask(doc, dict) { apply_color_key_mask(&mut rgba, &Some(ck)); }
             return Some(ImageData { w: out_w, h: out_h, format: 0, data: rgba });
         }
@@ -1166,17 +1207,20 @@ fn extract_image_inner(doc: &Document, stream: &lopdf::Stream, fill_argb: u32, c
         let mask_present = dict.get(b"Mask").is_ok();
         // Chain decode to get JPEG bytes if wrapped in Ascii etc
         let raw = stream.content.clone();
-        let jpeg_bytes = filters::decode_stream_chain(raw.clone(), &specs, doc).unwrap_or(raw);
+        // Same reasoning as the CCITT branch: on failure these are still-compressed
+        // bytes, and the no-mask arm below would hand them to the platform decoder as
+        // if they were a JPEG, which renders nothing and says nothing.
+        let Some(jpeg_bytes) = filters::decode_stream_chain(raw, &specs, doc) else {
+            image_warn!("DCT {}x{}: filter chain before the codec failed to decode - image dropped", w, h);
+            return None;
+        };
         if smask_present || mask_present {
             if let Some((jw,jh,mut rgba)) = decode_jpeg_rgba(&jpeg_bytes) {
                 let smask = read_smask(doc, dict, jw, jh);
                 apply_smask(&mut rgba, &smask);
                 if smask.is_some() { if let Some(matte) = read_matte(doc, dict) { apply_matte(&mut rgba, matte); } }
                 if let Some(mask_alpha) = read_explicit_mask(doc, dict, jw, jh) {
-                    for (i, px) in rgba.chunks_exact_mut(4).enumerate() {
-                        let mv = mask_alpha.get(i).copied().unwrap_or(255) as u16;
-                        px[3] = ((px[3] as u16 * mv) / 255) as u8;
-                    }
+                    apply_explicit_mask(&mut rgba, &mask_alpha);
                 }
                 if let Some(ck) = read_color_key_mask(doc, dict) { apply_color_key_mask(&mut rgba, &Some(ck)); }
                 return Some(ImageData { w: jw, h: jh, format: 0, data: rgba });
@@ -1191,10 +1235,7 @@ fn extract_image_inner(doc: &Document, stream: &lopdf::Stream, fill_argb: u32, c
                 let smask = read_smask(doc, dict, jw, jh);
                 apply_smask(&mut rgba, &smask);
                 if let Some(mask_alpha) = read_explicit_mask(doc, dict, jw, jh) {
-                    for (i, px) in rgba.chunks_exact_mut(4).enumerate() {
-                        let mv = mask_alpha.get(i).copied().unwrap_or(255) as u16;
-                        px[3] = ((px[3] as u16 * mv) / 255) as u8;
-                    }
+                    apply_explicit_mask(&mut rgba, &mask_alpha);
                 }
                 if let Some(ck) = read_color_key_mask(doc, dict) { apply_color_key_mask(&mut rgba, &Some(ck)); }
                 return Some(ImageData{ w: jw, h: jh, format: 0, data: rgba });
@@ -1209,6 +1250,10 @@ fn extract_image_inner(doc: &Document, stream: &lopdf::Stream, fill_argb: u32, c
                 if let Some((jw, jh, rgba)) = decode_jpeg_rgba(&jpeg_bytes) {
                     return Some(ImageData { w: jw, h: jh, format: 0, data: rgba });
                 }
+                // Passing a CMYK/YCCK JPEG through to the platform decoder is the same
+                // as dropping it (Android cannot decode one), so say so rather than
+                // leaving an unexplained hole.
+                image_warn!("DCT {}x{} CMYK/Adobe decode failed - passing through, likely to render nothing", w, h);
             }
             // efficient passthrough
             return Some(ImageData { w, h, format: 1, data: jpeg_bytes });
@@ -1245,19 +1290,38 @@ fn extract_image_inner(doc: &Document, stream: &lopdf::Stream, fill_argb: u32, c
             return None;
         }
         let absent: u8 = if invert { 0x00 } else { 0xFF };
-        let mut rgba = vec![0u8; (w * h * 4) as usize];
-        for y in 0..h as usize {
-            for x in 0..w as usize {
+        // A stencil is one bit per pixel, so /Width x /Height of 20000 x 20000 costs
+        // 2500 bytes on disk but 1.6 GB of RGBA here. Every other branch bounds its own
+        // raster (the contone path decimates, the codecs cap their decoded size); this
+        // one did not, so a tiny file could OOM the process. Decimate with the same
+        // rule the contone path uses, which is the identity for any sane stencil.
+        let step = {
+            let px = (w as usize).saturating_mul(h as usize);
+            let mut s = 1usize;
+            while s < 64 && px / (s * s) > MAX_IMAGE_PIXELS {
+                s += 1;
+            }
+            s
+        };
+        let (ow, oh) = ((w as usize).div_ceil(step), (h as usize).div_ceil(step));
+        if step > 1 {
+            image_warn!("stencil /ImageMask {}x{} over pixel budget: decimated by {} to {}x{}", w, h, step, ow, oh);
+        }
+        let mut rgba = vec![0u8; ow * oh * 4];
+        for oy in 0..oh {
+            let y = oy * step;
+            for ox in 0..ow {
+                let x = ox * step;
                 let byte = samples.get(y * row_bytes + x / 8).copied().unwrap_or(absent);
                 let mut bit = (byte >> (7 - (x % 8))) & 1;
                 if invert { bit ^= 1; }
-                let idx = (y * w as usize + x) * 4;
+                let idx = (oy * ow + ox) * 4;
                 if bit == 0 {
                     rgba[idx]=fr; rgba[idx+1]=fg; rgba[idx+2]=fb; rgba[idx+3]=255;
                 }
             }
         }
-        return Some(ImageData { w, h, format: 0, data: rgba });
+        return Some(ImageData { w: ow as u32, h: oh as u32, format: 0, data: rgba });
     }
 
     // Resolve the colourspace through the resource map so a NAMED entry
@@ -1314,10 +1378,7 @@ fn extract_image_inner(doc: &Document, stream: &lopdf::Stream, fill_argb: u32, c
     }
     // Explicit stencil /Mask image (mutually exclusive with color-key /Mask).
     if let Some(mask_alpha) = read_explicit_mask(doc, dict, out_w, out_h) {
-        for (i, px) in rgba.chunks_exact_mut(4).enumerate() {
-            let mv = mask_alpha.get(i).copied().unwrap_or(255) as u16;
-            px[3] = ((px[3] as u16 * mv) / 255) as u8;
-        }
+        apply_explicit_mask(&mut rgba, &mask_alpha);
     }
     // Color-key masking is compared against the pre-conversion samples so it is
     // correct for CMYK/DeviceN (not just DeviceRGB/Gray). Indexed images key on
@@ -1329,9 +1390,34 @@ fn extract_image_inner(doc: &Document, stream: &lopdf::Stream, fill_argb: u32, c
 }
 
 pub(crate) fn extract_inline_image(doc: &Document, stream: &lopdf::Stream, fill_argb: u32, cs_resources: &HashMap<Vec<u8>, ObjectId>) -> Option<ImageData> {
+    let mut img = extract_inline_image_inner(doc, stream, fill_argb, cs_resources)?;
+    // The XObject path has always done this; the inline path did not, so it could hand
+    // the wire a full MAX_IMAGE_PIXELS raster — 64 MB of RGBA — and a few KB of inline
+    // Flate or CCITT expands to exactly that. The consumer only materialises 16 MB for
+    // one image, so anything larger was a dropped primitive at best.
+    if img.format == 0 {
+        let bilevel = is_bilevel(doc, &stream.dict);
+        if let Some((nw, nh, ndata)) =
+            downscale_rgba(&img.data, img.w, img.h, IMAGE_DOWNSCALE_MAX_DIM, !bilevel)
+        {
+            img.w = nw;
+            img.h = nh;
+            img.data = ndata;
+        }
+    }
+    Some(img)
+}
+
+fn extract_inline_image_inner(doc: &Document, stream: &lopdf::Stream, fill_argb: u32, cs_resources: &HashMap<Vec<u8>, ObjectId>) -> Option<ImageData> {
     let dict = &stream.dict;
-    let w = dict.get(b"Width").or_else(|_| dict.get(b"W")).ok().and_then(num)? as u32;
-    let h = dict.get(b"Height").or_else(|_| dict.get(b"H")).ok().and_then(num)? as u32;
+    let (Some(w), Some(h)) = (
+        dict.get(b"Width").or_else(|_| dict.get(b"W")).ok().and_then(num),
+        dict.get(b"Height").or_else(|_| dict.get(b"H")).ok().and_then(num),
+    ) else {
+        image_warn!("inline image has no usable /W or /H - dropped");
+        return None;
+    };
+    let (w, h) = (w as u32, h as u32);
     if w==0 || h==0 || w>MAX_IMAGE_DIM || h>MAX_IMAGE_DIM {
         image_warn!("inline image {}x{} outside 1..{} - dropped", w, h, MAX_IMAGE_DIM);
         return None;
@@ -1373,7 +1459,13 @@ pub(crate) fn extract_inline_image(doc: &Document, stream: &lopdf::Stream, fill_
     // Support filter chain for inline BI: may have Flate, AHx, A85 etc.
     let specs = filters::filter_specs_from_dict(doc, dict);
     let raw = stream.content.clone();
-    let samples = filters::decode_stream_chain(raw.clone(), &specs, doc).unwrap_or(raw.clone());
+    // On failure these are still-encoded bytes. Unpacked as raw samples they are noise,
+    // and for an inline stencil noise is a solid block of fill colour over the page —
+    // the same failure mode the mask path had. Nothing is better than something wrong.
+    let Some(samples) = filters::decode_stream_chain(raw, &specs, doc) else {
+        image_warn!("inline image {}x{}: filter chain failed to decode - dropped", w, h);
+        return None;
+    };
 
     // DCT inline
     let legacy_filters = filter_names(doc, dict);
@@ -1479,7 +1571,94 @@ pub(crate) fn radial_shading_param(coords: &[f64], e0: bool, e1: bool, fx: f64, 
     best
 }
 
+/// Whether a placement matrix can actually be drawn with.
+///
+/// A non-finite entry — from a `/BBox`, `/Matrix` or `/Domain` holding a real that
+/// overflowed on parse, or from an inherited CTM that already went non-finite —
+/// reaches `Canvas.drawBitmap` as a broken transform, where the bitmap silently does
+/// not draw. Nothing downstream catches it: interpret.rs drops non-finite PATH
+/// operands, but a shading's matrix travels to the wire by a different route.
+fn mat_is_finite(m: &Mat) -> bool {
+    m.iter().all(|v| v.is_finite())
+}
+
 pub(crate) fn rasterize_shading(doc: &Document, shading_obj: &Object, base_ctm: &Mat, cs_resources: &HashMap<Vec<u8>, ObjectId>, size: u32, clip_bbox_device: Option<[f64;4]>) -> Option<(Mat, u32, u32, Vec<u8>)> {
+    rasterize_shading_inner(doc, shading_obj, base_ctm, cs_resources, size, clip_bbox_device, false)
+}
+
+/// As [`rasterize_shading`], but honouring `/Background`.
+///
+/// §8.7.4.3 Table 78: `/Background` fills the parts of the painted area that lie
+/// outside the shading's own extent — and it "shall be ignored by the `sh`
+/// operator", applying only when the shading is painted as a shading PATTERN.
+/// `rasterize_shading` serves both callers and cannot tell them apart, so the
+/// plain entry point takes the `sh` semantics (ignore it) and pattern painting
+/// must opt in here. Applying it under `sh` floods the whole clip region with the
+/// background colour instead of leaving it clear, which is the damaging direction.
+///
+/// Pattern painting (`paint_pattern_fill` / `paint_pattern_stroke`, PatternType 2)
+/// calls this; the `sh` operator must keep calling [`rasterize_shading`]. The two
+/// have IDENTICAL signatures, so nothing but a test stops an edit from swapping
+/// them and it fails silently in both directions — `background_is_ignored_by_sh_but
+/// _honoured_by_a_pattern` here, and `interpret::blind_reaudit_r4_tests::background
+/// _applies_to_shading_patterns_but_not_to_the_sh_operator` at the call sites.
+pub(crate) fn rasterize_shading_as_pattern(doc: &Document, shading_obj: &Object, base_ctm: &Mat, cs_resources: &HashMap<Vec<u8>, ObjectId>, size: u32, clip_bbox_device: Option<[f64;4]>) -> Option<(Mat, u32, u32, Vec<u8>)> {
+    rasterize_shading_inner(doc, shading_obj, base_ctm, cs_resources, size, clip_bbox_device, true)
+}
+
+/// Fill every fully-transparent pixel of an already-rasterized shading with
+/// `/Background`.
+///
+/// §8.7.4.3 Table 78 defines it as filling "those portions of the area to be painted
+/// that lie outside the bounds of the shading object", so a pixel the shading did not
+/// cover is exactly the case. Types 2 and 3 apply it inline while walking the axial or
+/// radial parameter; types 1 and 4-7 hand back a finished raster from elsewhere
+/// (`rasterize_shading_function_based`, `shading::rasterize_shading_mesh`), neither of
+/// which reads `/Background` — so without this post-pass a MESH or function-based
+/// PATTERN silently dropped it and only types 2 and 3 honoured the entry.
+fn fill_background_outside(
+    doc: &Document,
+    dict: &lopdf::Dictionary,
+    cs_resources: &HashMap<Vec<u8>, ObjectId>,
+    rgba: &mut [u8],
+) {
+    let comps: Vec<f64> = match dict
+        .get(b"Background")
+        .ok()
+        .and_then(|o| deref(doc, o))
+        .and_then(|o| o.as_array().ok())
+    {
+        Some(a) => a.iter().filter_map(num).collect(),
+        None => return,
+    };
+    if comps.is_empty() {
+        return;
+    }
+    let cs = dict
+        .get(b"ColorSpace")
+        .ok()
+        .and_then(|o| parse_cs_kind(doc, Some(o), cs_resources))
+        .unwrap_or(CsKind::DeviceRGB);
+    let argb = match eval_cs_to_rgb(doc, &cs, &comps, cs_resources) {
+        Some(v) => v,
+        None => return,
+    };
+    let (r, g, b) = (
+        ((argb >> 16) & 0xFF) as u8,
+        ((argb >> 8) & 0xFF) as u8,
+        (argb & 0xFF) as u8,
+    );
+    for px in rgba.chunks_exact_mut(4) {
+        if px[3] == 0 {
+            px[0] = r;
+            px[1] = g;
+            px[2] = b;
+            px[3] = 255;
+        }
+    }
+}
+
+fn rasterize_shading_inner(doc: &Document, shading_obj: &Object, base_ctm: &Mat, cs_resources: &HashMap<Vec<u8>, ObjectId>, size: u32, clip_bbox_device: Option<[f64;4]>, apply_background: bool) -> Option<(Mat, u32, u32, Vec<u8>)> {
     // A shading may be a plain dictionary (Type 1-3) or a stream (Type 4-7,
     // whose mesh data lives in the stream body).
     let (dict, mesh_bytes): (&lopdf::Dictionary, Option<Vec<u8>>) = match shading_obj {
@@ -1500,10 +1679,14 @@ pub(crate) fn rasterize_shading(doc: &Document, shading_obj: &Object, base_ctm: 
     if shading_type==4 || shading_type==5 || shading_type==6 || shading_type==7 {
         // Mesh shadings: pass the decoded stream body so real vertices/patches
         // can be parsed (falls back to /DataSource when the dict provides one).
-        return shading::rasterize_shading_mesh(doc, dict, mesh_bytes.as_deref(), base_ctm, cs_resources, size);
+        let mut out = shading::rasterize_shading_mesh(doc, dict, mesh_bytes.as_deref(), base_ctm, cs_resources, size)?;
+        if apply_background { fill_background_outside(doc, dict, cs_resources, &mut out.3); }
+        return Some(out);
     }
     if shading_type==1 {
-        return rasterize_shading_function_based(doc, dict, base_ctm, cs_resources, size);
+        let mut out = rasterize_shading_function_based(doc, dict, base_ctm, cs_resources, size)?;
+        if apply_background { fill_background_outside(doc, dict, cs_resources, &mut out.3); }
+        return Some(out);
     }
     if shading_type!=2 && shading_type!=3 { return None; }
 
@@ -1617,10 +1800,12 @@ pub(crate) fn rasterize_shading(doc: &Document, shading_obj: &Object, base_ctm: 
             let td = domain[0] + t * (domain[1] - domain[0]);
             return Some(f.eval(&[td]));
         }
-        // If no function, try to use Background as single color.
-        if let Some(ref bgc) = bg {
-            return Some(bgc.clone());
-        }
+        // NOT /Background. §8.7.4.3 Table 78 confines it to "those portions of the area
+        // to be painted that lie OUTSIDE the bounds of the shading object" — it is never
+        // the shading's own colour. /Function is required for types 2 and 3 (§8.7.4.5.3),
+        // and substituting the background here made every one of the 256 LUT slots the
+        // background colour, so a /Function-less shading painted its WHOLE area solid
+        // opaque background, gradient region included.
         None
     };
 
@@ -1643,11 +1828,16 @@ pub(crate) fn rasterize_shading(doc: &Document, shading_obj: &Object, base_ctm: 
             }
         }
     }
-    // Background color for out-of-range pixels, computed once.
-    let bg_argb = bg.as_ref().and_then(|bgc| {
-        let cs = color_space_obj.as_ref().unwrap_or(&CsKind::DeviceRGB);
-        eval_cs_to_rgb(doc, cs, bgc, cs_resources)
-    });
+    // Background color for out-of-range pixels, computed once. Only when the shading
+    // is painted as a PATTERN — §8.7.4.3 makes `sh` ignore /Background.
+    let bg_argb = if !apply_background {
+        None
+    } else {
+        bg.as_ref().and_then(|bgc| {
+            let cs = color_space_obj.as_ref().unwrap_or(&CsKind::DeviceRGB);
+            eval_cs_to_rgb(doc, cs, bgc, cs_resources)
+        })
+    };
 
     for y in 0..h as usize {
         for x in 0..w as usize {
@@ -1671,7 +1861,18 @@ pub(crate) fn rasterize_shading(doc: &Document, shading_obj: &Object, base_ctm: 
                     if len2<1e-12 {
                         0.0
                     } else {
-                        ((fx - x0)*dx + (fy - y0)*dy)/len2
+                        let v = ((fx - x0)*dx + (fy - y0)*dy)/len2;
+                        // `len2 < 1e-12` is FALSE for inf and NaN, so non-finite
+                        // /Coords (a real like 1e40 overflows an f32 on parse) fall
+                        // through to this division and yield NaN for every pixel. That
+                        // used to be harmless, because the NaN guard below just skipped
+                        // them — but now that the guard paints /Background, a degenerate
+                        // axial PATTERN would flood its whole raster with the background
+                        // colour. Axial has a defined answer for degenerate geometry
+                        // (the same 0.0 the len2 ~ 0 arm gives), so keep it finite by
+                        // construction: the NaN branch is then reachable only by radial,
+                        // the one type for which NaN means "outside the extent".
+                        if v.is_finite() { v } else { 0.0 }
                     }
                 } else { 0.0 }
             } else {
@@ -1686,14 +1887,27 @@ pub(crate) fn rasterize_shading(doc: &Document, shading_obj: &Object, base_ctm: 
                 } else { 0.0 }
             };
 
-            // Radial pixels not covered by any circle stay transparent.
+            let idx = (y * w as usize + x) * 4;
+            // A point covered by no circle of the (possibly extended) family lies
+            // OUTSIDE the shading's extent, which is exactly what /Background is for
+            // (§8.7.4.3 Table 78). `radial_shading_param` applies /Extend itself and
+            // returns None rather than an out-of-range t, so the `t < 0` and `t > 1`
+            // arms below are structurally UNREACHABLE for ShadingType 3 — this is the
+            // only place a radial shading can paint its background, and plain
+            // `continue` meant a radial pattern with /Background painted none of it.
+            // Under `sh`, bg_argb is None and the pixel stays clear, as it must.
             if t.is_nan() {
+                if let Some(argb) = bg_argb {
+                    rgba[idx] = ((argb >> 16) & 0xFF) as u8;
+                    rgba[idx + 1] = ((argb >> 8) & 0xFF) as u8;
+                    rgba[idx + 2] = (argb & 0xFF) as u8;
+                    rgba[idx + 3] = 255;
+                }
                 continue;
             }
 
             // Extend handling. Out-of-range pixels use the precomputed
             // background color (or stay transparent when none is defined).
-            let idx = (y * w as usize + x) * 4;
             let t_clamped = if t < 0.0 {
                 if extend.first().copied().unwrap_or(false) {
                     0.0
@@ -1734,12 +1948,13 @@ pub(crate) fn rasterize_shading(doc: &Document, shading_obj: &Object, base_ctm: 
                 rgba[idx + 1] = px[1];
                 rgba[idx + 2] = px[2];
                 rgba[idx + 3] = px[3];
-            } else if let Some(argb) = bg_argb {
-                rgba[idx] = ((argb >> 16) & 0xFF) as u8;
-                rgba[idx + 1] = ((argb >> 8) & 0xFF) as u8;
-                rgba[idx + 2] = (argb & 0xFF) as u8;
-                rgba[idx + 3] = 255;
             }
+            // and NO /Background arm here. This point is INSIDE the shading's extent —
+            // t is in [0,1] — so Table 78 does not apply: a colour we could not compute
+            // leaves the pixel clear. Painting the background here is the same conflation
+            // as the `eval_func` case above, and the two must be removed together:
+            // with `eval_func` now returning None for a /Function-less shading, every LUT
+            // slot is empty and this arm alone would reproduce the whole-area flood.
         }
     }
 
@@ -1750,6 +1965,10 @@ pub(crate) fn rasterize_shading(doc: &Document, shading_obj: &Object, base_ctm: 
     // shading CTM: [bw 0 0 bh bbox0 bbox1] * base_ctm
     let shading_mat: Mat = [bw, 0.0, 0.0, bh, bbox[0], bbox[1]];
     let ctm = mat_mul(&shading_mat, base_ctm);
+    if !mat_is_finite(&ctm) {
+        image_warn!("axial/radial shading placement matrix is non-finite - shading dropped");
+        return None;
+    }
     Some((ctm, w, h, rgba))
 }
 
@@ -1775,6 +1994,10 @@ fn rasterize_shading_function_based(doc: &Document, dict: &lopdf::Dictionary, ba
     // Image [0,1]^2 -> domain rect -> Matrix -> base CTM.
     let unit_to_domain: Mat = [dx1 - dx0, 0.0, 0.0, dy1 - dy0, dx0, dy0];
     let ctm = mat_mul(&mat_mul(&unit_to_domain, &matrix), base_ctm);
+    if !mat_is_finite(&ctm) {
+        image_warn!("function-based shading placement matrix is non-finite - shading dropped");
+        return None;
+    }
 
     // Size each axis from its DEVICE-space extent instead of forcing a square. Types 2/3
     // and the mesh types were fixed in round 1 but this one was missed: a /Domain of
@@ -2167,6 +2390,16 @@ pub(crate) fn apply_smask(rgba: &mut [u8], smask: &Option<Vec<u8>>) {
         for i in 0..n {
             rgba[i * 4 + 3] = alpha[i];
         }
+    }
+}
+
+/// Multiply an explicit stencil `/Mask`'s alpha (§8.9.6.4) into an RGBA buffer.
+/// Unlike [`apply_smask`] this COMBINES rather than replaces, so it composes with
+/// whatever alpha the codec already produced. Absent entries keep the pixel.
+pub(crate) fn apply_explicit_mask(rgba: &mut [u8], mask_alpha: &[u8]) {
+    for (i, px) in rgba.chunks_exact_mut(4).enumerate() {
+        let mv = mask_alpha.get(i).copied().unwrap_or(255) as u16;
+        px[3] = ((px[3] as u16 * mv) / 255) as u8;
     }
 }
 
@@ -2728,6 +2961,12 @@ fn decode_mask_stream_gray(
             }
             return Some(out);
         }
+        // The bytes are a JBIG2 codestream we could not decode. `stream_data_with_doc`
+        // hands image codecs back STILL ENCODED, so falling through to the raw-bit path
+        // below would unpack the codestream itself as mask samples: noise, and for an
+        // /SMask mostly alpha 0, i.e. the base image disappears. Leave it unmasked.
+        image_warn!("mask /SMask or /Mask: JBIG2 {}x{} decode failed - leaving the image unmasked", sw, sh);
+        return None;
     }
     if has_ccitt {
         let params = filters::parse_ccitt_params(doc, specs.iter().find(|(k, _)| *k == filters::FilterKind::Ccitt).and_then(|(_, d)| d.as_ref()));
@@ -2750,6 +2989,8 @@ fn decode_mask_stream_gray(
             }
             return Some(gray);
         }
+        image_warn!("mask /SMask or /Mask: CCITT {}x{} decode failed - leaving the image unmasked", sw, sh);
+        return None;
     }
     if has_dct {
         // NOT `stream_data`: that is lopdf's decoder, which implements only
@@ -2770,7 +3011,11 @@ fn decode_mask_stream_gray(
             let fitted = fit(gray, jw as usize, jh as usize);
             return Some(fitted.into_iter().map(to_alpha).collect());
         }
-        image_warn!("mask /SMask or /Mask: DCT {}x{} decode failed ({} bytes)", sw, sh, raw.len());
+        image_warn!(
+            "mask /SMask or /Mask: DCT {}x{} decode failed ({} bytes) - leaving the image unmasked",
+            sw, sh, raw.len()
+        );
+        return None;
     }
     if has_jpx {
         // Same reasoning as the DCT branch: use the project's chain so an
@@ -2781,7 +3026,11 @@ fn decode_mask_stream_gray(
             let fitted = fit(gray, jw as usize, jh as usize);
             return Some(fitted.into_iter().map(to_alpha).collect());
         }
-        image_warn!("mask /SMask or /Mask: JPX {}x{} decode failed ({} bytes)", sw, sh, raw.len());
+        image_warn!(
+            "mask /SMask or /Mask: JPX {}x{} decode failed ({} bytes) - leaving the image unmasked",
+            sw, sh, raw.len()
+        );
+        return None;
     }
     // Plain bit path (1-bit masks without compression). The raw bit IS the DeviceGray
     // sample: 1 = white. Mapping bit 1 to black here inverted every uncompressed
@@ -2857,6 +3106,13 @@ pub(crate) fn read_explicit_mask(doc: &Document, dict: &lopdf::Dictionary, w: u3
     let sh = s.dict.get(b"Height").ok().and_then(num)? as usize;
     if sw == 0 || sh == 0 || sw > 20000 || sh > 20000 {
         image_warn!("/Mask stream {}x{} outside 1..20000 - mask ignored", sw, sh);
+        return None;
+    }
+    // A per-dimension cap still admits 20000x20000, and `decode_mask_stream_gray`
+    // allocates sw*sh bytes plus a resample buffer. Bound it the same way the base
+    // image is bounded; a mask that big cannot be resolving anything anyway.
+    if sw.saturating_mul(sh) > MAX_IMAGE_PIXELS {
+        image_warn!("/Mask stream {}x{} over the {} pixel budget - mask ignored", sw, sh, MAX_IMAGE_PIXELS);
         return None;
     }
     let invert = matches!(
@@ -2943,6 +3199,10 @@ pub(crate) fn read_smask(doc: &Document, dict: &lopdf::Dictionary, w: u32, h: u3
     let sh = s.dict.get(b"Height").ok().and_then(num).unwrap_or(h as f64) as usize;
     if sw == 0 || sh == 0 || sw > 20000 || sh > 20000 {
         image_warn!("/SMask stream {}x{} outside 1..20000 - mask ignored", sw, sh);
+        return None;
+    }
+    if sw.saturating_mul(sh) > MAX_IMAGE_PIXELS {
+        image_warn!("/SMask stream {}x{} over the {} pixel budget - mask ignored", sw, sh, MAX_IMAGE_PIXELS);
         return None;
     }
     // P0 fix critical #1: previously DCT/JPX only; now uses unified decoder for all filters
@@ -3884,6 +4144,550 @@ mod mask_tests {
         // And the low end still maps to index 0.
         let out = image_samples_to_rgba(&doc, &decoded, &res, &[0u8], 1, 1, 1, 8);
         assert_eq!(&out[0..3], &[0, 0, 0], "sample 0 stays index 0 -> black");
+    }
+
+    /// A mask stream carrying an image codec whose decode FAILS must leave the base
+    /// image unmasked. `stream_data_with_doc` hands image codecs back still ENCODED
+    /// (objects.rs decides that, because only the image layer knows /Width), so the
+    /// raw-bit fallback below the codec branches was unpacking the codestream itself
+    /// as mask samples. For an /SMask the sample IS the alpha (§11.6.5.3), and the
+    /// bytes past the short codestream read as 0, so the base image went almost
+    /// entirely transparent: the "graphic just isn't there" report, from an image
+    /// that decoded perfectly well.
+    #[test]
+    fn a_mask_whose_codec_fails_leaves_the_image_unmasked() {
+        let mut doc = Document::with_version("1.7");
+        let codec_mask = |filter: &str, doc: &mut Document| {
+            let id = doc.add_object(Stream::new(
+                dictionary! {
+                    "Width" => 4,
+                    "Height" => 4,
+                    "BitsPerComponent" => 8,
+                    "ColorSpace" => "DeviceGray",
+                    "Filter" => filter,
+                },
+                // A plausible SOI followed by nothing decodable.
+                vec![0xFFu8, 0xD8, 0x00, 0x01, 0x02, 0x03],
+            ));
+            dictionary! { "SMask" => Object::Reference(id) }
+        };
+        // CCITTFaxDecode is deliberately absent: `filters::decode_ccitt` is tolerant and
+        // returns a (mostly blank) raster rather than failing, so it never reaches the
+        // fall-through. The three that DO fail are the ones that mattered.
+        for filter in ["DCTDecode", "JPXDecode", "JBIG2Decode"] {
+            let dict = codec_mask(filter, &mut doc);
+            assert!(
+                read_smask(&doc, &dict, 4, 4).is_none(),
+                "{filter}: an undecodable mask must not become a mask of codestream bytes"
+            );
+        }
+    }
+
+    /// `jp2::decode_with_opts` sniffed the JP2 signature box with `bytes.len() > 4`
+    /// and then sliced `bytes[4..8]`, so a 5-to-7-byte JPX stream panicked with
+    /// "range end index 8 out of range". A panic crosses the JNI boundary and takes
+    /// the whole document down, not just the one image.
+    #[test]
+    fn a_short_jpx_codestream_does_not_panic() {
+        for len in 0..12usize {
+            let bytes: Vec<u8> = (0..len).map(|i| i as u8).collect();
+            assert!(jp2::decode(&bytes).is_none(), "{len} bytes must fail, not panic");
+        }
+        // And the byte pattern that actually reaches the signature comparison.
+        let mut sig = b"\x00\x00\x00\x0CjP  ".to_vec();
+        sig.truncate(6);
+        assert!(jp2::decode(&sig).is_none());
+    }
+
+    /// §8.9.6.4 puts no restriction on the base image's filter: a stencil `/Mask`
+    /// applies to a CCITT/JBIG2/JPX base just as it does to raw samples. Only the
+    /// raw-sample path read it, so a codec-compressed base rendered as an uncut
+    /// opaque rectangle with the cut-out areas still showing.
+    #[test]
+    fn explicit_stencil_mask_applies_to_a_codec_base_image() {
+        let mut doc = Document::with_version("1.7");
+        let (data, w) = half_black_g4();
+        // 8x2 stencil, left half set. Mask sample 1 = masked out (§8.9.6.2/§8.9.6.4).
+        let mask = doc.add_object(Stream::new(
+            dictionary! {
+                "Type" => "XObject", "Subtype" => "Image",
+                "Width" => 8, "Height" => 2, "BitsPerComponent" => 1,
+                "ImageMask" => true,
+            },
+            vec![0b1111_0000u8, 0b1111_0000u8],
+        ));
+        let d = dictionary! {
+            "Width" => w as i64, "Height" => 2, "BitsPerComponent" => 1,
+            "ColorSpace" => "DeviceGray",
+            "Filter" => "CCITTFaxDecode",
+            "DecodeParms" => dictionary! { "K" => -1, "Columns" => w as i64, "Rows" => 2 },
+            "Mask" => Object::Reference(mask),
+        };
+        let img = extract_image_inner(&doc, &Stream::new(d, data), 0xFF00_0000, &HashMap::new())
+            .expect("a G4 image must decode");
+        assert_eq!((img.w, img.h), (8, 2));
+        assert_eq!(img.data[3], 0, "x=0 is under a set mask bit - masked out");
+        assert_eq!(img.data[4 * 3 + 3], 0, "x=3 still masked out");
+        assert_eq!(img.data[4 * 4 + 3], 255, "x=4 is under a clear mask bit - kept");
+        assert_eq!(img.data[4 * 8 + 3], 0, "row 1 masks the same half");
+    }
+
+    /// A stencil is one bit per pixel, so `/Width 8192 /Height 4096` is 4 MB on disk
+    /// and 134 MB of RGBA. Every other branch bounds its own raster; this one had no
+    /// pixel budget at all, so a tiny file could commit gigabytes. Decimating matches
+    /// what the contone path already does and is the identity for any sane stencil.
+    #[test]
+    fn an_oversized_stencil_is_decimated_not_allocated_whole() {
+        let doc = Document::with_version("1.7");
+        let d = dictionary! { "Width" => 8192, "Height" => 4096, "ImageMask" => true };
+        // One row of zero samples (which PAINT under the default /Decode), no more.
+        let img = extract_image_inner(
+            &doc,
+            &Stream::new(d, vec![0u8; 8192 / 8]),
+            0xFFFF_0000,
+            &HashMap::new(),
+        )
+        .expect("an oversized stencil must still render");
+        assert!(
+            (img.w as usize) * (img.h as usize) <= MAX_IMAGE_PIXELS,
+            "{}x{} must fit the pixel budget",
+            img.w,
+            img.h
+        );
+        assert_eq!((img.w, img.h), (4096, 2048), "decimated by 2 on each axis");
+        assert_eq!(img.data.len(), 4096 * 2048 * 4);
+        assert_eq!(img.data[3], 255, "row 0 sample 0 paints the fill colour");
+        assert_eq!(
+            img.data[4096 * 4 + 3],
+            0,
+            "a row past the supplied bytes must stay unpainted, not become a solid block"
+        );
+    }
+
+    /// The 20000-per-side cap still admits a 400 Mpx mask, which `decode_mask_stream_gray`
+    /// would allocate one byte per pixel of, twice.
+    #[test]
+    fn an_oversized_mask_is_refused_rather_than_allocated() {
+        let mut doc = Document::with_version("1.7");
+        let big = dictionary! {
+            "Width" => 20000, "Height" => 20000, "BitsPerComponent" => 8,
+            "ColorSpace" => "DeviceGray",
+        };
+        let sm = doc.add_object(Stream::new(big.clone(), vec![0u8; 16]));
+        assert!(read_smask(&doc, &dictionary! { "SMask" => Object::Reference(sm) }, 8, 8).is_none());
+        let mut stencil = big;
+        stencil.set("ImageMask", true);
+        stencil.set("BitsPerComponent", 1);
+        let mk = doc.add_object(Stream::new(stencil, vec![0u8; 16]));
+        assert!(read_explicit_mask(&doc, &dictionary! { "Mask" => Object::Reference(mk) }, 8, 8).is_none());
+    }
+
+    /// `decode_stream_chain` returns `None` for a CORRUPT Flate/LZW/ASCII85 wrapper as
+    /// well as for an unknown filter name, and `unwrap_or(raw)` then unpacked the
+    /// still-compressed bytes as image samples. That is noise, and for an inline
+    /// stencil (§8.9.6.2) noise is a solid block of fill colour over the page.
+    #[test]
+    fn an_inline_image_whose_filter_chain_fails_is_dropped_not_rendered_as_noise() {
+        let doc = Document::with_version("1.7");
+        // Not valid zlib, so `decode_flate` fails and the chain returns None.
+        let junk = vec![0x00u8, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07];
+        let d = dictionary! { "W" => 4, "H" => 2, "BPC" => 8, "CS" => "G", "F" => "Fl" };
+        assert!(
+            extract_inline_image(&doc, &Stream::new(d, junk.clone()), 0xFF00_0000, &HashMap::new())
+                .is_none(),
+            "an undecodable inline image must be dropped, not unpacked from its own zlib bytes"
+        );
+        // And the stencil form, where the failure mode is a solid block rather than noise.
+        let d = dictionary! { "W" => 8, "H" => 8, "IM" => true, "F" => "Fl" };
+        assert!(
+            extract_inline_image(&doc, &Stream::new(d, junk), 0xFF00_0000, &HashMap::new())
+                .is_none()
+        );
+    }
+
+    /// The inline path never called `downscale_rgba`, so it could hand the wire a full
+    /// `MAX_IMAGE_PIXELS` raster (64 MB of RGBA) that the consumer refuses to
+    /// materialise. A few KB of inline Flate expands to exactly that.
+    #[test]
+    fn an_inline_image_is_downscaled_like_an_xobject() {
+        let doc = Document::with_version("1.7");
+        let (w, h) = (4096usize, 8usize);
+        let d = dictionary! { "W" => w as i64, "H" => h as i64, "BPC" => 8, "CS" => "G" };
+        let img = extract_inline_image(
+            &doc,
+            &Stream::new(d, vec![0x80u8; w * h]),
+            0xFF00_0000,
+            &HashMap::new(),
+        )
+        .expect("decodes");
+        assert!(
+            img.w <= IMAGE_DOWNSCALE_MAX_DIM && img.h <= IMAGE_DOWNSCALE_MAX_DIM,
+            "{}x{} must be bounded by the downscale cap",
+            img.w,
+            img.h
+        );
+        assert_eq!(img.data.len(), (img.w as usize) * (img.h as usize) * 4);
+    }
+
+    /// §8.7.4.3 Table 78: `/Background` "shall be ignored by the `sh` operator" and
+    /// applies only when the shading is painted as a shading PATTERN. Painting it under
+    /// `sh` floods the whole clip region with the background colour where the shading's
+    /// own extent should have left it clear.
+    #[test]
+    fn background_is_ignored_by_sh_but_honoured_by_a_pattern() {
+        let mut doc = Document::with_version("1.7");
+        let func = doc.add_object(dictionary! {
+            "FunctionType" => 2,
+            "Domain" => vec![0.into(), 1.into()],
+            "C0" => vec![0.into(), 0.into(), 0.into()],
+            "C1" => vec![1.into(), 1.into(), 1.into()],
+            "N" => 1,
+        });
+        // An axial shading spanning only the middle of its /BBox, with /Extend false, so
+        // the pixels outside the axis are "outside the shading's extent".
+        let sh = Object::Dictionary(dictionary! {
+            "ShadingType" => 2,
+            "ColorSpace" => "DeviceRGB",
+            "Coords" => vec![0.4.into(), 0.into(), 0.6.into(), 0.into()],
+            "Function" => Object::Reference(func),
+            "Extend" => vec![Object::Boolean(false), Object::Boolean(false)],
+            "BBox" => vec![0.into(), 0.into(), 1.into(), 1.into()],
+            "Background" => vec![1.into(), 0.into(), 0.into()],
+        });
+        let alpha_at_left_edge = |data: &[u8]| data[3];
+
+        let (_, _, _, sh_data) =
+            rasterize_shading(&doc, &sh, &IDENTITY, &HashMap::new(), 32, None).expect("sh");
+        assert_eq!(
+            alpha_at_left_edge(&sh_data), 0,
+            "`sh` must leave the area outside the shading CLEAR, not flood it with /Background"
+        );
+
+        let (_, _, _, pat_data) =
+            rasterize_shading_as_pattern(&doc, &sh, &IDENTITY, &HashMap::new(), 32, None)
+                .expect("pattern");
+        assert_eq!(alpha_at_left_edge(&pat_data), 255, "a pattern DOES paint /Background");
+        assert_eq!(&pat_data[0..3], &[255, 0, 0], "and it is the declared red");
+    }
+
+    /// §8.7.4.3 does not restrict /Background by shading type, but types 1 and 4-7
+    /// return a finished raster from a different function and neither reads it, so a
+    /// function-based or MESH pattern dropped the entry while types 2 and 3 honoured
+    /// it. `fill_background_outside` is the post-pass that closes that gap; the mesh
+    /// and type 1 call sites are one line each.
+    #[test]
+    fn background_post_pass_fills_only_the_uncovered_pixels() {
+        let doc = Document::with_version("1.7");
+        let dict = dictionary! {
+            "ShadingType" => 4,
+            "ColorSpace" => "DeviceRGB",
+            "Background" => vec![0.into(), 0.into(), 1.into()],
+        };
+        // Pixel 0 was covered by the shading (opaque green), pixel 1 was not.
+        let mut rgba = vec![0, 255, 0, 255, 0, 0, 0, 0];
+        fill_background_outside(&doc, &dict, &HashMap::new(), &mut rgba);
+        assert_eq!(&rgba[0..4], &[0, 255, 0, 255], "a covered pixel is untouched");
+        assert_eq!(&rgba[4..8], &[0, 0, 255, 255], "an uncovered pixel takes /Background");
+
+        // Evaluated in the shading's OWN colour space, not assumed to be RGB.
+        let cmyk = dictionary! {
+            "ShadingType" => 4,
+            "ColorSpace" => "DeviceCMYK",
+            "Background" => vec![0.into(), 1.into(), 1.into(), 0.into()],
+        };
+        let mut rgba = vec![0, 0, 0, 0];
+        fill_background_outside(&doc, &cmyk, &HashMap::new(), &mut rgba);
+        assert_eq!(&rgba[0..4], &[255, 0, 0, 255], "CMYK 0,1,1,0 is red");
+
+        // No /Background is a no-op: an uncovered pixel stays CLEAR, it does not
+        // become opaque black.
+        let bare = dictionary! { "ShadingType" => 4, "ColorSpace" => "DeviceRGB" };
+        let mut rgba = vec![0, 0, 0, 0];
+        fill_background_outside(&doc, &bare, &HashMap::new(), &mut rgba);
+        assert_eq!(&rgba[0..4], &[0, 0, 0, 0], "no /Background must not paint anything");
+    }
+
+    /// A RADIAL shading reports "outside the extent" as `None` from
+    /// `radial_shading_param`, which becomes NaN — and the NaN guard used to `continue`
+    /// above the two arms that paint `/Background`, so those arms were structurally
+    /// unreachable for ShadingType 3 and a radial pattern painted none of its
+    /// background. The solver is correct; the ordering was not. (a-shading's diagnosis
+    /// on a-interp's repro.)
+    #[test]
+    fn a_radial_pattern_paints_background_outside_its_extent() {
+        let mut doc = Document::with_version("1.7");
+        let func = doc.add_object(dictionary! {
+            "FunctionType" => 2,
+            "Domain" => vec![0.into(), 1.into()],
+            // All black, so any red pixel can only have come from /Background.
+            "C0" => vec![0.into(), 0.into(), 0.into()],
+            "C1" => vec![0.into(), 0.into(), 0.into()],
+            "N" => 1,
+        });
+        // Concentric circles r0=0 -> r1=0.1 in the middle of the bbox, /Extend false
+        // both ends, so every pixel outside the small disc is outside the extent.
+        let sh = Object::Dictionary(dictionary! {
+            "ShadingType" => 3,
+            "ColorSpace" => "DeviceRGB",
+            "Coords" => vec![0.5.into(), 0.5.into(), 0.into(), 0.5.into(), 0.5.into(), 0.1.into()],
+            "Function" => Object::Reference(func),
+            "Extend" => vec![Object::Boolean(false), Object::Boolean(false)],
+            "BBox" => vec![0.into(), 0.into(), 1.into(), 1.into()],
+            "Background" => vec![1.into(), 0.into(), 0.into()],
+        });
+
+        let (_, _, _, sh_data) =
+            rasterize_shading(&doc, &sh, &IDENTITY, &HashMap::new(), 32, None).expect("sh");
+        assert_eq!(sh_data[3], 0, "`sh` must leave the corner CLEAR (/Background is ignored)");
+
+        let (_, _, _, pat) =
+            rasterize_shading_as_pattern(&doc, &sh, &IDENTITY, &HashMap::new(), 32, None)
+                .expect("pattern");
+        assert_eq!(
+            &pat[0..4], &[255, 0, 0, 255],
+            "a radial PATTERN must paint /Background outside the ending circle"
+        );
+        let red = pat.chunks_exact(4).filter(|px| px[0] == 255 && px[3] == 255).count();
+        assert!(red > 100, "most of the raster is outside the r=0.1 disc, got {red} red pixels");
+        // The disc itself is still the shading's own colour, not background.
+        let mid = ((16 * 32) + 16) * 4;
+        assert_eq!(&pat[mid..mid + 4], &[0, 0, 0, 255], "inside the disc stays the gradient's black");
+    }
+
+    /// The NaN branch that paints /Background must be reachable by RADIAL only.
+    /// `len2 < 1e-12` is false for inf, so non-finite /Coords (a real like 1e40
+    /// overflows an f32 on parse) used to reach the division and make `t` NaN for
+    /// every pixel of an AXIAL shading. That was harmless while the guard just
+    /// skipped them; once it paints the background, a degenerate axial pattern would
+    /// flood its whole raster — reintroducing the exact failure the /Background split
+    /// was made to prevent.
+    #[test]
+    fn a_degenerate_axial_pattern_does_not_flood_with_background() {
+        let mut doc = Document::with_version("1.7");
+        let func = doc.add_object(dictionary! {
+            "FunctionType" => 2,
+            "Domain" => vec![0.into(), 1.into()],
+            "C0" => vec![0.into(), 0.into(), 0.into()],
+            "C1" => vec![0.into(), 0.into(), 0.into()],
+            "N" => 1,
+        });
+        for coords in [
+            // Non-finite: a real like 1e40 overflows an f32 on parse, so /Coords can
+            // legitimately hold inf and len2 becomes inf.
+            vec![
+                Object::Real(0.0),
+                Object::Real(0.0),
+                Object::Real(f32::INFINITY),
+                Object::Real(0.0),
+            ],
+            // Zero-length axis, the case the len2 ~ 0 arm already handled.
+            vec![Object::Real(0.5), Object::Real(0.5), Object::Real(0.5), Object::Real(0.5)],
+        ] {
+            let sh = Object::Dictionary(dictionary! {
+                "ShadingType" => 2,
+                "ColorSpace" => "DeviceRGB",
+                "Coords" => coords,
+                "Function" => Object::Reference(func),
+                "Extend" => vec![Object::Boolean(false), Object::Boolean(false)],
+                "BBox" => vec![0.into(), 0.into(), 1.into(), 1.into()],
+                "Background" => vec![1.into(), 0.into(), 0.into()],
+            });
+            let (_, _, _, pat) =
+                rasterize_shading_as_pattern(&doc, &sh, &IDENTITY, &HashMap::new(), 16, None)
+                    .expect("degenerate axial still rasterizes");
+            let red = pat.chunks_exact(4).filter(|px| px[0] == 255 && px[3] == 255).count();
+            assert_eq!(
+                red, 0,
+                "degenerate axial geometry must resolve to the shading's own colour, \
+                 not flood the raster with /Background"
+            );
+        }
+    }
+
+    /// A shading's placement matrix is built from file-controlled /BBox, /Matrix and
+    /// /Domain, so an overflowed real reaches `Canvas.drawBitmap` as a non-finite
+    /// transform and the bitmap silently does not draw. Nothing downstream guards it —
+    /// interpret.rs drops non-finite PATH operands, but a shading matrix takes a
+    /// different route to the wire. Dropping it here at least names the reason.
+    #[test]
+    fn a_non_finite_shading_matrix_is_refused() {
+        let mut doc = Document::with_version("1.7");
+        let func = doc.add_object(dictionary! {
+            "FunctionType" => 2,
+            "Domain" => vec![0.into(), 1.into()],
+            "C0" => vec![0.into(), 0.into(), 0.into()],
+            "C1" => vec![1.into(), 1.into(), 1.into()],
+            "N" => 1,
+        });
+        // Axial, via a /BBox whose width overflowed an f32 on parse.
+        let axial = Object::Dictionary(dictionary! {
+            "ShadingType" => 2,
+            "ColorSpace" => "DeviceRGB",
+            "Coords" => vec![0.into(), 0.into(), 1.into(), 0.into()],
+            "Function" => Object::Reference(func),
+            "BBox" => vec![
+                Object::Real(0.0),
+                Object::Real(0.0),
+                Object::Real(f32::INFINITY),
+                Object::Real(1.0),
+            ],
+        });
+        assert!(
+            rasterize_shading(&doc, &axial, &IDENTITY, &HashMap::new(), 16, None).is_none(),
+            "a non-finite /BBox must not yield a shading with a broken transform"
+        );
+        // And via a non-finite inherited CTM, which neither this file nor the caller owns.
+        let ok = Object::Dictionary(dictionary! {
+            "ShadingType" => 2,
+            "ColorSpace" => "DeviceRGB",
+            "Coords" => vec![0.into(), 0.into(), 1.into(), 0.into()],
+            "Function" => Object::Reference(func),
+            "BBox" => vec![0.into(), 0.into(), 1.into(), 1.into()],
+        });
+        let bad_ctm: Mat = [f64::INFINITY, 0.0, 0.0, 1.0, 0.0, 0.0];
+        assert!(
+            rasterize_shading(&doc, &ok, &bad_ctm, &HashMap::new(), 16, None).is_none(),
+            "a non-finite inherited CTM must not reach the wire either"
+        );
+        // The same shading with a sane CTM still renders, so the guard is not blanket.
+        assert!(
+            rasterize_shading(&doc, &ok, &IDENTITY, &HashMap::new(), 16, None).is_some(),
+            "precondition: the guard must not reject well-formed shadings"
+        );
+    }
+
+    /// §8.7.4.3 Table 78 confines /Background to the area OUTSIDE the shading's bounds.
+    /// Two arms used it as the shading's own in-extent colour: `eval_func` returned it
+    /// when /Function was absent (making all 256 LUT slots the background, so the whole
+    /// area painted solid), and the per-pixel lookup fell back to it when no colour
+    /// could be computed. They had to go together — with `eval_func` fixed alone, every
+    /// LUT slot is empty and the second arm reproduces the identical flood.
+    /// (a-shading's finding.)
+    #[test]
+    fn background_is_never_used_as_the_shadings_own_colour() {
+        let doc = Document::with_version("1.7");
+        // Types 2/3 REQUIRE /Function (§8.7.4.5.3); this one has none. The axis spans
+        // only the middle fifth of the bbox, so the raster has both in-extent pixels
+        // (t in [0,1], centre) and out-of-extent ones (t < 0 / t > 1, edges).
+        let sh = Object::Dictionary(dictionary! {
+            "ShadingType" => 2,
+            "ColorSpace" => "DeviceRGB",
+            "Coords" => vec![0.4.into(), 0.into(), 0.6.into(), 0.into()],
+            "Extend" => vec![Object::Boolean(false), Object::Boolean(false)],
+            "BBox" => vec![0.into(), 0.into(), 1.into(), 1.into()],
+            "Background" => vec![1.into(), 0.into(), 0.into()],
+        });
+        let (_, w, h, pat) =
+            rasterize_shading_as_pattern(&doc, &sh, &IDENTITY, &HashMap::new(), 32, None)
+                .expect("rasterizes");
+        let px = |x: usize, y: usize| -> &[u8] {
+            let i = (y * w as usize + x) * 4;
+            &pat[i..i + 4]
+        };
+        let mid_y = (h as usize) / 2;
+        // Inside the extent the shading has no colour, so the pixel stays CLEAR.
+        assert_eq!(
+            px(16, mid_y), &[0, 0, 0, 0],
+            "a point INSIDE the extent must not take /Background"
+        );
+        // Outside it, /Background is exactly what Table 78 asks for.
+        assert_eq!(px(0, mid_y), &[255, 0, 0, 255], "left of the axis is outside -> background");
+        assert_eq!(px(31, mid_y), &[255, 0, 0, 255], "right of the axis is outside -> background");
+        // And the whole raster must not be background, which is the flood symptom.
+        let red = pat.chunks_exact(4).filter(|p| p[0] == 255 && p[3] == 255).count();
+        assert!(
+            red < (w as usize) * (h as usize),
+            "the shading's own area must not be flooded with /Background"
+        );
+    }
+
+    /// §7.4.6 Table 11: `/Rows` defaults to 0. Every other CCITT fixture in this file
+    /// supplies it explicitly, so `images.rs`'s own `params.rows > 0` fallback at :1163
+    /// and the `/Rows`-absent path end to end were unexercised. That is what this pins.
+    ///
+    /// It does NOT witness `filters::decode_ccitt`'s row-count derivation, and I claimed
+    /// otherwise before measuring. a-file mutated that derivation and this test came back
+    /// green; reading :1163 explains why, and the reason is structural rather than a
+    /// fixture weakness: `rows_est` is `params.rows` or `/Height`, never anything derived
+    /// from the data length, and `row_bytes` comes from `columns`. Extra rows the decoder
+    /// may produce are never read.
+    ///
+    /// Precisely: this consumer depends on `decode_ccitt` returning `Some`, NOT on which
+    /// row count it chose. Those are different, and "no dependency here" — which is what
+    /// this comment said first — was too broad. The `Option` half IS a real dependency and
+    /// is covered by `a_long_ccitt_payload_for_a_short_image_still_renders` below.
+    /// (a-file's narrowing, after their measurement corrected my first claim.)
+    #[test]
+    fn a_ccitt_image_without_an_explicit_rows_parameter_still_gets_every_row() {
+        let doc = Document::with_version("1.7");
+        let (data, w) = half_black_g4();
+        // /Rows deliberately ABSENT — the default per Table 11.
+        let d = dictionary! {
+            "Width" => w as i64, "Height" => 2, "BitsPerComponent" => 1,
+            "ImageMask" => true,
+            "Filter" => "CCITTFaxDecode",
+            "DecodeParms" => dictionary! { "K" => -1, "Columns" => w as i64 },
+        };
+        let img = extract_image_inner(&doc, &Stream::new(d, data), 0xFF00_FF00, &HashMap::new())
+            .expect("a G4 stencil with no /Rows must still decode");
+        assert_eq!(
+            (img.w, img.h), (8, 2),
+            "with /Rows absent the raster must still be /Height rows tall, not truncated"
+        );
+        // Both rows must carry the fax's ink. A row count derived short leaves row 1
+        // entirely unpainted, which renders as the bottom half of a scan going missing.
+        let alpha = |x: usize, y: usize| img.data[(y * 8 + x) * 4 + 3];
+        assert_eq!(alpha(0, 0), 255, "row 0, x=0 is a black pel - painted");
+        assert_eq!(alpha(4, 0), 0, "row 0, x=4 is white - transparent");
+        assert_eq!(alpha(0, 1), 255, "row 1, x=0 must be painted too");
+        assert_eq!(alpha(4, 1), 0, "row 1, x=4 stays transparent");
+    }
+
+    /// The one dependency images.rs DOES have on `filters::decode_ccitt`'s row handling:
+    /// the `Option`, not the count. `decode_ccitt` refuses over 20000 rows, and when its
+    /// row estimate came from the PAYLOAD LENGTH rather than `/Height`, a long payload
+    /// for a short image pushed the estimate past that ceiling, returned `None`, and
+    /// skipped this consumer's entire CCITT branch at images.rs:1161 — total loss of the
+    /// image through the `Option`, not a wrong raster. That is the invisible-hole symptom.
+    ///
+    /// WITNESSED: a-file re-applied the payload-derived estimate in filters.rs and this
+    /// test FAILED at the raster assertion, alongside their own
+    /// `ccitt_row_count_comes_from_the_height_not_the_compressed_length`, while the four
+    /// polarity tests above stayed green. Their own test passing under fixed code and
+    /// failing in that same invocation certifies the binary held the mutation, so the
+    /// result does not rest on marker timing or binary mtime — a failure is consistent
+    /// with exactly one compiled state. The seam is covered at this point.
+    #[test]
+    fn a_long_ccitt_payload_for_a_short_image_still_renders() {
+        let doc = Document::with_version("1.7");
+        // 8-wide rows, encoded far past the point where payload*8/columns exceeds the
+        // decoder's 20000-row ceiling, while /Height stays 2. The phase alternates per
+        // row so G4's vertical mode cannot collapse them — identical rows compress to a
+        // couple of bits each and never reach the ceiling.
+        let rows: Vec<Vec<bool>> = (0..20000)
+            .map(|i: usize| (0..8).map(|x| (x + i) % 2 == 0).collect())
+            .collect();
+        let data = g4_encode(&rows, 8);
+        assert!(
+            data.len() > 20000,
+            "fixture must exceed the row ceiling under a payload-derived estimate, got {} bytes",
+            data.len()
+        );
+        let d = dictionary! {
+            "Width" => 8, "Height" => 2, "BitsPerComponent" => 1,
+            "ImageMask" => true,
+            "Filter" => "CCITTFaxDecode",
+            "DecodeParms" => dictionary! { "K" => -1, "Columns" => 8 },
+        };
+        let img = extract_image_inner(&doc, &Stream::new(d, data), 0xFF00_FF00, &HashMap::new())
+            .expect("a long payload must not make the whole image vanish");
+        assert_eq!((img.w, img.h), (8, 2), "the raster is sized by /Height, not the payload");
+        // The fixture alternates phase per row: row i paints x where (x + i) is even.
+        let alpha = |x: usize, y: usize| img.data[(y * 8 + x) * 4 + 3];
+        assert_eq!(alpha(0, 0), 255, "row 0, x=0 is a black pel");
+        assert_eq!(alpha(1, 0), 0, "row 0, x=1 is white");
+        assert_eq!(alpha(0, 1), 0, "row 1 inverts the phase: x=0 is white");
+        assert_eq!(alpha(1, 1), 255, "row 1, x=1 is black");
     }
 }
 

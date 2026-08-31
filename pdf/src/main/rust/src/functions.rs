@@ -45,12 +45,18 @@ pub(crate) enum PdfFunction {
     },
     Exponential {
         domain: [f64; 2],
+        /// 7.10.1 Table 38 makes `/Range` optional for types 2 and 3, but when it IS
+        /// present outputs shall be clipped to it — a Type 2 whose `/Domain` extends
+        /// past 1 evaluates `C0 + t^N*(C1-C0)` outside the `C0..C1` interval, so the
+        /// entry is not redundant.
+        range: Vec<[f64; 2]>,
         c0: Vec<f64>,
         c1: Vec<f64>,
         n: f64,
     },
     Stitching {
         domain: [f64; 2],
+        range: Vec<[f64; 2]>,
         functions: Vec<PdfFunction>,
         bounds: Vec<f64>,
         encode: Vec<[f64; 2]>,
@@ -101,6 +107,29 @@ fn read_floats(obj: Option<&Object>) -> Vec<f64> {
         Some(Object::Array(a)) => a.iter().filter_map(num).collect(),
         _ => Vec::new(),
     }
+}
+
+/// Clip `v` to the interval described by the pair `[a, b]` taken from a `/Domain`
+/// or `/Range` entry (7.10.1: inputs are clipped to Domain, outputs to Range).
+///
+/// This exists instead of `f64::clamp` for two reasons, both reachable from a file:
+///
+/// * `f64::clamp` PANICS when its low bound exceeds its high bound, and nothing in
+///   Table 38 stops a generator writing `[1 0]`. A reversed pair therefore aborted
+///   the render of the whole page rather than clipping one component.
+/// * `f64::clamp` PROPAGATES NaN. A NaN component survives every downstream
+///   conversion and lands as an arbitrary (usually black) colour, so it has to be
+///   removed at the boundary rather than clamped — the same reasoning the
+///   `Exponential` arm already applies to `t^N`.
+///
+/// A non-finite bound is ignored rather than honoured, so `f64::max`/`min`'s
+/// NaN-skipping behaviour is what makes the degenerate cases fall out.
+fn clip(v: f64, a: f64, b: f64) -> f64 {
+    if !v.is_finite() {
+        let lo = a.min(b);
+        return if lo.is_finite() { lo } else { 0.0 };
+    }
+    v.max(a.min(b)).min(a.max(b))
 }
 
 impl PdfFunction {
@@ -194,13 +223,13 @@ impl PdfFunction {
                 // the target colour space too few components. The padding values are
                 // the same per-index defaults `eval` already applied, so this is a
                 // no-op for every well-formed function.
-                let range_j = read_pairs(dict.get(b"Range").ok()).len();
-                let j = c0.len().max(c1.len()).max(range_j).min(MAX_FN_OUTPUTS);
+                let range = read_pairs(dict.get(b"Range").ok());
+                let j = c0.len().max(c1.len()).max(range.len()).min(MAX_FN_OUTPUTS);
                 c0.resize(j, 0.0);
                 c1.resize(j, 1.0);
                 let n = dict.get(b"N").ok().and_then(num).unwrap_or(1.0);
                 let domain = domain_pairs.first().copied().unwrap_or([0.0, 1.0]);
-                Some(PdfFunction::Exponential { domain, c0, c1, n })
+                Some(PdfFunction::Exponential { domain, range, c0, c1, n })
             }
             3 => {
                 let funcs_obj = deref(doc, dict.get(b"Functions").ok()?)?;
@@ -218,8 +247,9 @@ impl PdfFunction {
                 }
                 let bounds = read_floats(dict.get(b"Bounds").ok());
                 let encode = read_pairs(dict.get(b"Encode").ok());
+                let range = read_pairs(dict.get(b"Range").ok());
                 let domain = domain_pairs.first().copied().unwrap_or([0.0, 1.0]);
-                Some(PdfFunction::Stitching { domain, functions, bounds, encode })
+                Some(PdfFunction::Stitching { domain, range, functions, bounds, encode })
             }
             4 => {
                 let bytes = stream_bytes?;
@@ -234,8 +264,8 @@ impl PdfFunction {
     /// Evaluate the function, returning the output tuple.
     pub(crate) fn eval(&self, inputs: &[f64]) -> Vec<f64> {
         match self {
-            PdfFunction::Exponential { domain, c0, c1, n } => {
-                let t = inputs.first().copied().unwrap_or(0.0).clamp(domain[0], domain[1]);
+            PdfFunction::Exponential { domain, range, c0, c1, n } => {
+                let t = clip(inputs.first().copied().unwrap_or(0.0), domain[0], domain[1]);
                 // 7.10.3 constrains Domain so that t^N is defined, but a malformed
                 // file can still reach negative t with a non-integer N, which gives
                 // NaN and would poison every output component.
@@ -250,15 +280,19 @@ impl PdfFunction {
                     .map(|i| {
                         let a = c0.get(i).copied().unwrap_or(0.0);
                         let b = c1.get(i).copied().unwrap_or(1.0);
-                        a + (b - a) * tn
+                        let v = a + (b - a) * tn;
+                        match range.get(i) {
+                            Some(r) => clip(v, r[0], r[1]),
+                            None => v,
+                        }
                     })
                     .collect()
             }
-            PdfFunction::Stitching { domain, functions, bounds, encode } => {
+            PdfFunction::Stitching { domain, range, functions, bounds, encode } => {
                 if functions.is_empty() {
                     return Vec::new();
                 }
-                let x = inputs.first().copied().unwrap_or(0.0).clamp(domain[0], domain[1]);
+                let x = clip(inputs.first().copied().unwrap_or(0.0), domain[0], domain[1]);
                 // Select sub-function k.
                 let mut k = 0usize;
                 while k < bounds.len() && x >= bounds[k] {
@@ -274,7 +308,13 @@ impl PdfFunction {
                 } else {
                     e0 + (x - lo) * (e1 - e0) / (hi - lo)
                 };
-                functions[k].eval(&[xe])
+                let mut out = functions[k].eval(&[xe]);
+                for (i, v) in out.iter_mut().enumerate() {
+                    if let Some(r) = range.get(i) {
+                        *v = clip(*v, r[0], r[1]);
+                    }
+                }
+                out
             }
             PdfFunction::Sampled { .. } => self.eval_sampled(inputs),
             PdfFunction::PostScript { domain, range, program } => {
@@ -283,7 +323,7 @@ impl PdfFunction {
                     .enumerate()
                     .map(|(i, v)| {
                         if let Some(d) = domain.get(i) {
-                            v.clamp(d[0], d[1])
+                            clip(*v, d[0], d[1])
                         } else {
                             *v
                         }
@@ -298,7 +338,7 @@ impl PdfFunction {
                     }
                     for (i, v) in out.iter_mut().enumerate() {
                         if let Some(r) = range.get(i) {
-                            *v = v.clamp(r[0], r[1]);
+                            *v = clip(*v, r[0], r[1]);
                         }
                     }
                 }
@@ -352,13 +392,13 @@ impl PdfFunction {
         for (i, sz) in size.iter().enumerate().take(n_in) {
             let d = domain.get(i).copied().unwrap_or([0.0, 1.0]);
             let enc = encode.get(i).copied().unwrap_or([0.0, (*sz as f64 - 1.0).max(0.0)]);
-            let x = inputs.get(i).copied().unwrap_or(0.0).clamp(d[0], d[1]);
+            let x = clip(inputs.get(i).copied().unwrap_or(0.0), d[0], d[1]);
             let ev = if (d[1] - d[0]).abs() < 1e-12 {
                 enc[0]
             } else {
                 enc[0] + (x - d[0]) * (enc[1] - enc[0]) / (d[1] - d[0])
             };
-            e.push(ev.clamp(0.0, (*sz as f64 - 1.0).max(0.0)));
+            e.push(clip(ev, 0.0, (*sz as f64 - 1.0).max(0.0)));
         }
         // Multilinear interpolation over the 2^n_in surrounding grid corners.
         let max_val = if bps >= 32 { u32::MAX as f64 } else { ((1u64 << bps) - 1) as f64 };
@@ -414,7 +454,7 @@ impl PdfFunction {
             let dec = decode.get(j).copied().unwrap_or([0.0, 1.0]);
             *o = dec[0] + *o * (dec[1] - dec[0]);
             if let Some(r) = range.get(j) {
-                *o = o.clamp(r[0], r[1]);
+                *o = clip(*o, r[0], r[1]);
             }
         }
         out
@@ -605,7 +645,13 @@ fn exec_ps_op(op: PsOp, stack: &mut Vec<PsVal>, steps: &mut usize, depth: u32) -
         Log => { let a = pop_num(stack)?; stack.push(PsVal::Num(if a > 0.0 { a.log10() } else { 0.0 })); }
         Floor => { let a = pop_num(stack)?; stack.push(PsVal::Num(a.floor())); }
         Ceiling => { let a = pop_num(stack)?; stack.push(PsVal::Num(a.ceil())); }
-        Round => { let a = pop_num(stack)?; stack.push(PsVal::Num(a.round())); }
+        Round => {
+            // PLRM `round` returns the nearest integer and, for a value exactly
+            // halfway, the GREATER of the two. `f64::round` breaks that tie away
+            // from zero instead, so -1.5 came out -2 where PostScript gives -1.
+            let a = pop_num(stack)?;
+            stack.push(PsVal::Num((a + 0.5).floor()));
+        }
         Truncate => { let a = pop_num(stack)?; stack.push(PsVal::Num(a.trunc())); }
         Cvi => { let a = pop_num(stack)?; stack.push(PsVal::Num(a.trunc())); }
         Cvr => { /* no-op: already real */ }
@@ -633,7 +679,14 @@ fn exec_ps_op(op: PsOp, stack: &mut Vec<PsVal>, steps: &mut usize, depth: u32) -
             let b = pop_num(stack)? as i64; let a = pop_num(stack)? as i64;
             stack.push(PsVal::Num(if b != 0 { (a % b) as f64 } else { 0.0 }));
         }
-        Exp => { let b = pop_num(stack)?; let a = pop_num(stack)?; stack.push(PsVal::Num(a.powf(b))); }
+        Exp => {
+            let b = pop_num(stack)?; let a = pop_num(stack)?;
+            // A negative base with a fractional exponent is NaN, which then survives
+            // the /Range clip and every colour conversion below it. Same guard the
+            // Type 2 `t^N` path already applies, for the same reason.
+            let p = a.powf(b);
+            stack.push(PsVal::Num(if p.is_finite() { p } else { 0.0 }));
+        }
         Atan => {
             let den = pop_num(stack)?; let num_ = pop_num(stack)?;
             let mut deg = num_.atan2(den).to_degrees();
@@ -753,6 +806,7 @@ mod tests {
     fn exponential_eval() {
         let f = PdfFunction::Exponential {
             domain: [0.0, 1.0],
+            range: Vec::new(),
             c0: vec![0.0, 0.0, 0.0],
             c1: vec![1.0, 0.5, 0.0],
             n: 1.0,
@@ -764,22 +818,70 @@ mod tests {
         assert!((out[2] - 0.0).abs() < 1e-9);
     }
 
+    // 7.10.4: subdomain i is [Bounds_i-1, Bounds_i) (with Domain_0 / Domain_1 at the
+    // ends), and x is then mapped LINEARLY from that subdomain onto Encode_i. Asserting
+    // only "somewhere strictly between 0 and 1" let an off-by-one in either the
+    // selection or the sub-interval through; those produce a hard colour discontinuity
+    // at a stop, so pin the exact values.
     #[test]
     fn stitching_selects_subfunction() {
+        let ramp = |lo: f64, hi: f64| PdfFunction::Exponential {
+            domain: [0.0, 1.0],
+            range: Vec::new(),
+            c0: vec![lo],
+            c1: vec![hi],
+            n: 1.0,
+        };
         let f = PdfFunction::Stitching {
             domain: [0.0, 1.0],
-            functions: vec![
-                PdfFunction::Exponential { domain: [0.0, 1.0], c0: vec![0.0], c1: vec![1.0], n: 1.0 },
-                PdfFunction::Exponential { domain: [0.0, 1.0], c0: vec![1.0], c1: vec![0.0], n: 1.0 },
-            ],
+            range: Vec::new(),
+            functions: vec![ramp(0.0, 1.0), ramp(1.0, 0.0)],
             bounds: vec![0.5],
             encode: vec![[0.0, 1.0], [0.0, 1.0]],
         };
-        // Below the bound -> first function, above -> second.
-        let a = f.eval(&[0.25]);
-        let b = f.eval(&[0.75]);
-        assert!(a[0] > 0.0 && a[0] < 1.0);
-        assert!(b[0] > 0.0 && b[0] < 1.0);
+        // x=0.25 sits at the midpoint of subdomain 0 = [0, 0.5) -> encoded 0.5 -> 0.5.
+        assert!((f.eval(&[0.25])[0] - 0.5).abs() < 1e-9);
+        // x=0.75 sits at the midpoint of subdomain 1 = [0.5, 1] -> encoded 0.5 -> 0.5.
+        assert!((f.eval(&[0.75])[0] - 0.5).abs() < 1e-9);
+        // The bound itself belongs to the UPPER subdomain (half-open below), so x=0.5
+        // is the START of function 1, which ramps 1 -> 0.
+        assert!((f.eval(&[0.5])[0] - 1.0).abs() < 1e-9);
+        // Just below it is the END of function 0, which ramps 0 -> 1. The two agree,
+        // i.e. the stitch is continuous rather than stepping.
+        assert!((f.eval(&[0.5 - 1e-9])[0] - 1.0).abs() < 1e-6);
+        assert!((f.eval(&[0.0])[0] - 0.0).abs() < 1e-9);
+        assert!((f.eval(&[1.0])[0] - 0.0).abs() < 1e-9);
+
+        // Three subdomains: the MIDDLE one must use [Bounds_0, Bounds_1), not Domain.
+        let g = PdfFunction::Stitching {
+            domain: [0.0, 1.0],
+            range: Vec::new(),
+            functions: vec![ramp(0.0, 0.0), ramp(0.0, 1.0), ramp(0.0, 0.0)],
+            bounds: vec![0.25, 0.75],
+            encode: vec![[0.0, 1.0], [0.0, 1.0], [0.0, 1.0]],
+        };
+        assert!((g.eval(&[0.5])[0] - 0.5).abs() < 1e-9, "midpoint of [0.25, 0.75)");
+        assert!((g.eval(&[0.25])[0] - 0.0).abs() < 1e-9, "lower edge of the middle");
+        assert!((g.eval(&[0.75 - 1e-9])[0] - 1.0).abs() < 1e-6, "upper edge");
+    }
+
+    // 7.10.1 Table 38: when /Range is present its outputs SHALL be clipped to it. A
+    // Type 2 whose /Domain runs past 1 evaluates outside the C0..C1 interval, so this
+    // is not vacuous.
+    #[test]
+    fn exponential_clips_to_range() {
+        let mut doc = Document::with_version("1.7");
+        let id = doc.add_object(dictionary! {
+            "FunctionType" => 2,
+            "Domain" => vec![0.into(), 2.into()],
+            "Range" => vec![0.into(), 1.into()],
+            "C0" => vec![0.into()],
+            "C1" => vec![1.into()],
+            "N" => 1,
+        });
+        let f = PdfFunction::parse(&doc, &Object::Reference(id)).expect("parses");
+        assert!((f.eval(&[0.5])[0] - 0.5).abs() < 1e-9, "in range, untouched");
+        assert!((f.eval(&[2.0])[0] - 1.0).abs() < 1e-9, "t=2 gives 2.0, clipped to 1");
     }
 
     #[test]
@@ -811,6 +913,85 @@ mod tests {
         // input 0.0 -> 2*0-1 = -1 < 0 -> 0
         let out2 = eval_ps(&prog, &[0.0]).unwrap();
         assert!((out2[0] - 0.0).abs() < 1e-9);
+    }
+
+    // 7.10.5 Table 42 operand ORDER and rounding/truncation semantics. A bug in any of
+    // these shows up simultaneously as wrong gradient colours and wrong Separation
+    // colours, because both go through the same evaluator.
+    #[test]
+    fn postscript_operator_semantics_match_table_42() {
+        let run = |src: &[u8]| -> Vec<f64> {
+            eval_ps(&parse_ps_program(src).expect("parses"), &[]).expect("runs")
+        };
+        let one = |src: &[u8]| run(src)[0];
+
+        // `num1 num2 sub/div/idiv/mod` take num1 from BELOW num2 on the stack.
+        assert_eq!(one(b"{ 7 2 sub }"), 5.0);
+        assert_eq!(one(b"{ 7 2 div }"), 3.5);
+        // idiv and mod truncate toward zero and keep the dividend's sign.
+        assert_eq!(one(b"{ 7 2 idiv }"), 3.0);
+        assert_eq!(one(b"{ -7 2 idiv }"), -3.0);
+        assert_eq!(one(b"{ -7 2 mod }"), -1.0);
+        // `base exponent exp`, not the other way round.
+        assert_eq!(one(b"{ 2 10 exp }"), 1024.0);
+        // A negative base with a fractional exponent is NaN; it must not escape.
+        assert!(one(b"{ -8 0.5 exp }").is_finite());
+
+        // Angles are DEGREES, and `num den atan` returns 0..360.
+        assert!((one(b"{ 90 sin }") - 1.0).abs() < 1e-12);
+        assert!((one(b"{ 180 cos }") + 1.0).abs() < 1e-12);
+        assert!((one(b"{ 0 1 atan }") - 0.0).abs() < 1e-9);
+        assert!((one(b"{ 1 0 atan }") - 90.0).abs() < 1e-9);
+        assert!((one(b"{ -1 0 atan }") - 270.0).abs() < 1e-9, "never negative");
+
+        // truncate/cvi cut toward zero; round breaks a tie toward +infinity (PLRM),
+        // which f64::round does NOT do.
+        assert_eq!(one(b"{ -1.7 truncate }"), -1.0);
+        assert_eq!(one(b"{ -1.7 cvi }"), -1.0);
+        assert_eq!(one(b"{ -1.5 round }"), -1.0);
+        assert_eq!(one(b"{ 1.5 round }"), 2.0);
+        assert_eq!(one(b"{ -1.7 floor }"), -2.0);
+        assert_eq!(one(b"{ -1.7 ceiling }"), -1.0);
+
+        // `n j roll` moves the bottom of the n-group UPWARD for positive j.
+        assert_eq!(run(b"{ 1 2 3 3 1 roll }"), vec![3.0, 1.0, 2.0]);
+        assert_eq!(run(b"{ 1 2 3 3 -1 roll }"), vec![2.0, 3.0, 1.0]);
+        // `n index` counts down from the top, 0 being the top itself.
+        assert_eq!(run(b"{ 10 20 30 2 index }"), vec![10.0, 20.0, 30.0, 10.0]);
+        assert_eq!(run(b"{ 10 20 2 copy }"), vec![10.0, 20.0, 10.0, 20.0]);
+        // `int shift bitshift`, negative shift = right.
+        assert_eq!(one(b"{ 1 4 bitshift }"), 16.0);
+        assert_eq!(one(b"{ 16 -4 bitshift }"), 1.0);
+    }
+
+    // 7.10.2: sample data is ordered with the FIRST input dimension varying fastest,
+    // and the reconstruction is multilinear. Nearest-neighbour (or a transposed index)
+    // passes a 1-D two-sample test but fails here, and shows as banded gradients.
+    #[test]
+    fn sampled_is_bilinear_with_first_dimension_fastest() {
+        // 2x2 grid, one output. Sample order is (x0,y0) (x1,y0) (x0,y1) (x1,y1).
+        let f = PdfFunction::Sampled {
+            domain: vec![[0.0, 1.0], [0.0, 1.0]],
+            range: vec![[0.0, 1.0]],
+            size: vec![2, 2],
+            bps: 8,
+            encode: vec![[0.0, 1.0], [0.0, 1.0]],
+            decode: vec![[0.0, 1.0]],
+            samples: vec![0, 255, 0, 0],
+            n_in: 2,
+            n_out: 1,
+        };
+        // Corners come straight back.
+        assert!((f.eval(&[0.0, 0.0])[0] - 0.0).abs() < 1e-6);
+        assert!((f.eval(&[1.0, 0.0])[0] - 1.0).abs() < 1e-6, "x varies fastest");
+        assert!((f.eval(&[0.0, 1.0])[0] - 0.0).abs() < 1e-6);
+        assert!((f.eval(&[1.0, 1.0])[0] - 0.0).abs() < 1e-6);
+        // Interior is the bilinear blend, not a nearest corner.
+        assert!((f.eval(&[0.5, 0.0])[0] - 0.5).abs() < 1e-2);
+        assert!((f.eval(&[0.5, 0.5])[0] - 0.25).abs() < 1e-2);
+        // A quarter step must land a quarter of the way, which nearest-neighbour
+        // would snap to 0 or 1.
+        assert!((f.eval(&[0.25, 0.0])[0] - 0.25).abs() < 1e-2);
     }
 
     // A truncated sample stream must read as 0, not as a partially shifted value
@@ -937,12 +1118,65 @@ mod tests {
         assert!(read_transfer_lut(&doc, &Object::Integer(3)).is_none());
     }
 
+    // 7.10.1 Table 38 gives no ordering guarantee on /Domain or /Range beyond their
+    // meaning, and `f64::clamp` PANICS when its low bound exceeds its high bound. A
+    // reversed pair therefore aborted the page rather than clipping.
+    #[test]
+    fn reversed_domain_and_range_clip_instead_of_panicking() {
+        let mut doc = Document::with_version("1.7");
+        let t2 = doc.add_object(dictionary! {
+            "FunctionType" => 2,
+            "Domain" => vec![1.into(), 0.into()],
+            "Range" => vec![1.into(), 0.into()],
+            "C0" => vec![0.into()],
+            "C1" => vec![1.into()],
+            "N" => 1,
+        });
+        let f = PdfFunction::parse(&doc, &Object::Reference(t2)).expect("parses");
+        assert!(f.eval(&[0.5])[0].is_finite());
+
+        let t4 = doc.add_object(Stream::new(
+            dictionary! {
+                "FunctionType" => 4,
+                "Domain" => vec![1.into(), 0.into()],
+                "Range" => vec![1.into(), 0.into()],
+            },
+            b"{ }".to_vec(),
+        ));
+        let f4 = PdfFunction::parse(&doc, &Object::Reference(t4)).expect("parses");
+        assert!(f4.eval(&[0.5])[0].is_finite());
+
+        let t0 = doc.add_object(Stream::new(
+            dictionary! {
+                "FunctionType" => 0,
+                "Domain" => vec![1.into(), 0.into()],
+                "Range" => vec![1.into(), 0.into()],
+                "Size" => vec![2.into()],
+                "BitsPerSample" => 8,
+            },
+            vec![0u8, 255u8],
+        ));
+        let f0 = PdfFunction::parse(&doc, &Object::Reference(t0)).expect("parses");
+        assert!(f0.eval(&[0.5])[0].is_finite());
+
+        let t3 = doc.add_object(dictionary! {
+            "FunctionType" => 3,
+            "Domain" => vec![1.into(), 0.into()],
+            "Functions" => vec![Object::Reference(t2)],
+            "Bounds" => Vec::<Object>::new(),
+            "Encode" => vec![0.into(), 1.into()],
+        });
+        let f3 = PdfFunction::parse(&doc, &Object::Reference(t3)).expect("parses");
+        assert!(f3.eval(&[0.5])[0].is_finite());
+    }
+
     // A non-monotonic /TR must be carried faithfully; only the FIRST output component is
     // used, per 11.6.5.2's one-in/one-out requirement.
     #[test]
     fn transfer_lut_uses_only_the_first_output() {
         let f = PdfFunction::Exponential {
             domain: [0.0, 1.0],
+            range: Vec::new(),
             c0: vec![1.0, 0.0, 0.0],
             c1: vec![0.0, 1.0, 1.0],
             n: 1.0,
@@ -950,5 +1184,58 @@ mod tests {
         let lut = f.to_lut256();
         assert_eq!(lut[0], 255, "first component starts at 1.0");
         assert_eq!(lut[255], 0, "and ends at 0.0");
+    }
+
+    // SEAM TEST: dictionary -> `PdfFunction::parse` -> output arity -> `eval_cs_to_rgb`
+    // for a Separation. Neither side of this join was witnessed: my own arity tests stop
+    // at `out.len()`, and color.rs's Separation tests hand-BUILD a `PdfFunction` rather
+    // than parsing one, so nothing exercised parse feeding a real colour conversion.
+    //
+    // It matters because the failure is silent and total. §8.6.6.4's tint transform must
+    // yield `cs_kind_ncomp(alt)` components; when it yields fewer, `eval_cs_to_rgb` falls
+    // back to a subtractive grey ramp. So an arity regression in Type 2 parsing does not
+    // produce a slightly wrong colour — every spot colour on the page turns grey, which
+    // is 7.10's "function bugs show up as wrong Separation colours" in its worst form.
+    #[test]
+    fn a_parsed_tint_transform_drives_a_separation_to_a_real_colour() {
+        let mut doc = Document::with_version("1.7");
+        // Type 2 over DeviceCMYK: t=1 -> (0, 1, 1, 0), i.e. red.
+        let good = doc.add_object(dictionary! {
+            "FunctionType" => 2,
+            "Domain" => vec![0.into(), 1.into()],
+            "C0" => vec![0.into(), 0.into(), 0.into(), 0.into()],
+            "C1" => vec![0.into(), 1.into(), 1.into(), 0.into()],
+            "N" => 1,
+        });
+        let cs = CsKind::Separation {
+            name: b"Spot".to_vec(),
+            alt: Box::new(CsKind::DeviceCMYK),
+            tint_fn: PdfFunction::parse(&doc, &Object::Reference(good)),
+        };
+        let res = HashMap::new();
+        let argb = eval_cs_to_rgb(&doc, &cs, &[1.0], &res).expect("separation resolves");
+        let (r, g, b) = ((argb >> 16) & 0xFF, (argb >> 8) & 0xFF, argb & 0xFF);
+        assert!(r > 200 && g < 60 && b < 60, "full tint is red, got #{r:02x}{g:02x}{b:02x}");
+
+        // The same Separation whose tint transform parses to the WRONG arity takes the
+        // grey-ramp fallback. Asserting the two differ pins the seam without this test
+        // needing to know the fallback's formula.
+        let short = doc.add_object(dictionary! {
+            "FunctionType" => 2,
+            "Domain" => vec![0.into(), 1.into()],
+            "C0" => vec![0.into()],
+            "C1" => vec![1.into()],
+            "N" => 1,
+        });
+        let cs_short = CsKind::Separation {
+            name: b"Spot".to_vec(),
+            alt: Box::new(CsKind::DeviceCMYK),
+            tint_fn: PdfFunction::parse(&doc, &Object::Reference(short)),
+        };
+        let fallback = eval_cs_to_rgb(&doc, &cs_short, &[1.0], &res).expect("fallback resolves");
+        assert_ne!(
+            argb, fallback,
+            "a correctly-parsed 4-component tint transform must not land on the grey ramp"
+        );
     }
 }

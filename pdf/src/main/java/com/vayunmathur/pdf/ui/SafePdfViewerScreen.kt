@@ -2902,7 +2902,14 @@ internal fun DrawScope.drawSafePage(page: SafePdfPage) {
                 // standard faux-bold — and rendered it hollow. Only suppress the fill when
                 // a stroke will actually be painted, since Rust's no-metrics path emits
                 // mode 1 with no stroke colour and must still show something.
-                val willStroke = prim.strokeColor != null && prim.strokeWidth > 0f
+                //
+                // Width ZERO still strokes: §8.4.3.2 makes 0 the thinnest line the device
+                // can render, not the absence of one, and draw.rs passes `device_stroke_w`
+                // through without a floor (unlike the `.max(0.1)` on Prim::Stroke). Treating
+                // it as "no stroke" made `0 w 1 Tr` fall through to the fill branch, which
+                // for a stroke-only mode paints prim.color — Rust sets that to the STROKE
+                // colour there — so hairline-outlined text came out solid.
+                val willStroke = prim.strokeColor != null && prim.strokeWidth >= 0f
                 val isStrokeOnly = willStroke && (rm == 1 || rm == 5)
 
                 // v8: substitute the embedded font with a system typeface matching the
@@ -2934,6 +2941,17 @@ internal fun DrawScope.drawSafePage(page: SafePdfPage) {
                 // Mode 3 paints nothing (it is how scanned PDFs carry an invisible OCR
                 // text layer) and mode 7 is clip-only.
                 if (rm != 3 && rm != 7) {
+                    // FILL FIRST, THEN STROKE. Table 106 names modes 2 and 6 "Fill, then
+                    // stroke text", and the order is visible whenever the two colours
+                    // differ: stroking first let the fill paint over the inner half of the
+                    // stroke, so a black outline round white display text came out at half
+                    // its weight. Modes 1 and 5 take the stroke branch only.
+                    if (!isStrokeOnly) {
+                        textPaint.color = prim.color
+                        textPaint.textSize = ts
+                        textPaint.setBlend(prim.blend)
+                        nativeCanvas.drawText(prim.text, origin.x, origin.y, textPaint)
+                    }
                     if (willStroke) {
                         textStrokePaint.color = prim.strokeColor
                         textStrokePaint.textSize = ts
@@ -2942,12 +2960,6 @@ internal fun DrawScope.drawSafePage(page: SafePdfPage) {
                         textStrokePaint.strokeJoin = android.graphics.Paint.Join.ROUND
                         textStrokePaint.setBlend(prim.blend)
                         nativeCanvas.drawText(prim.text, origin.x, origin.y, textStrokePaint)
-                    }
-                    if (!isStrokeOnly) {
-                        textPaint.color = prim.color
-                        textPaint.textSize = ts
-                        textPaint.setBlend(prim.blend)
-                        nativeCanvas.drawText(prim.text, origin.x, origin.y, textPaint)
                     }
                 }
 

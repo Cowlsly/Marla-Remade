@@ -1,6 +1,6 @@
 use crate::*;
 
-#[derive(Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Clone, Copy, PartialEq, Eq, Default, Debug)]
 #[repr(u8)]
 pub(crate) enum BlendMode {
     #[default]
@@ -23,8 +23,22 @@ pub(crate) enum BlendMode {
 }
 
 impl BlendMode {
-    pub(crate) fn from_name(name: &[u8]) -> Self {
-        match name {
+    /// Map a `/BM` name to a mode, or `None` when the name is not one of the
+    /// Table 136 / Table 137 blend modes.
+    ///
+    /// This is separate from [`BlendMode::from_name`] because RECOGNITION cannot be
+    /// read back off the result: `/Normal` and `/Compatible` are themselves legitimate
+    /// Table 136 names that map to `Normal`, so `from_name(n) == Normal` conflates
+    /// "the file asked for Normal" with "we have never heard of this name".
+    ///
+    /// §11.6.3 needs the distinction. When `/BM` is an ARRAY the reader shall use the
+    /// first name in it that it RECOGNISES, and the array form exists so a file can
+    /// name a future or vendor-specific mode first with a supported fallback behind
+    /// it — `[/FutureVendorMode /Multiply]` shall composite as Multiply. Picking the
+    /// first name outright would yield Normal; skipping every name that maps to Normal
+    /// would mis-handle `[/Normal /Multiply]` in the other direction.
+    pub(crate) fn from_name_checked(name: &[u8]) -> Option<Self> {
+        Some(match name {
             b"Normal" | b"Compatible" => BlendMode::Normal,
             b"Multiply" => BlendMode::Multiply,
             b"Screen" => BlendMode::Screen,
@@ -41,7 +55,70 @@ impl BlendMode {
             b"Saturation" => BlendMode::Saturation,
             b"Color" => BlendMode::Color,
             b"Luminosity" => BlendMode::Luminosity,
-            _ => BlendMode::Normal,
+            _ => return None,
+        })
+    }
+
+    /// Map a `/BM` name to a mode, treating an unrecognised name as `Normal`
+    /// (§11.6.3). Use [`BlendMode::from_name_checked`] instead when the caller has to
+    /// tell an unrecognised name from an explicit `/Normal`.
+    pub(crate) fn from_name(name: &[u8]) -> Self {
+        BlendMode::from_name_checked(name).unwrap_or(BlendMode::Normal)
+    }
+}
+
+#[cfg(test)]
+mod blend_mode_tests {
+    use super::*;
+
+    // §11.6.3: for an ARRAY /BM the reader uses the first name it RECOGNISES. That
+    // rule is only expressible if recognition is distinguishable from the Normal
+    // result, which is what `from_name_checked` exists for. Both directions matter:
+    // a leading /Normal must WIN (it is recognised), and a leading vendor name must
+    // be SKIPPED rather than collapsing the array to Normal.
+    #[test]
+    fn recognition_is_distinguishable_from_the_normal_result() {
+        assert_eq!(BlendMode::from_name_checked(b"Normal"), Some(BlendMode::Normal));
+        assert_eq!(BlendMode::from_name_checked(b"Compatible"), Some(BlendMode::Normal));
+        assert_eq!(BlendMode::from_name_checked(b"Multiply"), Some(BlendMode::Multiply));
+        assert_eq!(BlendMode::from_name_checked(b"FutureVendorMode"), None);
+        assert_eq!(BlendMode::from_name_checked(b""), None);
+        // The lenient wrapper still folds an unrecognised name to Normal.
+        assert_eq!(BlendMode::from_name(b"FutureVendorMode"), BlendMode::Normal);
+
+        // The two array cases the distinction exists to separate.
+        let first_recognised = |names: &[&[u8]]| -> BlendMode {
+            names
+                .iter()
+                .find_map(|n| BlendMode::from_name_checked(n))
+                .unwrap_or(BlendMode::Normal)
+        };
+        assert_eq!(
+            first_recognised(&[b"Normal", b"Multiply"]),
+            BlendMode::Normal,
+            "a leading /Normal is recognised and wins"
+        );
+        assert_eq!(
+            first_recognised(&[b"FutureVendorMode", b"Multiply"]),
+            BlendMode::Multiply,
+            "an unrecognised leading name falls through to the supported fallback"
+        );
+    }
+
+    // All four non-separable modes (Table 137) are present; a missing one silently
+    // composites as Normal, which looks plausible and is wrong.
+    #[test]
+    fn all_table_136_and_137_names_are_recognised() {
+        for n in [
+            &b"Normal"[..], b"Compatible", b"Multiply", b"Screen", b"Overlay", b"Darken",
+            b"Lighten", b"ColorDodge", b"ColorBurn", b"HardLight", b"SoftLight",
+            b"Difference", b"Exclusion", b"Hue", b"Saturation", b"Color", b"Luminosity",
+        ] {
+            assert!(
+                BlendMode::from_name_checked(n).is_some(),
+                "{} is a Table 136/137 blend mode",
+                String::from_utf8_lossy(n)
+            );
         }
     }
 }

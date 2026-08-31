@@ -324,4 +324,106 @@ class DrawSafePageTextTest {
             "the image did not land where its CTM and the Y-flip put it",
         )
     }
+
+    // ---- Tr paint ORDER and the zero-width stroke (PDF 32000-1 9.3.6 / 8.4.3.2) ----
+
+    /**
+     * Records the style of each `drawText` in the order it was issued.
+     *
+     * `drawSafePage` keeps two paints — a FILL one for the glyph body and a STROKE one for the
+     * outline — so the style sequence IS the paint order, which no pixel assertion can recover
+     * once the two have been composited.
+     */
+    private class TextOrderSpy(bitmap: android.graphics.Bitmap) : android.graphics.Canvas(bitmap) {
+        val styles = mutableListOf<android.graphics.Paint.Style>()
+
+        override fun drawText(text: String, x: Float, y: Float, paint: android.graphics.Paint) {
+            styles.add(paint.style)
+            super.drawText(text, x, y, paint)
+        }
+    }
+
+    /** The `drawText` styles [prims] issue, in order. */
+    private fun textOrder(vararg prims: PdfPrimitive): List<android.graphics.Paint.Style> {
+        val bitmap = android.graphics.Bitmap.createBitmap(
+            pageWidth.toInt(), pageHeight.toInt(), android.graphics.Bitmap.Config.ARGB_8888,
+        )
+        val spy = TextOrderSpy(bitmap)
+        spy.drawColor(android.graphics.Color.WHITE)
+        val page = SafePdfPage(pageWidth, pageHeight, prims.toList())
+        CanvasDrawScope().draw(
+            Density(1f), LayoutDirection.Ltr, Canvas(spy), Size(pageWidth, pageHeight),
+        ) {
+            drawSafePage(page)
+        }
+        return spy.styles
+    }
+
+    /**
+     * Table 106 names modes 2 and 6 "Fill, then stroke text", and the order is visible whenever
+     * the two colours differ: stroking first lets the fill paint over the inner half of the
+     * stroke, so a black outline round white display text comes out at half its weight.
+     */
+    @Test
+    fun modesTwoAndSixFillBeforeTheyStroke() {
+        for (rm in listOf(2, 6)) {
+            assertEquals(
+                listOf(android.graphics.Paint.Style.FILL, android.graphics.Paint.Style.STROKE),
+                textOrder(text(renderMode = rm, strokeColor = 0xFF0000FF.toInt(), strokeWidth = 3f)),
+                "render mode $rm painted the stroke before the fill, so the fill covers the " +
+                    "inner half of the outline",
+            )
+        }
+    }
+
+    /** Modes 1 and 5 are stroke-only: the fill must not be painted at all. */
+    @Test
+    fun modesOneAndFiveStrokeWithoutFilling() {
+        for (rm in listOf(1, 5)) {
+            assertEquals(
+                listOf(android.graphics.Paint.Style.STROKE),
+                textOrder(text(renderMode = rm, strokeColor = 0xFF0000FF.toInt(), strokeWidth = 3f)),
+                "render mode $rm is stroke-only",
+            )
+        }
+    }
+
+    /**
+     * §8.4.3.2 makes a line width of ZERO the thinnest line the device can render, not the
+     * absence of a line — and `draw.rs` forwards `device_stroke_w` for text without the
+     * `.max(0.1)` it applies to `Prim::Stroke`, so `0 w 1 Tr` really does arrive here as width
+     * zero. Treating that as "no stroke" fell through to the fill branch, which for a
+     * stroke-only mode paints `prim.color` — Rust sets that to the STROKE colour there — so
+     * hairline-outlined text rendered as solid glyphs.
+     */
+    @Test
+    fun aZeroWidthStrokeStillStrokesRatherThanFilling() {
+        assertEquals(
+            listOf(android.graphics.Paint.Style.STROKE),
+            textOrder(text(renderMode = 1, strokeColor = 0xFF0000FF.toInt(), strokeWidth = 0f)),
+            "a zero-width stroke was treated as no stroke, so mode 1 painted a solid fill",
+        )
+    }
+
+    /**
+     * The counterweight: with no stroke COLOUR there is nothing to stroke with, and Rust's
+     * no-metrics path emits mode 1 exactly like that. It must still show something.
+     */
+    @Test
+    fun modeOneWithNoStrokeColourStillPaintsTheFill() {
+        assertEquals(
+            listOf(android.graphics.Paint.Style.FILL),
+            textOrder(text(renderMode = 1, strokeColor = null)),
+            "mode 1 with no stroke colour painted nothing at all",
+        )
+    }
+
+    /** A negative width is not a width: it must not reach Skia as one. */
+    @Test
+    fun aNegativeStrokeWidthIsNotTreatedAsAStroke() {
+        assertEquals(
+            listOf(android.graphics.Paint.Style.FILL),
+            textOrder(text(renderMode = 0, strokeColor = 0xFF0000FF.toInt(), strokeWidth = -2f)),
+        )
+    }
 }

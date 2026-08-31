@@ -388,6 +388,11 @@ pub fn authenticate_v5_owner(pw: &[u8], o: &[u8], oe: &[u8], u: &[u8], rev: u8) 
     }
     let o_val_salt = &o[32..40];
     let o_key_salt = &o[40..48];
+    // ISO 32000-2 algorithm 12/13 concatenate the 48-BYTE /U string, not however many
+    // bytes the file happened to put there. `u` is untrusted: algorithm 2.B repeats
+    // (password || K || udata) 64 times per round for at least 64 rounds, so a 10 MB
+    // /U turns one password check into tens of gigabytes of AES.
+    let u = &u[..48];
     // Owner validation hash: hash(owner_pw + oValSalt + U)
     let check = if rev >= 6 {
         hash_2b(pw, o_val_salt, u)?
@@ -466,5 +471,34 @@ mod tests {
         let iv = [3u8; 16];
         let enc = aes_cbc_encrypt(&[7u8; 16], &iv, b"secret payload").expect("encrypt");
         assert_eq!(aes_cbc_decrypt(&[8u8; 16], &enc), Err(CbcError::BadPadding));
+    }
+
+    /// ISO 32000-2 algorithms 12/13 hash exactly the 48-byte /U string. A longer /U is
+    /// untrusted input to algorithm 2.B, which repeats it 64 times per round for at
+    /// least 64 rounds - so honouring the file's length turns one password check into
+    /// tens of gigabytes of AES.
+    #[test]
+    fn owner_authentication_uses_only_the_48_byte_u_string() {
+        let file_key = [0x5Au8; 32];
+        let salts: [[u8; 8]; 4] = [[1; 8], [2; 8], [3; 8], [4; 8]];
+        for rev in [5u8, 6u8] {
+            let (u, _ue, o, oe) =
+                compute_v5(b"user", b"owner", &file_key, &salts, rev).expect("entries");
+            assert_eq!(u.len(), 48);
+            assert_eq!(
+                authenticate_v5_owner(b"owner", &o, &oe, &u, rev),
+                Some(file_key.to_vec()),
+                "R{rev} owner password must recover the file key"
+            );
+            // Trailing junk past the 48 bytes must be ignored, not hashed.
+            let mut padded = u.clone();
+            padded.extend(std::iter::repeat_n(0xAAu8, 4096));
+            assert_eq!(
+                authenticate_v5_owner(b"owner", &o, &oe, &padded, rev),
+                Some(file_key.to_vec()),
+                "only /U[0..48] is part of the hash"
+            );
+            assert!(authenticate_v5_owner(b"wrong", &o, &oe, &u, rev).is_none());
+        }
     }
 }

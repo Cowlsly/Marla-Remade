@@ -233,10 +233,15 @@ fn parse_private(dec: &[u8]) -> (Vec<Vec<u8>>, HashMap<String, Vec<u8>>) {
         .unwrap_or(4);
 
     // --- Subrs: `dup <i> <len> RD <bytes> NP` ---
+    // Both the declared count and each `dup` index come straight from the file and
+    // size a heap allocation. A Type 1 font's Subrs array is at most a few
+    // thousand entries; without a cap, `/Subrs 2000000000 array` (or one oversized
+    // `dup` index) asks for tens of gigabytes before a single charstring is read.
+    const MAX_SUBRS: usize = 65536;
     let mut subrs: Vec<Vec<u8>> = Vec::new();
     if let Some(sp) = find(dec, b"/Subrs") {
         if let Some((count, _)) = read_int(dec, sp + 6) {
-            subrs = vec![Vec::new(); count.max(0) as usize];
+            subrs = vec![Vec::new(); (count.max(0) as usize).min(MAX_SUBRS)];
         }
         let mut i = sp;
         let mut guard = 0;
@@ -255,9 +260,7 @@ fn parse_private(dec: &[u8]) -> (Vec<Vec<u8>>, HashMap<String, Vec<u8>>) {
                 None => continue,
             };
             i = next;
-            if idx >= 0 && (idx as usize) < subrs.len() {
-                subrs[idx as usize] = decrypt(&bytes, 4330, len_iv);
-            } else if idx >= 0 {
+            if idx >= 0 && (idx as usize) < MAX_SUBRS {
                 if (idx as usize) >= subrs.len() {
                     subrs.resize(idx as usize + 1, Vec::new());
                 }
@@ -786,6 +789,18 @@ mod tests {
     }
 
     #[test]
+    fn subrs_array_size_is_not_taken_from_the_file() {
+        // `/Subrs <n> array` and each `dup <i>` index size a heap allocation
+        // straight from untrusted bytes. Unclamped, this asks for ~48 GB of empty
+        // Vecs before a single charstring is read.
+        let dec = b"/lenIV 0 def\n/Subrs 2000000000 array\ndup 0 3 RD abc NP\ndup 1999999999 3 RD def NP\nND\n/CharStrings 1 dict dup begin\n/A 3 RD xyz ND\nend";
+        let (subrs, glyphs) = parse_private(dec);
+        assert!(subrs.len() <= 65536, "subr table sized from the file: {}", subrs.len());
+        assert_eq!(subrs[0].len(), 3, "the in-range subr is still stored");
+        assert!(glyphs.contains_key("A"), "CharStrings still parse after the cap");
+    }
+
+    #[test]
     fn flex_emits_one_contour_and_leaves_the_current_point_correct() {
         // OtherSubrs 1/2/0 flex (Adobe Type 1 Font Format 8.3). The seven
         // rmovetos are reference points, NOT contour starts, and OtherSubr 0
@@ -829,10 +844,14 @@ mod tests {
         assert_eq!(contours.len(), 1, "flex must not start new contours");
         let c = &contours[0];
         assert_eq!(c.first().copied(), Some((0.0, 0.0)));
-        let last = *c.last().unwrap();
+        // `endchar` closes the contour, and `ContourBuilder` represents closure as
+        // a duplicated first point (the convention `interpret.rs`'s `h` uses), so
+        // the pen's final position is the point BEFORE that closing point.
+        assert_eq!(c.last().copied(), Some((0.0, 0.0)), "contour is explicitly closed");
+        let pen = c[c.len() - 2];
         assert!(
-            (last.0 - 120.0).abs() < 1e-6 && (last.1 - 70.0).abs() < 1e-6,
-            "trailing rlineto ended at {last:?}, expected (120, 70)"
+            (pen.0 - 120.0).abs() < 1e-6 && (pen.1 - 70.0).abs() < 1e-6,
+            "trailing rlineto ended at {pen:?}, expected (120, 70)"
         );
         // The join between the two cubics is the flex midpoint, reference point 3.
         assert!(

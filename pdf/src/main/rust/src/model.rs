@@ -165,7 +165,7 @@ pub(crate) enum Prim {
 }
 
 /// Path operation for bezier-retentive clip (Phase 5 fidelity).
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub(crate) enum PathOp {
     Move(f32,f32),
     Line(f32,f32),

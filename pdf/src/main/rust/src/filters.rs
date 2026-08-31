@@ -232,9 +232,17 @@ pub fn decode_ascii85(data: &[u8]) -> Result<Vec<u8>, String> {
 
 /// RunLength per PDF spec EOD 128.
 pub fn decode_runlength(data: &[u8]) -> Vec<u8> {
+    decode_runlength_limited(data, MAX_DECODED_BYTES as usize)
+}
+
+/// §7.4.5 expands by up to 128x, so a 200 MB stream (the `MAX_PDF_BYTES` ceiling)
+/// can reach ~25 GB. Nothing else bounds this, and the bytes decoded so far are
+/// still usable, so `limit` stops the expansion rather than the process being killed.
+fn decode_runlength_limited(data: &[u8], limit: usize) -> Vec<u8> {
     let mut out = Vec::new();
     let mut i=0;
     while i < data.len() {
+        if out.len() >= limit { break; }
         let len = data[i] as i16; i+=1;
         if len==128 { break; }
         else if len<=127 {
@@ -253,14 +261,14 @@ pub fn decode_runlength(data: &[u8]) -> Vec<u8> {
 
 pub fn decode_lzw(data: &[u8], early_change: bool) -> Option<Vec<u8>> {
     // weezl crate removed – pure std LZW decoder (single function we use, prefer stdlib)
-    lzw_decode_std(data, early_change)
+    lzw_decode_std(data, early_change, MAX_DECODED_BYTES as usize)
 }
 
 /// Minimal std-only LZW decoder for PDF's LZWDecode (MSB-first, 8-bit symbols).
 /// Handles EarlyChange 1 (default, code size early bump) vs 0.
 /// This is the `single function we use, we can just write it ourselves` rewrite path.
 /// Returns None on malformed data.
-fn lzw_decode_std(data: &[u8], early_change: bool) -> Option<Vec<u8>> {
+fn lzw_decode_std(data: &[u8], early_change: bool, limit: usize) -> Option<Vec<u8>> {
     // Simplified version: common case – try via quick dict of 258+ entries.
     // If too complex, return None and let caller fail gracefully.
     // Real PDF LZW switches code size at 2^k - early. Standard TIFF variant uses clear code 256, eod 257.
@@ -271,7 +279,10 @@ fn lzw_decode_std(data: &[u8], early_change: bool) -> Option<Vec<u8>> {
     for i in 0..256 { dict.push(vec![i as u8]); }
     dict.push(vec![]); // 256 clear
     dict.push(vec![]); // 257 eod
-    let mut out = Vec::with_capacity(data.len()*2);
+    // Reserve a guess, not a file-controlled amount: `data.len() * 2` is a 400 MB
+    // up-front allocation for a `MAX_PDF_BYTES`-sized stream, before a single code
+    // has been shown to decode.
+    let mut out = Vec::with_capacity(data.len().saturating_mul(2).min(1 << 20));
     let mut code_bits = 9usize;
     let mut bit_buf: u32 = 0;
     let mut bits_in_buf = 0usize;
@@ -323,6 +334,13 @@ fn lzw_decode_std(data: &[u8], early_change: bool) -> Option<Vec<u8>> {
             break;
         };
         out.extend_from_slice(&entry);
+        // §7.4.3 places no bound on the expansion ratio: a dictionary entry grows to
+        // 4096 bytes, so a few-MB stream can decode to gigabytes. Flate is capped by
+        // `MAX_DECODED_BYTES`; this was not, and nothing downstream bounds it either.
+        // Everything decoded so far is kept, as for a truncated stream.
+        if out.len() >= limit {
+            break;
+        }
         if let Some(p) = prev.take() {
             if dict.len() < 4096 {
                 if let Some(&first) = entry.first() {
@@ -411,10 +429,23 @@ pub fn parse_ccitt_params(doc: &Document, dict_opt: Option<&Dictionary>) -> Ccit
 pub fn decode_ccitt(data: &[u8], w: u32, h: u32, params: &CcittParams) -> Option<Vec<u8>> {
     // P0 fix: honor BlackIs1 (spec §7.4.6: true=>1=black, false default=>1=white inverted), estimate Rows when absent
     let columns = if params.columns > 0 { params.columns } else { w.max(1) };
-    let rows_est = if params.rows > 0 { params.rows } else {
-        // Estimate from data length: rows ≈ data_len*8 / cols (fax data may omit Rows)
-        let est = (data.len() * 8 / columns.max(1) as usize) as u32;
-        est.max(h).max(1)
+    // §7.4.6 Table 11: /Rows gives the scan-line count; when it is absent or 0 the
+    // height comes from the image dictionary's /Height, which is what `h` is.
+    //
+    // The data-length estimate below is the LAST resort, used only when neither is
+    // available. It is not a spec-sanctioned reading of the row count at all: it
+    // equates one row to `columns` BITS of payload, so it only exceeds `h` when the
+    // encoded data is LARGER than the raster it encodes. For any normally-compressed
+    // fax it comes out well below `h`, which is why deriving from it looks harmless.
+    // On a padded, corrupt or mislabelled stream it does not, and past the 20000-row
+    // guard below `decode_ccitt` then returns None and the image is dropped ENTIRELY
+    // rather than merely mis-sized - total loss where a partial render was available.
+    let rows_est = if params.rows > 0 {
+        params.rows
+    } else if h > 0 {
+        h
+    } else {
+        ((data.len() * 8 / columns.max(1) as usize) as u32).max(1)
     };
     let rows = rows_est;
     let rows_us = rows as usize;
@@ -891,5 +922,135 @@ mod tests {
         let specs = filter_specs_from_dict(&doc, &dict);
         assert_eq!(specs.len(), 1);
         assert_eq!(specs[0].0, FilterKind::Flate);
+    }
+
+    /// Writes MSB-first codes, which is the bit order §7.4.3 specifies for LZWDecode.
+    struct BitWriter {
+        out: Vec<u8>,
+        acc: u32,
+        bits: u32,
+    }
+    impl BitWriter {
+        fn new() -> Self {
+            BitWriter { out: Vec::new(), acc: 0, bits: 0 }
+        }
+        fn put(&mut self, code: u32, width: u32) {
+            self.acc = (self.acc << width) | code;
+            self.bits += width;
+            while self.bits >= 8 {
+                self.bits -= 8;
+                self.out.push((self.acc >> self.bits) as u8);
+            }
+        }
+        fn finish(mut self) -> Vec<u8> {
+            if self.bits > 0 {
+                self.out.push((self.acc << (8 - self.bits)) as u8);
+            }
+            self.out
+        }
+    }
+
+    #[test]
+    fn lzw_early_change_bumps_the_code_width_one_entry_early() {
+        // §7.4.3 Table 8: /EarlyChange 1 (the DEFAULT) makes the code length grow one
+        // code sooner than strictly necessary. Getting the boundary wrong desynchronizes
+        // the bit stream from that point on, so everything after it is noise - the
+        // classic "second half of the image is garbage" symptom.
+        //
+        // Codes 0..=253 are single-byte literals. The first adds no dictionary entry
+        // (there is no previous string), each later one adds exactly one, so after code
+        // 253 the dictionary holds 258 + 253 = 511 entries. With EarlyChange the width
+        // must ALREADY be 10 bits for the next code; without it, it is still 9.
+        let literals: Vec<u32> = (0..=253u32).collect();
+        let mut early = BitWriter::new();
+        for &c in &literals {
+            early.put(c, 9);
+        }
+        early.put(100, 10);
+        early.put(257, 10); // EOD
+        let out = decode_lzw(&early.finish(), true).expect("decodes");
+        let mut want: Vec<u8> = (0..=253u8).collect();
+        want.push(100);
+        assert_eq!(out, want, "EarlyChange 1 must switch to 10 bits at 511 entries");
+
+        // /EarlyChange 0 keeps 9 bits until the 512th entry, so the same 254 literals
+        // are followed by one more 9-bit code before the width changes.
+        let mut late = BitWriter::new();
+        for &c in &literals {
+            late.put(c, 9);
+        }
+        late.put(100, 9);
+        late.put(257, 10); // the 512th entry exists by now, so EOD is 10 bits
+        let out = decode_lzw(&late.finish(), false).expect("decodes");
+        assert_eq!(out, want, "EarlyChange 0 must switch to 10 bits at 512 entries");
+    }
+
+    #[test]
+    fn lzw_kwkwk_case() {
+        // §7.4.3: a code one past the end of the table means "previous string plus its
+        // own first character". Emitting `A` then the not-yet-defined code 258 must
+        // produce `AA`, not abandon the stream.
+        let mut w = BitWriter::new();
+        w.put(b'A' as u32, 9);
+        w.put(258, 9);
+        w.put(257, 9);
+        assert_eq!(decode_lzw(&w.finish(), true).expect("decodes"), b"AAA");
+    }
+
+    #[test]
+    fn lzw_output_is_bounded_by_the_decode_ceiling() {
+        // §7.4.3 bounds neither the expansion ratio nor the output length, so the only
+        // limit on a hostile stream is the one imposed here. Everything decoded up to
+        // the ceiling is still returned.
+        let mut w = BitWriter::new();
+        for _ in 0..64 {
+            w.put(b'A' as u32, 9);
+        }
+        let out = lzw_decode_std(&w.finish(), true, 4).expect("partial output");
+        assert_eq!(out, b"AAAA", "decoding must stop at the ceiling, not at the data");
+    }
+
+    #[test]
+    fn ccitt_row_count_comes_from_the_height_not_the_compressed_length() {
+        // §7.4.6 Table 11: with /Rows absent the scan-line count is the image's /Height.
+        // The old code used `max(data.len()*8/columns, h)`. That estimate exceeds `h`
+        // only when the encoded payload is LARGER than the raster it encodes, so a
+        // normally-compressed fax never reaches it and the two agree - which is why the
+        // bug was invisible at fixture scale. On a padded or corrupt stream it does
+        // exceed `h`, and past the 20000-row guard `decode_ccitt` returned None and the
+        // image was dropped ENTIRELY rather than mis-sized.
+        //
+        // The numbers below are therefore deliberately pathological, not realistic: they
+        // have to be, because that is the only shape of input the two expressions
+        // disagree on. This witnesses spec conformance and the no-total-loss property,
+        // NOT a scenario a well-formed file reaches.
+        let params = CcittParams { k: -1, columns: 8, ..CcittParams::default() };
+        // 8 columns, 4 rows => 1 byte per row. A payload far longer than the geometry
+        // would previously have driven `rows` from its own length.
+        let data = vec![0u8; 40_000];
+        let packed = decode_ccitt(&data, 8, 4, &params);
+        if let Some(p) = packed {
+            assert_eq!(p.len(), 4, "one byte per 8-column row, /Height rows");
+        }
+        // The case that used to disappear: columns * (len*8/columns) exceeds the 20000
+        // row guard, so `decode_ccitt` returned None and the image vanished.
+        let big = vec![0u8; 300_000];
+        let params = CcittParams { k: -1, columns: 100, ..CcittParams::default() };
+        assert!(
+            decode_ccitt(&big, 100, 50, &params).is_some(),
+            "a 50-row image must not be refused because its data is long"
+        );
+    }
+
+    #[test]
+    fn runlength_output_is_bounded_by_the_decode_ceiling() {
+        // §7.4.5 expands a 2-byte run record into up to 128 bytes, so a stream at the
+        // 200 MB input ceiling reaches ~25 GB unbounded.
+        let data = [0x81u8, 0xAA].repeat(64); // 64 runs of 128 bytes = 8192 bytes
+        let out = decode_runlength_limited(&data, 5);
+        assert_eq!(out.len(), 128, "one run past the ceiling, then stop");
+        assert!(out.iter().all(|&b| b == 0xAA));
+        // Unlimited decoding of the same input is unchanged.
+        assert_eq!(decode_runlength(&data).len(), 8192);
     }
 }

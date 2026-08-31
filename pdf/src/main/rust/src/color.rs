@@ -202,7 +202,7 @@ fn parse_cs_array_at(doc: &Document, arr: &[Object], cs_resources: &HashMap<Vec<
             let dict = arr.get(1).and_then(|o| deref(doc, o)).and_then(|o| o.as_dict().ok());
             if let Some(d) = dict {
                 let white = read_white_point(d).unwrap_or([0.9505,1.0,1.0890]);
-                let gamma = d.get(b"Gamma").ok().and_then(num).unwrap_or(1.0);
+                let gamma = d.get(b"Gamma").ok().and_then(num).filter(|g| g.is_finite()).unwrap_or(1.0);
                 Some(CsKind::CalGray { white, gamma })
             } else {
                 Some(CsKind::DeviceGray)
@@ -350,17 +350,36 @@ pub(crate) fn cs_kind_default_decode(kind: &CsKind) -> Vec<(f64, f64)> {
     }
 }
 
+/// The Cal*/Lab dictionary readers below all feed `.unwrap_or(<spec default>)` at their
+/// call sites, so rejecting a malformed entry makes it mean exactly what an ABSENT one
+/// means. That matters for NON-FINITE values specifically: a real like 1e40 overflows
+/// the f32 `Object::Real` holds, and an infinite /WhitePoint or /Matrix propagates
+/// through `adapt_to_d65` (inf/inf) into NaN, which `rgb_to_argb` saturates to 0 — a
+/// CalRGB image rendering as a solid black rectangle. Falling back to the default
+/// renders the picture instead.
+fn all_finite(v: &[f64]) -> bool {
+    v.iter().all(|x| x.is_finite())
+}
+
 pub(crate) fn read_white_point(dict: &lopdf::Dictionary) -> Option<[f64;3]> {
     let arr = dict.get(b"WhitePoint").ok().and_then(|o| o.as_array().ok())?;
     if arr.len()>=3 {
-        Some([num(&arr[0])?, num(&arr[1])?, num(&arr[2])?])
+        let wp = [num(&arr[0])?, num(&arr[1])?, num(&arr[2])?];
+        // A zero or negative Y also breaks the adaptation; §8.6.5.2 requires X and Z
+        // positive and Y exactly 1.
+        if all_finite(&wp) && wp[0] > 0.0 && wp[1] > 0.0 && wp[2] > 0.0 {
+            Some(wp)
+        } else {
+            None
+        }
     } else { None }
 }
 
 pub(crate) fn read_gamma_rgb(dict: &lopdf::Dictionary) -> Option<[f64;3]> {
     let arr = dict.get(b"Gamma").ok().and_then(|o| o.as_array().ok())?;
     if arr.len()>=3 {
-        Some([num(&arr[0])?, num(&arr[1])?, num(&arr[2])?])
+        let g = [num(&arr[0])?, num(&arr[1])?, num(&arr[2])?];
+        if all_finite(&g) { Some(g) } else { None }
     } else { None }
 }
 
@@ -374,18 +393,22 @@ pub(crate) fn read_matrix_cal(dict: &lopdf::Dictionary) -> Option<[[f64;3];3]> {
         // [[XA XB XC],[YA YB YC],[ZA ZB ZC]] (i.e. transposed from the array
         // order). Storing it in raw array order transposes the transform and
         // turns e.g. CalRGB white into cyan (issue #321 colorrenderexample).
-        Some([
+        let m = [
             [num(&arr[0])?, num(&arr[3])?, num(&arr[6])?],
             [num(&arr[1])?, num(&arr[4])?, num(&arr[7])?],
             [num(&arr[2])?, num(&arr[5])?, num(&arr[8])?],
-        ])
+        ];
+        if m.iter().all(|row| all_finite(row)) { Some(m) } else { None }
     } else { None }
 }
 
 pub(crate) fn read_lab_range(dict: &lopdf::Dictionary) -> Option<[[f64;2];2]> {
     let arr = dict.get(b"Range").ok().and_then(|o| o.as_array().ok())?;
     if arr.len()>=4 {
-        Some([[num(&arr[0])?, num(&arr[1])?],[num(&arr[2])?, num(&arr[3])?]])
+        let r = [num(&arr[0])?, num(&arr[1])?, num(&arr[2])?, num(&arr[3])?];
+        // /Range also seeds the default /Decode for a Lab image (§8.9.5.2 Table 90),
+        // so a non-finite bound would scale every sample to NaN.
+        if all_finite(&r) { Some([[r[0], r[1]],[r[2], r[3]]]) } else { None }
     } else { None }
 }
 
@@ -769,6 +792,7 @@ mod tests {
             alt: Box::new(CsKind::DeviceRGB),
             tint_fn: Some(PdfFunction::Exponential {
                 domain: [0.0, 1.0],
+                range: Vec::new(),
                 c0: vec![0.0, 0.0, 0.0],
                 c1: vec![1.0, 0.0, 0.0],
                 n: 1.0,
@@ -813,6 +837,7 @@ mod tests {
             alt: Box::new(CsKind::DeviceCMYK),
             tint_fn: Some(PdfFunction::Exponential {
                 domain: [0.0, 1.0],
+                range: Vec::new(),
                 c0: vec![0.0],
                 c1: vec![1.0],
                 n: 1.0,
@@ -1002,5 +1027,58 @@ mod tests {
         let (base_n, palette) = indexed.expect("indexed info");
         assert_eq!(base_n, 3);
         assert_eq!(palette, vec![0x00, 0x00, 0xFF], "palette must be decoded");
+    }
+
+    // A malformed Cal*/Lab entry must mean exactly what an ABSENT one means — the spec
+    // default — not propagate into the conversion. A real like 1e40 overflows the f32
+    // `Object::Real` holds, and an infinite /WhitePoint reaches `adapt_to_d65` where
+    // inf/inf is NaN; `rgb_to_argb` saturates NaN to 0, so a CalRGB image rendered as a
+    // solid BLACK rectangle. (Same class as the non-finite path operands and shading
+    // matrices found this round, on the colour side.)
+    #[test]
+    fn non_finite_cal_entries_fall_back_to_the_spec_defaults() {
+        use lopdf::dictionary;
+        let inf = Object::Real(f32::INFINITY);
+        let bad_wp = dictionary! {
+            "WhitePoint" => vec![inf.clone(), Object::Real(1.0), Object::Real(1.089)]
+        };
+        assert!(read_white_point(&bad_wp).is_none(), "non-finite /WhitePoint is refused");
+        // A zero component breaks the adaptation just as badly.
+        let zero_wp = dictionary! {
+            "WhitePoint" => vec![Object::Real(0.0), Object::Real(1.0), Object::Real(1.089)]
+        };
+        assert!(read_white_point(&zero_wp).is_none(), "a zero /WhitePoint component is refused");
+        let good_wp = dictionary! {
+            "WhitePoint" => vec![Object::Real(0.9505), Object::Real(1.0), Object::Real(1.089)]
+        };
+        assert!(read_white_point(&good_wp).is_some(), "a sane /WhitePoint still reads");
+
+        assert!(read_gamma_rgb(&dictionary! {
+            "Gamma" => vec![inf.clone(), Object::Real(1.0), Object::Real(1.0)]
+        }).is_none());
+        assert!(read_lab_range(&dictionary! {
+            "Range" => vec![Object::Real(-100.0), inf.clone(), Object::Real(-100.0), Object::Real(100.0)]
+        }).is_none());
+        let mut m: Vec<Object> = (0..9).map(|_| Object::Real(1.0)).collect();
+        m[4] = inf;
+        assert!(read_matrix_cal(&dictionary! { "Matrix" => m }).is_none());
+
+        // End to end: a CalRGB space whose /WhitePoint overflowed must still render a
+        // recognisable colour rather than collapsing to black.
+        let doc = Document::with_version("1.7");
+        let arr = vec![
+            Object::Name(b"CalRGB".to_vec()),
+            Object::Dictionary(dictionary! {
+                "WhitePoint" => vec![Object::Real(f32::INFINITY), Object::Real(1.0), Object::Real(1.089)]
+            }),
+        ];
+        let empty = HashMap::new();
+        let kind = parse_cs_array_at(&doc, &arr, &empty, 0).expect("calrgb");
+        let white = eval_cs_to_rgb(&doc, &kind, &[1.0, 1.0, 1.0], &empty).unwrap();
+        assert!(
+            (white & 0xFF) > 200,
+            "CalRGB white must stay light, got {:#010X} - a NaN whitepoint renders black",
+            white
+        );
     }
 }

@@ -366,6 +366,44 @@ fn font_identity(doc: &Document, dict: &Dictionary) -> u64 {
     h.finish()
 }
 
+/// `code -> glyph name` from a simple font's NAMED base encoding, empty when the
+/// font names none.
+///
+/// PDF 32000-1 9.6.6.2 orders a simple font's encoding: `/Differences` first,
+/// then the base encoding named by `/Encoding` or `/Encoding /BaseEncoding`,
+/// then the font program's own built-in encoding, then StandardEncoding. Only
+/// the middle step needs a table here — an absent name is precisely the case
+/// where the built-in encoding wins, and returning empty lets the caller fall
+/// through to it.
+///
+/// MacRomanEncoding is deliberately not tabulated. PDF's MacRomanEncoding is not
+/// Mac OS Roman (it leaves several codes undefined and differs at 0xDB), so a
+/// half-remembered table would substitute one wrong glyph for another; leaving
+/// it out keeps such fonts on the existing built-in-encoding path, which is the
+/// spec's own next step.
+fn named_base_encoding_names(doc: &Document, font: &lopdf::Dictionary) -> HashMap<u32, String> {
+    let mut names = HashMap::new();
+    let base = match font.get(b"Encoding").ok().and_then(|o| deref(doc, o)) {
+        Some(Object::Name(n)) => Some(String::from_utf8_lossy(n).into_owned()),
+        Some(Object::Dictionary(d)) => d
+            .get(b"BaseEncoding")
+            .ok()
+            .and_then(|o| deref(doc, o))
+            .and_then(|o| o.as_name().ok())
+            .map(|n| String::from_utf8_lossy(n).into_owned()),
+        _ => None,
+    };
+    let table: &[(u8, &str)] = match base.as_deref() {
+        Some("WinAnsiEncoding") => encoding::WIN_ANSI_NAMES,
+        Some("StandardEncoding") => crate::type1::STANDARD_ENCODING,
+        _ => return names,
+    };
+    for (code, name) in table {
+        names.insert(*code as u32, (*name).to_string());
+    }
+    names
+}
+
 pub(crate) fn font_info(doc: &Document, font: &lopdf::Dictionary) -> FontInfo {
     let subtype = font.get(b"Subtype").ok().and_then(|o| o.as_name().ok());
     let two_byte = matches!(subtype, Some(b"Type0"));
@@ -512,7 +550,11 @@ pub(crate) fn font_info(doc: &Document, font: &lopdf::Dictionary) -> FontInfo {
                                 list.iter().filter_map(|o| deref(doc, o).and_then(num)).collect();
                             for (j, t) in vals.chunks(3).enumerate() {
                                 if t.len() < 3 { break; }
-                                vm.insert(c0 + j as u32, (t[0] / 1000.0, t[1] / 1000.0));
+                                // Same file-controlled overflow as /W's array form.
+                                vm.insert(
+                                    c0.saturating_add(j as u32).min(MAX_CID),
+                                    (t[0] / 1000.0, t[1] / 1000.0),
+                                );
                             }
                             i += 2;
                         }
@@ -646,7 +688,24 @@ pub(crate) fn font_info(doc: &Document, font: &lopdf::Dictionary) -> FontInfo {
     let glyph_names = if two_byte || is_type3 {
         HashMap::new()
     } else {
-        crate::outlines::encoding_differences(doc, font)
+        // A Type 1 or bare-CFF program selects glyphs BY NAME, so a named base
+        // encoding has to be resolved to names here or 9.6.6.2's priority is
+        // silently inverted and the program's built-in encoding wins: a font
+        // whose built-in encoding is Standard, used with /WinAnsiEncoding, then
+        // draws Oslash for eacute, ae for ntilde and germandbls for ucircumflex
+        // — wrong glyphs rather than missing ones.
+        //
+        // Sfnt programs are excluded on purpose. 9.6.6.4 routes those through the
+        // cmap and treats `post`-table names as a fallback, so seeding a name for
+        // every code would put a subset font's often-garbage `post` table ahead
+        // of its cmap.
+        let mut m = match glyph_program.as_ref() {
+            Some(crate::outlines::GlyphProgram::Type1(_))
+            | Some(crate::outlines::GlyphProgram::Cff { .. }) => named_base_encoding_names(doc, font),
+            _ => HashMap::new(),
+        };
+        m.extend(crate::outlines::encoding_differences(doc, font));
+        m
     };
 
     // --- Standard-14 metrics fallback ---
@@ -656,16 +715,49 @@ pub(crate) fn font_info(doc: &Document, font: &lopdf::Dictionary) -> FontInfo {
     // via /Differences, falling back to StandardEncoding.
     if !two_byte && !is_type3 && widths.is_empty() {
         if let Some(afm) = crate::afm::standard_14_widths(&base_font_name) {
-            for code in 0u32..=255 {
-                let name = glyph_names.get(&code).cloned().or_else(|| {
-                    crate::type1::STANDARD_ENCODING.iter()
-                        .find(|(c, _)| *c as u32 == code)
-                        .map(|(_, n)| (*n).to_string())
-                });
-                if let Some(name) = name {
-                    if let Some(w) = afm.get(&name) {
-                        widths.insert(code, *w);
+            // AFM metrics are keyed by GLYPH NAME, so the code -> name step has to
+            // follow the font's real encoding (9.6.6.2), not StandardEncoding
+            // unconditionally: for /WinAnsiEncoding, Standard names code 233
+            // "Oslash" (611 units) where WinAnsi names it "eacute" (556), so every
+            // accented character came out with another glyph's advance.
+            let base_names = named_base_encoding_names(doc, font);
+            // Symbol and ZapfDingbats have their own built-in encodings, whose AFM
+            // names ("alpha", "a12") are in neither table. Their metrics are still
+            // reachable by resolving the AFM name to Unicode and matching the
+            // encoding's code -> Unicode map. Built in sorted-name order so a
+            // Unicode collision resolves deterministically.
+            let by_char: HashMap<char, f64> = {
+                let mut names: Vec<&String> = afm.keys().collect();
+                names.sort();
+                let mut m = HashMap::new();
+                for n in names {
+                    if let Some(c) = encoding::glyph_to_char(n) {
+                        m.entry(c).or_insert(afm[n]);
                     }
+                }
+                m
+            };
+            for code in 0u32..=255 {
+                let name = glyph_names
+                    .get(&code)
+                    .cloned()
+                    .or_else(|| base_names.get(&code).cloned())
+                    .or_else(|| {
+                        crate::type1::STANDARD_ENCODING
+                            .iter()
+                            .find(|(c, _)| *c as u32 == code)
+                            .map(|(_, n)| (*n).to_string())
+                    });
+                if let Some(w) = name.as_deref().and_then(|n| afm.get(n)) {
+                    widths.insert(code, *w);
+                    continue;
+                }
+                // ZapfDingbats is the one face this cannot reach: its `aNNN` AFM
+                // names carry no Unicode, so its codes stay on `default_width`.
+                // Left as a known gap rather than approximated, because a wrong
+                // advance for every dingbat is worse than one uniform one.
+                if let Some(w) = encoding.get(&code).and_then(|c| by_char.get(c)) {
+                    widths.insert(code, *w);
                 }
             }
         }
@@ -761,11 +853,19 @@ pub(crate) fn simple_widths(doc: &Document, font: &lopdf::Dictionary) -> (HashMa
         .and_then(|d| d.get(b"MissingWidth").ok())
         .and_then(|o| deref(doc, o))
         .and_then(num)
-        .unwrap_or(0.0)
-        / 1000.0;
-    // Simple fonts without a /Widths array (e.g. the standard 14) get a
-    // reasonable default so advances are non-degenerate.
-    let default_width = if widths.is_empty() { 0.5 } else { missing };
+        .map(|v| v / 1000.0);
+    // 9.6.2.1 Table 111: /MissingWidth is the width for codes the /Widths array
+    // does not cover, and that includes every code when /Widths is absent. It is
+    // only when the descriptor supplies no /MissingWidth either that a default is
+    // invented — the spec default of 0 would stack a whole string on one point,
+    // and the standard-14 AFM table fills in real metrics for the fonts where
+    // this case is legitimate, so 0.5 applies to nothing but genuinely unknown
+    // glyphs.
+    let default_width = match missing {
+        Some(w) => w,
+        None if widths.is_empty() => 0.5,
+        None => 0.0,
+    };
     (widths, default_width)
 }
 
@@ -807,7 +907,11 @@ pub(crate) fn cid_widths(doc: &Document, font: &lopdf::Dictionary) -> (HashMap<u
                 Some(Object::Array(list)) => {
                     for (j, item) in list.iter().enumerate() {
                         if let Some(v) = deref(doc, item).and_then(num) {
-                            widths.insert(c + j as u32, v / 1000.0);
+                            // `c` is file-controlled and `num` saturates at
+                            // u32::MAX, so `c + j` wraps in release and panics in
+                            // debug. The range form is already clamped to MAX_CID;
+                            // this form was not.
+                            widths.insert(c.saturating_add(j as u32).min(MAX_CID), v / 1000.0);
                         }
                     }
                     i += 2;
@@ -1623,6 +1727,72 @@ pub(crate) mod encoding {
         m
     }
 
+    /// WinAnsiEncoding as `code -> glyph NAME` (PDF 32000-1 Annex D.2).
+    ///
+    /// Distinct from [`win_ansi`], which yields Unicode. Selecting an outline in a
+    /// Type 1 or bare-CFF program is done by NAME, and 9.6.6.2 makes a named base
+    /// encoding outrank the program's own built-in encoding — so a Unicode map
+    /// cannot serve that lookup and StandardEncoding is the wrong table for it
+    /// (Standard puts Oslash where WinAnsi puts eacute, ae where it puts ntilde,
+    /// and so on across the whole 0xA0-0xFF range).
+    pub static WIN_ANSI_NAMES: &[(u8, &str)] = &[
+        (32, "space"), (33, "exclam"), (34, "quotedbl"), (35, "numbersign"),
+        (36, "dollar"), (37, "percent"), (38, "ampersand"), (39, "quotesingle"),
+        (40, "parenleft"), (41, "parenright"), (42, "asterisk"), (43, "plus"),
+        (44, "comma"), (45, "hyphen"), (46, "period"), (47, "slash"),
+        (48, "zero"), (49, "one"), (50, "two"), (51, "three"), (52, "four"),
+        (53, "five"), (54, "six"), (55, "seven"), (56, "eight"), (57, "nine"),
+        (58, "colon"), (59, "semicolon"), (60, "less"), (61, "equal"),
+        (62, "greater"), (63, "question"), (64, "at"),
+        (65, "A"), (66, "B"), (67, "C"), (68, "D"), (69, "E"), (70, "F"),
+        (71, "G"), (72, "H"), (73, "I"), (74, "J"), (75, "K"), (76, "L"),
+        (77, "M"), (78, "N"), (79, "O"), (80, "P"), (81, "Q"), (82, "R"),
+        (83, "S"), (84, "T"), (85, "U"), (86, "V"), (87, "W"), (88, "X"),
+        (89, "Y"), (90, "Z"),
+        (91, "bracketleft"), (92, "backslash"), (93, "bracketright"),
+        (94, "asciicircum"), (95, "underscore"), (96, "grave"),
+        (97, "a"), (98, "b"), (99, "c"), (100, "d"), (101, "e"), (102, "f"),
+        (103, "g"), (104, "h"), (105, "i"), (106, "j"), (107, "k"), (108, "l"),
+        (109, "m"), (110, "n"), (111, "o"), (112, "p"), (113, "q"), (114, "r"),
+        (115, "s"), (116, "t"), (117, "u"), (118, "v"), (119, "w"), (120, "x"),
+        (121, "y"), (122, "z"),
+        (123, "braceleft"), (124, "bar"), (125, "braceright"), (126, "asciitilde"),
+        (128, "Euro"), (130, "quotesinglbase"), (131, "florin"),
+        (132, "quotedblbase"), (133, "ellipsis"), (134, "dagger"),
+        (135, "daggerdbl"), (136, "circumflex"), (137, "perthousand"),
+        (138, "Scaron"), (139, "guilsinglleft"), (140, "OE"), (142, "Zcaron"),
+        (145, "quoteleft"), (146, "quoteright"), (147, "quotedblleft"),
+        (148, "quotedblright"), (149, "bullet"), (150, "endash"), (151, "emdash"),
+        (152, "tilde"), (153, "trademark"), (154, "scaron"), (155, "guilsinglright"),
+        (156, "oe"), (158, "zcaron"), (159, "Ydieresis"),
+        (160, "space"), (161, "exclamdown"), (162, "cent"), (163, "sterling"),
+        (164, "currency"), (165, "yen"), (166, "brokenbar"), (167, "section"),
+        (168, "dieresis"), (169, "copyright"), (170, "ordfeminine"),
+        (171, "guillemotleft"), (172, "logicalnot"), (173, "hyphen"),
+        (174, "registered"), (175, "macron"), (176, "degree"), (177, "plusminus"),
+        (178, "twosuperior"), (179, "threesuperior"), (180, "acute"), (181, "mu"),
+        (182, "paragraph"), (183, "periodcentered"), (184, "cedilla"),
+        (185, "onesuperior"), (186, "ordmasculine"), (187, "guillemotright"),
+        (188, "onequarter"), (189, "onehalf"), (190, "threequarters"),
+        (191, "questiondown"),
+        (192, "Agrave"), (193, "Aacute"), (194, "Acircumflex"), (195, "Atilde"),
+        (196, "Adieresis"), (197, "Aring"), (198, "AE"), (199, "Ccedilla"),
+        (200, "Egrave"), (201, "Eacute"), (202, "Ecircumflex"), (203, "Edieresis"),
+        (204, "Igrave"), (205, "Iacute"), (206, "Icircumflex"), (207, "Idieresis"),
+        (208, "Eth"), (209, "Ntilde"), (210, "Ograve"), (211, "Oacute"),
+        (212, "Ocircumflex"), (213, "Otilde"), (214, "Odieresis"), (215, "multiply"),
+        (216, "Oslash"), (217, "Ugrave"), (218, "Uacute"), (219, "Ucircumflex"),
+        (220, "Udieresis"), (221, "Yacute"), (222, "Thorn"), (223, "germandbls"),
+        (224, "agrave"), (225, "aacute"), (226, "acircumflex"), (227, "atilde"),
+        (228, "adieresis"), (229, "aring"), (230, "ae"), (231, "ccedilla"),
+        (232, "egrave"), (233, "eacute"), (234, "ecircumflex"), (235, "edieresis"),
+        (236, "igrave"), (237, "iacute"), (238, "icircumflex"), (239, "idieresis"),
+        (240, "eth"), (241, "ntilde"), (242, "ograve"), (243, "oacute"),
+        (244, "ocircumflex"), (245, "otilde"), (246, "odieresis"), (247, "divide"),
+        (248, "oslash"), (249, "ugrave"), (250, "uacute"), (251, "ucircumflex"),
+        (252, "udieresis"), (253, "yacute"), (254, "thorn"), (255, "ydieresis"),
+    ];
+
     /// Adobe StandardEncoding: matches Latin-1 for the core ASCII letters/digits
     /// but differs across punctuation (0x27 quoteright, 0x60 quoteleft) and the
     /// whole 0x80–0xFF range, so it is built from the real name table rather than
@@ -1741,6 +1911,217 @@ mod encrypt_tests {
     #[test]
     fn aes256_save_roundtrip() {
         roundtrip(crate::EncryptAlgo::Aes256);
+    }
+}
+
+#[cfg(test)]
+mod encoding_priority_tests {
+    use super::*;
+
+    fn helvetica(encoding: Option<&str>) -> (Document, Dictionary) {
+        let doc = Document::with_version("1.7");
+        let mut f = dictionary! {
+            "Type" => "Font",
+            "Subtype" => "Type1",
+            "BaseFont" => "Helvetica",
+        };
+        if let Some(e) = encoding {
+            f.set("Encoding", Object::Name(e.as_bytes().to_vec()));
+        }
+        (doc, f)
+    }
+
+    // Builds a minimal but REAL Type 1 font program, so `font_info` takes the
+    // `GlyphProgram::Type1` arm for real rather than being handed a pre-built
+    // `glyph_names`. Mutation testing found that no test covered the wiring: with
+    // the Type1/Cff arm reverted to an empty map, all 11 of the original tests
+    // still passed, because each one either built `FontInfo` by hand or exercised
+    // `named_base_encoding_names` directly. The production path that carries a
+    // named base encoding into glyph selection was the one thing untested.
+    fn type1_font_program(glyph: &str, charstring: &[u8]) -> Vec<u8> {
+        fn crypt(seed: u16, lead: usize, plain: &[u8]) -> Vec<u8> {
+            let (c1, c2) = (52845u16, 22719u16);
+            let mut r = seed;
+            let mut out = Vec::new();
+            for &p in std::iter::repeat(&0u8).take(lead).chain(plain) {
+                let c = p ^ (r >> 8) as u8;
+                r = (c as u16).wrapping_add(r).wrapping_mul(c1).wrapping_add(c2);
+                out.push(c);
+            }
+            out
+        }
+        let mut private = Vec::new();
+        private.extend_from_slice(b"dup /Private 8 dict dup begin\n/lenIV 0 def\n");
+        private.extend_from_slice(b"/CharStrings 1 dict dup begin\n");
+        private.extend_from_slice(format!("/{glyph} {} RD ", charstring.len()).as_bytes());
+        // `lenIV 0`, so the charstring is eexec-charstring encrypted with no skip.
+        private.extend_from_slice(&crypt(4330, 0, charstring));
+        private.extend_from_slice(b" ND\nend\nend\n");
+
+        let mut font = Vec::new();
+        font.extend_from_slice(b"%!PS-AdobeFont-1.0\n");
+        font.extend_from_slice(b"/FontMatrix [0.001 0 0 0.001 0 0] readonly def\n");
+        font.extend_from_slice(b"/Encoding StandardEncoding def\n");
+        font.extend_from_slice(b"currentfile eexec\n");
+        // Four lead plaintext bytes that `extract_eexec` discards. Zero bytes put
+        // 0xD9 first in the ciphertext, which is not an ASCII hex digit, so the
+        // section is correctly detected as binary rather than hex.
+        font.extend_from_slice(&crypt(55665, 4, &private));
+        font
+    }
+
+    /// A square: `0 500 hsbw  0 0 rmoveto  100 0 rlineto  0 100 rlineto  -100 0 rlineto  closepath endchar`
+    fn square_charstring() -> Vec<u8> {
+        vec![
+            139, 248, 136, 13, // 0 500 hsbw
+            139, 139, 21, // 0 0 rmoveto
+            239, 139, 5, // 100 0 rlineto
+            139, 239, 5, // 0 100 rlineto
+            39, 139, 5, // -100 0 rlineto
+            9,  // closepath
+            14, // endchar
+        ]
+    }
+
+    // §9.6.6.2 end to end, through `font_info` rather than a hand-built FontInfo.
+    // The program's built-in encoding is StandardEncoding, which names code 233
+    // "Oslash"; the PDF declares /WinAnsiEncoding, which names it "eacute". The
+    // named base encoding must win, or an accented character silently draws a
+    // different letter.
+    #[test]
+    fn font_info_carries_a_named_base_encoding_into_glyph_names() {
+        let mut doc = Document::new();
+        let ff = doc.add_object(Stream::new(
+            dictionary! {},
+            type1_font_program("eacute", &square_charstring()),
+        ));
+        let fd = doc.add_object(dictionary! {
+            "Type" => "FontDescriptor", "FontName" => "Test", "FontFile" => ff,
+        });
+        let font = dictionary! {
+            "Type" => "Font", "Subtype" => "Type1", "BaseFont" => "Test",
+            "Encoding" => "WinAnsiEncoding",
+            "FontDescriptor" => fd,
+        };
+        let fi = font_info(&doc, &font);
+        assert!(fi.glyph_program.is_some(), "precondition: the Type 1 program must parse");
+        assert_eq!(
+            fi.glyph_names.get(&233).map(String::as_str),
+            Some("eacute"),
+            "WinAnsi must name code 233 eacute, not the program's built-in Oslash"
+        );
+        // And the whole path resolves to the real outline for that name.
+        let (contours, upm) = crate::outlines::glyph_outline(&fi, 233).expect("outline");
+        assert_eq!(upm, 1000.0);
+        assert_eq!(contours.len(), 1);
+        assert_eq!(contours[0].first(), contours[0].last(), "contour is closed");
+    }
+
+    // PDF 32000-1 9.6.6.2. The AFM metrics are keyed by GLYPH NAME, so resolving
+    // the code through StandardEncoding regardless of the declared base encoding
+    // charges every accented character another glyph's advance: Standard calls
+    // code 233 "Oslash" (778/1000 in Helvetica) where WinAnsi calls it "eacute"
+    // (556/1000). A whole line of accented text drifts right by ~40% of an em per
+    // accent, so words overlap the following ones.
+    #[test]
+    fn standard14_widths_follow_the_declared_base_encoding() {
+        let (doc, font) = helvetica(Some("WinAnsiEncoding"));
+        let fi = font_info(&doc, &font);
+        assert_eq!(fi.widths.get(&233).copied(), Some(0.556), "233 is eacute in WinAnsi");
+        assert_eq!(fi.widths.get(&65).copied(), Some(0.667), "ASCII is unaffected");
+
+        // With no /Encoding at all, StandardEncoding remains the right fallback.
+        let (doc, font) = helvetica(None);
+        let fi = font_info(&doc, &font);
+        assert_eq!(fi.widths.get(&233).copied(), Some(0.778), "233 is Oslash in Standard");
+    }
+
+    // Symbol has its own built-in encoding, whose AFM names (alpha, Beta, …) are
+    // in neither StandardEncoding nor WinAnsi. Resolving them through Unicode is
+    // what keeps Greek and math text from falling back to a flat default advance.
+    #[test]
+    fn symbol_metrics_resolve_through_its_own_encoding() {
+        let doc = Document::with_version("1.7");
+        let font = dictionary! { "Type" => "Font", "Subtype" => "Type1", "BaseFont" => "Symbol" };
+        let fi = font_info(&doc, &font);
+        assert_eq!(fi.widths.get(&0x61).copied(), Some(0.631), "0x61 is alpha (631)");
+        assert_eq!(fi.widths.get(&0x41).copied(), Some(0.722), "0x41 is Alpha (722)");
+        assert_eq!(fi.widths.get(&0x2B).copied(), Some(0.549), "0x2B is plus (549)");
+    }
+
+    // An absent base-encoding NAME is the case where 9.6.6.2 gives the font
+    // program's built-in encoding priority, so the table must stay empty and let
+    // `outlines.rs` fall through to it rather than asserting Standard names.
+    #[test]
+    fn no_named_base_encoding_yields_no_names() {
+        let (doc, font) = helvetica(None);
+        assert!(named_base_encoding_names(&doc, &font).is_empty());
+
+        let (doc, font) = helvetica(Some("WinAnsiEncoding"));
+        let m = named_base_encoding_names(&doc, &font);
+        assert_eq!(m.get(&233).map(String::as_str), Some("eacute"));
+        assert_eq!(m.get(&39).map(String::as_str), Some("quotesingle"));
+        assert_eq!(m.get(&96).map(String::as_str), Some("grave"));
+
+        // /BaseEncoding inside an /Encoding dictionary is the same base encoding.
+        let doc2 = Document::with_version("1.7");
+        let font2 = dictionary! {
+            "Type" => "Font", "Subtype" => "Type1", "BaseFont" => "Helvetica",
+            "Encoding" => dictionary! { "BaseEncoding" => "WinAnsiEncoding" },
+        };
+        assert_eq!(
+            named_base_encoding_names(&doc2, &font2).get(&233).map(String::as_str),
+            Some("eacute")
+        );
+    }
+
+    // 9.6.2.1 Table 111: /MissingWidth covers codes /Widths does not, which is all
+    // of them when /Widths is absent. Discarding it there charged an invented
+    // 0.5 em to every glyph of a font that had said what its default advance is.
+    #[test]
+    fn missing_width_applies_even_with_no_widths_array() {
+        let mut doc = Document::new();
+        let fd = doc.add_object(dictionary! { "Type" => "FontDescriptor", "MissingWidth" => 600 });
+        let font = dictionary! {
+            "Type" => "Font", "Subtype" => "TrueType", "BaseFont" => "NotAStandardFace",
+            "FontDescriptor" => fd,
+        };
+        let (widths, default) = simple_widths(&doc, &font);
+        assert!(widths.is_empty());
+        assert_eq!(default, 0.6);
+
+        // No descriptor at all still gets the non-degenerate invented default.
+        let bare = dictionary! { "Type" => "Font", "Subtype" => "TrueType" };
+        assert_eq!(simple_widths(&doc, &bare).1, 0.5);
+    }
+
+    // The array form of /W was the one width path with no bound on the start CID.
+    // `num` saturates at u32::MAX, so `c + j` panics in debug and wraps in release.
+    #[test]
+    fn w_array_form_cannot_overflow_the_cid() {
+        let mut doc = Document::new();
+        let desc = doc.add_object(dictionary! {
+            "Type" => "Font",
+            "Subtype" => "CIDFontType2",
+            "W" => vec![4_294_967_295u32.into(), Object::Array(vec![500.into(), 600.into()])],
+        });
+        let font = dictionary! {
+            "Type" => "Font",
+            "Subtype" => "Type0",
+            "DescendantFonts" => vec![desc.into()],
+        };
+        let (widths, _) = cid_widths(&doc, &font);
+        assert!(widths.keys().all(|c| *c <= MAX_CID));
+    }
+
+    // 9.10.3: a bfrange's array holds one destination per code in lo..=hi. A
+    // longer array used to run past `hi` and, at the top of the code space, wrap.
+    #[test]
+    fn bfrange_array_form_stops_at_hi() {
+        let map = cmap::parse(b"1 beginbfrange\n<0041> <0042> [<0061> <0062> <0063>]\nendbfrange");
+        assert_eq!(map.get(&0x41).map(String::as_str), Some("a"));
+        assert_eq!(map.get(&0x42).map(String::as_str), Some("b"));
+        assert_eq!(map.get(&0x43), None, "the surplus entry is outside the range");
     }
 }
 
@@ -2122,8 +2503,12 @@ pub(crate) mod cmap {
                                 }
                                 i += 3;
                             }
-                            (Some(Token::Hex(lo)), Some(Token::Hex(_hi)), Some(Token::ArrayOpen)) => {
+                            (Some(Token::Hex(lo)), Some(Token::Hex(hi)), Some(Token::ArrayOpen)) => {
                                 let lo = code(lo);
+                                // 9.10.3: the array holds one destination per code in
+                                // lo..=hi. Clamped like the incrementing form so a
+                                // corrupt `hi` cannot be outrun by a longer array.
+                                let hi = code(hi).min(lo.saturating_add(super::MAX_CID));
                                 i += 3; // skip lo, hi, '['
                                 let mut n = 0u32;
                                 while i < tokens.len() {
@@ -2133,7 +2518,16 @@ pub(crate) mod cmap {
                                             break;
                                         }
                                         Token::Hex(dst) => {
-                                            map.insert(lo + n, utf16be(dst));
+                                            // `lo` comes from the file and the array
+                                            // may be longer than hi-lo+1, so cap the
+                                            // walk at `hi` instead of letting it run
+                                            // past the range and wrap.
+                                            let c = lo.saturating_add(n);
+                                            if c > hi {
+                                                i += 1;
+                                                continue;
+                                            }
+                                            map.insert(c, utf16be(dst));
                                             n += 1;
                                             i += 1;
                                         }

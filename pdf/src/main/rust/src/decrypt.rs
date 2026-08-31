@@ -36,18 +36,35 @@ pub(crate) enum DecryptStatus {
 
 /// Apply a cipher (`apply`) to every string and stream inside `obj`.
 pub(crate) fn crypt_object(obj: &mut Object, apply: &dyn Fn(&[u8]) -> Vec<u8>) {
+    crypt_object_split(obj, Some(apply), Some(apply));
+}
+
+/// Apply `strings` to every string and `streams` to every stream body inside `obj`.
+///
+/// §7.6.5 gives streams and strings SEPARATE crypt filters (`/StmF`, `/StrF`), and
+/// either may be `/Identity`, so the two cannot share one transform. `None` leaves
+/// that class of data untouched.
+fn crypt_object_split(
+    obj: &mut Object,
+    strings: Option<&dyn Fn(&[u8]) -> Vec<u8>>,
+    streams: Option<&dyn Fn(&[u8]) -> Vec<u8>>,
+) {
     match obj {
-        Object::String(s, _) => *s = apply(s),
+        Object::String(s, _) => {
+            if let Some(apply) = strings {
+                *s = apply(s);
+            }
+        }
         Object::Array(a) => {
             for o in a.iter_mut() {
-                crypt_object(o, apply);
+                crypt_object_split(o, strings, streams);
             }
         }
         Object::Dictionary(d) => {
             let keys: Vec<Vec<u8>> = d.iter().map(|(k, _)| k.clone()).collect();
             for k in keys {
                 if let Ok(v) = d.get_mut(&k) {
-                    crypt_object(v, apply);
+                    crypt_object_split(v, strings, streams);
                 }
             }
         }
@@ -55,10 +72,12 @@ pub(crate) fn crypt_object(obj: &mut Object, apply: &dyn Fn(&[u8]) -> Vec<u8>) {
             let keys: Vec<Vec<u8>> = st.dict.iter().map(|(k, _)| k.clone()).collect();
             for k in keys {
                 if let Ok(v) = st.dict.get_mut(&k) {
-                    crypt_object(v, apply);
+                    crypt_object_split(v, strings, streams);
                 }
             }
-            st.content = apply(&st.content);
+            if let Some(apply) = streams {
+                st.content = apply(&st.content);
+            }
         }
         _ => {}
     }
@@ -104,6 +123,72 @@ pub(crate) enum CryptMethod {
     AesV3,
 }
 
+/// §7.6.5: resolve a `/StmF` or `/StrF` crypt-filter NAME to the method it selects.
+///
+/// `None` means the data shall NOT be decrypted. `/Identity` is the reserved filter
+/// name for exactly that (Table 20, and it is the DEFAULT for both keys), and
+/// `/CFM /None` says the same at the filter itself (Table 25). Running the file's
+/// cipher over data a crypt filter declared unencrypted turns plaintext into noise
+/// for the whole document, which is why the two cases are worth separating.
+///
+/// A name that resolves to no readable `/CFM` falls back to `default`, so a file that
+/// never mentions `/Identity` takes exactly the path it took before.
+fn crypt_filter_method(
+    cf: Option<&Dictionary>,
+    name: &[u8],
+    default: CryptMethod,
+) -> Option<CryptMethod> {
+    if name == b"Identity" {
+        return None;
+    }
+    let cfm = cf
+        .and_then(|d| d.get(name).ok())
+        .and_then(|o| o.as_dict().ok())
+        .and_then(|d| d.get(b"CFM").ok())
+        .and_then(|o| o.as_name().ok());
+    match cfm {
+        Some(m) if m == b"None" => None,
+        Some(m) if m == b"AESV3" => Some(CryptMethod::AesV3),
+        Some(m) if m == b"AESV2" => Some(CryptMethod::AesV2),
+        Some(m) if m == b"V2" => Some(CryptMethod::Rc4),
+        _ => Some(default),
+    }
+}
+
+/// The `/P` permission flags as the 32-BIT quantity §7.6.3.3 Algorithm 2 step (d)
+/// feeds to the key hash.
+///
+/// Producers write the same bit pattern either signed (`-3904`) or unsigned
+/// (`4294963392`); both are the same four bytes and Acrobat reads them identically.
+/// Going through `f64 as i32` SATURATES the unsigned form to `2147483647`, which
+/// hashes four wrong bytes and rejects a correct password on a file that opens
+/// everywhere else. Truncating to 32 bits reads both forms the same.
+fn permissions_p(enc: &Dictionary) -> i32 {
+    enc.get(b"P")
+        .ok()
+        .and_then(|o| o.as_i64().ok().or_else(|| num(o).map(|v| v as i64)))
+        .unwrap_or(0) as u32 as i32
+}
+
+/// The per-object transform for one object under `method`.
+fn object_cipher(method: CryptMethod, key: &[u8], id: ObjectId, n: usize) -> CryptFn {
+    match method {
+        CryptMethod::Rc4 => {
+            let okey = crypto::object_key(key, id.0, id.1, n);
+            Box::new(move |d: &[u8]| crypto::rc4(&okey, d))
+        }
+        CryptMethod::AesV2 => {
+            let okey = crypto::object_key_aes(key, id.0, id.1, n);
+            Box::new(move |d: &[u8]| crypto::aes_cbc_decrypt(&okey, d).unwrap_or_default())
+        }
+        // §7.6.5.3: AESV3 uses the file encryption key directly, with no per-object key.
+        CryptMethod::AesV3 => {
+            let k = key.to_vec();
+            Box::new(move |d: &[u8]| crypto::aes_cbc_decrypt(&k, d).unwrap_or_default())
+        }
+    }
+}
+
 /// Decrypt a standard-encrypted document (RC4 or AES) in place with `password`.
 ///
 /// Tries lopdf's own standard-security-handler first. That matters for correctness, not
@@ -146,7 +231,7 @@ fn decrypt_in_place_fallback(doc: &mut Document, password: &[u8]) -> DecryptStat
         Ok(id) => id,
         Err(_) => return DecryptStatus::Unsupported,
     };
-    let (o, u, ue, oe, p, r, length, method, encrypt_metadata, _cf_dict_opt) = {
+    let (o, u, ue, oe, p, r, length, method, encrypt_metadata, stm_method, str_method) = {
         let enc = match doc.get_dictionary(enc_id) {
             Ok(d) => d,
             Err(_) => return DecryptStatus::Unsupported,
@@ -224,13 +309,36 @@ fn decrypt_in_place_fallback(doc: &mut Document, password: &[u8]) -> DecryptStat
         let ue = enc.get(b"UE").ok().and_then(|o| o.as_str().ok()).map(|s| s.to_vec()).unwrap_or_default();
         let oe = enc.get(b"OE").ok().and_then(|o| o.as_str().ok()).map(|s| s.to_vec()).unwrap_or_default();
         // Preserve CF dict for later StmF/StrF handling? We already parsed method but for auth need OE for owner
-        let p = enc.get(b"P").ok().and_then(num).unwrap_or(0.0) as i32;
+        // §7.6.3.3 Algorithm 2 step (d) hashes /P as a 32-BIT quantity.
+        let p = permissions_p(enc);
         let default_len = if method == CryptMethod::AesV2 { 128.0 } else { 40.0 };
         let length = enc.get(b"Length").ok().and_then(num).unwrap_or(default_len) as usize;
         // §7.6.3.3 Algorithm 2 step (f): with /EncryptMetadata false and R >= 4 the key
         // derivation takes four extra 0xFF bytes. Default true.
         let encrypt_metadata = !matches!(enc.get(b"EncryptMetadata"), Ok(Object::Boolean(false)));
-        (o, u, ue, oe, p, r, length, method, encrypt_metadata, cf_dict_opt)
+        // §7.6.5 Table 20: /StmF and /StrF name the crypt filters for STREAMS and
+        // STRINGS separately, and either may be /Identity. `method` above still drives
+        // key derivation and authentication - only what gets transformed changes.
+        let (stm_method, str_method) = if v >= 4 {
+            let cf = cf_dict_opt.as_ref();
+            let stm_name = enc
+                .get(b"StmF")
+                .ok()
+                .and_then(|o| o.as_name().ok())
+                .unwrap_or(b"StdCF");
+            let str_name = enc
+                .get(b"StrF")
+                .ok()
+                .and_then(|o| o.as_name().ok())
+                .unwrap_or(b"StdCF");
+            (
+                crypt_filter_method(cf, stm_name, method),
+                crypt_filter_method(cf, str_name, method),
+            )
+        } else {
+            (Some(method), Some(method))
+        };
+        (o, u, ue, oe, p, r, length, method, encrypt_metadata, stm_method, str_method)
     };
 
     let id0 = trailer_id0(doc);
@@ -294,22 +402,14 @@ fn decrypt_in_place_fallback(doc: &mut Document, password: &[u8]) -> DecryptStat
         if is_xref_stream {
             continue;
         }
-        let apply: CryptFn = match method {
-            CryptMethod::Rc4 => {
-                let okey = crypto::object_key(&key, id.0, id.1, n);
-                Box::new(move |d: &[u8]| crypto::rc4(&okey, d))
-            }
-            CryptMethod::AesV2 => {
-                let okey = crypto::object_key_aes(&key, id.0, id.1, n);
-                Box::new(move |d: &[u8]| crypto::aes_cbc_decrypt(&okey, d).unwrap_or_default())
-            }
-            CryptMethod::AesV3 => {
-                let k = key.clone();
-                Box::new(move |d: &[u8]| crypto::aes_cbc_decrypt(&k, d).unwrap_or_default())
-            }
-        };
+        let str_apply = str_method.map(|m| object_cipher(m, &key, id, n));
+        let stm_apply = stm_method.map(|m| object_cipher(m, &key, id, n));
         if let Some(obj) = doc.objects.get_mut(&id) {
-            crypt_object(obj, &apply);
+            crypt_object_split(
+                obj,
+                str_apply.as_ref().map(|f| f.as_ref() as &dyn Fn(&[u8]) -> Vec<u8>),
+                stm_apply.as_ref().map(|f| f.as_ref() as &dyn Fn(&[u8]) -> Vec<u8>),
+            );
         }
     }
     expand_object_streams(doc);
@@ -526,4 +626,111 @@ pub(crate) fn encrypt_doc_bytes(
     let mut out = Vec::new();
     doc.save_to(&mut out).ok()?;
     Some(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// §7.6.3.3 Algorithm 2 step (d): /P is hashed as 32 bits, so the signed and
+    /// unsigned spellings of the same flags must derive the same file key.
+    #[test]
+    fn permissions_p_reads_both_spellings_of_the_same_flags() {
+        let signed = dictionary! { "P" => Object::Integer(-3904) };
+        let unsigned = dictionary! { "P" => Object::Integer(4_294_963_392) };
+        assert_eq!(permissions_p(&signed), -3904);
+        assert_eq!(
+            permissions_p(&unsigned),
+            -3904,
+            "the unsigned spelling is the same 32 bits, not i32::MAX"
+        );
+        // The four bytes Algorithm 2 actually hashes.
+        assert_eq!(
+            (permissions_p(&unsigned) as u32).to_le_bytes(),
+            (permissions_p(&signed) as u32).to_le_bytes()
+        );
+        // A missing /P still reads as zero rather than panicking.
+        assert_eq!(permissions_p(&Dictionary::new()), 0);
+    }
+
+    /// §7.6.5 Table 20: /Identity is the reserved crypt-filter name for data that is
+    /// NOT encrypted, and Table 25 gives /CFM /None the same meaning. Decrypting
+    /// either turns plaintext into noise for the whole document.
+    #[test]
+    fn identity_crypt_filters_select_no_cipher() {
+        let mut cf = Dictionary::new();
+        cf.set("StdCF", dictionary! { "CFM" => name_obj("AESV2") });
+        cf.set("NoneCF", dictionary! { "CFM" => name_obj("None") });
+        cf.set("Rc4CF", dictionary! { "CFM" => name_obj("V2") });
+        let cf = Some(&cf);
+
+        assert!(crypt_filter_method(cf, b"Identity", CryptMethod::AesV2).is_none());
+        assert!(crypt_filter_method(cf, b"NoneCF", CryptMethod::AesV2).is_none());
+        assert!(matches!(
+            crypt_filter_method(cf, b"StdCF", CryptMethod::Rc4),
+            Some(CryptMethod::AesV2)
+        ));
+        // A crypt filter may differ from the default: /StmF and /StrF are independent.
+        assert!(matches!(
+            crypt_filter_method(cf, b"Rc4CF", CryptMethod::AesV2),
+            Some(CryptMethod::Rc4)
+        ));
+        // An unresolvable name keeps the previous behaviour: fall back to the default,
+        // so no file that never mentions /Identity changes path.
+        assert!(matches!(
+            crypt_filter_method(cf, b"MissingCF", CryptMethod::AesV3),
+            Some(CryptMethod::AesV3)
+        ));
+        assert!(matches!(
+            crypt_filter_method(None, b"StdCF", CryptMethod::Rc4),
+            Some(CryptMethod::Rc4)
+        ));
+    }
+
+    /// §7.6.5: streams and strings have SEPARATE crypt filters, so one of them being
+    /// /Identity must not stop the other being decrypted - and must not decrypt it.
+    #[test]
+    fn a_stream_identity_filter_leaves_the_body_but_not_the_strings() {
+        let flip = |d: &[u8]| d.iter().map(|b| b ^ 0xFF).collect::<Vec<u8>>();
+        let mut obj = Object::Stream(Stream::new(
+            dictionary! { "Author" => Object::String(b"abc".to_vec(), lopdf::StringFormat::Literal) },
+            b"body".to_vec(),
+        ));
+        crypt_object_split(&mut obj, Some(&flip), None);
+        let Object::Stream(s) = &obj else { panic!("expected a stream") };
+        assert_eq!(s.content, b"body", "an /Identity /StmF must not touch the body");
+        let Ok(Object::String(a, _)) = s.dict.get(b"Author") else {
+            panic!("expected a string")
+        };
+        assert_eq!(a, &flip(b"abc"), "/StrF still applies to the dictionary strings");
+
+        // And the mirror case: /StrF /Identity with a real /StmF.
+        let mut obj = Object::Stream(Stream::new(
+            dictionary! { "Author" => Object::String(b"abc".to_vec(), lopdf::StringFormat::Literal) },
+            b"body".to_vec(),
+        ));
+        crypt_object_split(&mut obj, None, Some(&flip));
+        let Object::Stream(s) = &obj else { panic!("expected a stream") };
+        assert_eq!(s.content, flip(b"body"));
+        let Ok(Object::String(a, _)) = s.dict.get(b"Author") else {
+            panic!("expected a string")
+        };
+        assert_eq!(a, b"abc", "an /Identity /StrF must not touch the strings");
+    }
+
+    /// `crypt_object` (the encrypt-on-save path) must keep applying one transform to
+    /// both, unchanged by the split above.
+    #[test]
+    fn crypt_object_still_applies_to_strings_and_streams_alike() {
+        let flip = |d: &[u8]| d.iter().map(|b| b ^ 0xFF).collect::<Vec<u8>>();
+        let mut obj = Object::Array(vec![
+            Object::String(b"s".to_vec(), lopdf::StringFormat::Literal),
+            Object::Stream(Stream::new(Dictionary::new(), b"c".to_vec())),
+        ]);
+        crypt_object(&mut obj, &flip);
+        let Object::Array(a) = &obj else { panic!() };
+        assert_eq!(a[0], Object::String(flip(b"s"), lopdf::StringFormat::Literal));
+        let Object::Stream(s) = &a[1] else { panic!() };
+        assert_eq!(s.content, flip(b"c"));
+    }
 }

@@ -125,6 +125,17 @@ pub fn rasterize_shading_mesh(
     if (xmax - xmin).abs() < 1e-9 || (ymax - ymin).abs() < 1e-9 {
         return None;
     }
+    // Every vertex coordinate is `dmin + (raw/max)*(dmax-dmin)`, so an infinite
+    // /Decode extent makes `0 * inf` = NaN for raw == 0. NaN then defeats
+    // `fill_tri`'s barycentric rejection (every `< -1e-6` test is false for NaN),
+    // the colour cast saturates to 0, and the shading paints an OPAQUE BLACK
+    // rectangle over its whole area — covering page content that should show
+    // through. Reject the shading instead: with no usable geometry the only
+    // correct answer is to paint nothing, the same conclusion the empty-mesh
+    // branch below reaches.
+    if ![xmin, xmax, ymin, ymax].iter().all(|v| v.is_finite()) {
+        return None;
+    }
     let bounds = {
         let mut b = [xmin, ymin, xmax, ymax];
         // The shading shall be painted only inside /BBox (Table 78), which is
@@ -639,6 +650,13 @@ fn fill_tri(
     let (x0, y0) = (v0.x, v0.y);
     let (x1, y1) = (v1.x, v1.y);
     let (x2, y2) = (v2.x, v2.y);
+    // A non-finite vertex is not merely unpaintable, it paints EVERYTHING: the
+    // scanline bounds below collapse to the full raster (`NaN.max(0.0)` is 0 and
+    // `NaN.min(w)` is w), and every barycentric rejection test `a < -1e-6` is false
+    // for NaN, so the whole buffer is filled opaque. Bail before that.
+    if ![x0, y0, x1, y1, x2, y2].iter().all(|c| c.is_finite()) {
+        return;
+    }
     let bw = bounds[2] - bounds[0];
     let bh = bounds[3] - bounds[1];
     let to_px = |x: f64| (x - bounds[0]) / bw * w as f64;
@@ -802,5 +820,150 @@ mod tests {
             }).collect()
         };
         assert_ne!(verts(&a), verts(&b), "displaced interior must alter geometry");
+    }
+
+    // ISO 32000-1 8.7.4.5.5, Table 80: an edge flag of 1 continues the previous
+    // triangle with (vb, vc, new) and a flag of 2 with (va, vc, new). Swapping them
+    // (or reusing the wrong pair) still produces the right NUMBER of triangles, so a
+    // count assertion cannot see it — the mesh just folds back on itself.
+    #[test]
+    fn type4_edge_flags_pick_the_right_previous_vertices() {
+        // Per vertex: flag(8) x(8) y(8) colour(8). Distinct coords identify vertices.
+        let data: Vec<u8> = vec![
+            0, 10, 11, 0, // va
+            0, 20, 21, 0, // vb
+            0, 30, 31, 0, // vc  -> triangle 0 = (va, vb, vc)
+            1, 40, 41, 0, // flag 1 -> (vb, vc, vd)
+            2, 50, 51, 0, // flag 2 -> (vb, vd, ve)  [va of the PREVIOUS triangle is vb]
+        ];
+        let decode = [0.0, 255.0, 0.0, 255.0, 0.0, 1.0];
+        let tris = parse_type4(&data, 8, 8, 8, 1, &decode);
+        assert_eq!(tris.len(), 3);
+        let xy = |v: &Vertex| (v.x as i32, v.y as i32);
+        assert_eq!(
+            (xy(&tris[0].0), xy(&tris[0].1), xy(&tris[0].2)),
+            ((10, 11), (20, 21), (30, 31))
+        );
+        // flag 1: drop the previous triangle's FIRST vertex.
+        assert_eq!(
+            (xy(&tris[1].0), xy(&tris[1].1), xy(&tris[1].2)),
+            ((20, 21), (30, 31), (40, 41))
+        );
+        // flag 2: drop the previous triangle's SECOND vertex.
+        assert_eq!(
+            (xy(&tris[2].0), xy(&tris[2].1), xy(&tris[2].2)),
+            ((20, 21), (40, 41), (50, 51))
+        );
+    }
+
+    // ISO 32000-1 8.7.4.5.7 Table 85: a flag-1 continuation patch inherits the
+    // previous patch's p4..p7 as its own p1..p4 AND its c2,c3 as c1,c2. Getting the
+    // colour half wrong is invisible in the geometry but rotates the gradient inside
+    // every continued patch.
+    #[test]
+    fn coons_continuation_inherits_edge_and_corner_colours() {
+        // Patch 1: flag 0, 12 boundary points, 4 one-component colours.
+        let boundary: [(u8, u8); 12] = [
+            (0, 0), (0, 33), (0, 66), (0, 100),
+            (33, 100), (66, 100), (100, 100),
+            (100, 66), (100, 33), (100, 0),
+            (66, 0), (33, 0),
+        ];
+        let mut data = vec![0u8];
+        for (x, y) in boundary { data.push(x); data.push(y); }
+        data.extend_from_slice(&[10, 20, 30, 40]); // c1..c4
+        // Patch 2: flag 1, 8 new boundary points, 2 new colours (c3, c4).
+        data.push(1);
+        for i in 0..8u8 { data.push(200 + i); data.push(200 + i); }
+        data.extend_from_slice(&[50, 60]);
+
+        let decode = [0.0, 255.0, 0.0, 255.0, 0.0, 255.0];
+        let tris = parse_type6_7(&data, 6, 8, 8, 8, 1, &decode);
+        assert!(!tris.is_empty());
+
+        // The second patch's tessellation starts after the first's (2*8*8 triangles).
+        let per_patch = 2 * 8 * 8;
+        assert_eq!(tris.len(), 2 * per_patch, "two patches tessellated");
+
+        // grid[0][0] of a patch is its C00 corner = p1 with colour c1. For patch 2
+        // that inherits patch 1's p4 = (0,100) and patch 1's c2 = 20.
+        let corner = &tris[per_patch].0;
+        assert_eq!((corner.x as i32, corner.y as i32), (0, 100), "p1 = previous p4");
+        assert!((corner.color[0] - 20.0).abs() < 1e-6, "c1 = previous c2");
+    }
+
+    // A /Decode extent of +/-infinity makes `dmin + (raw/max)*(dmax-dmin)` NaN for
+    // raw == 0. NaN defeats every `< -1e-6` barycentric rejection in `fill_tri` and
+    // the colour cast saturates to 0, so the shading used to paint an OPAQUE BLACK
+    // rectangle over its whole area and hide the page content beneath it.
+    #[test]
+    fn non_finite_geometry_paints_nothing_rather_than_a_black_rectangle() {
+        let inf_decode = [f64::NEG_INFINITY, f64::INFINITY, 0.0, 255.0, 0.0, 1.0];
+        let data: Vec<u8> = vec![
+            0, 0, 0, 0,
+            0, 255, 0, 255,
+            0, 0, 255, 128,
+        ];
+        let tris = parse_type4(&data, 8, 8, 8, 1, &inf_decode);
+        assert_eq!(tris.len(), 1);
+        assert!(tris[0].0.x.is_nan(), "the NaN this guards against is reachable");
+
+        let (w, h) = (16usize, 16usize);
+        let mut rgba = vec![0u8; w * h * 4];
+        let (v0, v1, v2) = &tris[0];
+        fill_tri(&mut rgba, w, h, &[0.0, 0.0, 1.0, 1.0], (v0, v1, v2), (0xFF00_0000, 0xFF00_0000, 0xFF00_0000));
+        assert!(
+            rgba.chunks(4).all(|px| px[3] == 0),
+            "a triangle with non-finite vertices must leave every pixel transparent"
+        );
+    }
+
+    // `rasterize_shading_mesh` returning None (rather than an all-transparent raster)
+    // for a mesh it cannot parse is load-bearing beyond this file: images.rs now
+    // applies a /Background post-pass over every alpha-0 pixel of whatever raster it
+    // gets back, so an empty raster would be flooded edge to edge with the background
+    // colour and become the opaque rectangle over page content that the no-triangles
+    // branch exists to prevent. Table 78 scopes /Background to the area outside the
+    // shading's bounds, and an unparseable mesh has no known bounds.
+    #[test]
+    fn unparseable_mesh_returns_none_rather_than_an_empty_raster() {
+        let doc = Document::with_version("1.7");
+        let dict = dictionary! {
+            "ShadingType" => 4,
+            "ColorSpace" => "DeviceRGB",
+            "BitsPerCoordinate" => 8,
+            "BitsPerComponent" => 8,
+            "BitsPerFlag" => 8,
+            "Decode" => vec![0.into(), 255.into(), 0.into(), 255.into(),
+                             0.into(), 1.into(), 0.into(), 1.into(), 0.into(), 1.into()],
+        };
+        // Two vertices' worth of bytes: enough to decode, never enough for a triangle.
+        let truncated = vec![0u8; 12];
+        assert!(
+            rasterize_shading_mesh(&doc, &dict, Some(&truncated), &IDENTITY, &HashMap::new(), 64)
+                .is_none(),
+            "a mesh that yields no triangles must produce no raster at all"
+        );
+        // And a non-finite /Decode extent, which makes every vertex NaN.
+        let inf_dict = dictionary! {
+            "ShadingType" => 4,
+            "ColorSpace" => "DeviceRGB",
+            "BitsPerCoordinate" => 8,
+            "BitsPerComponent" => 8,
+            "BitsPerFlag" => 8,
+            "Decode" => vec![Object::Real(f32::NEG_INFINITY), Object::Real(f32::INFINITY),
+                             0.into(), 255.into(),
+                             0.into(), 1.into(), 0.into(), 1.into(), 0.into(), 1.into()],
+        };
+        let three_verts: Vec<u8> = vec![
+            0, 0, 0, 255, 0, 0,
+            0, 255, 0, 0, 255, 0,
+            0, 0, 255, 0, 0, 255,
+        ];
+        assert!(
+            rasterize_shading_mesh(&doc, &inf_dict, Some(&three_verts), &IDENTITY, &HashMap::new(), 64)
+                .is_none(),
+            "an infinite /Decode extent must be refused, not rasterized as NaN geometry"
+        );
     }
 }

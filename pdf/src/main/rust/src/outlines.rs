@@ -73,6 +73,26 @@ impl ContourBuilder {
 
     fn flush(&mut self) {
         if self.cur.len() >= 3 {
+            // Close the contour explicitly. A glyph contour is closed by
+            // definition in every format here (TrueType, CFF and Type 1), and
+            // this renderer represents closure as a duplicated first point —
+            // `interpret.rs`'s `h` operator pushes the subpath's start point for
+            // exactly this reason, and `Prim::Stroke` carries no closed flag.
+            // Without it a stroked glyph (Tr 1/2) is drawn as an OPEN polyline, so
+            // every contour is missing its final edge: outlined text shows a notch
+            // in each letter and each counter. Fills are unaffected either way,
+            // which is why this only ever showed up in stroke modes.
+            //
+            // NOTE (seam probe, this round): reverting this breaks ONLY tests in
+            // this crate's font files. Nothing in `draw.rs` or the golden suite
+            // notices that glyph contours arrive unclosed, so the contract with
+            // `Prim::Stroke` is witnessed here and nowhere downstream.
+            let first = self.cur[0];
+            if let Some(&last) = self.cur.last() {
+                if (last.0 - first.0).abs() > 1e-9 || (last.1 - first.1).abs() > 1e-9 {
+                    self.cur.push(first);
+                }
+            }
             self.contours.push(std::mem::take(&mut self.cur));
         } else {
             self.cur.clear();
@@ -199,12 +219,20 @@ pub(crate) fn glyph_outline(fi: &FontInfo, code: u32) -> Option<GlyphContours> {
     let program = fi.glyph_program.as_deref()?;
     match program {
         GlyphProgram::Type1(t1) => {
-            let name = fi
+            // PDF 32000-1 9.6.6.2 order: /Differences and a named base encoding
+            // (both already folded into `glyph_names`) outrank the program's own
+            // built-in /Encoding, which is consulted next.
+            //
+            // A base-encoding name the program does not actually define falls
+            // THROUGH to the built-in rather than giving up: the base encoding
+            // says what the code means, the built-in says what this particular
+            // subset calls it, and dropping to the substitute face when the two
+            // disagree would lose an outline the font does contain.
+            let contours = fi
                 .glyph_names
                 .get(&code)
-                .cloned()
-                .or_else(|| t1.encoding.get(&code).cloned())?;
-            let contours = t1.glyphs.get(&name)?;
+                .and_then(|n| t1.glyphs.get(n))
+                .or_else(|| t1.encoding.get(&code).and_then(|n| t1.glyphs.get(n)))?;
             if contours.is_empty() {
                 return None;
             }
@@ -407,4 +435,122 @@ pub(crate) fn encoding_differences(doc: &lopdf::Document, font: &lopdf::Dictiona
         }
     }
     names
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::fonts::{FontInfo, FontStyle};
+    use std::sync::Arc;
+
+    fn square() -> Vec<Vec<(f64, f64)>> {
+        vec![vec![(0.0, 0.0), (100.0, 0.0), (100.0, 100.0), (0.0, 100.0)]]
+    }
+
+    fn triangle() -> Vec<Vec<(f64, f64)>> {
+        vec![vec![(0.0, 0.0), (50.0, 0.0), (25.0, 80.0)]]
+    }
+
+    fn type1_font_info(
+        glyphs: &[(&str, Vec<Vec<(f64, f64)>>)],
+        builtin: &[(u32, &str)],
+        names: &[(u32, &str)],
+    ) -> FontInfo {
+        let t1 = Type1Font {
+            glyphs: glyphs.iter().map(|(n, c)| ((*n).to_string(), c.clone())).collect(),
+            encoding: builtin.iter().map(|(c, n)| (*c, (*n).to_string())).collect(),
+            font_matrix: [0.001, 0.0, 0.0, 0.001, 0.0, 0.0],
+        };
+        FontInfo {
+            two_byte: false,
+            wmode: 0,
+            vertical_metrics: Arc::default(),
+            default_vertical: (0.880, -1.0),
+            cid_to_gid: None,
+            to_unicode: None,
+            encoding: Arc::default(),
+            cmap_uni: Arc::default(),
+            cmap: None,
+            widths: Arc::default(),
+            default_width: 0.5,
+            t3: None,
+            style: FontStyle::default(),
+            family: 0,
+            base_font: String::new(),
+            glyph_program: Some(Arc::new(GlyphProgram::Type1(t1))),
+            glyph_names: Arc::new(names.iter().map(|(c, n)| (*c, (*n).to_string())).collect()),
+        }
+    }
+
+    // A glyph contour is closed by definition, and this renderer represents
+    // closure as a duplicated first point (`interpret.rs`'s `h` does the same) —
+    // `Prim::Stroke` has no closed flag. Without the duplicate a stroked glyph
+    // (Tr 1/2) is an OPEN polyline missing its final edge, so outlined text shows
+    // a notch in every letter and every counter.
+    #[test]
+    fn contours_are_explicitly_closed() {
+        let mut cb = ContourBuilder::new();
+        cb.move_to(0.0, 0.0);
+        cb.line_to(100.0, 0.0);
+        cb.line_to(100.0, 100.0);
+        cb.close();
+        let contours = cb.finish();
+        assert_eq!(contours.len(), 1);
+        assert_eq!(contours[0].first(), contours[0].last(), "first point repeated at the end");
+        assert_eq!(contours[0].len(), 4);
+    }
+
+    // …but a contour the font already closed must not gain a zero-length segment,
+    // which the stroker would render as a cap-shaped blob at the seam.
+    #[test]
+    fn an_already_closed_contour_is_not_double_closed() {
+        let mut cb = ContourBuilder::new();
+        cb.move_to(0.0, 0.0);
+        cb.line_to(100.0, 0.0);
+        cb.line_to(100.0, 100.0);
+        cb.line_to(0.0, 0.0);
+        cb.close();
+        let contours = cb.finish();
+        assert_eq!(contours[0].len(), 4, "no duplicate closing point added");
+    }
+
+    // PDF 32000-1 9.6.6.2: a base encoding named by /Encoding outranks the font
+    // program's own built-in encoding. Code 233 is "eacute" in WinAnsi and
+    // "Oslash" in StandardEncoding, so a Type 1 font carrying the usual built-in
+    // StandardEncoding used with /WinAnsiEncoding drew Ø for é — the wrong glyph,
+    // silently, with no missing-text symptom to notice.
+    #[test]
+    fn a_named_base_encoding_outranks_the_programs_built_in_one() {
+        let fi = type1_font_info(
+            &[("eacute", square()), ("Oslash", triangle())],
+            &[(233, "Oslash")],
+            &[(233, "eacute")],
+        );
+        let (contours, _) = glyph_outline(&fi, 233).expect("outline");
+        assert_eq!(contours, square(), "must draw eacute, not the built-in Oslash");
+    }
+
+    // …but a base-encoding name the program does not define must fall THROUGH to
+    // the built-in rather than to the substitute face. A subset that renamed its
+    // glyphs still holds the right outline, and reporting None here would replace
+    // a correct embedded glyph with a system font.
+    #[test]
+    fn an_undefined_base_encoding_name_falls_back_to_the_built_in() {
+        let fi = type1_font_info(
+            &[("uni00E9", square())],
+            &[(233, "uni00E9")],
+            &[(233, "eacute")],
+        );
+        let (contours, _) = glyph_outline(&fi, 233).expect("outline");
+        assert_eq!(contours, square());
+    }
+
+    // With no /Differences and no named base encoding, `glyph_names` is empty and
+    // the built-in encoding is the whole answer (9.6.6.2's next step).
+    #[test]
+    fn the_built_in_encoding_is_used_when_nothing_outranks_it() {
+        let fi = type1_font_info(&[("A", square())], &[(65, "A")], &[]);
+        assert!(glyph_outline(&fi, 65).is_some());
+        assert!(glyph_outline(&fi, 66).is_none(), "unmapped code substitutes");
+    }
 }

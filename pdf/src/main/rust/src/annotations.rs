@@ -1,8 +1,14 @@
 use crate::*;
 
-/// The matrix mapping an appearance stream's form space to page space, fitting
-/// the (Matrix-transformed) `/BBox` into the annotation `/Rect` (PDF 12.5.5).
-pub(crate) fn appearance_matrix(rect: [f64; 4], bbox: [f64; 4], matrix: Mat) -> Mat {
+/// The §12.5.5 appearance algorithm's matrix **A**: it maps the `/Matrix`-
+/// transformed `/BBox` onto the annotation `/Rect`, and does NOT itself include
+/// `/Matrix`.
+///
+/// This is the matrix to concatenate before invoking the appearance with `Do`,
+/// because §8.10.2 makes `Do` concatenate the form's own `/Matrix` with the CTM.
+/// Using the full `AA` there applies `/Matrix` twice. Callers that play the
+/// appearance's operators directly want `appearance_matrix` instead.
+pub(crate) fn appearance_fit_matrix(rect: [f64; 4], bbox: [f64; 4], matrix: Mat) -> Mat {
     let corners = [
         (bbox[0], bbox[1]),
         (bbox[2], bbox[1]),
@@ -28,8 +34,17 @@ pub(crate) fn appearance_matrix(rect: [f64; 4], bbox: [f64; 4], matrix: Mat) -> 
     let bh = ty1 - ty0;
     let sx = if bw.abs() > 1e-6 { (rx1 - rx0) / bw } else { 1.0 };
     let sy = if bh.abs() > 1e-6 { (ry1 - ry0) / bh } else { 1.0 };
-    let fit = [sx, 0.0, 0.0, sy, rx0 - sx * tx0, ry0 - sy * ty0];
-    mat_mul(&matrix, &fit)
+    [sx, 0.0, 0.0, sy, rx0 - sx * tx0, ry0 - sy * ty0]
+}
+
+/// The §12.5.5 appearance algorithm's matrix **AA** = `Matrix` × **A**: maps the
+/// appearance stream's form space straight to page space.
+///
+/// For a caller that interprets the appearance's operator list itself (which
+/// therefore never sees a `Do` to apply `/Matrix` for it). A caller that emits
+/// `Do` must use `appearance_fit_matrix`.
+pub(crate) fn appearance_matrix(rect: [f64; 4], bbox: [f64; 4], matrix: Mat) -> Mat {
+    mat_mul(&matrix, &appearance_fit_matrix(rect, bbox, matrix))
 }
 
 /// Whether an annotation should be painted on screen. Shared by the renderer and
@@ -390,6 +405,18 @@ pub(crate) fn synthesize_annotation_appearance(
     let stroke = markup_color(doc, dict, b"C");
     let fill = markup_color(doc, dict, b"IC");
     let bw = annot_border_width(doc, dict);
+    // §12.5.4 Table 166: "/W ... the border width in points. If this value is 0,
+    // no border shall be drawn." `gs.line_width` floors at 0.5, so a shape whose
+    // file says W=0 would otherwise come out ringed in a hairline it never asked
+    // for — most visibly around a filled Square/Circle, which is exactly how
+    // this codebase's own `set_shape_border` marks a filled shape.
+    //
+    // Applied only to the two shapes that have a spec-defined interior (/IC), so
+    // suppressing the border still leaves the annotation's content. For Line,
+    // PolyLine and Ink the stroke IS the whole annotation, and dropping it on a
+    // producer that wrote W=0 by accident would erase the annotation outright,
+    // which is the larger risk of the two.
+    let has_border = bw > 0.0;
     let dev = |x: f64, y: f64| -> (f64, f64) { transform(base, x, y) };
     // Device half-width for strokes (approx via base scale).
     let scale = ((base[0]*base[0]+base[1]*base[1]).sqrt() + (base[2]*base[2]+base[3]*base[3]).sqrt()) / 2.0;
@@ -414,7 +441,7 @@ pub(crate) fn synthesize_annotation_appearance(
         b"Square" => {
             let poly = vec![dev(rect[0],rect[1]), dev(rect[2],rect[1]), dev(rect[2],rect[3]), dev(rect[0],rect[3])];
             if let Some(f) = fill { emit_fill(prims, std::slice::from_ref(&poly), apply_alpha_to_argb(f, ca), false, 1.0, BlendMode::Normal); }
-            if let Some(s) = stroke {
+            if let Some(s) = stroke.filter(|_| has_border) {
                 let mut ring = poly.clone(); ring.push(poly[0]);
                 let mut sgs = gs.clone(); sgs.stroke = s;
                 let d = annot_border_dash(doc, dict);
@@ -431,7 +458,7 @@ pub(crate) fn synthesize_annotation_appearance(
                 dev(cx + rx*t.cos(), cy + ry*t.sin())
             }).collect();
             if let Some(f) = fill { emit_fill(prims, std::slice::from_ref(&poly), apply_alpha_to_argb(f, ca), false, 1.0, BlendMode::Normal); }
-            if let Some(s) = stroke {
+            if let Some(s) = stroke.filter(|_| has_border) {
                 let mut ring = poly.clone(); ring.push(poly[0]);
                 let mut sgs = gs.clone(); sgs.stroke = s;
                 let d = annot_border_dash(doc, dict);
@@ -659,12 +686,16 @@ pub(crate) fn synthesize_annotation_appearance(
         b"Redact" => {
             // §12.5.6.24: a redaction is not applied until apply_redactions runs,
             // so before that the annotation only MARKS the region. Outline it in
-            // /C (default red) and fill only if /IC is present — a wash over the
-            // region would obscure the very text the user needs to read.
+            // /C (default red) and draw no interior at all.
+            //
+            // /IC is deliberately NOT painted here. Table 187 defines it as "the
+            // interior colour with which to fill the redacted region AFTER the
+            // affected content has been removed" — it is the post-application
+            // art, alongside /RO and /OverlayText. Filling with it while the
+            // content is still there hides the very text the user has to read to
+            // check the mark, which is the same "wash over the page" failure the
+            // rest of this function exists to avoid.
             let poly = vec![dev(rect[0],rect[1]), dev(rect[2],rect[1]), dev(rect[2],rect[3]), dev(rect[0],rect[3])];
-            if let Some(f) = fill {
-                emit_fill(prims, std::slice::from_ref(&poly), apply_alpha_to_argb(f, ca), false, 1.0, BlendMode::Normal);
-            }
             let mut ring = poly.clone(); ring.push(poly[0]);
             let mut sgs = gs.clone();
             sgs.stroke = stroke.unwrap_or(0xFFFF_0000);
@@ -1666,9 +1697,46 @@ pub(crate) fn update_free_text(handle: i64, annot_id: i64, text: &str) -> bool {
             .unwrap_or(12.0);
         (rect, argb, size)
     };
-    let (w, h) = (rect[2] - rect[0], rect[3] - rect[1]);
+    // The regenerated appearance must keep the orientation the annotation was
+    // authored with. On a /Rotate 90/180/270 page `add_free_text` lays the text
+    // out in DISPLAY orientation and carries it back into raw page space with
+    // the form's `/Matrix` (§12.5.5, see `display_orientation`). Re-authoring
+    // with an identity `/Matrix` and the raw `/Rect` extents put the edited text
+    // sideways relative to the reader, and squashed it as well, because
+    // §12.5.5 fits the /Matrix-transformed /BBox onto /Rect and a BBox whose
+    // axes no longer line up with /Rect gets scaled to fit. Reusing the existing
+    // stream's /BBox extents and /Matrix reproduces exactly what created it, and
+    // is a strict no-op at /Rotate 0.
+    let (w, h, apm) = {
+        let existing = doc
+            .get_dictionary(id)
+            .ok()
+            .and_then(|d| d.get(b"AP").ok())
+            .and_then(|o| deref(doc, o))
+            .and_then(|o| o.as_dict().ok())
+            .and_then(|ap| ap.get(b"N").ok())
+            .and_then(|o| deref(doc, o))
+            .and_then(|o| o.as_stream().ok());
+        let fallback = (rect[2] - rect[0], rect[3] - rect[1]);
+        match existing {
+            Some(s) => {
+                let m = s.dict.get(b"Matrix").ok().and_then(read_matrix_obj).unwrap_or(IDENTITY);
+                let (bw, bh) = s
+                    .dict
+                    .get(b"BBox")
+                    .ok()
+                    .and_then(|o| read_rect(doc, o))
+                    .map(normalize_rect)
+                    .filter(|b| b[2] - b[0] > 0.0 && b[3] - b[1] > 0.0)
+                    .map(|b| (b[2] - b[0], b[3] - b[1]))
+                    .unwrap_or(fallback);
+                (bw, bh, m)
+            }
+            None => (fallback.0, fallback.1, IDENTITY),
+        }
+    };
     let content = free_text_content(w, h, text, argb, size);
-    let ap_id = make_appearance(doc, w, h, content, helvetica_resources());
+    let ap_id = make_appearance_oriented(doc, w, h, content, helvetica_resources(), apm);
     if let Ok(dict) = doc.get_dictionary_mut(id) {
         dict.set("Contents", Object::string_literal(text));
         let mut ap = Dictionary::new();
@@ -2290,6 +2358,173 @@ mod synthesis_tests {
         }
         // /Rotate 0 must be a strict no-op.
         assert_eq!(display_orientation(0, dw, dh), (dw, dh, IDENTITY));
+    }
+
+    /// §12.5.5 computes the appearance placement as `AA = Matrix × A`, where
+    /// `AA` maps form space straight to page space. A caller that emits
+    /// `cm ... Do` must NOT use `AA`: §8.10.2 makes `Do` concatenate the form's
+    /// own `/Matrix` for it, so `AA` there applies `/Matrix` twice. This pins
+    /// `appearance_fit_matrix` as `A` and shows that the doubled form escapes the
+    /// `/Rect` entirely, which is what `flatten_document` used to bake in.
+    #[test]
+    fn the_fit_matrix_omits_the_form_matrix_that_do_reapplies() {
+        let (dw, dh) = (160.0_f64, 40.0_f64);
+        let bbox = [0.0, 0.0, dw, dh];
+        for rot in [0i64, 90, 180, 270] {
+            let (_, _, apm) = display_orientation(rot, dw, dh);
+            let rect = match rot {
+                90 | 270 => [10.0, 20.0, 10.0 + dh, 20.0 + dw],
+                _ => [10.0, 20.0, 10.0 + dw, 20.0 + dh],
+            };
+            let aa = appearance_matrix(rect, bbox, apm);
+            let a = appearance_fit_matrix(rect, bbox, apm);
+            // What the interpreter's `Do` arm actually builds from a `cm A`.
+            let via_do = mat_mul(&apm, &a);
+            for i in 0..6 {
+                assert!(
+                    (via_do[i] - aa[i]).abs() < 1e-9,
+                    "rot={rot}: `cm A ... Do` must land on AA, element {i}"
+                );
+            }
+            if rot == 0 {
+                assert_eq!(a, aa, "identity /Matrix: A and AA coincide");
+                continue;
+            }
+            // Emitting AA in the `cm` instead: `Do` rotates a second time and the
+            // appearance leaves its own /Rect.
+            let doubled = mat_mul(&apm, &aa);
+            let (px, py) = transform(&doubled, dw, dh);
+            assert!(
+                px < rect[0] - 1e-6 || px > rect[2] + 1e-6 || py < rect[1] - 1e-6 || py > rect[3] + 1e-6,
+                "rot={rot}: doubling /Matrix should have escaped {rect:?}, got ({px},{py})"
+            );
+        }
+    }
+
+    /// §12.5.6.24 Table 187: `/IC` is "the interior colour with which to fill the
+    /// redacted region AFTER the affected content has been removed". Painting it
+    /// while the content is still there is a wash over the very text the user has
+    /// to read to check the mark. Only the outline may be synthesized.
+    #[test]
+    fn a_pending_redaction_marks_the_region_without_covering_it() {
+        let mut d = annot("Redact");
+        d.set("IC", Object::Array(vec![0.into(), 0.into(), 0.into()]));
+        d.set("C", Object::Array(vec![1.into(), 0.into(), 0.into()]));
+        let prims = synth(&d, [0.0, 0.0, 60.0, 40.0]);
+        assert!(
+            !prims.iter().any(|p| matches!(p, Prim::Fill { .. })),
+            "a pending redaction must not fill its region: {:?}",
+            kinds(&prims)
+        );
+        assert_eq!(
+            prims.iter().filter(|p| matches!(p, Prim::Stroke { .. })).count(),
+            1,
+            "the region must still be outlined: {:?}",
+            kinds(&prims)
+        );
+    }
+
+    /// §12.5.4 Table 166: "/W ... If this value is 0, no border shall be drawn."
+    /// The synthesized stroke floors its line width at 0.5, so without an explicit
+    /// check a filled Square or Circle came out ringed in a hairline outline the
+    /// file expressly asked not to have — and `set_shape_border` in this very file
+    /// writes `W 0` for every filled shape it authors.
+    #[test]
+    fn a_zero_border_width_draws_no_border() {
+        for subtype in ["Square", "Circle"] {
+            let mut d = annot(subtype);
+            d.set("C", Object::Array(vec![1.into(), 0.into(), 0.into()]));
+            d.set("IC", Object::Array(vec![0.into(), 0.into(), 1.into()]));
+            d.set("BS", dictionary! { "W" => 0 });
+            let prims = synth(&d, [0.0, 0.0, 60.0, 40.0]);
+            assert!(
+                !prims.iter().any(|p| matches!(p, Prim::Stroke { .. })),
+                "{subtype} with /BS /W 0 drew a border: {:?}",
+                kinds(&prims)
+            );
+            assert!(
+                prims.iter().any(|p| matches!(p, Prim::Fill { .. })),
+                "{subtype}: the /IC interior must still paint"
+            );
+            // A width the file did not suppress still strokes.
+            d.set("BS", dictionary! { "W" => 2 });
+            assert!(
+                synth(&d, [0.0, 0.0, 60.0, 40.0])
+                    .iter()
+                    .any(|p| matches!(p, Prim::Stroke { .. })),
+                "{subtype}: a nonzero /W must still draw"
+            );
+        }
+    }
+
+    /// Editing a FreeText's text must not re-orient it. On a rotated page
+    /// `add_free_text` authors the appearance in DISPLAY orientation and carries
+    /// it back with the form's `/Matrix` (§12.5.5); regenerating with an identity
+    /// `/Matrix` and the raw `/Rect` extents laid the edited text sideways, and
+    /// squashed it because §12.5.5 scales the transformed /BBox to fit /Rect.
+    #[test]
+    fn editing_free_text_preserves_the_appearance_orientation() {
+        for rot in [0i64, 90, 180, 270] {
+            let mut doc = Document::with_version("1.7");
+            let pages_id = doc.new_object_id();
+            let page = doc.add_object(dictionary! {
+                "Type" => name_obj("Page"),
+                "Parent" => Object::Reference(pages_id),
+                "MediaBox" => rect_obj([0.0, 0.0, 612.0, 792.0]),
+                "Rotate" => Object::Integer(rot),
+            });
+            doc.objects.insert(
+                pages_id,
+                Object::Dictionary(dictionary! {
+                    "Type" => name_obj("Pages"),
+                    "Kids" => Object::Array(vec![Object::Reference(page)]),
+                    "Count" => 1,
+                }),
+            );
+            let cat = doc.add_object(dictionary! {
+                "Type" => name_obj("Catalog"),
+                "Pages" => Object::Reference(pages_id),
+            });
+            doc.trailer.set("Root", cat);
+            let handle = next_handle();
+            registry().lock().unwrap_or_else(|e| e.into_inner()).insert(handle, doc);
+
+            let aid = add_free_text(handle, 0, [40.0, 60.0, 200.0, 100.0], 0xFF00_0000, 12.0, "before")
+                .expect("annotation added");
+            let before = ap_box(handle, aid);
+            assert!(update_free_text(handle, aid, "after"), "rot={rot}: update failed");
+            let after = ap_box(handle, aid);
+            assert_eq!(after, before, "rot={rot}: the appearance box/matrix changed");
+            close_document(handle);
+        }
+    }
+
+    /// The `/AP /N` stream's `/BBox` extents and `/Matrix`, rounded so the f32
+    /// round-trip through `Object::Real` compares cleanly.
+    fn ap_box(handle: i64, annot_id: i64) -> ([i64; 2], [i64; 6]) {
+        let reg = registry().lock().unwrap_or_else(|e| e.into_inner());
+        let doc = reg.get(&handle).expect("handle is registered");
+        let dict = doc.get_dictionary(decode_id(annot_id)).expect("annot");
+        let ap = dict
+            .get(b"AP")
+            .ok()
+            .and_then(|o| deref(doc, o))
+            .and_then(|o| o.as_dict().ok())
+            .and_then(|d| d.get(b"N").ok())
+            .and_then(|o| deref(doc, o))
+            .and_then(|o| o.as_stream().ok())
+            .expect("/AP /N stream");
+        let bb = normalize_rect(
+            ap.dict.get(b"BBox").ok().and_then(|o| read_rect(doc, o)).expect("/BBox"),
+        );
+        let m = ap.dict.get(b"Matrix").ok().and_then(read_matrix_obj).unwrap_or(IDENTITY);
+        (
+            [(bb[2] - bb[0]).round() as i64, (bb[3] - bb[1]).round() as i64],
+            [
+                m[0].round() as i64, m[1].round() as i64, m[2].round() as i64,
+                m[3].round() as i64, m[4].round() as i64, m[5].round() as i64,
+            ],
+        )
     }
 
     #[test]
