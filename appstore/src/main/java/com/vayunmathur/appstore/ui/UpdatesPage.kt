@@ -138,11 +138,20 @@ fun UpdatesScreen(
                     }
                     items(state.updates, key = { it.packageName }) { app ->
                         val stage = state.stages[app.packageName]
+                        val installed = state.installedInfos[app.packageName]
+                        val versionLabel = installed?.let { info ->
+                            val old = info.versionName?.let { "$it (${info.versionCode})" }
+                                ?: info.versionCode.toString()
+                            val new = app.versionName?.let { "$it (${app.versionCode})" }
+                                ?: app.versionCode.toString()
+                            stringResource(R.string.version_update, old, new)
+                        }
                         AppRow(
                             app = app,
                             isInstalled = true,
                             stage = stage,
                             installedIcon = state.installedIcons[app.packageName],
+                            versionLabel = versionLabel,
                             onClick = { onAppClick(app) },
                             trailing = {
                                 Button(

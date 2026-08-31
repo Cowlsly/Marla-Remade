@@ -253,6 +253,7 @@ class AppStoreViewModel(
         UpdatesUiState(
             updates = list,
             installedIcons = rows.icons,
+            installedInfos = rows.installed.associateBy { it.packageName },
             stages = rows.stages,
             isChecking = checking,
             lastCheckedAt = checkedAt,

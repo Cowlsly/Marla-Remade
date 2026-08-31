@@ -122,6 +122,8 @@
     <string name="fact_size">Size</string>
     <string name="fact_rated">Rated</string>
     <string name="fact_version">Version</string>
+    <!-- Updates list: shows the currently-installed version and the new one, e.g. "1.2 (3) → 1.3 (4)" -->
+    <string name="version_update">%1$s → %2$s</string>
     <string name="detail_whats_new">What\'s new</string>
     <string name="detail_package">Package</string>
     <string name="detail_license">License</string>

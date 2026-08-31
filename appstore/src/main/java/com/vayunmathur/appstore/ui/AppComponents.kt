@@ -150,6 +150,7 @@ fun AppRow(
     isInstalled: Boolean = false,
     stage: InstallStage? = null,
     installedIcon: Drawable? = null,
+    versionLabel: String? = null,
     onClick: () -> Unit = {},
     trailing: @Composable (() -> Unit)? = null,
 ) {
@@ -190,6 +191,16 @@ fun AppRow(
                     if (isInstalled) {
                         IconCheck(Modifier.size(12.dp), tint = MaterialTheme.colorScheme.primary)
                     }
+                }
+                if (versionLabel != null) {
+                    Text(
+                        versionLabel,
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.padding(top = 2.dp),
+                    )
                 }
             }
             if (trailing != null) {

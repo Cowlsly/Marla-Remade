@@ -99,6 +99,8 @@ data class AppDetailUiState(
 data class UpdatesUiState(
     val updates: List<UnifiedApp> = emptyList(),
     val installedIcons: Map<String, Drawable> = emptyMap(),
+    /** Currently-installed info per package, so the row can show old → new versions. */
+    val installedInfos: Map<String, InstalledInfo> = emptyMap(),
     val stages: Map<String, InstallStage> = emptyMap(),
     val isChecking: Boolean = false,
     /** ms since epoch of the last completed check, 0 if never. */
