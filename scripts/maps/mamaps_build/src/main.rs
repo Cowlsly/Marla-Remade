@@ -37,6 +37,7 @@ mod shapefile;
 mod schema;
 mod store;
 mod tiler;
+mod tilespill;
 
 /// The allocator, replaced because the default one was three quarters of the build.
 ///
@@ -273,7 +274,14 @@ fn run(
         derive_build_id(input, layers, min_zoom, max_zoom, simplification, stats.features)
     });
 
-    let settings = tiler::Settings { min_zoom, max_zoom, simplification, build_id };
+    let settings = tiler::Settings {
+        min_zoom,
+        max_zoom,
+        simplification,
+        build_id,
+        // Beside the archive, as the feature spill is. One zoom at a time, removed as each finishes.
+        scratch: scratch_path(out),
+    };
     let (bytes, per_zoom) = tiler::build(&store, &settings).map_err(|e| e.to_string())?;
     tiler::check_not_empty(&per_zoom).map_err(|e| e.to_string())?;
     std::fs::write(out, &bytes).map_err(|e| format!("cannot write {}: {e}", out.display()))?;
@@ -330,6 +338,27 @@ fn run(
         );
     }
     let (stage_c, serialize, deflate) = tiler::encode_seconds();
+    // How close the archive came to the 65,535-feature cap on one tile-layer. Printed rather than
+    // asserted because the answer is what decides whether the field has to widen, and widening it is
+    // a `FORMAT_VERSION` bump and a matching renderer change.
+    let widest = tiler::widest_layers();
+    if !widest.is_empty() {
+        let dict = tilecodec::mamaps::dict::Dictionary::schema();
+        let worst = widest.iter().map(|(_, n)| *n).max().unwrap_or(0);
+        let named: Vec<String> = widest
+            .iter()
+            .map(|(id, n)| {
+                let name = dict.layer_name(*id).unwrap_or("?");
+                format!("{name} {n}")
+            })
+            .collect();
+        println!(
+            "       widest tile-layer: {} (cap {}, {:.0}% used)",
+            named.join(", "),
+            u16::MAX,
+            worst as f64 / u16::MAX as f64 * 100.0,
+        );
+    }
     println!(
         "total  map {:.1}s (of which {:.1}s deserialising the spill, on one thread)  merge {:.1}s  encode {:.1}s  append {:.1}s   ({:.0}% of tiling is serial)",
         map as f64 / 1000.0,
@@ -362,6 +391,17 @@ fn run(
         println!("report {}", path.display());
     }
     Ok(())
+}
+
+/// Where the tiler parks one zoom's chunks while it merges them.
+///
+/// Beside the archive, as `<out>.tilechunks`, matching where the feature spill is placed. Appended
+/// to the whole file name rather than replacing an extension, so `world.mamaps` and `world.tmp`
+/// cannot collide on one path.
+fn scratch_path(out: &std::path::Path) -> PathBuf {
+    let mut p = out.as_os_str().to_owned();
+    p.push(".tilechunks");
+    PathBuf::from(p)
 }
 
 /// Hash the inputs that decide what an archive contains.

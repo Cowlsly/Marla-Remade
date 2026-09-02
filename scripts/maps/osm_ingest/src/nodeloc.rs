@@ -132,8 +132,8 @@ static NEXT_LOCS: atomic::AtomicU64 = atomic::AtomicU64::new(0);
 
 /// Ids per block of [`IdIndex`].
 ///
-/// The trade is the usual one: a larger block amortises its 12 bytes of base and offset over more
-/// ids, and lengthens the scan that follows the binary search. 64 puts the overhead at 0.19 bytes per
+/// The trade is the usual one: a larger block amortises its 16 bytes of base and offset over more
+/// ids, and lengthens the scan that follows the binary search. 64 puts the overhead at 0.25 bytes per
 /// id and keeps the worst-case scan inside a couple of cache lines.
 const BLOCK: usize = 64;
 
@@ -141,65 +141,78 @@ const BLOCK: usize = 64;
 ///
 /// Searchable through `&self` alone, because [`resolve_nodes`] hands it to every worker in a PBF pass
 /// while the sink writes coordinates.
+///
+/// # The next step, if the node pass is still hot
+///
+/// A rank-select bitset over the node id space would make [`IdIndex::find`] `O(1)` instead of a
+/// binary search plus a varint scan, and would cut a planet index from ~12.9 GB to ~2 GB -- because
+/// its size follows the id *space*, which is bounded, rather than the id *count*. It is attractive
+/// and it is not here, because it is a second index implementation to maintain and the caller-side
+/// bitset in `mamaps_build`'s `extract` already removed the blocker that prompted it. Revisit if the
+/// node pass is measured hot after that.
 #[derive(Default)]
 struct IdIndex {
     /// The first id of each block, ascending. What the binary search runs over.
     bases: Vec<i64>,
     /// Where each block's gaps start in `deltas`, with a sentinel so `offsets[b + 1]` is always the
     /// end of block `b`.
-    offsets: Vec<u32>,
+    ///
+    /// `u64`, not `u32`. It was `u32` behind a guard that errored when `deltas` outgrew 4.29 GB, and
+    /// at ~1.1 bytes per id that guard fires at roughly 3.9 G ids -- reached by a planet extract's
+    /// 9.5 G. Widening costs 4 bytes per block of 64 ids, which is 2.38 GB against 1.19 GB at planet
+    /// scale and noise against what the bitset in [`crate::extract`]'s caller saves.
+    offsets: Vec<u64>,
     /// `BLOCK - 1` varint gaps per block, each the difference from the previous id.
     deltas: Vec<u8>,
     len: usize,
 }
 
-/// One `offsets` entry, or an error when `deltas` has outgrown a `u32`.
-fn offset(at: usize) -> Result<u32> {
-    u32::try_from(at).map_err(|_| {
-        Error(format!("an id index's delta bytes ({at}) are past the {} it can address", u32::MAX))
-    })
-}
-
 impl IdIndex {
     /// Build from ids that are already sorted and unique.
     ///
-    /// Errors rather than truncates on the two `u32` fields, because both are within reach at planet
-    /// scale and both fail silently: a truncated `offsets` entry sends [`IdIndex::find`] scanning
-    /// from the wrong place in `deltas`, and a truncated position sends a coordinate to the wrong
-    /// node. Neither produces a wrong-looking value -- they produce a plausible one, which is worse.
-    /// `deltas` runs about 1.1 bytes per id, so the 4.29 GB ceiling is roughly 3.9 G ids away; the
-    /// crate's README already flags exactly this class of bug for `road_graph`.
-    fn build(ids: &[i64]) -> Result<IdIndex> {
-        // A position is returned as a `u32` by `find`, so the id count is capped by that and not by
-        // the delta bytes.
-        if ids.len() > u32::MAX as usize {
-            return Err(Error(format!(
-                "{} node ids is past the {} an id index can address",
-                ids.len(),
-                u32::MAX,
-            )));
-        }
-        let blocks = ids.len().div_ceil(BLOCK);
+    /// Infallible, and it was not. Two guards used to live here, one on the id count and one on the
+    /// delta bytes, because `find` returned a `u32` position and `offsets` held `u32` byte offsets --
+    /// and their own doc comment predicted that "both are within reach at planet scale and both fail
+    /// silently". They were right and they were reached, so the types were widened instead. Both
+    /// ceilings are now `u64`, which no extract of this planet can approach.
+    fn build(ids: &[i64]) -> IdIndex {
+        IdIndex::build_sorted(ids.iter().copied(), ids.len())
+    }
+
+    /// Build from an ascending, unique id **stream** of known length.
+    ///
+    /// The streaming form exists because a planet extract cannot afford the slice. [`crate::extract`]
+    /// gets its ids by walking a bitset over the node id space, and materialising them first would
+    /// be 8 bytes an id -- the very vector the bitset replaced.
+    ///
+    /// `len` sizes the three arenas up front and is not otherwise trusted: the index's own length is
+    /// what the stream actually yielded.
+    fn build_sorted(ids: impl Iterator<Item = i64>, len: usize) -> IdIndex {
+        let blocks = len.div_ceil(BLOCK);
         let mut index = IdIndex {
             bases: Vec::with_capacity(blocks),
             offsets: Vec::with_capacity(blocks + 1),
             // One byte per gap is the common case, so this is the right first guess.
-            deltas: Vec::with_capacity(ids.len()),
-            len: ids.len(),
+            deltas: Vec::with_capacity(len),
+            len: 0,
         };
-        for block in ids.chunks(BLOCK) {
-            index.bases.push(block[0]);
-            index.offsets.push(offset(index.deltas.len())?);
-            let mut previous = block[0];
-            for &id in &block[1..] {
+        let mut in_block = 0usize;
+        let mut previous = 0i64;
+        for id in ids {
+            if in_block == 0 {
+                index.bases.push(id);
+                index.offsets.push(index.deltas.len() as u64);
+            } else {
                 // Non-negative because the input is sorted and unique, so the gap is at least one.
                 put_uvarint((id - previous) as u64, &mut index.deltas);
-                previous = id;
             }
+            previous = id;
+            index.len += 1;
+            in_block = (in_block + 1) % BLOCK;
         }
-        index.offsets.push(offset(index.deltas.len())?);
+        index.offsets.push(index.deltas.len() as u64);
         index.deltas.shrink_to_fit();
-        Ok(index)
+        index
     }
 
     fn len(&self) -> usize {
@@ -207,10 +220,10 @@ impl IdIndex {
     }
 
     /// The position of `id`, or `None` if it is not in the set.
-    fn find(&self, id: i64) -> Option<u32> {
+    fn find(&self, id: i64) -> Option<u64> {
         let block = match self.bases.binary_search(&id) {
             // A base is an id, so this is a hit on the first of a block.
-            Ok(block) => return Some((block * BLOCK) as u32),
+            Ok(block) => return Some((block * BLOCK) as u64),
             // Before the first id in the set.
             Err(0) => return None,
             Err(next) => next - 1,
@@ -225,7 +238,7 @@ impl IdIndex {
             current += gap as i64;
             position += 1;
             if current == id {
-                return Some((block * BLOCK + position) as u32);
+                return Some((block * BLOCK + position) as u64);
             }
             // The block is ascending, so once it is past `id` the id is absent.
             if current > id {
@@ -280,7 +293,7 @@ impl Cursor<'_> {
     ///
     /// Answers exactly what [`IdIndex::find`] would, which a test asserts over thousands of cases in
     /// both ascending and shuffled order.
-    fn find(&mut self, id: i64) -> Option<u32> {
+    fn find(&mut self, id: i64) -> Option<u64> {
         if !self.live || id < self.current || self.too_far(id) {
             let block = match self.index.bases.binary_search(&id) {
                 Ok(block) => block,
@@ -297,7 +310,7 @@ impl Cursor<'_> {
             }
         }
         if self.current == id {
-            Some(self.position as u32)
+            Some(self.position as u64)
         } else {
             None
         }
@@ -368,11 +381,28 @@ impl NodeLocations {
     pub fn new(mut ids: Vec<i64>) -> Result<NodeLocations> {
         ids.sort_unstable();
         ids.dedup();
-        let index = IdIndex::build(&ids)?;
+        let index = IdIndex::build(&ids);
         // The plain vector goes here rather than being kept alongside: it is 8 bytes per id against
         // the index's ~1.2, and holding both would give back the saving. Freed before the coordinate
         // array is mapped, so the two never peak together.
         drop(ids);
+        let locs = Locs::new(index.len())?;
+        Ok(NodeLocations { ids: index, locs })
+    }
+
+    /// The same table from an **ascending, unique** id stream of known length.
+    ///
+    /// [`Self::new`] takes a vector because most callers have one. A continental or planet extract
+    /// does not want one: [`crate::extract`]-shaped callers hold the needed ids as a bitset over the
+    /// node id space, which is a fixed ~1.7 GB for any extract, and turning that back into 8 bytes an
+    /// id to hand it over would be the allocation the bitset exists to avoid.
+    ///
+    /// **Sorted and unique is a precondition, not a request.** It is what makes every gap positive,
+    /// and an out-of-order id would encode as a ten-byte varint and quietly corrupt the index. A
+    /// bitset walked low to high satisfies it by construction, which is the only reason this is safe
+    /// to expose.
+    pub fn from_sorted(ids: impl Iterator<Item = i64>, len: usize) -> Result<NodeLocations> {
+        let index = IdIndex::build_sorted(ids, len);
         let locs = Locs::new(index.len())?;
         Ok(NodeLocations { ids: index, locs })
     }
@@ -385,8 +415,16 @@ impl NodeLocations {
         self.ids.len() == 0
     }
 
-    fn index_of(&self, id: i64) -> Option<u32> {
+    fn index_of(&self, id: i64) -> Option<u64> {
         self.ids.find(id)
+    }
+
+    /// Whether `id` is one of the ids this table was built for.
+    ///
+    /// Distinct from [`Self::get`] returning `None`, which also means "in the set but the node pass
+    /// never found it" -- the legitimate case at an extract's cut edges.
+    pub fn contains(&self, id: i64) -> bool {
+        self.index_of(id).is_some()
     }
 
     pub fn get(&self, id: i64) -> Option<(i32, i32)> {
@@ -439,7 +477,7 @@ pub fn resolve_seconds() -> (f64, f64) {
 ///
 /// Uses [`pbf::run_pass_sink`] rather than [`pbf::run_pass`], because `run_pass`'s contract is to
 /// hand every chunk's accumulator back at once and these accumulators are the largest thing this
-/// pass touches. On California they are 154 M nodes at 12 bytes -- about 1.8 GB -- and they would be
+/// pass touches. On California they are 154 M nodes at 16 bytes -- about 2.5 GB -- and they would be
 /// alive next to the 2.5 GB table they are about to be folded into, so the two peak together. Here a
 /// chunk is folded and freed while its neighbours are still decoding, which also overlaps the merge
 /// with the I/O. `pbf.rs` names this exact hazard in `run_pass_sink`'s own doc comment.
@@ -467,8 +505,8 @@ pub fn resolve_nodes(
         Some(blob_kinds),
         KIND_NODES,
         label,
-        Vec::<(u32, i32, i32)>::new,
-        |state: &mut Vec<(u32, i32, i32)>, block| {
+        Vec::<(u64, i32, i32)>::new,
+        |state: &mut Vec<(u64, i32, i32)>, block| {
             let at = on.then(std::time::Instant::now);
             let mut kinds = 0u8;
             // One cursor per block, because that is the run of ascending ids: a PBF block's dense
@@ -531,7 +569,7 @@ mod tests {
         }
         ids.sort_unstable();
         ids.dedup();
-        let index = super::IdIndex::build(&ids).expect("an index that fits");
+        let index = super::IdIndex::build(&ids);
 
         // Every id, ascending: the path the node pass actually takes.
         let mut cursor = index.cursor();
@@ -584,7 +622,7 @@ mod tests {
     fn the_cursor_is_right_on_a_set_smaller_than_one_block() {
         for count in [1usize, 2, 63, 64, 65, 129] {
             let ids: Vec<i64> = (0..count as i64).map(|i| i * 3 + 11).collect();
-            let index = super::IdIndex::build(&ids).expect("an index that fits");
+            let index = super::IdIndex::build(&ids);
             let mut cursor = index.cursor();
             for &want in &ids {
                 assert_eq!(cursor.find(want), index.find(want), "{count} id(s), id {want}");
@@ -627,18 +665,18 @@ mod tests {
             id += gap as i64;
             ids.push(id);
         }
-        let index = IdIndex::build(&ids).expect("an index that fits");
+        let index = IdIndex::build(&ids);
         assert_eq!(index.len(), ids.len());
 
         // Every id present resolves to its own position.
         for (position, &id) in ids.iter().enumerate() {
-            assert_eq!(index.find(id), Some(position as u32), "id {id} at {position}");
+            assert_eq!(index.find(id), Some(position as u64), "id {id} at {position}");
         }
         // And nothing else resolves at all. Probing every id +/- 1 covers the interesting misses:
         // just below a hit, just above one, and inside a gap.
         for &id in &ids {
             for probe in [id - 1, id + 1] {
-                let expected = ids.binary_search(&probe).ok().map(|i| i as u32);
+                let expected = ids.binary_search(&probe).ok().map(|i| i as u64);
                 assert_eq!(index.find(probe), expected, "probe {probe}");
             }
         }
@@ -656,15 +694,15 @@ mod tests {
         // Three full blocks and a partial one, with a gap of exactly one so positions and ids differ
         // by a constant and an off-by-one is unmissable.
         let ids: Vec<i64> = (0..BLOCK as i64 * 3 + 7).map(|i| 1_000 + i).collect();
-        let index = IdIndex::build(&ids).expect("an index that fits");
+        let index = IdIndex::build(&ids);
         for (position, &id) in ids.iter().enumerate() {
-            assert_eq!(index.find(id), Some(position as u32));
+            assert_eq!(index.find(id), Some(position as u64));
         }
         // The first id of each block is a base, which is the branch that returns without scanning.
         for block in 0..4 {
             let position = block * BLOCK;
             if position < ids.len() {
-                assert_eq!(index.find(ids[position]), Some(position as u32));
+                assert_eq!(index.find(ids[position]), Some(position as u64));
             }
         }
         assert_eq!(index.find(999), None, "below the set");
@@ -673,11 +711,11 @@ mod tests {
 
     #[test]
     fn an_empty_or_single_id_set_is_not_a_special_case_that_panics() {
-        let empty = IdIndex::build(&[]).expect("an empty index");
+        let empty = IdIndex::build(&[]);
         assert_eq!(empty.len(), 0);
         assert_eq!(empty.find(1), None);
 
-        let one = IdIndex::build(&[42]).expect("a one-id index");
+        let one = IdIndex::build(&[42]);
         assert_eq!(one.len(), 1);
         assert_eq!(one.find(42), Some(0));
         assert_eq!(one.find(41), None);
@@ -690,13 +728,55 @@ mod tests {
     fn the_index_costs_about_one_byte_per_id() {
         // Gaps of one to four, which is roughly what a real needed-node set looks like.
         let ids: Vec<i64> = (0..100_000i64).map(|i| 5 + i * 3).collect();
-        let index = IdIndex::build(&ids).expect("an index that fits");
-        let bytes = index.bases.len() * 8 + index.offsets.len() * 4 + index.deltas.len();
+        let index = IdIndex::build(&ids);
+        let bytes = index.bases.len() * 8 + index.offsets.len() * 8 + index.deltas.len();
         let plain = ids.len() * 8;
         assert!(
             bytes * 4 < plain,
             "the index is {bytes} bytes against {plain} for a plain vector, which is not worth it",
         );
+    }
+
+    /// What replaces the two `u32` guards that used to live in [`IdIndex::build`].
+    ///
+    /// They errored when the id count or the delta bytes passed `u32::MAX`, and their own doc
+    /// comment said both were within reach at planet scale. They were, so the fields were widened
+    /// instead -- and a guard removed with nothing put in its place is how a ceiling comes back.
+    ///
+    /// Two halves, because only one of them is affordable. The reachable half is ids whose *values*
+    /// are past `u32::MAX`: OSM node ids are near 13 G today, so this is the real input, and it
+    /// exercises the multi-byte varint gaps a sparse set produces. The unreachable half is the
+    /// cardinality itself -- 4.29 G ids is ~4.7 GB of deltas and 67 M blocks, which no test can
+    /// allocate -- so it is pinned as the types rather than as an allocation.
+    #[test]
+    fn ids_past_the_old_u32_ceilings_build_and_resolve() {
+        // Spread from just under `u32::MAX` to past OSM's own high-water mark, with gaps large
+        // enough that most encode to several varint bytes.
+        let mut ids: Vec<i64> = Vec::new();
+        let mut id = u32::MAX as i64 - 5;
+        for i in 0..5_000i64 {
+            ids.push(id);
+            id += 1 + (i % 7) * 1_000_003;
+        }
+        assert!(*ids.last().expect("ids") > 13_000_000_000, "the set must reach planet-scale ids");
+        let index = IdIndex::build(&ids);
+        assert_eq!(index.len(), ids.len());
+
+        // Every id resolves to its own position, by search and by cursor, and nothing else resolves.
+        let mut cursor = index.cursor();
+        for (position, &id) in ids.iter().enumerate() {
+            assert_eq!(index.find(id), Some(position as u64), "id {id}");
+            assert_eq!(cursor.find(id), Some(position as u64), "id {id} by cursor");
+        }
+        for &id in &ids {
+            assert_eq!(index.find(id - 1), ids.binary_search(&(id - 1)).ok().map(|i| i as u64));
+        }
+
+        // And the fields themselves. A position and a delta offset must both be `u64`, or the
+        // ceiling is back and only a planet-sized allocation would find it.
+        let _: Option<u64> = index.find(ids[0]);
+        let _: Option<u64> = index.cursor().find(ids[0]);
+        let _: &Vec<u64> = &index.offsets;
     }
 
     #[test]

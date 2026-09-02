@@ -24,6 +24,21 @@
 //! in ascending id order so no sort is needed to read them back in the order the archive wants.
 //! What stays resident is the set a sequential file cannot serve: the refs of the ways that some
 //! relation lists as a member, because a relation reaches those by id in its own order.
+//!
+//! # Collecting the needed ids: two shapes, one switch
+//!
+//! Pass 3 needs the ids sorted and unique, and there are two ways to get there. The obvious one --
+//! one `Vec<i64>` of every ref **with duplicates**, sorted and deduped in place -- is what
+//! [`collect_needed_in_memory`] does, and it is right up to a point: it is exact, it needs no
+//! assumption about the ids, and on anything smaller than a continent it is smaller than the
+//! alternative. Past that point it is the largest thing in the whole build. North-america is ~19 GB
+//! of it; planet projects to ~96 GB and a sort of 12 G elements.
+//!
+//! [`collect_needed_by_bitset`] is the other shape, taken above [`REFS_IN_MEMORY`]: a bit per node
+//! id, which is at most ~1.7 GB *for any extract, forever*, because OSM's node ids are monotonic and
+//! near 13 G. Walking it low to high yields sorted unique ids directly, so it removes the vector and
+//! the sort together, in one streaming pass with no extra I/O. Both paths must produce the same
+//! sequence and `the_two_ref_collectors_agree_on_the_same_input` holds them to it.
 
 use std::collections::HashMap;
 use std::path::Path;
@@ -182,7 +197,7 @@ pub fn extract(
             Ok(())
         },
     )?;
-    let WayCounts { ways: ways_classified, refs: way_refs } = ways.finish()?;
+    let WayCounts { ways: ways_classified, refs: way_refs, max_ref: way_max_ref } = ways.finish()?;
     stats.ways_classified = ways_classified;
     stats.relations_classified = relations.len() as u64;
 
@@ -231,29 +246,19 @@ pub fn extract(
 
     // --- pass 3: the coordinates those two asked for --------------------------------------
     //
-    // The classified ways are read off disk instead of walked in memory. Order does not matter here
-    // — `NodeLocations::new` sorts and dedups — so this is a plain streaming pass over the spill.
-    //
-    // Sized exactly rather than grown into. This is ~200 M ids on California, and a `Vec` that
-    // doubles its way there holds the old and the new allocation at once across the last realloc:
-    // 1.1 GB plus 2.1 GB, for a length both passes already know.
+    // The classified ways are read off disk instead of walked in memory. Order does not matter to
+    // either path below, so this is a plain streaming pass over the spill.
     let member_refs: usize = members.values().map(|refs| refs.len()).sum();
-    let mut needed: Vec<i64> = Vec::with_capacity(way_refs as usize + member_refs);
-    {
-        let mut reader = WayReader::open(&ways_path)?;
-        let mut refs: Vec<i64> = Vec::new();
-        while reader.next(&mut refs)?.is_some() {
-            needed.extend_from_slice(&refs);
-        }
-    }
-    // A member way that pass 1 also classified already contributed its refs above; `members` adds
-    // the ones — the great majority, since a multipolygon's rings usually carry no tags of their
-    // own — that nothing else asked for.
-    for refs in members.values() {
-        needed.extend_from_slice(refs);
-    }
-    mark("refs collected");
-    let table = NodeLocations::new(needed)?;
+    let refs_total = way_refs as usize + member_refs;
+    let max_ref = members
+        .values()
+        .flat_map(|refs| refs.iter().copied())
+        .fold(way_max_ref, i64::max);
+    let table = if refs_total <= REFS_IN_MEMORY {
+        collect_needed_in_memory(&ways_path, &members, refs_total, &mark)?
+    } else {
+        collect_needed_by_bitset(&ways_path, &members, max_ref, &mark)?
+    };
     mark("id index built, refs freed");
     stats.nodes_needed = table.len() as u64;
     let table = resolve_nodes(input, &blobs, &blob_kinds, "Pass 3: nodes", table)?;
@@ -404,6 +409,160 @@ pub fn extract(
     Ok((store, stats))
 }
 
+/// Node refs, duplicates included, above which the bitset replaces the sorted vector.
+///
+/// 256 M refs is a 2 GB `Vec<i64>` plus a sort of 256 M elements, and it is roughly a us-west
+/// extract. Below it the vector is smaller than the bitset and this stays exactly as it always was;
+/// above it the vector is the largest thing in stage A and the bitset is a constant.
+const REFS_IN_MEMORY: usize = 256 << 20;
+
+/// The node id a bitset will not be sized past.
+///
+/// OSM assigns node ids monotonically and is near 13 G, so this is roughly 4x today's high-water
+/// mark and 2.6 GB of bitset. It is a bound on the *data*, and a synthetic or non-OSM input with one
+/// sparse enormous id would otherwise ask for a bitset the size of the id, so it is an error rather
+/// than a clamp: a clamp would silently drop the nodes above it.
+const MAX_NODE_ID: i64 = 48 << 30;
+
+/// The ids pass 3 must resolve, collected the way stage A always did.
+///
+/// One exactly-sized vector, then [`NodeLocations::new`] sorts and dedups it in place. Sized rather
+/// than grown into because a `Vec` that doubles its way to 200 M ids holds the old and the new
+/// allocation at once across the last realloc -- 1.1 GB plus 2.1 GB, for a length both earlier passes
+/// already know.
+fn collect_needed_in_memory(
+    ways_path: &Path,
+    members: &HashMap<i64, Vec<i64>>,
+    refs_total: usize,
+    mark: &dyn Fn(&str),
+) -> Result<NodeLocations> {
+    let mut needed: Vec<i64> = Vec::with_capacity(refs_total);
+    {
+        let mut reader = WayReader::open(ways_path)?;
+        let mut refs: Vec<i64> = Vec::new();
+        while reader.next(&mut refs)?.is_some() {
+            needed.extend_from_slice(&refs);
+        }
+    }
+    // A member way that pass 1 also classified already contributed its refs above; `members` adds
+    // the ones — the great majority, since a multipolygon's rings usually carry no tags of their
+    // own — that nothing else asked for.
+    for refs in members.values() {
+        needed.extend_from_slice(refs);
+    }
+    mark("refs collected");
+    NodeLocations::new(needed)
+}
+
+/// The same ids, through a bitset over the node id space.
+///
+/// The vector above is `way_refs + member_refs` entries of eight bytes **with duplicates**, then a
+/// sort of all of them. On a north-america extract that is ~19 GB; on a planet one it projects to
+/// ~96 GB and a sort of 12 G elements, which is the second of the two things that stopped a planet
+/// build before anything else got the chance to.
+///
+/// A bit per node id costs `max_id / 8` and **does not scale with the extract**: OSM node ids are
+/// assigned monotonically and top out near 13 G, so this is at most ~1.7 GB for any extract, forever.
+/// Streaming the refs into it and then walking it low to high yields sorted unique ids directly --
+/// which removes the vector *and* the sort in one pass, with no extra I/O.
+///
+/// Not an external merge sort of the ref stream. That is the general answer and needs no assumption
+/// about the ids, and it costs ~96 GB written and ~96 GB read at planet scale to compute what this
+/// gets in one pass. The bound that makes the bitset safe -- monotonic, bounded ids -- is a property
+/// of OSM's data rather than a hope about it, and [`MAX_NODE_ID`] is where that property is enforced.
+fn collect_needed_by_bitset(
+    ways_path: &Path,
+    members: &HashMap<i64, Vec<i64>>,
+    max_ref: i64,
+    mark: &dyn Fn(&str),
+) -> Result<NodeLocations> {
+    let mut bits = NeededBits::new(max_ref)?;
+    {
+        let mut reader = WayReader::open(ways_path)?;
+        let mut refs: Vec<i64> = Vec::new();
+        while reader.next(&mut refs)?.is_some() {
+            for &id in &refs {
+                bits.set(id)?;
+            }
+        }
+    }
+    for refs in members.values() {
+        for &id in refs {
+            bits.set(id)?;
+        }
+    }
+    mark("refs collected");
+    // Ascending and unique by construction, which is `from_sorted`'s whole precondition.
+    NodeLocations::from_sorted(bits.ids(), bits.len())
+}
+
+/// One bit per node id in `0..=max_id`.
+struct NeededBits {
+    words: Vec<u64>,
+    /// `max_id + 1`. Kept because the last word is padded and a ref landing in that padding is out
+    /// of range, not merely addressable.
+    bits: usize,
+    count: usize,
+}
+
+impl NeededBits {
+    fn new(max_id: i64) -> Result<NeededBits> {
+        if max_id > MAX_NODE_ID {
+            return err(format!(
+                "node id {max_id} is past the {MAX_NODE_ID} this build will size a bitset for; \
+                 OSM's own ids are near 13 billion, so this input is not an OSM extract"
+            ));
+        }
+        // `max_id` is a maximum, not a count, so the space is one larger.
+        let bits = max_id.max(0) as usize + 1;
+        Ok(NeededBits { words: vec![0u64; bits.div_ceil(64)], bits, count: 0 })
+    }
+
+    fn set(&mut self, id: i64) -> Result<()> {
+        // A negative ref is not a node this planet has. Refused rather than skipped: it means the
+        // spill or the PBF is not what it claims, and skipping would show as a way with a gap in it.
+        if id < 0 {
+            return err(format!("node ref {id} is negative"));
+        }
+        let at = id as usize;
+        if at >= self.bits {
+            return err(format!(
+                "node ref {id} is past the {} the bitset was sized for",
+                self.bits - 1
+            ));
+        }
+        let word = &mut self.words[at / 64];
+        let bit = 1u64 << (at % 64);
+        if *word & bit == 0 {
+            *word |= bit;
+            self.count += 1;
+        }
+        Ok(())
+    }
+
+    /// How many distinct ids were set. The `len` [`NodeLocations::from_sorted`] sizes from.
+    fn len(&self) -> usize {
+        self.count
+    }
+
+    /// Every set id, ascending. `trailing_zeros` on a word at a time, so an empty stretch of the id
+    /// space -- which is most of it, since a needed set is a subset of a subset -- costs one compare
+    /// per 64 ids rather than one per id.
+    fn ids(&self) -> impl Iterator<Item = i64> + '_ {
+        self.words.iter().enumerate().flat_map(|(w, word)| {
+            let mut rest = *word;
+            std::iter::from_fn(move || {
+                if rest == 0 {
+                    return None;
+                }
+                let bit = rest.trailing_zeros() as usize;
+                rest &= rest - 1;
+                Some((w * 64 + bit) as i64)
+            })
+        })
+    }
+}
+
 /// A node's location in lon/lat, which is the order [`rings::assemble`] and GeoJSON both want.
 ///
 /// [`NodeLocations::get`] returns lat/lon, matching the PBF's own field order.
@@ -438,6 +597,119 @@ fn way_geometry(line: &[(f64, f64)], area: bool) -> Option<Geometry> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The claim the bitset path rests on: it yields exactly the sequence the vector path's sort and
+    /// dedup would, for the same input. Everything downstream -- the id index, the positions the node
+    /// pass writes coordinates at -- follows from that one equality.
+    #[test]
+    fn the_bitset_yields_what_a_sort_and_dedup_would() {
+        // Deliberately awkward: duplicates, a run of consecutive ids inside one word, gaps that skip
+        // whole words, both ends of the space, and ids past `u32::MAX`.
+        let refs: Vec<i64> = vec![
+            0, 63, 64, 65, 1, 1, 1, 4_294_967_295, 4_294_967_296, 12_345_678_901, 128, 127, 2, 63,
+            12_345_678_901, 500_000, 499_999, 0,
+        ];
+        let mut want = refs.clone();
+        want.sort_unstable();
+        want.dedup();
+
+        let max = *refs.iter().max().expect("refs");
+        let mut bits = NeededBits::new(max).expect("size the bitset");
+        for &id in &refs {
+            bits.set(id).expect("set a bit");
+        }
+        assert_eq!(bits.ids().collect::<Vec<i64>>(), want);
+        assert_eq!(bits.len(), want.len(), "the count must match what `from_sorted` is sized with");
+    }
+
+    /// The empty and single-id cases, which the word-at-a-time walk makes easy to get wrong.
+    #[test]
+    fn an_empty_or_single_id_bitset_is_not_a_special_case() {
+        let empty = NeededBits::new(0).expect("size");
+        assert_eq!(empty.len(), 0);
+        assert!(empty.ids().next().is_none());
+
+        let mut one = NeededBits::new(0).expect("size");
+        one.set(0).expect("set");
+        assert_eq!(one.ids().collect::<Vec<i64>>(), vec![0]);
+        assert_eq!(one.len(), 1);
+
+        // The maximum is inclusive, so a bitset sized for it must hold it.
+        let mut edge = NeededBits::new(64).expect("size");
+        edge.set(64).expect("the maximum is in range");
+        assert_eq!(edge.ids().collect::<Vec<i64>>(), vec![64]);
+    }
+
+    /// The bound that makes the bitset affordable is a property of OSM's ids, so an input that
+    /// breaks it has to say so rather than ask for an allocation the size of one id.
+    #[test]
+    fn an_id_outside_osms_own_range_is_refused_rather_than_sized_for() {
+        assert!(NeededBits::new(MAX_NODE_ID + 1).is_err(), "a wild maximum was sized for");
+        assert!(NeededBits::new(i64::MAX).is_err(), "`i64::MAX` was sized for");
+
+        let mut bits = NeededBits::new(100).expect("size");
+        assert!(bits.set(-1).is_err(), "a negative ref was accepted");
+        assert!(bits.set(101).is_err(), "a ref past the maximum was accepted");
+        assert!(bits.set(100).is_ok());
+    }
+
+    /// End to end over a real ways spill: the two collectors must agree on the set they hand pass 3.
+    #[test]
+    fn the_two_ref_collectors_agree_on_the_same_input() {
+        let path = std::env::temp_dir().join(format!(
+            "mamaps_refcollect_{}_{:?}.ways.tmp",
+            std::process::id(),
+            std::thread::current().id(),
+        ));
+        let class = schema::Class::area(
+            tilecodec::mamaps::dict::LAYER_WATER,
+            schema::kind("lake"),
+            0,
+        );
+        let mut sink = WaySink::create(&path).expect("create the ways spill");
+        // Ascending way ids, as pass 1 produces; overlapping refs, as real ways have.
+        for way in 0..64i64 {
+            let refs: Vec<i64> = (0..8).map(|i| way * 5 + i).collect();
+            sink.push(way + 1, &class, &refs).expect("push");
+        }
+        let counts = sink.finish().expect("finish");
+
+        let mut members: HashMap<i64, Vec<i64>> = HashMap::new();
+        // One member whose refs overlap the spill's, and one that is entirely new.
+        members.insert(7, vec![30, 31, 32, 30]);
+        members.insert(9, vec![10_000, 9_999, 10_000]);
+        let member_refs: usize = members.values().map(|refs| refs.len()).sum();
+        let max_ref = members
+            .values()
+            .flat_map(|refs| refs.iter().copied())
+            .fold(counts.max_ref, i64::max);
+
+        let quiet = |_: &str| {};
+        let in_memory =
+            collect_needed_in_memory(&path, &members, counts.refs as usize + member_refs, &quiet)
+                .expect("the in-memory path");
+        let by_bitset =
+            collect_needed_by_bitset(&path, &members, max_ref, &quiet).expect("the bitset path");
+
+        assert_eq!(
+            in_memory.len(),
+            by_bitset.len(),
+            "the two paths disagree on how many distinct nodes are needed",
+        );
+        // And the same ids, not merely the same count: both tables must answer for every ref and
+        // for nothing between them that was never asked for.
+        for id in [0i64, 1, 30, 31, 32, 319, 9_999, 10_000] {
+            assert_eq!(
+                in_memory.contains(id),
+                by_bitset.contains(id),
+                "the two paths disagree about node {id}",
+            );
+        }
+        assert!(in_memory.contains(10_000), "a member-only ref is missing");
+        assert!(!in_memory.contains(5_000), "an id nothing asked for is present");
+
+        let _ = std::fs::remove_file(&path);
+    }
 
     #[test]
     fn an_open_way_is_a_line_and_a_closed_one_an_area_only_if_tagged() {

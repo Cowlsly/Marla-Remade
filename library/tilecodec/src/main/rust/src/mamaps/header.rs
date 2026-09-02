@@ -29,9 +29,14 @@ pub const FLAG_RUN_LENGTH_PRESENT: u16 = 1 << 1;
 /// What lets `tess::fill`'s repair pass be skipped: with this set, every polygon part group has
 /// exactly one CCW outer and its holes are CW and strictly inside it.
 pub const FLAG_RINGS_VALIDATED: u16 = 1 << 2;
+/// The leaf index exceeds 4 GiB (planet scale: ~268M bodies ×16 B ≈4.29 GB).
+/// When set, bytes 72..80 of the header hold leaf_len as a little-endian u64
+/// (instead of u32 leaf_len at 72..76 plus 0-reserved at 76..80). Common
+/// path (NA ~418 MB) stays flag 0 + u32 + 0 — byte-identical to v1.
+pub const FLAG_LEAF_LEN_64: u16 = 1 << 3;
 
 const KNOWN_FLAGS: u16 =
-    FLAG_BODIES_COMPRESSED | FLAG_RUN_LENGTH_PRESENT | FLAG_RINGS_VALIDATED;
+    FLAG_BODIES_COMPRESSED | FLAG_RUN_LENGTH_PRESENT | FLAG_RINGS_VALIDATED | FLAG_LEAF_LEN_64;
 
 /// Bodies stored as written.
 pub const COMPRESSION_NONE: u8 = 0;
@@ -77,7 +82,10 @@ pub struct Header {
     pub root_len: u32,
     pub leaf_count: u32,
     pub leaf_offset: u64,
-    pub leaf_len: u32,
+    /// Leaf index length. u64 on the wire when FLAG_LEAF_LEN_64 is set
+    /// (planet: ~4.29 GB); otherwise the 72..76 u32 plus 76..80 zero
+    /// reserved — so NA/us-west stay byte-identical.
+    pub leaf_len: u64,
     pub data_offset: u64,
     pub data_len: u64,
     /// Tiles that resolve to a body, counting every id a run covers.
@@ -150,11 +158,26 @@ impl Header {
         if flags & !KNOWN_FLAGS != 0 {
             return err(format!("a .mamaps header sets unknown flags {:#06X}", flags & !KNOWN_FLAGS));
         }
-        // Reserved bytes are checked rather than skipped, so a later version cannot put a field
-        // here and have this reader silently ignore it.
-        if u32_at(76) != 0 {
-            return err("a .mamaps header has a non-zero reserved word");
-        }
+        // Bytes 72..80 hold leaf_len: 72..76 low 32, 76..80 high 32 when
+        // FLAG_LEAF_LEN_64 is set, otherwise 76..80 must be zero (v1 reserved).
+        // Common path (NA ~418 MB) stays flag 0 + u32 + 0 — byte-identical to v1.
+        let leaf_len = if (flags & FLAG_LEAF_LEN_64) != 0 {
+            let lo = u32_at(72) as u64;
+            let hi = u32_at(76) as u64;
+            let v = lo | (hi << 32);
+            if v <= u32::MAX as u64 {
+                return err(format!(
+                    "a .mamaps header sets FLAG_LEAF_LEN_64 but leaf_len {} fits u32",
+                    v
+                ));
+            }
+            v
+        } else {
+            if u32_at(76) != 0 {
+                return err("a .mamaps header has a non-zero reserved word");
+            }
+            u32_at(72) as u64
+        };
         let header = Header {
             flags,
             compression: buf[12],
@@ -170,7 +193,7 @@ impl Header {
             root_len: u32_at(56),
             leaf_count: u32_at(60),
             leaf_offset: u64_at(64),
-            leaf_len: u32_at(72),
+            leaf_len,
             data_offset: u64_at(80),
             data_len: u64_at(88),
             tiles_addressed: u64_at(96),
@@ -274,8 +297,15 @@ impl Header {
         out.extend_from_slice(&self.root_len.to_le_bytes());
         out.extend_from_slice(&self.leaf_count.to_le_bytes());
         out.extend_from_slice(&self.leaf_offset.to_le_bytes());
-        out.extend_from_slice(&self.leaf_len.to_le_bytes());
-        out.extend_from_slice(&0u32.to_le_bytes());
+        // 72..76 is always low 32 of leaf_len; 76..80 is high 32 when extended,
+        // otherwise reserved zero. Common path (<4 GiB): high 32 == 0 → byte-identical to v1 (u32 + 0).
+        out.extend_from_slice(&(self.leaf_len as u32).to_le_bytes());
+        if (self.flags & FLAG_LEAF_LEN_64) != 0 {
+            // Extended: 76..80 holds high 32 of the true u64 leaf_len (planet ~4.29 GB).
+            out.extend_from_slice(&((self.leaf_len >> 32) as u32).to_le_bytes());
+        } else {
+            out.extend_from_slice(&0u32.to_le_bytes());
+        }
         out.extend_from_slice(&self.data_offset.to_le_bytes());
         out.extend_from_slice(&self.data_len.to_le_bytes());
         out.extend_from_slice(&self.tiles_addressed.to_le_bytes());
@@ -402,5 +432,58 @@ mod tests {
         header.data_offset = u64::MAX - 8;
         header.data_len = 64;
         assert!(Header::parse(&header.serialize()).is_err(), "the end wraps");
+    }
+
+    /// Planet scale: leaf index is ~268M bodies ×16 B ≈4.29 GB > u32::MAX,
+    /// overflowing the old 4 GiB leaf_len field by 1257 B in the failed run.
+    /// Extended encoding uses FLAG_LEAF_LEN_64 and the formerly-reserved
+    /// 76..80 word as high 32 of a u64 leaf_len (72..76 low 32). Common path
+    /// (NA ~418 MB < u32::MAX) stays flag 0 + u32 + 0 → byte-identical to v1.
+    #[test]
+    fn a_leaf_len_past_u32_max_round_trips_and_common_path_stays_byte_identical() {
+        // The leaf field itself round-trips via Header serialization; use a
+        // large file_len so the overall header check (sections fit) doesn't
+        // reject the test file. NA's file_len is 418 MB leaf_len + data, but
+        // plausible() is 4096 B — enlarge for the planet-sized leaf.
+        let planet_leaf: u64 = u32::MAX as u64 + 1257;
+        // Extended: flag set, high word carries the overflow.
+        let mut extended = Header {
+            leaf_len: planet_leaf,
+            flags: FLAG_BODIES_COMPRESSED | FLAG_LEAF_LEN_64,
+            ..plausible()
+        };
+        extended.data_offset = extended.leaf_offset + extended.leaf_len;
+        extended.file_len = extended.data_offset + extended.data_len;
+        let bytes_ext = extended.serialize();
+        assert_eq!(bytes_ext.len(), HEADER_LEN);
+        assert_ne!(bytes_ext[10] & 0x08, 0, "extended flag must be set");
+        assert_ne!(&bytes_ext[76..80], &[0, 0, 0, 0], "high word must carry overflow (1257 beyond 4 GiB)");
+        let parsed = Header::parse(&bytes_ext).expect("extended must parse");
+        assert_eq!(parsed.leaf_len, planet_leaf);
+        assert_eq!(parsed.flags & FLAG_LEAF_LEN_64, FLAG_LEAF_LEN_64);
+        // Common path (NA ~418 MB) stays byte-identical to v1: flag 0, reserved 0, low 32 only.
+        let na_leaf: u64 = 418 * 1024 * 1024;
+        let mut common = Header {
+            leaf_len: na_leaf,
+            ..plausible()
+        };
+        common.data_offset = common.leaf_offset + common.leaf_len;
+        common.file_len = common.data_offset + common.data_len;
+        let bytes_common = common.serialize();
+        assert_eq!(bytes_common.len(), HEADER_LEN);
+        assert_eq!(bytes_common[10] & FLAG_LEAF_LEN_64 as u8, 0, "common flag must be 0");
+        assert_eq!(&bytes_common[76..80], &[0, 0, 0, 0], "reserved must stay 0 for <4 GiB");
+        assert_eq!(Header::parse(&bytes_common).expect("common must parse").leaf_len, na_leaf);
+        // Byte-identity: common bytes up to leaf_len are identical to what v1
+        // would have written (low 32 + 0 reserved); extended differs only in flag + high word.
+        // Extended canonical: flag set but value fits u32 is rejected
+        let mut bad = Header {
+            leaf_len: 100,
+            flags: FLAG_BODIES_COMPRESSED | FLAG_LEAF_LEN_64,
+            ..plausible()
+        };
+        bad.data_offset = bad.leaf_offset + bad.leaf_len;
+        bad.file_len = bad.data_offset + bad.data_len;
+        assert!(Header::parse(&bad.serialize()).is_err(), "extended with small leaf_len must be rejected");
     }
 }

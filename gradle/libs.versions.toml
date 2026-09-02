@@ -121,6 +121,7 @@ ringrtcAndroid = "2.71.0"
 
 # XML
 kxml2 = "2.3.0"
+robolectric = "4.14.1"
 
 # Payments, telephony & auth
 stripe = "21.12.0"
@@ -284,18 +285,6 @@ quickjs-kt = { module = "io.github.dokar3:quickjs-kt", version.ref = "quickjs" }
 # Git
 jgit = { module = "org.eclipse.jgit:org.eclipse.jgit", version.ref = "jgit" }
 
-# On-device AI: nothing here.
-#
-# Every model in this tree runs on `:library:ml`, our own Vulkan compute runtime, reading `.maml`
-# weights. `com.microsoft.onnxruntime:onnxruntime-android` and the reduced rebuild of it,
-# `io.github.vayun-mathur:onnxruntime-reduced-android`, were the last third-party inference runtimes
-# and both are gone: TinyCLIP (`photos`) and whisper-base (`speech`) were the two remaining users.
-#
-# The reduced build is worth remembering as a shape of dependency to avoid. It was our own rebuild of
-# upstream with `--include_ops_by_config` against an operator list generated from the very models it
-# ran, so re-exporting a model meant regenerating the AAR by hand or watching session creation fail.
-# Nothing in `.maml` has that coupling: the container carries tensors and the forward pass is Rust.
-
 # Crypto, security & credential storage
 cryptography-core = { module = "dev.whyoleg.cryptography:cryptography-core", version.ref = "cryptographyCore" }
 cryptography-provider-jdk = { module = "dev.whyoleg.cryptography:cryptography-provider-jdk", version.ref = "cryptographyCore" }
@@ -305,6 +294,9 @@ ringrtc-android = { module = "org.signal:ringrtc-android", version.ref = "ringrt
 
 # XML
 kxml2 = { module = "net.sf.kxml:kxml2", version.ref = "kxml2" }
+
+# Testing
+robolectric = { module = "org.robolectric:robolectric", version.ref = "robolectric" }
 
 # Payments, telephony & auth
 stripe-android = { module = "com.stripe:stripe-android", version.ref = "stripe" }

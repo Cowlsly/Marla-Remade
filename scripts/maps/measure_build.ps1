@@ -11,8 +11,9 @@
 # What this adds that the binary cannot easily measure about itself on Windows:
 #   * Peak resident memory. `PeakWorkingSet64` is a kernel high-water mark, so sampling
 #     from outside cannot miss a spike between two polls.
-#   * Peak scratch disk. The spill is written during stage A and drained during tiling,
-#     so it is gone before the build ends and only a sampler ever sees its size.
+#   * Peak scratch disk. The feature spill is written during stage A and drained during
+#     tiling; the tile chunks are truncated and removed once per zoom. Both are gone before
+#     the build ends and only a sampler ever sees how large they got.
 #   * The archive's section breakdown, from `mamaps_dump`, which already decodes the
 #     header — reimplementing that here would be a second copy to keep in step.
 #
@@ -43,6 +44,9 @@ param(
     # identical every time for the same input, so this is the difference between a 20-minute
     # experiment and a 60-minute one. Refused if the spill was built from anything else.
     [switch] $ReuseStore,
+    # Skip the free-space preflight. It is a heuristic on the .pbf's size, so an unusual layer
+    # selection or an already-present spill can make it wrong in either direction.
+    [switch] $NoSpaceCheck,
     [string] $Exe,
     [string] $Dump
 )
@@ -63,6 +67,7 @@ $Pbf   = (Resolve-Path $Pbf).Path
 $Out   = [System.IO.Path]::GetFullPath($Out)
 # Named by the writer, beside the output. This is the scratch that peaks.
 $spill  = [System.IO.Path]::ChangeExtension($Out, "features.tmp")
+$chunks = "$Out.tilechunks"
 $json   = "$Out.report.json"
 $name   = [System.IO.Path]::GetFileNameWithoutExtension($build)
 
@@ -76,23 +81,47 @@ if ($Threads -gt 0) { $env:MAPS_THREADS = "$Threads" } else { Remove-Item Env:MA
 if ($Timing)        { $env:MAPS_TIMING  = "1"       } else { Remove-Item Env:MAPS_TIMING  -ErrorAction SilentlyContinue }
 if ($Lanes -gt 0)   { $env:MAPS_PREFETCH_LANES = "$Lanes" } else { Remove-Item Env:MAPS_PREFETCH_LANES -ErrorAction SilentlyContinue }
 
+# --- free space, before anything is written -------------------------------
+#
+# Three things are on disk at once at the deepest zoom: the feature spill, one zoom's tile
+# chunks and the archive being assembled. On north-america that is about 29 + 23 + 17 GB
+# against a 14 GB .pbf; a planet build projects to 134 + 100 + 78 against roughly 80. Both
+# land near six times the source, so that is the rule of thumb - and running out an hour
+# into z14, after stage A has already been paid for, is the failure this exists to avoid.
+if (-not $NoSpaceCheck) {
+    $pbfBytes = (Get-Item $Pbf).Length
+    # A reused spill is already on disk and does not have to be found again.
+    $wanted = if ($ReuseStore) { $pbfBytes * 4 } else { $pbfBytes * 6 }
+    $root = [System.IO.Path]::GetPathRoot($Out)
+    $free = (New-Object System.IO.DriveInfo $root).AvailableFreeSpace
+    if ($free -lt $wanted) {
+        throw ("{0} has {1:N1} GB free and this build wants about {2:N1} GB " -f `
+                $root, ($free / 1GB), ($wanted / 1GB)) +
+              "(feature spill + one zoom's tile chunks + the archive). Free some, or pass " +
+              "-NoSpaceCheck if you know better than the estimate."
+    }
+}
+
 # Started before the build, so the first spike cannot be missed.
-$sampler = Start-Job -ArgumentList $name, $spill, $Out -ScriptBlock {
-    param($name, $spill, $out)
-    $peakWs = 0L; $peakPriv = 0L; $peakSpill = 0L; $peakData = 0L
+$sampler = Start-Job -ArgumentList $name, $spill, $Out, $chunks -ScriptBlock {
+    param($name, $spill, $out, $chunks)
+    $peakWs = 0L; $peakPriv = 0L; $peakSpill = 0L; $peakData = 0L; $peakChunks = 0L
     while ($true) {
         $p = Get-Process -Name $name -ErrorAction SilentlyContinue
         if ($p) {
             $peakWs   = [Math]::Max($peakWs,   ($p | Measure-Object PeakWorkingSet64    -Maximum).Maximum)
             $peakPriv = [Math]::Max($peakPriv, ($p | Measure-Object PrivateMemorySize64 -Maximum).Maximum)
         }
-        foreach ($pair in @(@($spill, [ref]$peakSpill), @("$out.tiledata", [ref]$peakData))) {
+        # The tile chunks are truncated and removed per zoom, so only a sampler ever sees how
+        # large the largest zoom got - which is the number that decides whether a planet build
+        # fits on the disk at all.
+        foreach ($pair in @(@($spill, [ref]$peakSpill), @("$out.tiledata", [ref]$peakData), @($chunks, [ref]$peakChunks))) {
             if (Test-Path $pair[0]) {
                 $len = (Get-Item $pair[0] -ErrorAction SilentlyContinue).Length
                 if ($len -gt $pair[1].Value) { $pair[1].Value = $len }
             }
         }
-        [pscustomobject]@{ Ws = $peakWs; Priv = $peakPriv; Spill = $peakSpill; Data = $peakData }
+        [pscustomobject]@{ Ws = $peakWs; Priv = $peakPriv; Spill = $peakSpill; Data = $peakData; Chunks = $peakChunks }
         Start-Sleep -Milliseconds 250
     }
 }
@@ -117,10 +146,11 @@ $sw.Stop()
 Start-Sleep -Milliseconds 400
 $s = Receive-Job $sampler
 Stop-Job $sampler; Remove-Job $sampler -Force
-$peakWs    = ($s | Measure-Object Ws    -Maximum).Maximum
-$peakPriv  = ($s | Measure-Object Priv  -Maximum).Maximum
-$peakSpill = ($s | Measure-Object Spill -Maximum).Maximum
-$peakData  = ($s | Measure-Object Data  -Maximum).Maximum
+$peakWs    = ($s | Measure-Object Ws     -Maximum).Maximum
+$peakPriv  = ($s | Measure-Object Priv   -Maximum).Maximum
+$peakSpill = ($s | Measure-Object Spill  -Maximum).Maximum
+$peakData  = ($s | Measure-Object Data   -Maximum).Maximum
+$peakChunk = ($s | Measure-Object Chunks -Maximum).Maximum
 
 # Adaptive, because these span a 128-byte header and a 30 GB spill; a fixed unit makes
 # one end of that unreadable.
@@ -187,9 +217,12 @@ Write-Output ("  {0,-24} {1}   scratch, deleted" -f "feature spill, peak", (Size
 if ($peakData -gt 0) {
     Write-Output ("  {0,-24} {1}   scratch, deleted" -f "tile scratch, peak", (Size $peakData))
 }
+if ($peakChunk -gt 0) {
+    Write-Output ("  {0,-24} {1}   scratch, one zoom at a time" -f "tile chunks, peak", (Size $peakChunk))
+}
 Write-Output ("  {0,-24} {1}   the deliverable" -f "archive", (Size $archive))
 Write-Output ("  {0,-24} {1}   upper bound; the scratches do not peak together" -f `
-    "created, worst case", (Size ($peakSpill + $peakData + $archive)))
+    "created, worst case", (Size ($peakSpill + $peakData + $peakChunk + $archive)))
 
 # --- the archive, by part -------------------------------------------------
 $h = @{}

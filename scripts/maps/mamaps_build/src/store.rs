@@ -456,6 +456,44 @@ impl Store {
         )
     }
 
+    pub fn wanted_chunks_for_zoom(&self, z: u8) -> Vec<usize> {
+        self.chunk_mins
+            .iter()
+            .enumerate()
+            .filter(|(_, min)| **min <= z)
+            .map(|(i, _)| i)
+            .collect()
+    }
+
+    pub fn wanted_len_for_zoom(&self, z: u8) -> usize {
+        self.chunk_mins.iter().filter(|min| **min <= z).count()
+    }
+
+    pub fn path(&self) -> &PathBuf {
+        &self.path
+    }
+
+    pub fn raw_chunks(&self) -> &[u64] {
+        &self.chunks
+    }
+
+    pub fn chunk_mins_cloned(&self) -> Vec<u8> {
+        self.chunk_mins.clone()
+    }
+
+    pub fn from_parts(path: PathBuf, chunks: Vec<u64>, chunk_mins: Vec<u8>) -> Self {
+        Self { path, chunks, chunk_mins, count: 0, bbox: (0, 0, 0, 0) }
+    }
+
+    pub fn reader_for_wanted(&self, wanted: Vec<usize>, z: u8) -> Result<ZoomReader> {
+        ZoomReader::spawn(
+            NormalizedChunks::open(self.path.clone(), self.chunks.clone())
+                .map_err(|e| osm_ingest::proto::Error(e.to_string()))?,
+            wanted,
+            z,
+        )
+    }
+
     /// Read every feature, in the order they were written.
     ///
     /// Kept as the reference [`Self::reader_for_zoom`] is checked against: a test that reads a store
@@ -820,6 +858,7 @@ pub struct WaySink {
     last_id: i64,
     count: u64,
     refs: u64,
+    max_ref: i64,
 }
 
 impl WaySink {
@@ -833,6 +872,7 @@ impl WaySink {
             last_id: 0,
             count: 0,
             refs: 0,
+            max_ref: 0,
         })
     }
 
@@ -853,6 +893,7 @@ impl WaySink {
         for &node in refs {
             put_svarint(&mut self.record, node.wrapping_sub(previous));
             previous = node;
+            self.max_ref = self.max_ref.max(node);
         }
         self.out
             .write_all(&self.record)
@@ -863,16 +904,18 @@ impl WaySink {
         Ok(())
     }
 
-    /// Flush, and report how many ways were written and how many node refs they hold between them.
+    /// Flush, and report how many ways were written, how many node refs they hold between them, and
+    /// the largest of those refs.
     ///
-    /// The ref count is not a statistic. [`crate::extract`] reads this file back to collect the node
-    /// ids pass 3 must resolve, and that vector is ~200 M ids on California: grown by extension it
-    /// doubles into 2.1 GB of capacity, and the realloc that gets it there holds the old and new
-    /// allocations at once. Knowing the exact length first turns that into one allocation of exactly
-    /// the right size.
+    /// None of the three is a statistic. [`crate::extract`] reads this file back to collect the node
+    /// ids pass 3 must resolve, and it picks between two ways of doing that on the ref count: below a
+    /// budget it sizes one exact vector (grown by extension a 200 M-id vector doubles into 2.1 GB of
+    /// capacity, and the realloc that gets it there holds the old and new allocations at once), and
+    /// above it sizes a bitset from `max_ref`. Both numbers are free here, where every ref is already
+    /// being walked to encode it, and neither is recoverable later without a second pass.
     pub fn finish(mut self) -> Result<WayCounts> {
         self.out.flush().map_err(|e| Error(format!("cannot flush the ways spill: {e}")))?;
-        Ok(WayCounts { ways: self.count, refs: self.refs })
+        Ok(WayCounts { ways: self.count, refs: self.refs, max_ref: self.max_ref })
     }
 }
 
@@ -881,6 +924,9 @@ pub struct WayCounts {
     pub ways: u64,
     /// Node refs summed over every way, duplicates included — a capacity, not a cardinality.
     pub refs: u64,
+    /// The largest node ref written, or zero if none were. What a bitset over the id space is sized
+    /// from.
+    pub max_ref: i64,
 }
 
 /// Reads back what a [`WaySink`] wrote, in the order it was written.

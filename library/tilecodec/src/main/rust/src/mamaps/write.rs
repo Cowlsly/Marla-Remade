@@ -441,6 +441,15 @@ impl StreamWriter {
 
         let leaf_bytes: Vec<u8> =
             leaves.iter().flat_map(|leaf| index::serialize_leaf(leaf)).collect();
+        let leaf_len = leaf_bytes.len() as u64;
+        // Planet scale: ~268M bodies ×16 B ≈4.29 GB > u32::MAX (1257 B overflow
+        // in the failed run). Common path (NA ~418 MB, CA ~tens of MB) stays
+        // flag 0 + u32 + 0 — byte-identical to v1. Extended path uses
+        // FLAG_LEAF_LEN_64 and the 72..80 u64 slot (was u32+reserved).
+        let needs_leaf64 = leaf_len > u32::MAX as u64;
+        if needs_leaf64 {
+            flags |= crate::mamaps::header::FLAG_LEAF_LEN_64;
+        }
         let root_bytes = index::serialize_root(&root);
         let dict_offset = HEADER_LEN as u64;
         let root_offset = dict_offset + dictionary.len() as u64;
@@ -463,7 +472,7 @@ impl StreamWriter {
             root_len: root_bytes.len() as u32,
             leaf_count: root.len() as u32,
             leaf_offset,
-            leaf_len: leaf_bytes.len() as u32,
+            leaf_len,
             data_offset,
             data_len,
             tiles_addressed: self.tiles_addressed,

@@ -52,6 +52,7 @@ pub const BODY_HEADER_LEN: usize = 16;
 pub const LAYER_INDEX_LEN: usize = 12;
 pub const FEATURE_RECORD_LEN: usize = 16;
 pub const PART_ENTRY_LEN: usize = 12;
+pub const BODY_FLAG_EXTENDED_COUNTS: u8 = 0x01;
 
 /// A feature whose geometry is one or more open paths.
 pub const GEOM_LINE: u8 = 1;
@@ -194,7 +195,7 @@ impl Body {
     }
 
     /// Body header: `0..4` magic-and-version, `4..8` raw_len, `8..10` extent, `10` layer_count,
-    /// `11` flags, `12..16` reserved.
+    /// `11` flags, `12..16` reserved. Flag `0x01` means extended feature counts follow the layer index.
     pub fn parse(buf: &[u8]) -> Result<Body> {
         if buf.len() < BODY_HEADER_LEN {
             return err("a .mamaps body is shorter than its own header");
@@ -217,14 +218,29 @@ impl Body {
             return err("a .mamaps body has a zero extent");
         }
         let layer_count = buf[10] as usize;
-        if u32::from_le_bytes([buf[12], buf[13], buf[14], buf[15]]) != 0 {
+        let body_flags = buf[11];
+        if body_flags & !BODY_FLAG_EXTENDED_COUNTS != 0 {
+            return err(format!("unknown body flags {:#04x}", body_flags));
+        }
+        // Reserved word must be zero unless extended flag is set; extended uses it as spill for counts.
+        if body_flags & BODY_FLAG_EXTENDED_COUNTS == 0
+            && u32::from_le_bytes([buf[12], buf[13], buf[14], buf[15]]) != 0
+        {
             return err("a .mamaps body has a non-zero reserved word");
         }
 
-        let index_end = BODY_HEADER_LEN + layer_count * LAYER_INDEX_LEN;
+        let has_extended = (body_flags & BODY_FLAG_EXTENDED_COUNTS) != 0;
+        let mut index_end = BODY_HEADER_LEN + layer_count * LAYER_INDEX_LEN;
+        if has_extended {
+            index_end = index_end.checked_add(layer_count * 4).ok_or_else(|| {
+                crate::proto::Error("extended counts overflow".to_string())
+            })?;
+        }
         if index_end > buf.len() {
             return err("a .mamaps body's layer index runs past its end");
         }
+        // Extended counts live right after the layer index, one u32 LE per layer in order.
+        let ext_at = BODY_HEADER_LEN + layer_count * LAYER_INDEX_LEN;
         let mut layers = Vec::with_capacity(layer_count);
         let mut previous: Option<u8> = None;
         for i in 0..layer_count {
@@ -239,7 +255,16 @@ impl Body {
                 return err("a .mamaps body's layers are not ordered by id");
             }
             previous = Some(layer_id);
-            let feature_count = u16::from_le_bytes([buf[at + 2], buf[at + 3]]) as usize;
+            let feature_count = if has_extended {
+                u32::from_le_bytes([
+                    buf[ext_at + i * 4],
+                    buf[ext_at + i * 4 + 1],
+                    buf[ext_at + i * 4 + 2],
+                    buf[ext_at + i * 4 + 3],
+                ]) as usize
+            } else {
+                u16::from_le_bytes([buf[at + 2], buf[at + 3]]) as usize
+            };
             let (offset, length) = (u32_at(4) as usize, u32_at(8) as usize);
             let end = offset.checked_add(length).ok_or_else(|| {
                 crate::proto::Error("a .mamaps layer's extent overflows".to_string())
@@ -382,7 +407,7 @@ pub(crate) fn align4(at: usize) -> usize {
 #[derive(Default)]
 pub struct Scratch {
     payloads: Vec<Vec<u8>>,
-    meta: Vec<(u8, u16)>,
+    meta: Vec<(u8, u32)>,
     out: Vec<u8>,
 }
 
@@ -400,13 +425,21 @@ pub fn serialize_into<'s>(body: &Body, scratch: &'s mut Scratch) -> Result<&'s [
     if layers.windows(2).any(|pair| pair[0].layer_id == pair[1].layer_id) {
         return err("a .mamaps body cannot carry two layers with the same id");
     }
+    let needs_extended = layers.iter().any(|l| l.features.len() > u16::MAX as usize);
     for layer in &layers {
-        if layer.features.len() > u16::MAX as usize {
+        if !needs_extended && layer.features.len() > u16::MAX as usize {
             return err(format!(
                 "layer {} has {} features, past the {} a .mamaps body can index",
                 layer.layer_id,
                 layer.features.len(),
                 u16::MAX,
+            ));
+        }
+        if layer.features.len() > u32::MAX as usize {
+            return err(format!(
+                "layer {} has {} features, past u32",
+                layer.layer_id,
+                layer.features.len()
             ));
         }
         // The arena is written in parts-table order with no offsets of its own, so a part has to
@@ -445,7 +478,10 @@ pub fn serialize_into<'s>(body: &Body, scratch: &'s mut Scratch) -> Result<&'s [
         }
     }
 
-    let index_end = BODY_HEADER_LEN + layers.len() * LAYER_INDEX_LEN;
+    let mut index_end = BODY_HEADER_LEN + layers.len() * LAYER_INDEX_LEN;
+    if needs_extended {
+        index_end += layers.len() * 4;
+    }
     // Both fields at once, which needs the struct broken apart: the payloads are built first and
     // then copied into the output, and each wants its own mutable borrow.
     let Scratch { payloads, meta, out: assembled } = scratch;
@@ -498,7 +534,7 @@ pub fn serialize_into<'s>(body: &Body, scratch: &'s mut Scratch) -> Result<&'s [
                 (px, py) = (x as i32, y as i32);
             }
         }
-        meta.push((layer.layer_id, layer.features.len() as u16));
+        meta.push((layer.layer_id, layer.features.len() as u32));
     }
 
     let mut offset = align4(index_end);
@@ -510,15 +546,29 @@ pub fn serialize_into<'s>(body: &Body, scratch: &'s mut Scratch) -> Result<&'s [
     assembled.extend_from_slice(&0u32.to_le_bytes());
     assembled.extend_from_slice(&body.extent.to_le_bytes());
     assembled.push(layers.len() as u8);
-    assembled.push(0);
+    assembled.push(if needs_extended { BODY_FLAG_EXTENDED_COUNTS } else { 0 });
     assembled.extend_from_slice(&0u32.to_le_bytes());
     for (i, (layer_id, feature_count)) in meta.iter().enumerate() {
         assembled.push(*layer_id);
         assembled.push(0);
-        assembled.extend_from_slice(&feature_count.to_le_bytes());
+        // For extended, write sentinel-limited low 16 (old readers see at most 65534
+        // and reject on payload bound); real count is the u32 after the index.
+        let fc: u16 = if needs_extended {
+            (*feature_count as usize).min(0xFFFE) as u16
+        } else {
+            // Non-extended path is byte-identical to the old format: u16 carry
+            // validated above to be ≤65535.
+            u16::try_from(*feature_count).expect("feature count fits u16 in non-extended body")
+        };
+        assembled.extend_from_slice(&fc.to_le_bytes());
         assembled.extend_from_slice(&(offset as u32).to_le_bytes());
         assembled.extend_from_slice(&(payloads[i].len() as u32).to_le_bytes());
         offset += payloads[i].len();
+    }
+    if needs_extended {
+        for layer in &layers {
+            assembled.extend_from_slice(&(layer.features.len() as u32).to_le_bytes());
+        }
     }
     while assembled.len() % 4 != 0 {
         assembled.push(0);
@@ -908,5 +958,41 @@ mod tests {
         let mut reordered = sample();
         reordered.layers.reverse();
         assert_eq!(serialize(&sample()).expect("a"), serialize(&reordered).expect("b"));
+    }
+
+    #[test]
+    fn a_layer_with_more_than_65535_features_round_trips_via_extended_encoding() {
+        let mut layer = Layer::new(10);
+        let n = 70000usize;
+        for i in 0..n {
+            layer.features.push(Feature {
+                kind: 1,
+                kind_detail: 0,
+                geom_type: GEOM_LINE,
+                flags: 0,
+                parts_offset: i as u32,
+                part_count: 1,
+            });
+            layer.parts.push(Part { coord_start: (i * 2) as u32, point_count: 2, winding: WINDING_OUTER });
+            layer.coords.push((0, 0));
+            layer.coords.push((1, 1));
+        }
+        let body = Body { extent: DEFAULT_EXTENT, layers: vec![layer] };
+        let bytes = serialize(&body).expect("extended tile must serialize");
+        assert_eq!(bytes[11], BODY_FLAG_EXTENDED_COUNTS, "extended flag set");
+        let parsed = Body::parse(&bytes).expect("must parse extended");
+        assert_eq!(parsed.layers[0].features.len(), n);
+        assert_eq!(parsed.layers[0].parts.len(), n);
+        // Non-extended path stays byte-identical for common case.
+        let small_body = Body { extent: DEFAULT_EXTENT, layers: vec![{
+            let mut l = Layer::new(10);
+            l.features.push(Feature { kind: 1, kind_detail: 0, geom_type: GEOM_LINE, flags: 0, parts_offset: 0, part_count: 1 });
+            l.parts.push(Part { coord_start: 0, point_count: 2, winding: WINDING_OUTER });
+            l.coords.extend_from_slice(&[(0, 0), (1, 1)]);
+            l
+        }] };
+        let small_bytes = serialize(&small_body).expect("small tile");
+        assert_eq!(small_bytes[11], 0, "common path no flag, byte-identical");
+        assert_eq!(small_bytes[12..16], [0, 0, 0, 0], "reserved still zero for common path");
     }
 }
