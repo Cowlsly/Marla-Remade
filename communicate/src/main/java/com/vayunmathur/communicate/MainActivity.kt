@@ -198,9 +198,13 @@ private fun CommunicateApp(initialDeepLink: DeepLink? = null) {
         when (val link = initialDeepLink) {
             is DeepLink.Conversation -> backStack.add(
                 Route.Conversation(
-                    threadId = -1L,
+                    threadId = link.threadId,
                     address = link.address,
                     line = link.line,
+                    remoteId = link.remoteId,
+                    subscriptionId = link.subscriptionId,
+                    isGroup = link.isGroup,
+                    groupTitle = link.groupTitle,
                 ),
             )
             is DeepLink.UnsupportedGroupInvite ->

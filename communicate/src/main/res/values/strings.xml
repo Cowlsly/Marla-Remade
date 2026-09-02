@@ -68,6 +68,12 @@
     <string name="gv_sync_notification_title">Google Voice receive active</string>
     <string name="gv_sync_notification_text">Listening for calls and checking for new messages</string>
     <string name="notification_action_stop">Stop</string>
+    <!-- Notification channel title for incoming SIM SMS/MMS messages -->
+    <string name="sms_incoming_channel_name">Text messages</string>
+    <!-- Notification channel description for incoming SIM SMS/MMS messages -->
+    <string name="sms_incoming_channel_desc">Incoming SMS and MMS messages.</string>
+    <!-- Fallback notification body for a message whose only content is media (e.g. an MMS picture) -->
+    <string name="media_message">Media message</string>
     <string name="you">You</string>
     <string name="call_mute">Mute</string>
     <string name="call_unmute">Unmute</string>

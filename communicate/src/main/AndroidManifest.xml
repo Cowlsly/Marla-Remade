@@ -125,6 +125,15 @@
             </intent-filter>
         </activity>
 
+        <!-- Expanded conversation bubble host: must be embeddable and document-launched. -->
+        <activity
+            android:name=".notifications.BubbleActivity"
+            android:allowEmbedded="true"
+            android:documentLaunchMode="always"
+            android:exported="false"
+            android:resizeableActivity="true"
+            android:theme="@style/Theme.General" />
+
         <receiver
             android:name=".telephony.SmsDeliverReceiver"
             android:exported="true"

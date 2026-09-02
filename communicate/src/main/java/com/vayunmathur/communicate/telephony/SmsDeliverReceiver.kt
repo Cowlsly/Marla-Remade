@@ -6,6 +6,10 @@ import android.content.Context
 import android.content.Intent
 import android.provider.Telephony
 import android.util.Log
+import com.vayunmathur.communicate.R
+import com.vayunmathur.communicate.data.CommunicateLine
+import com.vayunmathur.communicate.notifications.ConversationSpace
+import com.vayunmathur.communicate.notifications.ConversationTarget
 
 /**
  * Handles inbound SMS as the default SMS app. Android delivers `SMS_DELIVER` only to the default
@@ -61,6 +65,29 @@ class SmsDeliverReceiver : BroadcastReceiver() {
         }
         context.contentResolver.insert(Telephony.Sms.Inbox.CONTENT_URI, values)
         Log.d(TAG, "stored inbound SMS parts=${parts.size} thread=$threadId")
+
+        if (address != null) {
+            ConversationSpace.ensureIncomingChannel(
+                context,
+                ConversationSpace.SIM_CHANNEL_ID,
+                context.getString(R.string.sms_incoming_channel_name),
+                context.getString(R.string.sms_incoming_channel_desc),
+            )
+            ConversationSpace.notifyIncoming(
+                context = context,
+                target = ConversationTarget(
+                    line = CommunicateLine.Sim,
+                    address = address,
+                    threadId = threadId ?: -1L,
+                    personName = address,
+                    subscriptionId = if (subscriptionId >= 0) subscriptionId else null,
+                ),
+                channelId = ConversationSpace.SIM_CHANNEL_ID,
+                body = body.ifBlank { context.getString(R.string.new_message) },
+                timestamp = System.currentTimeMillis(),
+                smallIcon = R.mipmap.ic_launcher,
+            )
+        }
     }
 
     companion object {

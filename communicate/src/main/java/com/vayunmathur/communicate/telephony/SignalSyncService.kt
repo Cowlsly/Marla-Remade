@@ -11,14 +11,16 @@ import android.os.Build
 import android.os.IBinder
 import android.util.Log
 import androidx.core.app.NotificationCompat
-import androidx.core.app.Person
 import androidx.core.content.ContextCompat
 import com.vayunmathur.communicate.MainActivity
 import com.vayunmathur.communicate.R
+import com.vayunmathur.communicate.data.CommunicateLine
 import com.vayunmathur.communicate.data.signal.SignalClient
 import com.vayunmathur.communicate.data.signal.SignalEvent
 import com.vayunmathur.communicate.data.signal.SignalFeature
 import com.vayunmathur.communicate.data.signal.SignalLineSession
+import com.vayunmathur.communicate.notifications.ConversationSpace
+import com.vayunmathur.communicate.notifications.ConversationTarget
 import com.vayunmathur.library.util.ensureNotificationChannel
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -116,7 +118,9 @@ class SignalSyncService : Service() {
             name = "Signal messages",
             importance = NotificationManager.IMPORTANCE_HIGH,
             description = "Incoming Signal messages",
-        )
+        ) {
+            setAllowBubbles(true)
+        }
     }
 
     private fun buildSyncNotification(): Notification {
@@ -147,33 +151,23 @@ class SignalSyncService : Service() {
     }
 
     private fun showIncomingNotification(event: SignalEvent.IncomingMessage) {
-        val notificationId = event.messageId.hashCode()
-        val tap = PendingIntent.getActivity(
-            this,
-            notificationId,
-            Intent(this, MainActivity::class.java).apply {
-                addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP)
-                putExtra(EXTRA_OPEN_SIGNAL_THREAD, event.conversationId)
-            },
-            PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT,
+        val isGroup = event.conversationId.startsWith("group:")
+        val target = ConversationTarget(
+            line = CommunicateLine.Signal,
+            address = event.peerPhone ?: event.conversationId,
+            remoteId = event.conversationId,
+            isGroup = isGroup,
+            title = if (isGroup) event.peerName else null,
+            personName = event.senderName ?: event.peerName ?: event.peerPhone ?: "Signal",
         )
-        val sender = Person.Builder()
-            .setName(event.senderName ?: event.peerName ?: event.peerPhone ?: "Signal")
-            .build()
-        val self = Person.Builder().setName(getString(R.string.you)).build()
-        val body = event.body.ifBlank { "New message" }
-        val notification = NotificationCompat.Builder(this, INCOMING_CHANNEL_ID)
-            .setSmallIcon(R.mipmap.ic_launcher)
-            .setContentTitle(sender.name)
-            .setContentText(body)
-            .setStyle(NotificationCompat.MessagingStyle(self).addMessage(body, event.timestamp, sender))
-            .setContentIntent(tap)
-            .setAutoCancel(true)
-            .setCategory(NotificationCompat.CATEGORY_MESSAGE)
-            .setPriority(NotificationCompat.PRIORITY_HIGH)
-            .build()
-        (getSystemService(NOTIFICATION_SERVICE) as NotificationManager)
-            .notify(event.conversationId, notificationId, notification)
+        ConversationSpace.notifyIncoming(
+            context = this,
+            target = target,
+            channelId = INCOMING_CHANNEL_ID,
+            body = event.body.ifBlank { getString(R.string.new_message) },
+            timestamp = event.timestamp,
+            smallIcon = R.mipmap.ic_launcher,
+        )
     }
 
     /**

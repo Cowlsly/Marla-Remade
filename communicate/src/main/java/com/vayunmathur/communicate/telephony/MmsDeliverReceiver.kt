@@ -9,6 +9,10 @@ import android.net.Uri
 import android.provider.Telephony
 import android.telephony.SmsManager
 import android.util.Log
+import com.vayunmathur.communicate.R
+import com.vayunmathur.communicate.data.CommunicateLine
+import com.vayunmathur.communicate.notifications.ConversationSpace
+import com.vayunmathur.communicate.notifications.ConversationTarget
 import java.io.File
 
 /**
@@ -117,6 +121,28 @@ class MmsDeliverReceiver : BroadcastReceiver() {
                 put("charset", 106)
             }
             context.contentResolver.insert(Uri.parse("content://mms/$mmsId/addr"), av)
+
+            val textBody = msg.parts.firstOrNull { it.contentType == "text/plain" }?.text
+            val body = textBody?.takeIf { it.isNotBlank() } ?: context.getString(R.string.media_message)
+            ConversationSpace.ensureIncomingChannel(
+                context,
+                ConversationSpace.SIM_CHANNEL_ID,
+                context.getString(R.string.sms_incoming_channel_name),
+                context.getString(R.string.sms_incoming_channel_desc),
+            )
+            ConversationSpace.notifyIncoming(
+                context = context,
+                target = ConversationTarget(
+                    line = CommunicateLine.Sim,
+                    address = from,
+                    threadId = threadId ?: -1L,
+                    personName = from,
+                ),
+                channelId = ConversationSpace.SIM_CHANNEL_ID,
+                body = body,
+                timestamp = System.currentTimeMillis(),
+                smallIcon = R.mipmap.ic_launcher,
+            )
         }
     }
 

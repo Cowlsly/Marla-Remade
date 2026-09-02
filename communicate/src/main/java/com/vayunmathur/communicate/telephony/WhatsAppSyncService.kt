@@ -11,15 +11,17 @@ import android.os.Build
 import android.os.IBinder
 import android.util.Log
 import androidx.core.app.NotificationCompat
-import androidx.core.app.Person
 import androidx.core.content.ContextCompat
 import com.vayunmathur.communicate.MainActivity
 import com.vayunmathur.communicate.R
+import com.vayunmathur.communicate.data.CommunicateLine
 import com.vayunmathur.communicate.data.whatsapp.WhatsAppClient
 import com.vayunmathur.communicate.data.whatsapp.WhatsAppDatabase
 import com.vayunmathur.communicate.data.whatsapp.WhatsAppEvent
 import com.vayunmathur.communicate.data.whatsapp.WhatsAppEventProcessor
 import com.vayunmathur.communicate.data.whatsapp.WhatsAppLineSession
+import com.vayunmathur.communicate.notifications.ConversationSpace
+import com.vayunmathur.communicate.notifications.ConversationTarget
 import com.vayunmathur.library.util.ensureNotificationChannel
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -109,7 +111,9 @@ class WhatsAppSyncService : Service() {
             name = "WhatsApp messages",
             importance = NotificationManager.IMPORTANCE_HIGH,
             description = "Incoming WhatsApp messages",
-        )
+        ) {
+            setAllowBubbles(true)
+        }
     }
 
     private fun buildSyncNotification(): Notification {
@@ -140,33 +144,23 @@ class WhatsAppSyncService : Service() {
     }
 
     private fun showIncomingNotification(event: WhatsAppEvent.IncomingMessage) {
-        val notificationId = event.messageId.hashCode()
-        val tap = PendingIntent.getActivity(
-            this,
-            notificationId,
-            Intent(this, MainActivity::class.java).apply {
-                addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP)
-                putExtra(EXTRA_OPEN_WHATSAPP_THREAD, event.conversationId)
-            },
-            PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT,
+        val isGroup = event.conversationId.endsWith("@g.us")
+        val target = ConversationTarget(
+            line = CommunicateLine.WhatsApp,
+            address = event.peerPhone ?: event.conversationId,
+            remoteId = event.conversationId,
+            isGroup = isGroup,
+            title = if (isGroup) event.peerName else null,
+            personName = event.senderName ?: event.peerName ?: event.peerPhone ?: "WhatsApp",
         )
-        val sender = Person.Builder()
-            .setName(event.senderName ?: event.peerName ?: event.peerPhone ?: "WhatsApp")
-            .build()
-        val self = Person.Builder().setName(getString(R.string.you)).build()
-        val body = event.body.ifBlank { "New message" }
-        val notification = NotificationCompat.Builder(this, INCOMING_CHANNEL_ID)
-            .setSmallIcon(R.mipmap.ic_launcher)
-            .setContentTitle(sender.name)
-            .setContentText(body)
-            .setStyle(NotificationCompat.MessagingStyle(self).addMessage(body, event.timestamp, sender))
-            .setContentIntent(tap)
-            .setAutoCancel(true)
-            .setCategory(NotificationCompat.CATEGORY_MESSAGE)
-            .setPriority(NotificationCompat.PRIORITY_HIGH)
-            .build()
-        (getSystemService(NOTIFICATION_SERVICE) as NotificationManager)
-            .notify(event.conversationId, notificationId, notification)
+        ConversationSpace.notifyIncoming(
+            context = this,
+            target = target,
+            channelId = INCOMING_CHANNEL_ID,
+            body = event.body.ifBlank { getString(R.string.new_message) },
+            timestamp = event.timestamp,
+            smallIcon = R.mipmap.ic_launcher,
+        )
     }
 
     private fun startForegroundCompat(notification: Notification) {

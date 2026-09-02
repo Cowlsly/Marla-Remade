@@ -3,6 +3,7 @@ package com.vayunmathur.communicate
 import android.content.Intent
 import android.net.Uri
 import com.vayunmathur.communicate.data.CommunicateLine
+import com.vayunmathur.communicate.notifications.ConversationSpace
 
 /**
  * What an incoming intent asked us to open.
@@ -12,7 +13,16 @@ import com.vayunmathur.communicate.data.CommunicateLine
  */
 sealed interface DeepLink {
     /** Open (or start) a conversation with [address] on [line]. */
-    data class Conversation(val address: String, val line: CommunicateLine, val body: String? = null) : DeepLink
+    data class Conversation(
+        val address: String,
+        val line: CommunicateLine,
+        val body: String? = null,
+        val remoteId: String? = null,
+        val threadId: Long = -1L,
+        val isGroup: Boolean = false,
+        val groupTitle: String? = null,
+        val subscriptionId: Int? = null,
+    ) : DeepLink
 
     /** A group invite we can't join yet, but shouldn't silently swallow either. */
     data class UnsupportedGroupInvite(val line: CommunicateLine) : DeepLink
@@ -28,12 +38,28 @@ sealed interface DeepLink {
 object DeepLinks {
     fun parse(intent: Intent?): DeepLink? {
         val intent = intent ?: return null
+        // A tap on a conversation notification / shortcut carries the thread in extras, not a URI.
+        fromConversationExtras(intent)?.let { return it }
         val data = intent.data ?: return null
         return when (intent.action) {
             Intent.ACTION_VIEW, Intent.ACTION_SENDTO, Intent.ACTION_DIAL, Intent.ACTION_CALL ->
                 fromUri(data, intent.getStringExtra(Intent.EXTRA_TEXT))
             else -> null
         }
+    }
+
+    private fun fromConversationExtras(intent: Intent): DeepLink.Conversation? {
+        val lineName = intent.getStringExtra(ConversationSpace.EXTRA_LINE) ?: return null
+        val line = runCatching { CommunicateLine.valueOf(lineName) }.getOrNull() ?: return null
+        return DeepLink.Conversation(
+            address = intent.getStringExtra(ConversationSpace.EXTRA_ADDRESS).orEmpty(),
+            line = line,
+            remoteId = intent.getStringExtra(ConversationSpace.EXTRA_REMOTE_ID),
+            threadId = intent.getLongExtra(ConversationSpace.EXTRA_THREAD_ID, -1L),
+            isGroup = intent.getBooleanExtra(ConversationSpace.EXTRA_IS_GROUP, false),
+            groupTitle = intent.getStringExtra(ConversationSpace.EXTRA_TITLE),
+            subscriptionId = intent.getIntExtra(ConversationSpace.EXTRA_SUB_ID, -1).takeIf { it >= 0 },
+        )
     }
 
     internal fun fromUri(uri: Uri, body: String? = null): DeepLink? = resolve(

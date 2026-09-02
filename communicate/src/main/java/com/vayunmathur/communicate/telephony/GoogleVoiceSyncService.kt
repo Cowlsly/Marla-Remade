@@ -11,16 +11,18 @@ import android.os.Build
 import android.os.IBinder
 import android.util.Log
 import androidx.core.app.NotificationCompat
-import androidx.core.app.Person
 import androidx.core.content.ContextCompat
 import com.vayunmathur.communicate.MainActivity
 import com.vayunmathur.communicate.R
+import com.vayunmathur.communicate.data.CommunicateLine
 import com.vayunmathur.communicate.data.googlevoice.GoogleVoiceAuthException
 import com.vayunmathur.communicate.data.googlevoice.GoogleVoiceClient
 import com.vayunmathur.communicate.data.googlevoice.GoogleVoiceSession
 import com.vayunmathur.communicate.data.googlevoice.GvFolder
 import com.vayunmathur.communicate.data.googlevoice.GvMessage
 import com.vayunmathur.communicate.data.googlevoice.call.GoogleVoiceCallManager
+import com.vayunmathur.communicate.notifications.ConversationSpace
+import com.vayunmathur.communicate.notifications.ConversationTarget
 import com.vayunmathur.library.util.ensureNotificationChannel
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -147,7 +149,9 @@ class GoogleVoiceSyncService : Service() {
             name = getString(R.string.gv_incoming_channel_name),
             importance = NotificationManager.IMPORTANCE_HIGH,
             description = getString(R.string.gv_incoming_channel_desc),
-        )
+        ) {
+            setAllowBubbles(true)
+        }
     }
 
     private fun buildSyncNotification(): Notification {
@@ -178,34 +182,21 @@ class GoogleVoiceSyncService : Service() {
     }
 
     private fun showIncomingNotification(message: GvMessage) {
-        val notificationId = message.id.hashCode()
-        val tap = PendingIntent.getActivity(
-            this,
-            notificationId,
-            Intent(this, MainActivity::class.java).apply {
-                addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP)
-                putExtra(EXTRA_OPEN_GOOGLE_VOICE_THREAD, message.threadId)
-            },
-            PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT,
+        val name = message.phoneNumber.ifBlank { getString(R.string.account_google_voice) }
+        val target = ConversationTarget(
+            line = CommunicateLine.GoogleVoice,
+            address = message.phoneNumber,
+            remoteId = message.threadId,
+            personName = name,
         )
-        val sender = Person.Builder()
-            .setName(message.phoneNumber.ifBlank { getString(R.string.account_google_voice) })
-            .build()
-        val self = Person.Builder().setName(getString(R.string.you)).build()
-        val body = message.notificationText()
-        val notification = NotificationCompat.Builder(this, INCOMING_CHANNEL_ID)
-            .setSmallIcon(R.mipmap.ic_launcher)
-            .setContentTitle(sender.name)
-            .setContentText(body)
-            .setStyle(NotificationCompat.MessagingStyle(self).addMessage(body, message.timestampMillis, sender))
-            .setContentIntent(tap)
-            .setAutoCancel(true)
-            .setCategory(NotificationCompat.CATEGORY_MESSAGE)
-            .setDefaults(NotificationCompat.DEFAULT_ALL)
-            .setPriority(NotificationCompat.PRIORITY_HIGH)
-            .build()
-        val nm = getSystemService(NOTIFICATION_SERVICE) as NotificationManager
-        nm.notify(message.threadId, notificationId, notification)
+        ConversationSpace.notifyIncoming(
+            context = this,
+            target = target,
+            channelId = INCOMING_CHANNEL_ID,
+            body = message.notificationText(),
+            timestamp = message.timestampMillis,
+            smallIcon = R.mipmap.ic_launcher,
+        )
     }
 
     private fun GvMessage.shouldNotify(): Boolean = !outgoing
