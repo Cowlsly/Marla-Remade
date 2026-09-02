@@ -12,7 +12,6 @@ import android.bluetooth.le.ScanCallback
 import android.bluetooth.le.ScanResult
 import android.bluetooth.le.ScanSettings
 import android.os.Build
-import com.vayunmathur.things.MainActivity
 import java.util.UUID
 
 /**
@@ -35,7 +34,7 @@ import java.util.UUID
  * No wifi/internet/cloud/login — pure on-device BLE + BodyComposition math.
  */
 @SuppressLint("MissingPermission")
-class ScaleBleManager(private val activity: MainActivity) {
+class ScaleBleManager {
 
     companion object {
         // Primary Qingniu GATT (covers Elis 1)
@@ -57,10 +56,15 @@ class ScaleBleManager(private val activity: MainActivity) {
 
     data class ScaleBleDevice(val name: String, val address: String)
 
-    private val bluetoothManager = activity.getSystemService(BluetoothManager::class.java)
+    private val bluetoothManager = DeviceController.appContext.getSystemService(BluetoothManager::class.java)
     private val adapter = bluetoothManager.adapter
     private val scanner get() = adapter.bluetoothLeScanner
     private var gatt: BluetoothGatt? = null
+
+    // See BleManager: keep connect() idempotent so repeated auto-connect calls don't stack a
+    // second GATT client, and drive passive background re-establishment on an unexpected drop.
+    private var currentAddress: String? = null
+    private var intentionalDisconnect = false
 
     private var weightRatio = 10.0
     private var notifyChar: UUID = CHAR_FFE1
@@ -85,37 +89,47 @@ class ScaleBleManager(private val activity: MainActivity) {
             val name = result.device.name
             if (!isScaleName(name)) return
             val addr = result.device.address
-            if (activity.scaleDevices.none { it.address == addr }) {
-                activity.scaleDevices.add(ScaleBleDevice(name ?: "Scale", addr))
+            if (DeviceController.scaleDevices.none { it.address == addr }) {
+                DeviceController.scaleDevices.add(ScaleBleDevice(name ?: "Scale", addr))
             }
         }
     }
 
     fun startScan() {
-        activity.scaleDevices.clear()
-        activity.scaleScanning.value = true
+        DeviceController.scaleDevices.clear()
+        DeviceController.scaleScanning.value = true
         val settings = ScanSettings.Builder()
             .setScanMode(ScanSettings.SCAN_MODE_LOW_LATENCY)
             .build()
         scanner?.startScan(null, settings, scanCallback)
-        activity.scaleConnectionState.value = "Scanning scales..."
+        DeviceController.scaleConnectionState.value = "Scanning scales..."
     }
 
     fun stopScan() {
         scanner?.stopScan(scanCallback)
-        activity.scaleScanning.value = false
+        DeviceController.scaleScanning.value = false
     }
 
     @Suppress("DEPRECATION")
     fun connect(address: String) {
+        if (gatt != null && currentAddress == address) return
+        close()
+        currentAddress = address
+        intentionalDisconnect = false
+        openGatt(address, autoConnect = false)
+    }
+
+    private fun openGatt(address: String, autoConnect: Boolean) {
         scanner?.stopScan(scanCallback)
-        activity.scaleScanning.value = false
-        activity.scaleConnectionState.value = "Connecting scale..."
+        DeviceController.scaleScanning.value = false
+        DeviceController.scaleConnectionState.value = "Connecting scale..."
         val device = adapter.getRemoteDevice(address)
-        gatt = device.connectGatt(activity, false, gattCallback, BluetoothDevice.TRANSPORT_LE)
+        gatt = device.connectGatt(DeviceController.appContext, autoConnect, gattCallback, BluetoothDevice.TRANSPORT_LE)
     }
 
     fun disconnect() {
+        intentionalDisconnect = true
+        currentAddress = null
         gatt?.disconnect()
     }
 
@@ -134,17 +148,27 @@ class ScaleBleManager(private val activity: MainActivity) {
 
     private val gattCallback = object : BluetoothGattCallback() {
         override fun onConnectionStateChange(g: BluetoothGatt, status: Int, newState: Int) {
-            activity.runOnUiThread {
+            DeviceController.runOnMain {
                 when (newState) {
                     BluetoothProfile.STATE_CONNECTED -> {
                         resetPacketState()
-                        activity.scaleConnectionState.value = "Discovering services..."
+                        DeviceController.scaleConnectionState.value = "Discovering services..."
                         g.discoverServices()
                     }
                     BluetoothProfile.STATE_DISCONNECTED -> {
-                        activity.scaleConnectionState.value = "Disconnected"
-                        activity.scaleDevices.clear()
+                        DeviceController.scaleConnectionState.value = "Disconnected"
+                        DeviceController.scaleDevices.clear()
                         resetPacketState()
+                        val g2 = gatt
+                        gatt = null
+                        g2?.let {
+                            it.close()
+                            refreshCache(it)
+                        }
+                        val addr = currentAddress
+                        if (!intentionalDisconnect && addr != null) {
+                            openGatt(addr, autoConnect = true)
+                        }
                     }
                 }
             }
@@ -155,13 +179,13 @@ class ScaleBleManager(private val activity: MainActivity) {
             // Prefer FFE0/FFE1, fall back to FFF0/FFF1 if that's what the firmware exposes.
             val svc = g.getService(SERVICE_FFE0) ?: g.getService(SERVICE_FFF0)
             if (svc == null) {
-                activity.runOnUiThread { activity.scaleConnectionState.value = "Scale service not found" }
+                DeviceController.runOnMain { DeviceController.scaleConnectionState.value = "Scale service not found" }
                 return
             }
             serviceUuid = svc.uuid
             val ch = svc.getCharacteristic(CHAR_FFE1) ?: svc.getCharacteristic(CHAR_FFF1)
             if (ch == null) {
-                activity.runOnUiThread { activity.scaleConnectionState.value = "Scale notifying char not found" }
+                DeviceController.runOnMain { DeviceController.scaleConnectionState.value = "Scale notifying char not found" }
                 return
             }
             notifyChar = ch.uuid
@@ -180,7 +204,7 @@ class ScaleBleManager(private val activity: MainActivity) {
         }
 
         override fun onDescriptorWrite(g: BluetoothGatt, descriptor: BluetoothGattDescriptor, status: Int) {
-            activity.runOnUiThread { activity.scaleConnectionState.value = "Connected — step on scale" }
+            DeviceController.runOnMain { DeviceController.scaleConnectionState.value = "Connected — step on scale" }
             // Scale sends c=18 scale-info unsolicited; no write needed to start. We just listen.
         }
 
@@ -191,7 +215,7 @@ class ScaleBleManager(private val activity: MainActivity) {
         ) {
             if (characteristic.uuid != notifyChar) return
             if (value.isEmpty()) return
-            activity.runOnUiThread { dispatch(value) }
+            DeviceController.runOnMain { dispatch(value) }
         }
     }
 
@@ -205,7 +229,7 @@ class ScaleBleManager(private val activity: MainActivity) {
                 // We treat stored the same as live: decode weight, notify.
                 if (value.size >= 11) {
                     val w = decodeWeight(twoByteInt(value[9], value[10]), weightRatio)
-                    if (w > 0) activity.onScaleMeasurement(w, 0, 0, false)
+                    if (w > 0) DeviceController.onScaleMeasurement(w, 0, 0, false)
                 }
             }
         }
@@ -216,7 +240,7 @@ class ScaleBleManager(private val activity: MainActivity) {
         weightRatio = if ((v[10].toInt() and 0x01) == 1) 100.0 else 10.0
         // Units etc. available at v[10] bits, v[16] lbPrecision, v[17] unit mask.
         // We keep ratio for weight decode; other bytes inform display only.
-        activity.scaleConnectionState.value = "Connected — step on scale"
+        DeviceController.scaleConnectionState.value = "Connected — step on scale"
     }
 
     private fun handleMeasure(v: ByteArray) {
@@ -227,18 +251,18 @@ class ScaleBleManager(private val activity: MainActivity) {
         when (c2) {
             0 -> {
                 // Real-time streaming weight
-                if (weight > 0) activity.onScaleRealtimeWeight(weight)
+                if (weight > 0) DeviceController.onScaleRealtimeWeight(weight)
             }
             1 -> {
                 // Stabilized weight + 4-electrode impedance at 6..9 (fourResTwoByte2Int)
                 if (v.size < 10) return
                 val r50 = fourResTwoByte2Int(v[6], v[7])
                 val r500 = fourResTwoByte2Int(v[8], v[9])
-                activity.onScaleMeasurement(weight, r50, r500, true)
+                DeviceController.onScaleMeasurement(weight, r50, r500, true)
             }
             2 -> {
                 // Overweight / error — treat as no-impedance measurement
-                activity.onScaleMeasurement(weight, 0, 0, true)
+                DeviceController.onScaleMeasurement(weight, 0, 0, true)
             }
             else -> {
                 // 8-electrode burst: top nibble=count, low nibble=current (QNDecoderImpl:472)
@@ -273,7 +297,7 @@ class ScaleBleManager(private val activity: MainActivity) {
                         )
                         val r50seg = (lh20k + rh20k).toInt()
                         val r500seg = (lh100k + rh100k).toInt()
-                        activity.onScaleMeasurement(weight, r50seg, r500seg, true, seg)
+                        DeviceController.onScaleMeasurement(weight, r50seg, r500seg, true, seg)
                     }
                 }
             }

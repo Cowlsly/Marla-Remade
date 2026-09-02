@@ -1,25 +1,35 @@
 <resources xmlns:xliff="urn:oasis:names:tc:xliff:document:1.2">
-    <!-- App name: launcher label, appears in app drawer -->
+    <!-- App name: launcher label, appears in app drawer. Also the Home screen title -->
     <string name="app_name">Things</string>
 
-    <!-- TopAppBar title. Noun, refers to hydration tracking feature -->
-    <string name="hydration">Hydration</string>
-    <!-- HydrationCard: header label for today's total intake. Noun/adjective, Title Case -->
-    <string name="today">Today</string>
+    <!-- Devices screen title: device management (scan/connect/disconnect). Noun -->
+    <string name="devices">Devices</string>
+    <!-- Home empty state when no device is connected. Sentence -->
+    <string name="no_devices">No devices connected</string>
+    <!-- Button on Home empty state that opens the Devices screen. Verb phrase -->
+    <string name="open_devices">Open Devices</string>
+    <!-- Scale note reassuring that measurements are saved to Health Connect. Sentence -->
+    <string name="syncs_to_health_connect">Measurements sync to Health Connect</string>
+
     <!-- Button to start BLE scan for smart bottle/cup. Verb, short action label -->
     <string name="scan">Scan</string>
     <!-- Device list label when BLE devices discovered. Noun phrase, colon intentional -->
     <string name="devices_found">Devices found:</string>
     <!-- Button to disconnect from BLE device. Verb -->
     <string name="disconnect">Disconnect</string>
-    <!-- Section header above daily drink log LazyColumn. Noun phrase -->
-    <string name="today_s_drinks">Today\'s drinks</string>
-    <!-- HydrationCard: total consumed. %1$s = volume number e.g. 450. Keep mL unit after placeholder -->
-    <string name="ml"><xliff:g id="volume" example="450">%1$s</xliff:g> mL</string>
-    <!-- HydrationCard: daily goal beneath progress bar. %1$s = goal number e.g. 2000 -->
-    <string name="goal_ml">Goal <xliff:g id="goal" example="2000">%1$s</xliff:g> mL</string>
     <!-- Bottle status section header shown when connected and sensor values available -->
     <string name="bottle_status">Bottle status</string>
+    <!-- Row labels in the bottle status card -->
+    <string name="label_battery">Battery</string>
+    <string name="label_water_level">Water level</string>
+    <string name="label_temperature">Temperature</string>
+    <string name="label_purity">Purity</string>
+    <!-- Generic percentage value. %1$d = 0-100 -->
+    <string name="percent"><xliff:g id="pct" example="60">%1$d</xliff:g>%%</string>
+    <!-- Shown in the bottle card before the first sensor reading arrives -->
+    <string name="waiting_for_data">Waiting for data…</string>
+    <!-- Timestamp of the most recent sensor reading. %1$s = clock time e.g. 14:05:30 -->
+    <string name="last_updated">Updated <xliff:g id="time" example="14:05:30">%1$s</xliff:g></string>
     <!-- Bottle status: water temperature. %1$d = degrees Celsius integer -->
     <string name="temperature_c"><xliff:g id="temp" example="22">%1$d</xliff:g>°C</string>
     <!-- Bottle status: water purity as TDS. %1$d = ppm integer -->
@@ -45,33 +55,17 @@
     <string name="athlete">Athlete mode</string>
     <!-- Scale scan button -->
     <string name="scan_scale">Scan scale</string>
-    <!-- Scale weight labels -->
-    <string name="weight">Weight</string>
-    <string name="weighing">Weighing…</string>
-    <!-- Impedance label. %1$d = ohms -->
-    <string name="impedance">Impedance %1$d Ω</string>
-    <string name="no_impedance">No impedance — BMI only</string>
-    <!-- Body composition -->
-    <string name="body_composition">Body composition</string>
-    <string name="bmi">BMI</string>
-    <string name="body_fat">Body fat</string>
-    <string name="fat_mass">Fat mass</string>
-    <string name="lbm">Lean mass</string>
-    <string name="water">Water</string>
-    <string name="muscle">Muscle</string>
-    <string name="bone">Bone</string>
-    <string name="protein">Protein</string>
-    <string name="bmr">BMR</string>
-    <string name="visceral">Visceral fat</string>
-    <string name="body_age">Body age</string>
-    <string name="score">Score</string>
-    <string name="segmental">Segmental (8-electrode)</string>
-    <string name="seg_arms">Arms R/L</string>
-    <string name="seg_legs">Legs R/L</string>
-    <string name="seg_trunk">Trunk</string>
-    <string name="bmi_only">BMI shown — step on bare feet for impedance</string>
-    <string name="bmi_hint">Impedance measures body fat via foot electrodes</string>
     <!-- Health Connect -->
     <!-- Button to grant Health Connect permissions. Verb phrase -->
     <string name="health_connect">Health Connect</string>
+
+    <!-- Foreground service -->
+    <!-- Notification channel name for the ongoing "keeping devices connected" notification -->
+    <string name="device_channel_name">Device connection</string>
+    <!-- Notification channel description shown in system notification settings -->
+    <string name="device_channel_desc">Keeps your bottle and scale connected in the background</string>
+    <!-- Ongoing foreground-service notification title -->
+    <string name="device_notification_title">Devices connected</string>
+    <!-- Ongoing foreground-service notification body text -->
+    <string name="device_notification_text">Keeping your devices connected</string>
 </resources>

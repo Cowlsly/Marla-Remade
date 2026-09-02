@@ -1,19 +1,22 @@
 package com.vayunmathur.things
 
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import com.vayunmathur.library.util.MainNavigation
+import com.vayunmathur.library.util.SiblingPage
 import com.vayunmathur.library.util.rememberNavBackStack
 import com.vayunmathur.things.platform.BleManager
-import com.vayunmathur.things.platform.BodyMetrics
 import com.vayunmathur.things.platform.ScaleBleManager
 import com.vayunmathur.things.platform.Sex
-import com.vayunmathur.things.ui.ThingsApp
+import com.vayunmathur.things.ui.DevicesPage
+import com.vayunmathur.things.ui.HomePage
 
 @Composable
 fun Navigation(
-    totalMl: Int,
-    goalMl: Int,
-    messages: List<String>,
     connectionState: String,
     scanning: Boolean,
     discoveredDevices: List<BleManager.BleDevice>,
@@ -21,16 +24,14 @@ fun Navigation(
     tds: Int?,
     batteryPct: Int?,
     charging: Boolean,
+    volumePct: Int?,
+    lastUpdatedMillis: Long?,
     onScanClick: () -> Unit,
     onDeviceClick: (BleManager.BleDevice) -> Unit,
     onDisconnectClick: () -> Unit,
-    scaleWeight: Double?,
-    scaleRealtimeWeight: Double?,
-    scaleR50: Int?,
     scaleConnectionState: String,
     scaleScanning: Boolean,
     scaleDevices: List<ScaleBleManager.ScaleBleDevice>,
-    scaleMetrics: BodyMetrics?,
     scaleSex: Sex,
     scaleAge: String,
     scaleHeight: String,
@@ -44,42 +45,69 @@ fun Navigation(
     onScaleAthleteChange: (Boolean) -> Unit,
     onHealthConnectClick: () -> Unit,
 ) {
-    val backStack = rememberNavBackStack<Route>(Route.Home)
+    val backStack = rememberNavBackStack<Route>(Route.Devices)
+
+    // Connection is derived from the managers' status strings (see BleManager/ScaleBleManager);
+    // there is no separate boolean link-state to read.
+    val bottleConnected = connectionState == "Connected"
+    val scaleConnected = scaleConnectionState.startsWith("Scale: ") ||
+        scaleConnectionState.contains("step on") ||
+        scaleConnectionState.startsWith("Weighing")
+    val anyConnected = bottleConnected || scaleConnected
+
+    // On the first device connecting, swap Devices out for Home so there is no back to an empty
+    // Devices screen. Only fires while sitting on Devices, so opening Devices manually later stays.
+    var wasConnected by remember { mutableStateOf(anyConnected) }
+    LaunchedEffect(anyConnected) {
+        if (anyConnected && !wasConnected && backStack.last() == Route.Devices) {
+            backStack.reset(Route.Home)
+        }
+        wasConnected = anyConnected
+    }
+
     MainNavigation(backStack) {
-        entry<Route.Home> {
-            ThingsApp(
-                totalMl = totalMl,
-                goalMl = goalMl,
-                messages = messages,
-                connectionState = connectionState,
-                scanning = scanning,
-                discoveredDevices = discoveredDevices,
+        entry<Route.Home>(SiblingPage()) {
+            HomePage(
+                bottleConnected = bottleConnected,
                 tempC = tempC,
                 tds = tds,
                 batteryPct = batteryPct,
                 charging = charging,
-                onScanClick = onScanClick,
-                onDeviceClick = onDeviceClick,
-                onDisconnectClick = onDisconnectClick,
-                scaleWeight = scaleWeight,
-                scaleRealtimeWeight = scaleRealtimeWeight,
-                scaleR50 = scaleR50,
+                volumePct = volumePct,
+                lastUpdatedMillis = lastUpdatedMillis,
+                scaleConnected = scaleConnected,
                 scaleConnectionState = scaleConnectionState,
-                scaleScanning = scaleScanning,
-                scaleDevices = scaleDevices,
-                scaleMetrics = scaleMetrics,
                 scaleSex = scaleSex,
                 scaleAge = scaleAge,
                 scaleHeight = scaleHeight,
                 scaleAthlete = scaleAthlete,
-                onScaleScanClick = onScaleScanClick,
-                onScaleDeviceClick = onScaleDeviceClick,
-                onScaleDisconnectClick = onScaleDisconnectClick,
                 onScaleSexChange = onScaleSexChange,
                 onScaleAgeChange = onScaleAgeChange,
                 onScaleHeightChange = onScaleHeightChange,
                 onScaleAthleteChange = onScaleAthleteChange,
+                onOpenDevices = { backStack.add(Route.Devices) },
+            )
+        }
+        entry<Route.Devices>(SiblingPage()) {
+            DevicesPage(
+                connectionState = connectionState,
+                scanning = scanning,
+                discoveredDevices = discoveredDevices,
+                onScanClick = onScanClick,
+                onDeviceClick = onDeviceClick,
+                onDisconnectClick = onDisconnectClick,
+                scaleConnectionState = scaleConnectionState,
+                scaleScanning = scaleScanning,
+                scaleDevices = scaleDevices,
+                onScaleScanClick = onScaleScanClick,
+                onScaleDeviceClick = onScaleDeviceClick,
+                onScaleDisconnectClick = onScaleDisconnectClick,
                 onHealthConnectClick = onHealthConnectClick,
+                onNavigateBack = if (backStack.backStack.size > 1) {
+                    { backStack.pop() }
+                } else {
+                    null
+                },
             )
         }
     }
