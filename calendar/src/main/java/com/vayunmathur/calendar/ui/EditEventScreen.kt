@@ -139,7 +139,15 @@ fun EditEventScreen(viewModel: CalendarViewModel, editRoute: Route.EditEvent, ba
     }
     var startTime by remember { mutableStateOf(event?.startDateTimeDisplay?.time ?: initialBeginLdt?.time ?: now) }
     var endTime by remember { mutableStateOf(event?.endDateTimeDisplay?.time ?: initialEndLdt?.time ?: startTime) }
-    var timezone by remember { mutableStateOf(event?.timezone ?: TimeZone.currentSystemDefault().id) }
+    // All-day events are stored in UTC as a provider/RFC 5545 artifact, not a real user zone.
+    // Seed the picker with the device zone so switching to a timed event doesn't reinterpret the
+    // wall-clock time in UTC (which the day/week/month views would then shift by the local offset).
+    var timezone by remember {
+        mutableStateOf(
+            if (event?.allDay == true) TimeZone.currentSystemDefault().id
+            else event?.timezone ?: TimeZone.currentSystemDefault().id
+        )
+    }
     var rruleObj by remember { mutableStateOf(event?.rrule) }
     var rdateObj by remember { mutableStateOf(event?.rdate ?: emptyList()) }
     val repeatSummary by remember {
@@ -155,6 +163,14 @@ fun EditEventScreen(viewModel: CalendarViewModel, editRoute: Route.EditEvent, ba
         }
     }
     var reminders by remember { mutableStateOf(event?.reminders ?: emptyList()) }
+
+    // A new event inherits the reminders configured as defaults for its calendar; switching the
+    // calendar re-applies that calendar's defaults. Editing an existing event keeps its own set.
+    LaunchedEffect(selectedCalendar) {
+        if (event == null && selectedCalendar != -1L) {
+            reminders = viewModel.getDefaultReminders(selectedCalendar)
+        }
+    }
 
     // Shift the end date/time to preserve the current event duration when the start moves.
     fun applyStartChange(newStartDate: LocalDate, newStartTime: LocalTime) {

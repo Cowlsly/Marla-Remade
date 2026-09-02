@@ -72,6 +72,9 @@ interface CalendarActions {
     fun openEvent(instance: Instance) {}
     fun createEvent() {}
 
+    /** Create a new event pre-filled to [date] (e.g. from a long-press on a month cell). */
+    fun createEventOn(date: LocalDate) {}
+
     companion object {
         val Noop: CalendarActions = object : CalendarActions {}
     }
@@ -100,6 +103,7 @@ interface SettingsActions {
     fun openRenameCalendar(calendarId: Long) {}
     fun openDeleteCalendar(calendarId: Long) {}
     fun openChangeColor(calendarId: Long) {}
+    fun openDefaultReminders(calendarId: Long) {}
     fun openHolidayCalendars() {}
 
     /** Opens the system file picker; the picked files are handed to the import screen. */

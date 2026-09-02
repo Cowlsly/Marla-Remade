@@ -64,6 +64,7 @@ import androidx.compose.material.icons.filled.StrikethroughS
 import androidx.compose.material.icons.filled.Style
 import androidx.compose.material.icons.filled.TextFields
 import androidx.compose.material.icons.filled.Title
+import androidx.compose.material.icons.filled.Today
 import androidx.compose.material.icons.filled.Waves
 import androidx.compose.material.icons.outlined.ChangeHistory
 import androidx.compose.material.icons.outlined.Circle
@@ -848,6 +849,10 @@ fun IconMyLocation(modifier: Modifier = Modifier, tint: Color = LocalContentColo
 @Composable
 fun IconCalendar(modifier: Modifier = Modifier, tint: Color = LocalContentColor.current) =
     AppIcon(Icons.Filled.CalendarMonth, "Calendar", modifier, tint)
+
+@Composable
+fun IconToday(modifier: Modifier = Modifier, tint: Color = LocalContentColor.current) =
+    AppIcon(Icons.Filled.Today, "Today", modifier, tint)
 
 @Composable
 fun IconCloudy(modifier: Modifier = Modifier, tint: Color = LocalContentColor.current) =

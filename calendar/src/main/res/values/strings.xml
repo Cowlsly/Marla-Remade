@@ -257,6 +257,12 @@
     <!-- Reminder labels: shown in EditEventScreen for notification time choices -->
     <!-- Reminder option: notify exactly at event start time -->
     <string name="reminder_at_time_of_event">At time of event</string>
+    <!-- Title of the dialog for setting a calendar's default reminders (Settings > calendar reminders action) -->
+    <string name="default_reminders">Default reminders</string>
+    <!-- Description at the top of the default-reminders dialog. %1$s = calendar display name -->
+    <string name="default_reminders_description">Reminders added automatically to new events in <xliff:g id="calendar_name" example="Work">%1$s</xliff:g>.</string>
+    <!-- Toggle in the default-reminders dialog: also apply the chosen reminders to events already in the calendar -->
+    <string name="apply_to_existing_events">Apply to existing events</string>
     <!-- Reminder time: days before. Plurals for day count -->
     <plurals name="reminder_days_before">
         <!-- %1$d = number of days. One day before event -->

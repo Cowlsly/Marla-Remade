@@ -186,6 +186,9 @@ sealed interface Route: NavKey {
         data class DeleteCalendar(val id: Long): Route
 
         @Serializable
+        data class DefaultReminders(val id: Long): Route
+
+        @Serializable
         data object HolidayCalendars: Route
 
         @Serializable
@@ -303,6 +306,10 @@ fun Navigation(viewModel: CalendarViewModel, initialRoute: Route?, onImportClear
 
         entry<Route.Settings.DeleteCalendar>(metadata = DialogPage()) { key ->
             SettingsDeleteCalendarDialog(viewModel, backStack, key.id)
+        }
+
+        entry<Route.Settings.DefaultReminders>(metadata = DialogPage()) { key ->
+            SettingsDefaultRemindersDialog(viewModel, backStack, key.id)
         }
 
         entry<Route.Settings.ImportIcs> { key ->

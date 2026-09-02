@@ -107,6 +107,47 @@ class CalendarViewModel(application: Application) :
         }
     }
 
+    /** Default reminders (minutes before start) applied to new events in calendar [calendarId]. */
+    fun getDefaultReminders(calendarId: Long): List<Int> =
+        dataStore.getString("default_reminders_$calendarId")
+            ?.split(",")
+            ?.mapNotNull { it.trim().toIntOrNull() }
+            ?: emptyList()
+
+    /**
+     * Persist the per-calendar default reminders. When [applyToExisting] is true the same set is
+     * written onto every event already in that calendar; otherwise only new events pick it up.
+     */
+    fun setDefaultReminders(calendarId: Long, minutes: List<Int>, applyToExisting: Boolean) {
+        val normalized = minutes.distinct().sorted()
+        viewModelScope.launch {
+            dataStore.setString("default_reminders_$calendarId", normalized.joinToString(","))
+            if (!applyToExisting) return@launch
+            withContext(Dispatchers.IO) {
+                val app = getApplication<Application>()
+                val affected = _events.value.filter { it.calendarID == calendarId && it.id != null }
+                affected.forEach { ev ->
+                    writeReminders(ev.id!!, normalized)
+                    try {
+                        app.contentResolver.update(
+                            CalendarContract.Events.CONTENT_URI,
+                            ContentValues().apply {
+                                put(CalendarContract.Events.HAS_ALARM, if (normalized.isEmpty()) 0 else 1)
+                            },
+                            "${CalendarContract.Events._ID} = ?",
+                            arrayOf(ev.id.toString()),
+                        )
+                    } catch (e: Exception) {
+                        Log.e("CalendarViewModel", "Error applying default reminders", e)
+                    }
+                }
+                _events.value = Event.getAllEvents(app)
+                ReminderScheduler.reconcileAll(app, _events.value)
+                updateWidgets()
+            }
+        }
+    }
+
     fun setLastViewedDate(d: LocalDate?) {
         _lastViewedDate.value = d
     }

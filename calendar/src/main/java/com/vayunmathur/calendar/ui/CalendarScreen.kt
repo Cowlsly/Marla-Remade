@@ -5,6 +5,7 @@ import android.text.format.DateFormat
 import androidx.compose.foundation.ScrollState
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
@@ -74,6 +75,7 @@ import com.vayunmathur.calendar.util.CalendarViewModel
 import com.vayunmathur.library.ui.IconAdd
 import com.vayunmathur.library.ui.IconArrowDropDown
 import com.vayunmathur.library.ui.IconSettings
+import com.vayunmathur.library.ui.IconToday
 import com.vayunmathur.library.util.NavBackStack
 import com.vayunmathur.library.util.ResultEffect
 import com.vayunmathur.library.util.sharedText
@@ -81,6 +83,8 @@ import kotlinx.datetime.DatePeriod
 import kotlinx.datetime.LocalDate
 import kotlinx.datetime.TimeZone
 import kotlinx.datetime.atStartOfDayIn
+import kotlinx.datetime.atTime
+import kotlinx.datetime.toInstant
 import com.vayunmathur.library.util.localizedMonthNames
 import com.vayunmathur.library.util.localizedDayOfWeekNames
 import com.vayunmathur.library.util.localeFirstDayOfWeek
@@ -153,6 +157,16 @@ fun CalendarScreen(viewModel: CalendarViewModel, backStack: NavBackStack<Route>)
                 viewModel.setLastViewedDate(dateViewing)
                 backStack.add(Route.EditEvent(null))
             }
+
+            override fun createEventOn(date: LocalDate) {
+                viewModel.setLastViewedDate(dateViewing)
+                // Pre-fill the pressed date at the current hour so the editor opens on a sensible
+                // timed slot; the editor derives a default end an hour later.
+                val tz = TimeZone.currentSystemDefault()
+                val nowTime = Clock.System.now().toLocalDateTime(tz).time
+                val begin = date.atTime(nowTime.hour, 0).toInstant(tz).toEpochMilliseconds()
+                backStack.add(Route.EditEvent(null, beginTime = begin))
+            }
         },
     )
 }
@@ -203,6 +217,10 @@ fun CalendarScreen(state: CalendarUiState, actions: CalendarActions) {
                 }
             }
 
+            IconButton({ actions.setSelectedDate(state.today) }) {
+                IconToday()
+            }
+
             IconButton({ actions.openSettings() }) {
                 IconSettings()
             }
@@ -227,6 +245,7 @@ fun CalendarScreen(state: CalendarUiState, actions: CalendarActions) {
                     actions::visibleInstances,
                     onEventClick = { actions.openEvent(it) },
                     onDayClick = { actions.setSelectedDate(it) },
+                    onDayLongClick = { actions.createEventOn(it) },
                     onDateViewingChanged = { actions.setSelectedDate(it) },
                     previewInstances = state.previewInstances,
                 )
@@ -475,6 +494,7 @@ fun MonthView(
     loadInstances: suspend (Instant, Instant) -> List<Instance>,
     onEventClick: (Instance) -> Unit,
     onDayClick: (LocalDate) -> Unit,
+    onDayLongClick: (LocalDate) -> Unit,
     onDateViewingChanged: (LocalDate) -> Unit,
     /**
      * Pre-resolved instances, used instead of querying through [loadInstances]. Only a
@@ -557,6 +577,7 @@ fun MonthView(
                     calendars,
                     onEventClick,
                     onDayClick,
+                    onDayLongClick,
                     context,
                     monthDate.month.number,
                     monthInstances,
@@ -575,6 +596,7 @@ fun MonthWeekRow(
     calendars: Map<Long, Calendar>,
     onEventClick: (Instance) -> Unit,
     onDayClick: (LocalDate) -> Unit,
+    onDayLongClick: (LocalDate) -> Unit,
     context: android.content.Context,
     viewingMonth: Int,
     allInstances: List<Instance>,
@@ -598,7 +620,10 @@ fun MonthWeekRow(
                         if (isToday) MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.4f)
                         else MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.4f)
                     )
-                    .clickable { onDayClick(date) }
+                    .combinedClickable(
+                        onClick = { onDayClick(date) },
+                        onLongClick = { onDayLongClick(date) },
+                    )
                     .padding(4.dp),
                 horizontalAlignment = Alignment.CenterHorizontally
             ) {
