@@ -27,4 +27,7 @@
     <string name="categories">类别</string>
     <string name="new_file">新建文件</string>
     <string name="rename">重命名</string>
+    <string name="install_permission_denied">安装应用的权限未授予</string>
+    <string name="unzip_channel_name">解压操作</string>
+    <string name="archiving">压缩中…</string>
 </resources>
