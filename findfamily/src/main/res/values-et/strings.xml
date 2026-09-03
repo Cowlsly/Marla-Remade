@@ -133,4 +133,10 @@
     <string name="add_tracker_failed">Nutimärgise sidumine ei õnnestunud. Proovi uuesti.</string>
     <string name="key_mismatch_title">Antud isiku verifitseerimine ei õnnestunud</string>
     <string name="key_mismatch_body">Selle isiku krüptovõti ei vasta tema kutselingis märgitud võtmele, seetõttu teda ei lisatud. Kontrolli, kas avasid lingi tervikuna või palu tal saata uus link.</string>
+    <string name="notification_channel_arrival_name"><xliff:g id="person_name" example="Kadri">%1$s</xliff:g> · Saabumised</string>
+    <string name="notification_channel_arrival_desc">Teavita, kui <xliff:g id="person_name" example="Kadri">%1$s</xliff:g> saabub asukohta</string>
+    <string name="notification_channel_departure_name"><xliff:g id="person_name" example="Kadri">%1$s</xliff:g> · Lahkumised</string>
+    <string name="notification_channel_departure_desc">Teavita, kui <xliff:g id="person_name" example="Kadri">%1$s</xliff:g> lahkub asukohast</string>
+    <string name="notification_settings_arrival">Saabumiste teavitused</string>
+    <string name="notification_settings_departure">Lahkumiste teavitused</string>
 </resources>
