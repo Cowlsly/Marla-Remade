@@ -82,4 +82,23 @@
     <string name="promo_code_optional">Reklaamkood (kui on saadaval)</string>
     <string name="calculating_tax_fees">Arvutan makse ja teenustasusid…</string>
     <string name="estimated_tax">Hinnangulised maksud</string>
+    <string name="tracking">Jälgimine</string>
+    <string name="add_an_address_in_account_to_see_nearby">Sisesta kasutajakonto juurde aadress ja näed läheduses asuvaid restorane</string>
+    <string name="no_restaurants_found">Ühtegi restorani ei leidu</string>
+    <string name="check_your_connection_or_try_again_later">Kontrolli oma nutiseadme võrguühenduse toimimist või proovi hiljem uuesti</string>
+    <string name="sign_in_to_view_your_orders">Oma tellimuste nägemiseks logi sisse</string>
+    <string name="go_to_account_to_sign_in">Sisselogimseks ava kasutajakonto vaade</string>
+    <string name="add_items_from_a_restaurant">Lisa restoranist tellitu</string>
+    <string name="sign_in_to_food_delivery">Logi sisse toidu kohaletoimetamisteenusesse</string>
+    <string name="view_orders_earn_rewards_and_more">Vaata tellimusi, teeni boonuseid ja paljugi veel</string>
+    <string name="apt_unit">Korter</string>
+    <string name="gate_code">Väravakood</string>
+    <string name="apt_unit_2">Korter/üksus: %1$s</string>
+    <string name="gate">Värav: %1$s</string>
+    <string name="order_tracking_channel">Tellimuse jälgimine</string>
+    <string name="order_tracking_channel_desc">Näed viimast teavet sellest, kuidas tellimus on teel</string>
+    <string name="select_up_to">Vali kuni %1$s</string>
+    <string name="back">%1$s%% tagasi</string>
+    <string name="saved_vs_delivery_apps">salvestatus versus kohaletoimetamisrakendused</string>
+    <string name="platform_savings">Kliendid on teenusega seni säästnud %1$s</string>
 </resources>
