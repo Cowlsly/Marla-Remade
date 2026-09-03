@@ -51,7 +51,7 @@
     <string name="theme_system">Süsteemi kujundus</string>
     <string name="theme_light">Hele kujundus</string>
     <string name="theme_dark">Tume kujundus</string>
-    <string name="reminder_channel_name">Vaata meeldetuletused üle</string>
+    <string name="reminder_channel_name">Kordamiste meeldetuletused</string>
     <string name="reminder_channel_description">Igapäevane meeldetuletus, kui sähvikud vajavad õppimist</string>
     <string name="reminder_title">On aeg õppimiseks</string>
     <string name="start">Alusta</string>
@@ -77,7 +77,7 @@
     <string name="remove_tag">Eemalda silt</string>
     <string name="tag_name">Silt</string>
     <string name="reset_scheduling">Lähtesta ajastamine</string>
-    <string name="reset_scheduling_message">Kas märgid need sähvikud läbimata olekusse? Nende senine õppimise ja läbivaatamise ajalugu kustub.</string>
+    <string name="reset_scheduling_message">Kas märgid need sähvikud läbimata olekusse? Nende senine õppimise ja kordamiste ajalugu kustub.</string>
     <string name="export_csv">Ekspordi CSV-failina</string>
     <string name="preset_saved">Eelseadistus on salvestatud</string>
     <string name="preset_applied">Eelseadistus on rakendatud</string>
@@ -94,4 +94,25 @@
     <string name="check">Kontrolli</string>
     <string name="setting_auto_play">Esita heli automaatselt</string>
     <string name="setting_auto_play_hint">Loe sähviku esikülje tekst valjult ette</string>
+    <string name="no_reviews_hint">Oma ajaloo nägemiseks vaata üle mõned kaardid</string>
+    <string name="period_week">Nädal</string>
+    <string name="period_month">Kuu</string>
+    <string name="period_year">Aasta</string>
+    <string name="no_reviews">Kordamisi veel pole</string>
+    <string name="stat_reviews">Kordamised</string>
+    <string name="setting_max_reviews">Kordamiste maksimumarv päevas</string>
+    <plurals name="reminder_text">
+        <item quantity="one">%d kaart on kordamise ootel</item>
+        <item quantity="other">%d kaarti on kordamiste ootel</item>
+    </plurals>
+    <string name="optimize_fsrs_too_few">Optimeerimiseks pole veel piisavalt kordamisi (%1$d / %2$d)</string>
+    <string name="stat_heatmap">Kordamiste lugu</string>
+    <string name="setting_reminder_enabled">Igapäevane meeldetuletus</string>
+    <string name="setting_reminder_time">Meeldetuletuse aeg</string>
+    <string name="suspend_card">Lükka sähvik edasi</string>
+    <string name="suspended_badge">Edasilükatud</string>
+    <string name="leech_suspended">Sähvik on edasilükatud</string>
+    <string name="custom_study_new">Ainult uued sähvikud</string>
+    <string name="custom_study_count">Sähvikute arv</string>
+    <string name="custom_study_days">Päevi ette</string>
 </resources>
