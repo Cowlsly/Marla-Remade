@@ -122,4 +122,6 @@
     <string name="cleartext_blocked_message">Soovisid avada %1$s lehte krüptimata HTTP-ühenduse abil. Krüptimata ühendused on lubatud vaid sinu kohtvõrgus asuvate seadmetega.</string>
     <string name="local_network_title">Kas lubad ligipääsu kohtvõrgule?</string>
     <string name="local_network_message">%1$s tundub olema seade või sait sinu kohtvõrgus. Enne selle lehe laadimist vajab Android luba kohtvõrgu päringute käivitamiseks.</string>
+    <string name="toolbar_at_bottom">Tööriistariba all ääres</string>
+    <string name="keeps_the_address_bar_within_thumb_reach">Kuvab aadressi- ja tööriistariba pöidlavajutuse kaugusel</string>
 </resources>
