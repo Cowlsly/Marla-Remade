@@ -117,4 +117,7 @@
     <string name="no_contacts_yet_message">Dotknij przycisk Dodaj, aby utworzyć pierwszy kontakt.</string>
     <string name="no_groups_yet">Nie ma jeszcze żadnych grup</string>
     <string name="no_groups_yet_message">Dotknij przycisk Dodaj, aby tworzyć grupy kontaktów.</string>
+    <string name="name_prefix">Zwrot grzecznościowy</string>
+    <string name="name_suffix">Tytuł pokoleniowy</string>
+    <string name="name_affix_none">Brak</string>
 </resources>
