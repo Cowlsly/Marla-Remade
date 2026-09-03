@@ -49,6 +49,13 @@
     <string name="theme_dark">Dark</string>
     <!-- Widget: content description for app widget in widget picker -->
     <string name="calendar_widget_description">Upcoming events at a glance - tap to open Calendar</string>
+    <!-- Widget: content description for month-view app widget in widget picker -->
+    <string name="calendar_month_widget_description">Month grid at a glance - tap to open Calendar</string>
+    <!-- Month widget: overflow line in a day cell when events exceed the chip cap. %1$d = hidden event count -->
+    <plurals name="month_widget_more_events">
+        <item quantity="one">+<xliff:g id="count" example="1">%1$d</xliff:g> more</item>
+        <item quantity="other">+<xliff:g id="count" example="3">%1$d</xliff:g> more</item>
+    </plurals>
 
     <!-- Common actions: generic buttons used across dialogs -->
     <!-- Generic create action. Verb. Creates new item -->
