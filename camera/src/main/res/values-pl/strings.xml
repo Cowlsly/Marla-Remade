@@ -39,4 +39,6 @@
     <string name="audio_source_voice_communication_description">Redukcja szumów i echa</string>
     <string name="audio_source_unprocessed_label">Nieprzetworzone</string>
     <string name="audio_source_unprocessed_description">Surowy, bez obróbki</string>
+    <string name="settings_mirror_front">Lustrzane odbicie selfie</string>
+    <string name="settings_mirror_front_description">Lustrzane odbicie podglądu z przedniego aparatu oraz zapisanych zdjęć selfie</string>
 </resources>
