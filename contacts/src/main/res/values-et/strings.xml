@@ -111,4 +111,7 @@
     <string name="no_contacts_yet_message">Oma esimese kontakti lisamiseks klõpsa lisamisnuppu.</string>
     <string name="no_groups_yet">Gruppe veel pole</string>
     <string name="no_groups_yet_message">Kontaktide grupeerimiseks klõpsa lisamisnuppu.</string>
+    <string name="name_prefix">Tiitel</string>
+    <string name="name_suffix">Järelliide</string>
+    <string name="name_affix_none">Puudub</string>
 </resources>
