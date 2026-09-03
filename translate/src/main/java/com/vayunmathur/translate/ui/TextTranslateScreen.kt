@@ -33,6 +33,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.vayunmathur.library.ui.AppScaffold
 import com.vayunmathur.library.ui.Card
@@ -59,7 +60,6 @@ import com.vayunmathur.translate.platform.SpeechRecognizerEngine
 import com.vayunmathur.translate.platform.TextTranslateActions
 import com.vayunmathur.translate.platform.TextTranslateUiState
 import com.vayunmathur.translate.platform.TranslateViewModel
-import com.vayunmathur.translate.ui.components.LanguagePicker
 import kotlinx.coroutines.delay
 
 /** Debounce window for live translation as the user types (ms). */
@@ -81,6 +81,7 @@ fun TextTranslatePage(
     viewModel: TranslateViewModel,
     initialText: String,
     onOpenCamera: () -> Unit,
+    onOpenLanguagePicker: (Boolean) -> Unit,
 ) {
     val context = LocalContext.current
     val messenger = rememberMessenger()
@@ -194,6 +195,9 @@ fun TextTranslatePage(
             }
 
             override fun openCamera() = onOpenCamera()
+
+            override fun openLanguagePicker(forSource: Boolean) =
+                onOpenLanguagePicker(forSource)
         },
     )
 }
@@ -246,8 +250,8 @@ fun TextTranslateScreen(state: TextTranslateUiState, actions: TextTranslateActio
             LanguageBar(
                 sourceCode = state.sourceLang,
                 targetCode = state.targetLang,
-                onSource = actions::setSource,
-                onTarget = actions::setTarget,
+                onSource = { actions.openLanguagePicker(true) },
+                onTarget = { actions.openLanguagePicker(false) },
                 onSwap = actions::swap,
             )
 
@@ -292,8 +296,8 @@ fun TextTranslateScreen(state: TextTranslateUiState, actions: TextTranslateActio
 private fun LanguageBar(
     sourceCode: String,
     targetCode: String,
-    onSource: (String) -> Unit,
-    onTarget: (String) -> Unit,
+    onSource: () -> Unit,
+    onTarget: () -> Unit,
     onSwap: () -> Unit,
 ) {
     Row(
@@ -301,12 +305,13 @@ private fun LanguageBar(
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.SpaceBetween,
     ) {
-        LanguagePicker(
-            selectedCode = sourceCode,
-            options = Languages.SOURCES,
-            onSelected = onSource,
-            modifier = Modifier.width(140.dp),
-        )
+        TextButton(onClick = onSource, modifier = Modifier.width(140.dp)) {
+            Text(
+                text = Languages.displayName(sourceCode),
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+        }
         IconButton(
             onClick = onSwap,
             // Nothing to swap into while the source is auto-detect.
@@ -314,12 +319,13 @@ private fun LanguageBar(
         ) {
             IconSwapLanguages()
         }
-        LanguagePicker(
-            selectedCode = targetCode,
-            options = Languages.TARGETS,
-            onSelected = onTarget,
-            modifier = Modifier.width(140.dp),
-        )
+        TextButton(onClick = onTarget, modifier = Modifier.width(140.dp)) {
+            Text(
+                text = Languages.displayName(targetCode),
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+        }
     }
 }
 

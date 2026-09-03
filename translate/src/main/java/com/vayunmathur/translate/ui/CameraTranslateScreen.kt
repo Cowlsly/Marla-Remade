@@ -81,9 +81,9 @@ import com.vayunmathur.library.ui.IconPause
 import com.vayunmathur.library.ui.IconPlay
 import com.vayunmathur.library.ui.PermissionsChecker
 import com.vayunmathur.library.ui.Text
+import com.vayunmathur.library.ui.TextButton
 import com.vayunmathur.translate.domain.Languages
 import com.vayunmathur.translate.platform.TranslateViewModel
-import com.vayunmathur.translate.ui.components.LanguagePicker
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
@@ -124,17 +124,25 @@ private data class OverlayBox(
 )
 
 @Composable
-fun CameraTranslateScreen(viewModel: TranslateViewModel, onBack: () -> Unit) {
+fun CameraTranslateScreen(
+    viewModel: TranslateViewModel,
+    onBack: () -> Unit,
+    onOpenLanguagePicker: (Boolean) -> Unit,
+) {
     PermissionsChecker(
         permissions = arrayOf(Manifest.permission.CAMERA),
         text = stringResource(R.string.grant_camera_access),
     ) {
-        CameraContent(viewModel, onBack)
+        CameraContent(viewModel, onBack, onOpenLanguagePicker)
     }
 }
 
 @Composable
-private fun CameraContent(viewModel: TranslateViewModel, onBack: () -> Unit) {
+private fun CameraContent(
+    viewModel: TranslateViewModel,
+    onBack: () -> Unit,
+    onOpenLanguagePicker: (Boolean) -> Unit,
+) {
     val context = LocalContext.current
     val lifecycleOwner = LocalLifecycleOwner.current
     val scope = rememberCoroutineScope()
@@ -341,7 +349,9 @@ private fun CameraContent(viewModel: TranslateViewModel, onBack: () -> Unit) {
     // this screen used to) meant the overlay updated once every several seconds, always
     // against a frame the camera had long since moved off. Instead we memo per source
     // line: repeat lines are free, and OCR keeps redrawing boxes at full rate.
-    LaunchedEffect(targetLang, translationAvailable) {
+    // Keyed on the source too: switching it must drop the memo, or lines keep showing
+    // translations made from the previous source language.
+    LaunchedEffect(sourceLang, targetLang, translationAvailable) {
         translations = emptyMap()
         if (!translationAvailable) return@LaunchedEffect
         while (isActive) {
@@ -493,10 +503,9 @@ private fun CameraContent(viewModel: TranslateViewModel, onBack: () -> Unit) {
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.SpaceBetween,
         ) {
-            LanguagePicker(
-                selectedCode = sourceLang,
-                options = Languages.SOURCES,
-                onSelected = viewModel::setSource,
+            LanguageFieldButton(
+                label = Languages.displayName(sourceLang),
+                onClick = { onOpenLanguagePicker(true) },
                 modifier = Modifier.width(120.dp),
             )
             IconButton(onClick = { paused = !paused }) {
@@ -505,13 +514,29 @@ private fun CameraContent(viewModel: TranslateViewModel, onBack: () -> Unit) {
             IconButton(onClick = { torchOn = !torchOn }) {
                 if (torchOn) IconFlashOn(tint = Color.White) else IconFlashOff(tint = Color.White)
             }
-            LanguagePicker(
-                selectedCode = targetLang,
-                options = Languages.TARGETS,
-                onSelected = viewModel::setTarget,
+            LanguageFieldButton(
+                label = Languages.displayName(targetLang),
+                onClick = { onOpenLanguagePicker(false) },
                 modifier = Modifier.width(120.dp),
             )
         }
+    }
+}
+
+/**
+ * A language field inside the camera bottom bar: white text on the bar's black pill,
+ * opening the full-screen picker. Carries its own minimum touch target so the narrow
+ * width doesn't make it hard to hit.
+ */
+@Composable
+private fun LanguageFieldButton(label: String, onClick: () -> Unit, modifier: Modifier = Modifier) {
+    TextButton(onClick = onClick, modifier = modifier) {
+        Text(
+            text = label,
+            color = Color.White,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+        )
     }
 }
 

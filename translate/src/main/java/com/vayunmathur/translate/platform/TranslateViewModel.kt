@@ -34,6 +34,13 @@ class TranslateViewModel(app: Application) : AndroidViewModel(app) {
     private val _targetLang = MutableStateFlow("es")
     val targetLang: StateFlow<String> = _targetLang.asStateFlow()
 
+    /** Most-recently-used language codes per direction, for the language picker. */
+    private val _recentSourceLangs = MutableStateFlow<List<String>>(emptyList())
+    val recentSourceLangs: StateFlow<List<String>> = _recentSourceLangs.asStateFlow()
+
+    private val _recentTargetLangs = MutableStateFlow<List<String>>(emptyList())
+    val recentTargetLangs: StateFlow<List<String>> = _recentTargetLangs.asStateFlow()
+
     /** True once the NLLB engine is loaded (model already downloaded by the checker). */
     private val _translationAvailable = MutableStateFlow(false)
     val translationAvailable: StateFlow<Boolean> = _translationAvailable.asStateFlow()
@@ -42,18 +49,28 @@ class TranslateViewModel(app: Application) : AndroidViewModel(app) {
         viewModelScope.launch {
             _sourceLang.value = settings.source()
             _targetLang.value = settings.target()
+            _recentSourceLangs.value = settings.recentSources()
+            _recentTargetLangs.value = settings.recentTargets()
             _translationAvailable.value = translator.isAvailable()
         }
     }
 
     fun setSource(code: String) {
         _sourceLang.value = code
-        viewModelScope.launch { settings.setSource(code) }
+        viewModelScope.launch {
+            settings.setSource(code)
+            settings.pushRecentSource(code)
+            _recentSourceLangs.value = settings.recentSources()
+        }
     }
 
     fun setTarget(code: String) {
         _targetLang.value = code
-        viewModelScope.launch { settings.setTarget(code) }
+        viewModelScope.launch {
+            settings.setTarget(code)
+            settings.pushRecentTarget(code)
+            _recentTargetLangs.value = settings.recentTargets()
+        }
     }
 
     /** Swap source and target. No-op while source is Auto (nothing to swap into). */

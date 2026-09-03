@@ -4,6 +4,9 @@ import androidx.compose.runtime.Composable
 import androidx.compose.ui.tooling.preview.Preview
 import com.android.tools.screenshot.PreviewTest
 import com.vayunmathur.library.ui.DynamicTheme
+import com.vayunmathur.translate.domain.Languages
+import com.vayunmathur.translate.platform.LanguagePickerActions
+import com.vayunmathur.translate.platform.LanguagePickerUiState
 import com.vayunmathur.translate.platform.MicState
 import com.vayunmathur.translate.platform.TextTranslateActions
 import com.vayunmathur.translate.platform.TextTranslateUiState
@@ -88,6 +91,26 @@ class MetadataPreviews {
                     isTranslating = true,
                 ),
                 actions = TextTranslateActions.Noop,
+            )
+        }
+    }
+
+    @PreviewTest
+    @Preview(name = "4-language-picker", device = PHONE, showSystemUi = true)
+    @Composable
+    fun Preview4LanguagePicker() {
+        DynamicTheme(darkTheme = true) {
+            LanguagePickerScreen(
+                state = LanguagePickerUiState(
+                    forSource = true,
+                    selectedCode = "auto",
+                    recents = listOf(
+                        Languages.byCode("es"),
+                        Languages.byCode("fr"),
+                        Languages.byCode("de"),
+                    ),
+                ),
+                actions = LanguagePickerActions.Noop,
             )
         }
     }

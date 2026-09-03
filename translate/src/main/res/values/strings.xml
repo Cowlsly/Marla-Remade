@@ -10,4 +10,16 @@
     <string name="grant_camera_access">Grant camera access to translate what you see</string>
     <string name="no_voice_installed">No %1$s voice installed</string>
     <string name="install_voice">Install</string>
+    <!-- Language picker screen title when choosing the source language. -->
+    <string name="select_source_language">Source language</string>
+    <!-- Language picker screen title when choosing the target language. -->
+    <string name="select_target_language">Target language</string>
+    <!-- Placeholder of the search field that filters the language list. -->
+    <string name="search_languages">Search languages</string>
+    <!-- Section header above the most-recently-used languages. -->
+    <string name="recent_languages">Recent languages</string>
+    <!-- Section header above the full language list. -->
+    <string name="all_languages">All languages</string>
+    <!-- Empty state when the search query matches no language; %1$s is the query. -->
+    <string name="no_languages_match">No languages match “%1$s”</string>
 </resources>

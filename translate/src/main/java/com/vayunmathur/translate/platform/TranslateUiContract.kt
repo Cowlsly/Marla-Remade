@@ -1,5 +1,6 @@
 package com.vayunmathur.translate.platform
 
+import com.vayunmathur.translate.domain.Language
 import com.vayunmathur.translate.domain.Languages
 
 /**
@@ -56,8 +57,32 @@ interface TextTranslateActions {
     fun copyOutput() {}
     fun speakOutput() {}
     fun openCamera() {}
+    fun openLanguagePicker(forSource: Boolean) {}
 
     companion object {
         val Noop: TextTranslateActions = object : TextTranslateActions {}
+    }
+}
+
+/** Everything the language picker screen draws, as literal values for previews. */
+data class LanguagePickerUiState(
+    /** True when picking the source language (shows the pinned Auto row); else the target. */
+    val forSource: Boolean = true,
+    val selectedCode: String = Languages.AUTO.code,
+    val recents: List<Language> = emptyList(),
+    val query: String = "",
+)
+
+/**
+ * Picker callbacks. Every method has a no-op default so a preview can render the
+ * screen without supplying behaviour — [Noop] is the whole implementation a preview needs.
+ */
+interface LanguagePickerActions {
+    fun select(code: String) {}
+    fun setQuery(query: String) {}
+    fun goBack() {}
+
+    companion object {
+        val Noop: LanguagePickerActions = object : LanguagePickerActions {}
     }
 }
