@@ -31,4 +31,6 @@
     <string name="units_widget_label">Przelicznik jednostek</string>
     <string name="units_widget_description">Szybki podgląd i przeliczanie jednostek – dotknij, aby otworzyć konwerter</string>
     <string name="units_widget_choose_category">Wybierz kategorię jednostki</string>
+    <string name="calculator_widget_transparent">Przezroczyste tło</string>
+    <string name="calculator_widget_transparent_summary">Pokaż tapetę za klawiaturą. Klawisze pozostaną wypełnione, dzięki czemu będą czytelne.</string>
 </resources>
