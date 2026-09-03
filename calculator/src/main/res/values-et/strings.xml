@@ -31,4 +31,6 @@
     <string name="units_widget_label">Ühikute teisendaja</string>
     <string name="units_widget_description">Teisenda ühikuid lennult - teisendaja avamiseks klõpsa seda</string>
     <string name="units_widget_choose_category">Vali ühikute kategooria</string>
+    <string name="calculator_widget_transparent">Läbipaistev taust</string>
+    <string name="calculator_widget_transparent_summary">Numbriklahvistiku taustana näed üldist taustapilti. Ei kehti numbriklahvidele - need jäävad alati eristatavateks.</string>
 </resources>
