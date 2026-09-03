@@ -11,4 +11,6 @@
     <string name="open_voice_input_settings">Ava häälesisendi seadistused</string>
     <string name="open_text_to_speech_settings">Ava kõnesünteesi seadistused</string>
     <string name="try_it">Proovi seda</string>
+    <string name="broken_install_title">Paigaldus tundub olema vigane</string>
+    <string name="broken_install_body">Rakendusega kaasnev mudel ei tundu olema loetav. Uuesti paigaldamine peaks selle vea parandama.</string>
 </resources>
