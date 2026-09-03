@@ -172,4 +172,7 @@
     <string name="drag_corners_to_distort">Moonutamiseks sikuta eelvaate nurkadest.</string>
     <string name="combine">Kombineeri</string>
     <string name="tap_to_add_points">Punktide lisamiseks klõpsa (<xliff:g id="mode" example="Uus">%1$s</xliff:g>)</string>
+    <string name="edit_with_label">Muuda minu rakendsuega</string>
+    <string name="editor_desc_lens_blur">Hägusta tausta, et saavutada teravussügavuse efekt.</string>
+    <string name="tool_line">Joon</string>
 </resources>
