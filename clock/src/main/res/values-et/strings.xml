@@ -19,7 +19,7 @@
     <string name="lap_number_format"># <xliff:g id="lap_number" example="1">%1$d</xliff:g></string>
     <string name="duration_ms_format"><xliff:g id="seconds" example="12">%1$d</xliff:g>.<xliff:g id="centiseconds" example="34">%2$02d</xliff:g></string>
     <string name="duration_m_s_ms_format"><xliff:g id="minutes" example="1">%1$d</xliff:g>:<xliff:g id="seconds" example="23">%2$02d</xliff:g>.<xliff:g id="centiseconds" example="45">%3$02d</xliff:g></string>
-    <string name="header_split">Jaga</string>
+    <string name="header_split">Vahe</string>
     <string name="header_total">Kokku</string>
     <string name="stopwatch_time_format"><xliff:g id="minutes" example="1">%1$d</xliff:g>:<xliff:g id="seconds" example="05">%2$02d</xliff:g></string>
     <string name="button_add_minute">+ 1:00</string>
