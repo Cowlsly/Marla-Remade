@@ -43,4 +43,5 @@
     <string name="line_width">Joone paksus: <xliff:g id="width" example="2">%1$s</xliff:g></string>
     <string name="callout">Noolega jutumull</string>
     <string name="safe_pdf_not_a_pdf">See pole PDF-fail</string>
+    <string name="pdf_page_failed">Selle lehe kuvamine ei õnnestunud</string>
 </resources>
