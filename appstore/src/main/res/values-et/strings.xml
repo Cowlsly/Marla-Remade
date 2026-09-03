@@ -126,4 +126,5 @@
     <string name="source_play_pin">Mitte midagi ei saa kinnitada: allkirjastamisvõtmed on alati Google\'i käes</string>
     <string name="source_accrescent">Accrescent</string>
     <string name="source_accrescent_pin">Kinnitatud kasutama Accrescenti tarkvarahoidla allkirjastamisvõtit (ed25519)</string>
+    <string name="home_empty_message">Et siin leiduks on teavet, sünkrooni rakendustehoidlaid või otsi rakendust nime alusel.</string>
 </resources>
