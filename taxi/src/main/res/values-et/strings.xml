@@ -102,7 +102,7 @@
     <string name="ride_status">Sõidu olek</string>
     <string name="ride_created">Sõit on loodud %1$s</string>
     <string name="booking_dry_run_title">Test: koosta sõit</string>
-    <string name="track_ride">Jälgimine</string>
+    <string name="track_ride">Jälgi</string>
     <string name="connect_prompt">Nägemaks hindu reaalajas ühenda oma kasutajakonto teenuses %1$s</string>
     <string name="booking_charge_to">Sõidu tasu on %1$s.</string>
     <string name="booking_dry_run_notice">See on test - järgnev päring on kuvatud kontrollimise mõttes, pole veel edastatud ja kulusid veel ei teki.</string>
