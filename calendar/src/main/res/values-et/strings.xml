@@ -161,4 +161,7 @@
     <string name="export_events_to_ics_file">Ekspordi sündmused .ics faili</string>
     <string name="export_ics_success">Kalender on eksporditud</string>
     <string name="export_ics_failed_format">Kalendri eksportimine ei õnnestunud: <xliff:g id="error" example="Õigused on puudu">%1$s</xliff:g></string>
+    <string name="default_reminders">Vaikimisi meeldetuletused</string>
+    <string name="default_reminders_description">Meeldetuletused lisatakse automaatselt <xliff:g id="calendar_name" example="Töö">%1$s</xliff:g> kalendri sündmustele.</string>
+    <string name="apply_to_existing_events">Rakenda olemasolevatele sündmustele</string>
 </resources>
