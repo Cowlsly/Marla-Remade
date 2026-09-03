@@ -39,4 +39,6 @@
     <string name="audio_source_voice_communication_description">Müra- ja kajasummutus</string>
     <string name="audio_source_unprocessed_label">Töötlemata</string>
     <string name="audio_source_unprocessed_description">Töötlemata voog</string>
+    <string name="settings_mirror_front">Peegepilt selfie jaoks</string>
+    <string name="settings_mirror_front_description">Peegelda esikaamera pilti selfie jaoks nii eelvaates, kui salvestatud failides</string>
 </resources>
