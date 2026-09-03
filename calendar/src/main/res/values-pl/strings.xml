@@ -181,4 +181,7 @@
     <string name="export_events_to_ics_file">Eksportuj wydarzenia do pliku .ics</string>
     <string name="export_ics_success">Kalendarz wyeksportowany</string>
     <string name="export_ics_failed_format">Eksport kalendarza nie powiódł się: <xliff:g id="error" example="permission denied">%1$s</xliff:g></string>
+    <string name="default_reminders">Domyślne przypomnienia</string>
+    <string name="default_reminders_description">Przypomnienia dodawane automatycznie do nowych wydarzeń w: <xliff:g id="calendar_name" example="Work">%1$s</xliff:g>.</string>
+    <string name="apply_to_existing_events">Zastosuj do istniejących wydarzeń</string>
 </resources>
