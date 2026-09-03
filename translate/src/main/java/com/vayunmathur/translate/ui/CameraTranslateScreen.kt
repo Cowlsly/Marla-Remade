@@ -336,7 +336,7 @@ private fun CameraContent(viewModel: TranslateViewModel, onBack: () -> Unit) {
         }
     }
 
-    // One background translator, decoupled from the OCR loop. SMaLL-100 takes on the
+    // One background translator, decoupled from the OCR loop. NLLB takes on the
     // order of a second per line, so translating every line of every frame inline (as
     // this screen used to) meant the overlay updated once every several seconds, always
     // against a frame the camera had long since moved off. Instead we memo per source

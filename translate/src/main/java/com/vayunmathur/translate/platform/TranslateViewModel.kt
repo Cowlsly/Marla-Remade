@@ -15,15 +15,15 @@ import kotlinx.coroutines.launch
 
 /**
  * Holds the shared engines (translation, OCR, TTS) and the persisted language
- * selection. The SMaLL-100 model (~1.2 GB) is now gated via
+ * selection. The NLLB-200 model is now gated via
  * [com.vayunmathur.library.downloadservice.InitialModelDownloadChecker] in
  * MainActivity — just like OpenAssistant — so it starts installing automatically
  * as soon as the page is opened. By the time this screen is shown,
- * [Small100Model] files are already present, and we just load the ncnn engine.
+ * [NllbModel] files are already present, and we just load the Vulkan engine.
  */
 class TranslateViewModel(app: Application) : AndroidViewModel(app) {
 
-    val translator: TranslationEngine = Small100Translator(app)
+    val translator: TranslationEngine = NllbTranslator(app)
     val ocr = OcrEngine(app)
     private val tts = TtsSpeaker(app)
     private val settings = TranslateSettings(app)
@@ -34,7 +34,7 @@ class TranslateViewModel(app: Application) : AndroidViewModel(app) {
     private val _targetLang = MutableStateFlow("es")
     val targetLang: StateFlow<String> = _targetLang.asStateFlow()
 
-    /** True once the ncnn engine is loaded (model already downloaded by the checker). */
+    /** True once the NLLB engine is loaded (model already downloaded by the checker). */
     private val _translationAvailable = MutableStateFlow(false)
     val translationAvailable: StateFlow<Boolean> = _translationAvailable.asStateFlow()
 
@@ -86,7 +86,7 @@ class TranslateViewModel(app: Application) : AndroidViewModel(app) {
 
     override fun onCleared() {
         ocr.close()
-        (translator as? Small100Translator)?.close()
+        (translator as? NllbTranslator)?.close()
         tts.shutdown()
     }
 }

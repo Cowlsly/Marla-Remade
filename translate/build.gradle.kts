@@ -17,8 +17,8 @@ android {
 }
 
 dependencies {
-    // On-device translation runs on `:library:ml`'s own Vulkan compute runtime (SMaLL-100 via
-    // `Small100Handle`); the two model files are downloaded at runtime from the mirror.
+    // On-device translation runs on `:library:ml`'s own Vulkan compute runtime (NLLB-200 via
+    // `NllbHandle`); the two model files are downloaded at runtime from the mirror.
     implementation(project(":library:ml"))
     implementation(project(":library:downloadservice"))
     implementation(project(":library:ocr"))

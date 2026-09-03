@@ -71,10 +71,10 @@ private const val TRANSLATE_DEBOUNCE_MS = 400L
  * Everything a `@Preview` cannot supply lives here: the speech recognizer, the microphone
  * permission launcher, the clipboard, and the debounced call into the translation engine.
  *
- * The SMaLL-100 model (~1.2 GB) is auto-installed on open via
+ * The NLLB-200 model is auto-installed on open via
  * [com.vayunmathur.library.downloadservice.InitialModelDownloadChecker] in MainActivity
  * (like OpenAssistant), so this screen never needs to show a manual Download button. By the
- * time we get here the files are on disk and [TranslateViewModel] has loaded the ncnn engine.
+ * time we get here the files are on disk and [TranslateViewModel] has loaded the engine.
  */
 @Composable
 fun TextTranslatePage(

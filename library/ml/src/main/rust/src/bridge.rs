@@ -34,7 +34,7 @@ use jni::sys::{jfloatArray, jint, jintArray, jlong, jstring};
 use jni::JNIEnv;
 
 use crate::nets::{
-    mobilefacenet, ppocr_det, ppocr_rec, scrfd, selfie, small100, supertonic_duration,
+    mobilefacenet, nllb, ppocr_det, ppocr_rec, scrfd, selfie, supertonic_duration,
     supertonic_sampler, supertonic_text, supertonic_vocoder, tinyclip, u2netp, whisper, Plan,
 };
 use crate::post::ctc::Dictionary;
@@ -1124,138 +1124,6 @@ pub unsafe extern "system" fn Java_com_vayunmathur_library_ml_MlNative_destroy<'
     drop(unsafe { Box::from_raw(handle as *mut Handle) });
 }
 
-/// SMaLL-100, as `:translate` holds it. Handed to Kotlin as an opaque `jlong`.
-///
-/// Its own handle type for the same reason [`SupertonicHandle`] is: it owns a different set of
-/// things, and one `destroy` guessing between them would be type confusion waiting to happen.
-///
-/// # One net, three plans
-///
-/// [`Reshaped`] keyed by [`small100::Mode`] rather than by a length. The encoder, the decode step
-/// and the logits projection are three passes over **one** 318 MiB file, so three `Net`s would
-/// upload it three times; one net rebuilt per pass uploads it once. A rebuild is a
-/// `device_wait_idle` and a re-record, and a decode step's cache grows by one position each time,
-/// so a translation of `n` tokens costs `n + 1` of them. That is the known cost of holding the KV
-/// cache on the host, and it is what a future prefix bound in [`crate::nets::Push`] would remove.
-///
-/// # The weights file stays open
-///
-/// Unlike Supertonic, whose host-side tensors are read once into [`supertonic::Conditioning`],
-/// SMaLL-100's host-side tensor is the 125 MiB tied embedding, which cannot be pre-read. So the
-/// [`Streamed`] is retained and [`small100::embed_positions`] gathers a 1 KB row per token from it.
-struct Small100Handle {
-    net: Reshaped<small100::Mode>,
-    weights: Streamed,
-    /// `scripts/ml/small100_tokenizer.py`'s table, 1.7 MB, parsed per translation.
-    tokenizer: Vec<u8>,
-}
-
-fn small100_plan(offsets: &Offsets, mode: small100::Mode) -> Result<Plan, String> {
-    small100::build(offsets, mode)
-}
-
-/// The two GPU passes, as [`translate::Nets`] wants them, plus the host-side KV cache.
-///
-/// Built per translation and dropped with it, so a cache cannot leak into the next sentence — the
-/// failure `Net::reset` would otherwise exist to prevent.
-struct Small100Nets<'a> {
-    net: &'a mut Reshaped<small100::Mode>,
-    weights: &'a Streamed,
-    /// Per decoder layer, the K then V for every position decoded so far, position-major and
-    /// concatenated. `[cache_len * D_MODEL]` each, appended one row at a time.
-    cache: Vec<Vec<f32>>,
-    /// Source positions, so a decode step records at the length the encoder ran at.
-    src_len: u32,
-}
-
-/// K and V per decoder layer, which is how many cache buffers there are.
-const SMALL100_CACHES: usize = small100::DECODER_LAYERS * 2;
-
-impl Small100Nets<'_> {
-    fn new<'a>(handle: &'a mut Small100Handle) -> Small100Nets<'a> {
-        Small100Nets {
-            net: &mut handle.net,
-            weights: &handle.weights,
-            cache: vec![Vec::new(); SMALL100_CACHES],
-            src_len: 0,
-        }
-    }
-}
-
-impl translate::Nets for Small100Nets<'_> {
-    fn encode(&mut self, source: &[u32]) -> Result<Vec<f32>, String> {
-        let len = u32::try_from(source.len()).map_err(|_| "a source longer than u32")?;
-        let reader = self.weights.reader();
-        // The embedding, `sqrt(d_model)` and the sinusoidal positions, all on the host. See
-        // `nets::small100` for why none of that is a shader.
-        let embedded = small100::embed_positions(reader, source, 0)?;
-        let net = self.net.at(small100::Mode::Encode { len })?;
-        let out = one_output(net.infer_raw(&embedded)?)?;
-        self.src_len = len;
-        // The plan produces `[d_model, 1, len]`; the trait's contract is `[len, d_model]`. One
-        // transpose here rather than a comment that disagrees with the trait.
-        Ok(transpose(&out, small100::D_MODEL as usize, source.len()))
-    }
-
-    fn decode_step(
-        &mut self,
-        token: u32,
-        step: usize,
-        encoded: &[f32],
-    ) -> Result<Vec<f32>, String> {
-        let width = small100::D_MODEL as usize;
-        let cache_len = u32::try_from(step).map_err(|_| "a step past u32")?;
-        let reader = self.weights.reader();
-        // `past = step`, which is what puts this token at position `step + 2`.
-        let embedded = small100::embed_positions(reader, &[token], cache_len)?;
-        if !encoded.len().is_multiple_of(width) {
-            return Err(format!("{} encoder values is not a whole number of {width}", encoded.len()));
-        }
-        let src_len = (encoded.len() / width) as u32;
-        if src_len != self.src_len {
-            return Err(format!("a step over {src_len} source positions after {}", self.src_len));
-        }
-        // Back to `[d_model, 1, src_len]`, which is what the cross-attention projections read.
-        let source = transpose(encoded, encoded.len() / width, width);
-
-        let net = self.net.at(small100::Mode::DecodeStep { cache_len, src_len })?;
-        // Declaration order: the token, the encoder output, then each layer's K and V. The cache
-        // pair is absent at step 0, where there is nothing before this token.
-        let mut inputs: Vec<&[f32]> = Vec::with_capacity(2 + SMALL100_CACHES);
-        inputs.push(&embedded);
-        inputs.push(&source);
-        if cache_len > 0 {
-            for held in &self.cache {
-                inputs.push(held);
-            }
-        }
-        let out = net.infer_raw_many(&inputs)?;
-
-        // Two logits halves, then this step's K and V per layer. The halves are consecutive class
-        // ranges, so concatenating them is the 128,112-wide vector `post::translate` argmaxes.
-        let expected = small100::HEAD_SPLITS + SMALL100_CACHES;
-        if out.len() != expected {
-            return Err(format!("a decode step returned {} tensors, not {expected}", out.len()));
-        }
-        let mut logits = Vec::with_capacity(small100::VOCAB as usize);
-        for half in out.iter().take(small100::HEAD_SPLITS) {
-            logits.extend_from_slice(half);
-        }
-        if logits.len() != small100::VOCAB as usize {
-            return Err(format!("{} logits, not {}", logits.len(), small100::VOCAB));
-        }
-        for (held, row) in self.cache.iter_mut().zip(out.iter().skip(small100::HEAD_SPLITS)) {
-            if row.len() != width {
-                return Err(format!("a cache row of {} values, not {width}", row.len()));
-            }
-            // Position-major, so appending is a plain extend and the plan's own concatenation of
-            // it is one contiguous copy.
-            held.extend_from_slice(row);
-        }
-        Ok(logits)
-    }
-}
-
 /// `[rows, columns]` to `[columns, rows]`.
 ///
 /// The encoder output crosses the `translate::Nets` seam as `[positions, d_model]` and this runtime
@@ -1276,13 +1144,151 @@ fn transpose(values: &[f32], rows: usize, columns: usize) -> Vec<f32> {
     out
 }
 
-/// Bring up SMaLL-100 from its one `.maml` and its tokenizer table. Returns 0 on failure.
+/// NLLB-200-distilled-600M, as `:translate` holds it. Handed to Kotlin as an opaque `jlong`.
+///
+/// Its own handle type for the same reason the translation handle is: it owns a different set of
+/// things, and one `destroy` guessing between them would be type confusion waiting to happen.
+///
+/// # One net, two passes
+///
+/// [`Reshaped`] keyed by [`nllb::Mode`]. The encoder and the decode step (which computes the tied
+/// head itself) are two passes over **one** ~600 MiB file, so two `Net`s would upload it twice.
+/// A rebuild is a `device_wait_idle` and a re-record, and a decode step's cache grows by one
+/// position each time, so a translation of `n` tokens costs `n + 1` of them. That is the known
+/// cost of holding the KV cache on the host, and it is what a future prefix bound in
+/// [`crate::nets::Push`] would remove.
+///
+/// # The weights file stays open
+///
+/// Unlike Supertonic, whose host-side tensors are read once into [`supertonic::Conditioning`],
+/// NLLB's host-side tensor is the ~250 MiB tied embedding, which cannot be pre-read. So the
+/// [`Streamed`] is retained and [`nllb::embed_positions`] gathers a 1 KB row per token from it.
+///
+/// The tensor order is the contract in `maml_convert.collect_nllb` — see `nets::nllb`.
+struct NllbHandle {
+    net: Reshaped<nllb::Mode>,
+    weights: Streamed,
+    /// `scripts/ml/nllb_tokenizer.py`'s table, parsed per translation.
+    tokenizer: Vec<u8>,
+}
+
+fn nllb_plan(offsets: &Offsets, mode: nllb::Mode) -> Result<Plan, String> {
+    nllb::build(offsets, mode)
+}
+
+/// The two GPU passes, as [`translate::Nets`] wants them, plus the host-side KV cache.
+///
+/// Built per translation and dropped with it, so a cache cannot leak into the next sentence — the
+/// failure `Net::reset` would otherwise exist to prevent.
+struct NllbNets<'a> {
+    net: &'a mut Reshaped<nllb::Mode>,
+    weights: &'a Streamed,
+    /// Per decoder layer, the K then V for every position decoded so far, position-major and
+    /// concatenated. `[cache_len * D_MODEL]` each, appended one row at a time.
+    cache: Vec<Vec<f32>>,
+    /// Source positions, so a decode step records at the length the encoder ran at.
+    src_len: u32,
+}
+
+/// K and V per decoder layer, which is how many cache buffers there are.
+const NLLB_CACHES: usize = nllb::DECODER_LAYERS * 2;
+
+impl NllbNets<'_> {
+    fn new<'a>(handle: &'a mut NllbHandle) -> NllbNets<'a> {
+        NllbNets {
+            net: &mut handle.net,
+            weights: &handle.weights,
+            cache: vec![Vec::new(); NLLB_CACHES],
+            src_len: 0,
+        }
+    }
+}
+
+impl translate::Nets for NllbNets<'_> {
+    fn encode(&mut self, source: &[u32]) -> Result<Vec<f32>, String> {
+        let len = u32::try_from(source.len()).map_err(|_| "a source longer than u32")?;
+        let reader = self.weights.reader();
+        // The embedding, `sqrt(d_model)` and the sinusoidal positions, all on the host. See
+        // `nets::nllb` for why none of that is a shader.
+        let embedded = nllb::embed_positions(reader, source, 0)?;
+        let net = self.net.at(nllb::Mode::Encode { len })?;
+        let out = one_output(net.infer_raw(&embedded)?)?;
+        self.src_len = len;
+        // The plan produces `[d_model, 1, len]`; the trait's contract is `[len, d_model]`. One
+        // transpose here rather than a comment that disagrees with the trait.
+        Ok(transpose(&out, nllb::D_MODEL as usize, source.len()))
+    }
+
+    fn decode_step(
+        &mut self,
+        token: u32,
+        step: usize,
+        encoded: &[f32],
+    ) -> Result<Vec<f32>, String> {
+        let width = nllb::D_MODEL as usize;
+        let cache_len = u32::try_from(step).map_err(|_| "a step past u32")?;
+        let reader = self.weights.reader();
+        // `past = step`, which is what puts this token at position `step + 2`.
+        let embedded = nllb::embed_positions(reader, &[token], cache_len)?;
+        if !encoded.len().is_multiple_of(width) {
+            return Err(format!("{} encoder values is not a whole number of {width}", encoded.len()));
+        }
+        let src_len = (encoded.len() / width) as u32;
+        if src_len != self.src_len {
+            return Err(format!("a step over {src_len} source positions after {}", self.src_len));
+        }
+        // Back to `[d_model, 1, src_len]`, which is what the cross-attention projections read.
+        let source = transpose(encoded, encoded.len() / width, width);
+
+        let net = self.net.at(nllb::Mode::DecodeStep { cache_len, src_len })?;
+        // Declaration order: the token, the encoder output, then each layer's K and V. The cache
+        // pair is absent at step 0, where there is nothing before this token.
+        let mut inputs: Vec<&[f32]> = Vec::with_capacity(2 + NLLB_CACHES);
+        inputs.push(&embedded);
+        inputs.push(&source);
+        if cache_len > 0 {
+            for held in &self.cache {
+                inputs.push(held);
+            }
+        }
+        let out = net.infer_raw_many(&inputs)?;
+
+        // Four logits splits, then this step's K and V per layer. The splits are consecutive class
+        // ranges (the last two one class short), so concatenating them is the full-vocabulary
+        // vector `post::translate` argmaxes.
+        let expected = nllb::HEAD_SPLITS + NLLB_CACHES;
+        if out.len() != expected {
+            return Err(format!("a decode step returned {} tensors, not {expected}", out.len()));
+        }
+        let mut logits = Vec::with_capacity(nllb::VOCAB as usize);
+        for half in out.iter().take(nllb::HEAD_SPLITS) {
+            logits.extend_from_slice(half);
+        }
+        if logits.len() != nllb::VOCAB as usize {
+            return Err(format!("{} logits, not {}", logits.len(), nllb::VOCAB));
+        }
+        for (held, row) in self.cache.iter_mut().zip(out.iter().skip(nllb::HEAD_SPLITS)) {
+            if row.len() != width {
+                return Err(format!("a cache row of {} values, not {width}", row.len()));
+            }
+            // Position-major, so appending is a plain extend and the plan's own concatenation of
+            // it is one contiguous copy.
+            held.extend_from_slice(row);
+        }
+        Ok(logits)
+    }
+}
+
+/// Bring up NLLB from its one `.maml` and its tokenizer table. Returns 0 on failure.
 ///
 /// # Safety
 ///
 /// Called only by the JVM, with a valid `env`, arrays it owns, and a descriptor nothing else holds.
+///
+/// `createNllb` mirrors the old `createSmall100`, and `translateNllb` takes **both** a source and a
+/// target token — the protocol flip vs small100. Agreed with app-eng (team `nllb-translate`).
 #[no_mangle]
-pub extern "system" fn Java_com_vayunmathur_library_ml_MlNative_createSmall100<'l>(
+pub extern "system" fn Java_com_vayunmathur_library_ml_MlNative_createNllb<'l>(
     mut env: JNIEnv<'l>,
     _class: JClass<'l>,
     fd: jint,
@@ -1294,33 +1300,33 @@ pub extern "system" fn Java_com_vayunmathur_library_ml_MlNative_createSmall100<'
     // caller detached it, so a path that returns without wrapping it leaks it for the life of the
     // process. Every check below the adoption is therefore free to fail; nothing above it is.
     if fd < 0 {
-        log(&format!("small100 is unavailable: descriptor {fd} is not open"));
+        log(&format!("nllb is unavailable: descriptor {fd} is not open"));
         return 0;
     }
     // SAFETY: the caller detached the descriptor, so nothing else owns it, and `File` closes it on
     // drop — including on every failure path below.
     let file = unsafe { File::from_raw_fd(fd) };
-    match build_small100(&mut env, file, offset, length, &tokenizer) {
+    match build_nllb(&mut env, file, offset, length, &tokenizer) {
         Ok(handle) => Box::into_raw(Box::new(handle)) as jlong,
         Err(e) => {
-            log(&format!("small100 is unavailable: {e}"));
+            log(&format!("nllb is unavailable: {e}"));
             0
         }
     }
 }
 
-fn build_small100<'l>(
+fn build_nllb<'l>(
     env: &mut JNIEnv<'l>,
     file: File,
     offset: jlong,
     length: jlong,
     tokenizer: &JByteArray<'l>,
-) -> Result<Small100Handle, String> {
+) -> Result<NllbHandle, String> {
     let (at, len) = match (u64::try_from(offset), u64::try_from(length)) {
         (Ok(at), Ok(len)) => (at, len),
         _ => return Err(format!("the graph spans {offset}+{length}")),
     };
-    let weights = Streamed::open(file, at, len, graph::SMALL100)?;
+    let weights = Streamed::open(file, at, len, graph::NLLB)?;
 
     let tokenizer = env
         .convert_byte_array(tokenizer)
@@ -1328,8 +1334,8 @@ fn build_small100<'l>(
     // Parsed once here purely to refuse a bad table at construction rather than at the first
     // translation, when the UI has already committed to having a working engine.
     let parsed = Table::parse(&tokenizer)?;
-    if parsed.len() != small100::VOCAB as usize {
-        return Err(format!("a tokenizer of {} pieces, not {}", parsed.len(), small100::VOCAB));
+    if parsed.len() != nllb::VOCAB as usize {
+        return Err(format!("a tokenizer of {} pieces, not {}", parsed.len(), nllb::VOCAB));
     }
 
     // The smallest legal encoder, immediately replaced: `Net::new` needs a plan and the real shapes
@@ -1338,78 +1344,88 @@ fn build_small100<'l>(
         context::shared()?,
         weights.offsets(),
         &weights,
-        small100::Mode::Encode { len: SMALLEST },
-        small100_plan,
+        nllb::Mode::Encode { len: SMALLEST },
+        nllb_plan,
     )?;
-    Ok(Small100Handle { net, weights, tokenizer })
+    Ok(NllbHandle { net, weights, tokenizer })
 }
 
-/// Translate [`text`] into the language `target_token` names, or null on failure.
+/// Translate [`text`] from the language `source_token` names into the language `target_token`
+/// names, or null on failure.
 ///
 /// `text` must already be NFKC — `java.text.Normalizer.normalize(text, Form.NFKC)`. The model's
-/// normaliser is `nmt_nfkc` with a 237 KB precompiled charsmap, and reproducing that natively would
+/// normaliser is `nmt_nfkc` with a precompiled charsmap, and reproducing that natively would
 /// mean carrying Unicode tables the platform already has. See `post::sentencepiece`.
+///
+/// Unlike small100 before it, BOTH tokens are required: the source token goes on the encoder source
+/// and the
+/// target token forced-BOSes the decoder. Backwards it produces fluent output in the wrong
+/// language rather than an error.
 ///
 /// # Safety
 ///
-/// `handle` must be a non-zero value from `createSmall100` that has not been destroyed.
+/// `handle` must be a non-zero value from `createNllb` that has not been destroyed.
 #[no_mangle]
-pub unsafe extern "system" fn Java_com_vayunmathur_library_ml_MlNative_translateSmall100<'l>(
+pub unsafe extern "system" fn Java_com_vayunmathur_library_ml_MlNative_translateNllb<'l>(
     mut env: JNIEnv<'l>,
     _class: JClass<'l>,
     handle: jlong,
     text: JString<'l>,
+    source_token: jint,
     target_token: jint,
 ) -> jstring {
     if handle == 0 {
         return std::ptr::null_mut();
     }
-    // SAFETY: the caller guarantees the handle came from `createSmall100` and is still live. It is
+    // SAFETY: the caller guarantees the handle came from `createNllb` and is still live. It is
     // `&mut` because a decode step re-records the net, and Kotlin serialises calls on one handle.
-    let handle = unsafe { &mut *(handle as *mut Small100Handle) };
+    let handle = unsafe { &mut *(handle as *mut NllbHandle) };
     let translated = match env.get_string(&text) {
-        Ok(text) => run_small100(handle, &String::from(text), target_token),
+        Ok(text) => run_nllb(handle, &String::from(text), source_token, target_token),
         Err(e) => Err(format!("cannot read the source text: {e}")),
     };
     match translated {
         Ok(out) => match env.new_string(&out) {
             Ok(string) => string.into_raw(),
             Err(e) => {
-                log(&format!("small100 cannot return its translation: {e}"));
+                log(&format!("nllb cannot return its translation: {e}"));
                 std::ptr::null_mut()
             }
         },
         Err(e) => {
-            log(&format!("small100 failed: {e}"));
+            log(&format!("nllb failed: {e}"));
             std::ptr::null_mut()
         }
     }
 }
 
-fn run_small100(
-    handle: &mut Small100Handle,
+fn run_nllb(
+    handle: &mut NllbHandle,
     text: &str,
+    source_token: jint,
     target_token: jint,
 ) -> Result<String, String> {
-    let target = u32::try_from(target_token).map_err(|_| format!("{target_token} is not a token"))?;
-    // Cloned so the table can borrow it while the nets borrow the handle mutably. 1.7 MB against a
-    // translation that uploads nothing and reads a 318 MiB file.
+    let source =
+        u32::try_from(source_token).map_err(|_| format!("{source_token} is not a token"))?;
+    let target =
+        u32::try_from(target_token).map_err(|_| format!("{target_token} is not a token"))?;
+    // Cloned so the table can borrow it while the nets borrow the handle mutably.
     let tokenizer = handle.tokenizer.clone();
     let table = Table::parse(&tokenizer)?;
-    let mut nets = Small100Nets::new(handle);
-    translate::translate(&mut nets, &table, target, text)
+    let mut nets = NllbNets::new(handle);
+    translate::translate(&mut nets, &table, source, target, text)
 }
 
-/// Free SMaLL-100's net, its open weights file and its tokenizer table.
+/// Free NLLB's net, its open weights file and its tokenizer table.
 ///
-/// Exactly once per non-zero handle from `createSmall100`. When it is the last user of the shared
+/// Exactly once per non-zero handle from `createNllb`. When it is the last user of the shared
 /// `VkDevice`, the device goes away with it.
 ///
 /// # Safety
 ///
-/// `handle` must be a non-zero value from `createSmall100`, and must not be used again.
+/// `handle` must be a non-zero value from `createNllb`, and must not be used again.
 #[no_mangle]
-pub unsafe extern "system" fn Java_com_vayunmathur_library_ml_MlNative_destroySmall100<'l>(
+pub unsafe extern "system" fn Java_com_vayunmathur_library_ml_MlNative_destroyNllb<'l>(
     _env: JNIEnv<'l>,
     _class: JClass<'l>,
     handle: jlong,
@@ -1417,16 +1433,16 @@ pub unsafe extern "system" fn Java_com_vayunmathur_library_ml_MlNative_destroySm
     if handle == 0 {
         return;
     }
-    // SAFETY: the caller guarantees this handle came from `createSmall100` and has not been
+    // SAFETY: the caller guarantees this handle came from `createNllb` and has not been
     // destroyed. `Net`'s Drop waits for the device to go idle before freeing.
-    drop(unsafe { Box::from_raw(handle as *mut Small100Handle) });
+    drop(unsafe { Box::from_raw(handle as *mut NllbHandle) });
 }
 
 /// TinyCLIP, as `:photos` holds it. Handed to Kotlin as an opaque `jlong`.
 ///
 /// # One net, two plans
 ///
-/// [`Reshaped`] keyed by [`tinyclip::Mode`], as [`Small100Handle`] is: the two towers share no
+/// [`Reshaped`] keyed by [`tinyclip::Mode`], as the translation handle is: the two towers share no
 /// weights but they do share a 22.6 MiB file, so two `Net`s would upload it twice. Switching towers
 /// is a `device_wait_idle` and a re-record — which is why an indexing run, which is `Mode::Image`
 /// throughout, pays for exactly one.
@@ -1478,7 +1494,8 @@ pub extern "system" fn Java_com_vayunmathur_library_ml_MlNative_createTinyclip<'
     length: jlong,
 ) -> jlong {
     // The descriptor first, and adopted into an owning `File` before anything else may fail, as
-    // `createSmall100` does: the caller detached it, so a path that returns without wrapping it
+    // the old `createSmall100` did: the caller detached it, so a path that returns without wrapping
+    // it
     // leaks it for the life of the process.
     if fd < 0 {
         log(&format!("tinyclip is unavailable: descriptor {fd} is not open"));
@@ -1650,7 +1667,8 @@ pub unsafe extern "system" fn Java_com_vayunmathur_library_ml_MlNative_destroyTi
 ///
 /// [`Reshaped`] keyed by [`whisper::Mode`]. The encoder runs once per utterance; a decode step is
 /// re-recorded every token because its self-attention cache grows by one position, which is a
-/// `device_wait_idle` and a re-record per token — the same known cost `Small100Handle` documents.
+/// `device_wait_idle` and a re-record per token — the same known cost the translation handle
+/// documents.
 ///
 /// The **cross-attention** caches are the difference. Whisper's decoder cross-attends over 1500
 /// encoder positions through each layer's own key and value projections, so recomputing them per

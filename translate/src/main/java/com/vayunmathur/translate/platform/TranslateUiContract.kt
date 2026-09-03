@@ -31,7 +31,7 @@ enum class MicState { IDLE, LISTENING, TRANSCRIBING }
 data class TextTranslateUiState(
     val sourceLang: String = Languages.AUTO.code,
     val targetLang: String = "es",
-    /** False only while the ncnn engine is still loading; the model itself is pre-installed. */
+    /** False only while the NLLB engine is still loading; the model itself is pre-installed. */
     val translationAvailable: Boolean = false,
     val inputText: String = "",
     val outputText: String = "",

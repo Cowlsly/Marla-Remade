@@ -11,7 +11,7 @@ import com.vayunmathur.library.network.NetworkClient
 import com.vayunmathur.library.network.TrustBundle
 import com.vayunmathur.library.ui.DynamicTheme
 import com.vayunmathur.library.util.DataStoreUtils
-import com.vayunmathur.translate.platform.Small100Model
+import com.vayunmathur.translate.platform.NllbModel
 import com.vayunmathur.translate.platform.TranslateViewModel
 
 class MainActivity : ComponentActivity() {
@@ -25,7 +25,7 @@ class MainActivity : ComponentActivity() {
         val ds = DataStoreUtils.getInstance(this)
         setContent {
             DynamicTheme {
-                InitialModelDownloadChecker(ds, Small100Model.FILES) {
+                InitialModelDownloadChecker(ds, NllbModel.FILES) {
                     Navigation(viewModel, initialText)
                 }
             }

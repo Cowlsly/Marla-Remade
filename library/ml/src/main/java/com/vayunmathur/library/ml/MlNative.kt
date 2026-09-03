@@ -151,28 +151,35 @@ internal object MlNative {
     external fun synthesizeSupertonic(handle: Long, text: String, language: String): FloatArray?
 
     /**
-     * Bring up SMaLL-100 from its one `.maml` and its tokenizer table. Returns 0 on failure.
+     * Bring up NLLB-200-distilled-600M from its one `.maml` and its tokenizer table.
+     * Returns 0 on failure.
      *
-     * One graph, not two: the 128,112-row embedding is **tied** — it is the encoder's input table,
-     * the decoder's input table and the logits kernel — so an encoder file and a decoder file would
-     * upload 125 MiB of it twice. Native selects between the encoder pass, the decode step and the
-     * logits projection by re-recording one net.
+     * One graph, not two: the 256,206-row
+     * embedding is **tied** - it is the encoder's input table, the decoder's input
+     * table and the logits kernel - so an encoder file and a decoder file would upload
+     * ~250 MiB of it twice. Native selects between the encoder pass, the decode step
+     * and the logits projection by re-recording one net.
      *
-     * The plan arrives as a **file descriptor** for the reason [createSupertonic] gives, and more
-     * so: at 318 MiB a `ByteArray` would allocate it three times over and be killed for it. Native
-     * reads the header and tensor table only, then streams the weights into the GPU. It also keeps
-     * the descriptor open for the life of the handle, because the tied embedding is gathered a row
-     * at a time on the host rather than uploaded a second time.
+     * The plan arrives as a **file descriptor** because it is a downloaded file, not a
+     * bundled asset: [offset] is 0 and [length] the file's size; only an asset needs a
+     * real range. Native reads the header and tensor table only, then streams the
+     * weights into the GPU. It also keeps the descriptor open for the life of the
+     * handle, because the tied embedding is gathered a row at a time on the host
+     * rather than uploaded a second time.
      *
-     * **The descriptor must be detached.** Native takes ownership and closes it, on the failure
-     * paths as much as the successful one, so a caller must not close it itself. [offset] is 0 and
-     * [length] the file's size for a file on disk; only an asset needs a real range.
+     * **The descriptor must be detached.** Native takes ownership and closes it, on the
+     * failure paths as much as the successful one, so a caller must not close it
+     * itself.
      *
-     * [tokenizer] stays a byte array: 1.7 MB, where streaming saves nothing.
+     * [tokenizer] stays a byte array, where streaming saves nothing.
      *
-     * Freed by [destroySmall100], not [destroy], [destroyOcr] or [destroySupertonic].
+     * The maml's graph id is 18 (`graph::NLLB`), agreed three-ways with model-eng
+     * and rust-eng - native rejects any other file at load.
+     *
+     * Freed by [destroyNllb], not [destroy], [destroyOcr], [destroySupertonic]
+     * or [destroyTinyclip].
      */
-    external fun createSmall100(
+    external fun createNllb(
         fd: Int,
         offset: Long,
         length: Long,
@@ -180,32 +187,42 @@ internal object MlNative {
     ): Long
 
     /**
-     * Translate [text] into the language [targetToken] names, or null on failure.
+     * Translate [text] from the language [sourceToken] names into the language
+     * [targetToken] names, or null on failure.
      *
-     * [text] **must already be NFKC** - use `java.text.Normalizer.normalize(text, Form.NFKC)`. The
-     * model's normaliser is `nmt_nfkc` with a 237 KB precompiled charsmap, and reproducing that
-     * natively would mean carrying Unicode tables the platform already has.
+     * [text] **must already be NFKC** - use `java.text.Normalizer.normalize(text,
+     * Form.NFKC)`. The model's normaliser is `nmt_nfkc` with a precompiled charsmap,
+     * and reproducing that natively would mean carrying Unicode tables the platform
+     * already has.
      *
-     * [targetToken] goes on the **source** side, which is the one thing about SMaLL-100 that is easy
-     * to get backwards: its distillation gives the *encoder* the target language and starts the
-     * decoder from `</s>`. Backwards it produces fluent output in the wrong language rather than an
-     * error. `Small100Model.LANG_ID` is the table.
+     * BOTH tokens are required, which is the protocol flip vs the old SMaLL-100
+     * target-only call:
+     * the source token goes on the **source** side (`pieces + [EOS]`), and the target
+     * token forced-BOSes the **decoder** rather than starting from `</s>`. Backwards
+     * it produces fluent output in the wrong language rather than an error.
+     * `NllbModel.tokenId` is the table: the 202 flores200 codes at 256001..256202,
+     * which native validates in `post::translate::is_nllb_lang_token`.
      *
-     * Greedy decoding, capped at 128 tokens. An empty string means the text had nothing to
-     * translate, which is not a failure.
+     * Greedy decoding, capped at 128 tokens. An empty string means the text had
+     * nothing to translate, which is not a failure.
      */
-    external fun translateSmall100(handle: Long, text: String, targetToken: Int): String?
+    external fun translateNllb(
+        handle: Long,
+        text: String,
+        sourceToken: Int,
+        targetToken: Int,
+    ): String?
 
     /**
-     * Free SMaLL-100's network, its open weights file and its tokenizer table.
-     * Exactly once per non-zero handle from [createSmall100].
+     * Free NLLB's network, its open weights file and its tokenizer table.
+     * Exactly once per non-zero handle from [createNllb].
      */
-    external fun destroySmall100(handle: Long)
+    external fun destroyNllb(handle: Long)
 
     /**
      * Bring up TinyCLIP from its one `.maml`. Returns 0 on failure.
      *
-     * One graph, not two, for a different reason from [createSmall100]: the image and text towers
+     * One graph, not two: the image and text towers
      * share **no weights at all**, but they do share a 22.6 MiB file, so two handles would upload it
      * twice. Native selects between them by re-recording one net, which costs a `device_wait_idle` —
      * and an indexing run is the image tower throughout, so it pays for exactly one.
@@ -221,8 +238,7 @@ internal object MlNative {
      * **The descriptor must be detached.** Native takes ownership and closes it, on the failure
      * paths as much as the successful one, so a caller must not close it itself.
      *
-     * Freed by [destroyTinyclip], not [destroy], [destroyOcr], [destroySupertonic] or
-     * [destroySmall100].
+     * Freed by [destroyTinyclip], not [destroy], [destroyOcr] or [destroySupertonic].
      */
     external fun createTinyclip(fd: Int, offset: Long, length: Long): Long
 
@@ -261,7 +277,7 @@ internal object MlNative {
      * Bring up whisper-base from its one `.maml` and the ids read from `generation_config.json`.
      * Returns 0 on failure.
      *
-     * One graph, not two, as [createSmall100] is: the 51,865-row embedding is **tied** — the
+     * One graph, not two: the 51,865-row embedding is **tied** — the
      * decoder's input table and the logits kernel — so an encoder file and a decoder file would
      * upload 26.6 MB of it twice. Native selects between the encoder pass and a decode step by
      * re-recording one net.
@@ -286,8 +302,8 @@ internal object MlNative {
      * All four are validated here rather than per transcription, so a broken asset reports an
      * unavailable recogniser instead of producing wrong text.
      *
-     * Freed by [destroyWhisper], not [destroy], [destroyOcr], [destroySupertonic],
-     * [destroySmall100] or [destroyTinyclip].
+     * Freed by [destroyWhisper], not [destroy], [destroyOcr], [destroySupertonic]
+     * or [destroyTinyclip].
      */
     external fun createWhisper(
         fd: Int,

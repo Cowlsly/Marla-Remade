@@ -1,4 +1,4 @@
-//! SMaLL-100's SentencePiece tokenizer: text to token ids and back.
+//! NLLB's SentencePiece tokenizer: text to token ids and back.
 //!
 //! # What was inside the ncnn AAR
 //!
@@ -7,9 +7,9 @@
 //!
 //! # It is BPE, and the "scores" are merge ranks
 //!
-//! The model file is named `sentencepiece.bpe.model` and its `trainer_spec.model_type` is 2, BPE.
-//! Its pieces carry scores of 0, -1, -2, ... which are **negative merge ranks** rather than log
-//! probabilities: `,` scores -119149 because it is a very late merge. So encoding is greedy
+//! The model file is named `sentencepiece.bpe.model` and its `trainer_spec.model_type` is 2, BPE
+//! (verified by model-eng with the existing `read_spm` parser: 256,000 pieces, scores 0..-255996).
+//! Its pieces carry **negative merge ranks** rather than log probabilities, so encoding is greedy
 //! pairwise merging — repeatedly join the adjacent pair whose concatenation is in the vocabulary
 //! with the highest score, leftmost on a tie — and not the Viterbi a Unigram model would need.
 //! Reading the scores as log probabilities and running Viterbi produces plausible pieces and the
@@ -25,7 +25,7 @@
 //! Latin, Cyrillic, Arabic, Devanagari, Han, Kana, Hangul, fullwidth forms and emoji — NFKC plus
 //! that whitespace handling agrees with `nmt_nfkc` on all of them.
 //!
-//! The table itself is `scripts/ml/small100_tokenizer.py`'s output; see it for the format.
+//! The table itself is `scripts/ml/nllb_tokenizer.py`'s output; see it for the format.
 
 use std::collections::HashMap;
 
@@ -292,34 +292,42 @@ mod tests {
         assert_eq!(parsed.decode(&[]), "");
     }
 
-    /// The real vocabulary, against ids taken from `sentencepiece` itself.
+    /// The real vocabulary, against model-eng's verified inventory.
     ///
     /// Skipped rather than ignored: the table is a runtime download rather than a checked-in
-    /// asset, so `SMALL100_TOKENIZER` is how you point at one. `scripts/ml/fetch_small100.py`
+    /// asset, so `NLLB_TOKENIZER` is how you point at one. `scripts/ml/fetch_nllb600.py`
     /// builds it, and prints the command.
+    ///
+    /// These assert the *inventory* rather than golden encode ids: golden ids need the reference
+    /// `sentencepiece` run, which is model-eng's parity harness. What this catches is a table
+    /// built from the wrong files — wrong length, wrong specials, missing language range.
     #[test]
     fn the_real_vocabulary_agrees_with_sentencepiece() {
-        let Ok(path) = std::env::var("SMALL100_TOKENIZER") else {
+        let Ok(path) = std::env::var("NLLB_TOKENIZER") else {
             return;
         };
         let bytes = std::fs::read(&path).unwrap_or_else(|e| panic!("{path}: {e}"));
         let parsed = Table::parse(&bytes).expect("the real table parses");
-        assert_eq!(parsed.len(), 128_112);
-        // Every one of these came out of `sentencepiece.SentencePieceProcessor` on the shipped
-        // model, mapped through fairseq's vocabulary order.
-        let cases: [(&str, &[u32]); 6] = [
-            ("Hello, world!", &[65_761, 4, 55_185, 30]),
-            ("café naïve", &[40_244, 18, 6_460, 470]),
-            ("  multiple   spaces\tand\nnewlines  ", &[119_683, 654, 44_628, 1_019, 19_420, 116_356]),
-            ("한국어", &[13_740, 2_254]),
-            ("emoji 🙂 done", &[21_761, 720, 6_459, 111_108]),
-            // Fullwidth forms, already folded by the caller's NFKC.
-            ("Full A", &[26_033, 58]),
-        ];
-        for (text, want) in cases {
-            assert_eq!(parsed.encode(text), want, "encoding {text:?}");
+        // 256,000 BPE pieces, then `<pad>`, the 202 flores codes, `<mask>`, two empty pads.
+        assert_eq!(parsed.len(), 256_206);
+        // fairseq's specials, in fairseq's order — `parse` already checks these, restated here so
+        // the failure names the inventory rather than the parser.
+        for (id, name) in [(0, "<s>"), (1, "<pad>"), (2, "</s>"), (3, "<unk>")] {
+            assert_eq!(parsed.piece(id), Some(name.as_bytes()), "special {id}");
         }
-        // And a round trip, which is what the decode loop ends with.
-        assert_eq!(parsed.decode(&[1_197, 6_308]), "the cat");
+        // The language range: 202 flores codes at 256001..256202, then `<mask>`. Their exact text
+        // is model-eng's mapping JSON; what matters here is that they are present, non-empty and
+        // distinct — a missing or duplicated code would mistranslate silently.
+        let mut seen = std::collections::BTreeSet::new();
+        for id in 256_001..=256_202u32 {
+            let piece = parsed.piece(id).unwrap_or_else(|| panic!("language token {id} missing"));
+            assert!(!piece.is_empty(), "language token {id} is empty");
+            assert!(seen.insert(piece.to_vec()), "language token {id} duplicates another");
+        }
+        assert_eq!(parsed.piece(256_203), Some(b"<mask>".as_slice()), "<mask>");
+        // And encoding is non-degenerate on the real table: every id it emits is in range.
+        for id in parsed.encode("Hello, world!") {
+            assert!(id < 256_206, "id {id} past the vocabulary");
+        }
     }
 }

@@ -1,4 +1,4 @@
-//! SMaLL-100's decode loop: source text to translated text, one token at a time.
+//! NLLB's decode loop: source text to translated text, one token at a time.
 //!
 //! # What was inside the ncnn AAR
 //!
@@ -7,19 +7,24 @@
 //! both use — because the order of the special tokens is where the mistakes are and none of them
 //! needs a device to catch.
 //!
-//! # The target language token goes on the SOURCE side
+//! # The source language token goes on the SOURCE side; the decoder starts from </s>
 //!
-//! This is the one thing about SMaLL-100 that is easy to get backwards, and getting it backwards
-//! produces fluent output in the wrong language rather than an error. Its distillation gives the
-//! *encoder* the target language:
+//! This is the one thing about NLLB that is easy to get backwards, and getting it backwards
+//! produces fluent output in the wrong language rather than an error:
 //!
 //! ```text
-//! source  = [target_language_token] ++ tokenizer(text) ++ [</s>]
-//! decoder starts from </s> (id 2), not from the language token
+//! source  = [source_language_token] ++ tokenizer(text) ++ [</s>]
+//! decoder input starts from </s> (id 2); the first *generated* token is forced to the
+//! target language token (forced-BOS), then decoding proceeds autoregressively
 //! ```
 //!
-//! M2M-100 proper puts a source-language token on the source and a target-language token on the
-//! decoder; SMaLL-100 does neither of those. See [`translate`].
+//! That forcing is HuggingFace `generate`'s `forced_bos_token_id`: the step-0 logits are
+//! overridden, so the model never gets a vote on the first output. Every reference
+//! `greedy_output_ids` in `scripts/ml/nllb_parity_fixture.json` is `[2, tgt, content…, 2]`,
+//! which is exactly the framing [`translate`] replays.
+//!
+//! SMaLL-100, which this replaced, did it the other way round: the *target* token on the source
+//! and `</s>`-start. See [`translate`].
 //!
 //! # Greedy, not beam
 //!
@@ -30,16 +35,10 @@
 
 use super::sentencepiece::{Table, EOS};
 
-/// The first of the 100 language tokens, `af`. They are contiguous from here.
+/// Decoder start token: `</s>` (id 2), which is also `decoder_start_token_id`.
 ///
-/// Cross-checked against `Small100Model.LANG_ID`'s `FIRST_LANG_ID` and against the export's own
-/// `lang_tokens`, whose minimum is this and whose ids have no gaps.
-pub const FIRST_LANG_TOKEN: u32 = 128_004;
-
-/// Language tokens the model holds.
-pub const LANGUAGES: u32 = 100;
-
-/// What the decoder is primed with, which is `</s>` and not a language token.
+/// The decoder input starts here — not at the language token. The language token is *generated*
+/// first, forced: step 0 of [`translate`] overrides the logits with the target token.
 pub const DECODER_START: u32 = EOS;
 
 /// Tokens the loop will emit before giving up.
@@ -64,47 +63,83 @@ pub trait Nets {
     fn decode_step(&mut self, token: u32, step: usize, encoded: &[f32]) -> Result<Vec<f32>, String>;
 }
 
-/// Translate `normalised` into the language `target_token` names.
+/// Translate `normalised` from the language `source_token` names into the language `target_token`
+/// names.
 ///
-/// `normalised` must already be NFKC; see [`Table::encode`]. `target_token` is one of the 100
-/// language tokens, which the caller resolves from a language code — the Kotlin side already has
-/// that table, and duplicating 100 entries here to look one up would be two places to get wrong.
+/// The first of NLLB's 202 language tokens, `ace_Arab` through `zul_Latn` in flores order.
+///
+/// Model-eng's tokenizer inventory: the 202 flores codes sit at ids `256001..256202` (after the
+/// 256,000 SentencePiece pieces), with `<mask>` at 256203 and fairseq's specials at 0..3.
+pub const FIRST_NLLB_LANG_TOKEN: u32 = 256_001;
+
+/// Language tokens NLLB holds: the 202 flores200 codes.
+pub const NLLB_LANGUAGES: u32 = 202;
+
+/// Whether `token` is one of NLLB's language tokens.
+pub fn is_nllb_lang_token(token: u32) -> bool {
+    (FIRST_NLLB_LANG_TOKEN..FIRST_NLLB_LANG_TOKEN + NLLB_LANGUAGES).contains(&token)
+}
+
+/// Translate `normalised` from the language `source_token` names into the language `target_token`
+/// names, with NLLB's protocol.
+///
+/// `normalised` must already be NFKC; see [`Table::encode`]. Both tokens are validated here:
+/// swapping them produces fluent output in the wrong language rather than an error.
+///
+/// The decoder starts from `</s>` ([`DECODER_START`]) and step 0 is *forced* to `target_token`
+/// — HuggingFace's `forced_bos_token_id` — so the step-0 argmax is discarded, the forced token
+/// is fed back as step 1's input but never emitted as text, and decoding proceeds greedily from
+/// there, stopping at the first `</s>`.
 ///
 /// An empty result means the text had nothing to translate, which is not a failure.
 pub fn translate(
     nets: &mut dyn Nets,
     table: &Table,
+    source_token: u32,
     target_token: u32,
     normalised: &str,
 ) -> Result<String, String> {
-    if !(FIRST_LANG_TOKEN..FIRST_LANG_TOKEN + LANGUAGES).contains(&target_token) {
-        return Err(format!(
-            "{target_token} is not one of the {LANGUAGES} language tokens from {FIRST_LANG_TOKEN}"
-        ));
+    for (what, token) in [("source", source_token), ("target", target_token)] {
+        if !is_nllb_lang_token(token) {
+            return Err(format!(
+                "{what} token {token} is not one of the {NLLB_LANGUAGES} NLLB language tokens \
+                 from {FIRST_NLLB_LANG_TOKEN}"
+            ));
+        }
     }
     let body = table.encode(normalised);
     if body.is_empty() {
         return Ok(String::new());
     }
 
-    // The language token leads the SOURCE, and the tokenizer's own `</s>` closes it.
+    // The SOURCE language token leads the source, and the tokenizer's own `</s>` closes it.
     let mut source = Vec::with_capacity(body.len() + 2);
-    source.push(target_token);
+    source.push(source_token);
     source.extend(body);
     source.push(EOS);
 
     let encoded = nets.encode(&source)?;
 
     let mut produced: Vec<u32> = Vec::new();
+    // The decoder starts from `</s>`, and step 0 is forced to the target language — the
+    // `forced_bos_token_id` override. The forced token is fed back as step 1's input but never
+    // emitted: it is framing, not translated text.
     let mut token = DECODER_START;
     for step in 0..MAX_TOKENS {
         let logits = nets.decode_step(token, step, &encoded)?;
-        let next = argmax(&logits)
-            .ok_or_else(|| format!("the decoder returned {} logits at step {step}", logits.len()))?;
+        let next = if step == 0 {
+            target_token
+        } else {
+            argmax(&logits).ok_or_else(|| {
+                format!("the decoder returned {} logits at step {step}", logits.len())
+            })?
+        };
         if next == EOS {
             break;
         }
-        produced.push(next);
+        if step > 0 {
+            produced.push(next);
+        }
         token = next;
     }
     Ok(table.decode(&produced))
@@ -195,30 +230,32 @@ mod tests {
     }
 
     #[test]
-    fn the_language_token_leads_the_source_and_eos_closes_it() {
-        // The trap this module exists to document: SMaLL-100 puts the *target* language on the
-        // *source* side, and the decoder starts from `</s>` rather than from that token. Both
-        // halves are asserted, because swapping them produces fluent text in the wrong language.
+    fn the_forced_bos_frames_the_output_like_the_reference() {
+        // The parity fixture's `greedy_output_ids` are `[2, tgt, content…, 2]`; this replays that
+        // framing through the loop: step 0 sees `</s>`, is forced to the target, emits it back at
+        // step 1 without emitting it as text, then decodes content until `</s>`.
         let bytes = table_bytes();
         let table = Table::parse(&bytes).expect("parses");
-        let mut nets = scripted(&[EOS]);
-        let target = FIRST_LANG_TOKEN + 7;
-        translate(&mut nets, &table, target, "a b").expect("translates");
-        assert_eq!(nets.source.first(), Some(&target));
-        assert_eq!(nets.source.last(), Some(&EOS));
-        // And the decoder was primed with `</s>`, not with the language token.
-        assert_eq!(nets.steps.first(), Some(&(DECODER_START, 0)));
+        let source = FIRST_NLLB_LANG_TOKEN;
+        let target = FIRST_NLLB_LANG_TOKEN + 1;
+        let mut nets = scripted(&[10, 11, EOS]);
+        translate(&mut nets, &table, source, target, "a").expect("translates");
+        // Step 0's scripted winner (10) is discarded by the forcing; step 1 sees script[1].
+        assert_eq!(nets.steps, vec![(DECODER_START, 0), (target, 1), (11, 2)]);
     }
 
     #[test]
-    fn each_step_feeds_the_previous_token_back() {
-        // Greedy decoding is a chain: step n sees what step n-1 chose. Feeding the original
-        // start token every time would still terminate and still produce text.
+    fn step_zero_forces_the_target_token_regardless_of_the_logits() {
+        // `forced_bos_token_id`: the step-0 argmax is discarded even when it has a clear winner,
+        // the forced token is fed back but never emitted, and decoding proceeds from there.
         let bytes = table_bytes();
         let table = Table::parse(&bytes).expect("parses");
-        let mut nets = scripted(&[30, 31, 32, EOS]);
-        translate(&mut nets, &table, FIRST_LANG_TOKEN, "a").expect("translates");
-        assert_eq!(nets.steps, vec![(DECODER_START, 0), (30, 1), (31, 2), (32, 3)]);
+        let source = FIRST_NLLB_LANG_TOKEN;
+        let target = FIRST_NLLB_LANG_TOKEN + 1;
+        // The script's step-0 winner is 30 — it must lose to the forced target.
+        let mut nets = scripted(&[30, 31, EOS]);
+        translate(&mut nets, &table, source, target, "a").expect("translates");
+        assert_eq!(nets.steps, vec![(DECODER_START, 0), (target, 1), (31, 2)]);
     }
 
     #[test]
@@ -226,9 +263,11 @@ mod tests {
         let bytes = table_bytes();
         let table = Table::parse(&bytes).expect("parses");
         let mut nets = scripted(&[14, 15, EOS, 16]);
-        let got = translate(&mut nets, &table, FIRST_LANG_TOKEN, "a").expect("translates");
-        // ids 14 and 15 are 'e' and 'f' in the fixture table; 16 is past the `</s>` and unseen.
-        assert_eq!(got, "ef");
+        let got = translate(&mut nets, &table, FIRST_NLLB_LANG_TOKEN, FIRST_NLLB_LANG_TOKEN + 1, "a")
+            .expect("translates");
+        // Step 0's scripted winner (14, 'e') is discarded by the forcing, so only 'f' survives;
+        // 16 is past the `</s>` and unseen.
+        assert_eq!(got, "f");
         assert_eq!(nets.steps.len(), 3);
     }
 
@@ -241,9 +280,17 @@ mod tests {
         // A script of one repeated non-EOS token, longer than the cap.
         let script = vec![20u32; MAX_TOKENS + 10];
         let mut nets = scripted(&script);
-        let got = translate(&mut nets, &table, FIRST_LANG_TOKEN, "a").expect("translates");
+        let got = translate(
+            &mut nets,
+            &table,
+            FIRST_NLLB_LANG_TOKEN,
+            FIRST_NLLB_LANG_TOKEN + 1,
+            "a",
+        )
+        .expect("translates");
         assert_eq!(nets.steps.len(), MAX_TOKENS);
-        assert_eq!(got.chars().count(), MAX_TOKENS);
+        // Step 0 is the forced target, never emitted, so the cap yields MAX_TOKENS - 1 chars.
+        assert_eq!(got.chars().count(), MAX_TOKENS - 1);
     }
 
     #[test]
@@ -251,7 +298,14 @@ mod tests {
         let bytes = table_bytes();
         let table = Table::parse(&bytes).expect("parses");
         let mut nets = scripted(&[EOS]);
-        let got = translate(&mut nets, &table, FIRST_LANG_TOKEN, "   ").expect("translates");
+        let got = translate(
+            &mut nets,
+            &table,
+            FIRST_NLLB_LANG_TOKEN,
+            FIRST_NLLB_LANG_TOKEN + 1,
+            "   ",
+        )
+        .expect("translates");
         assert_eq!(got, "");
         assert!(nets.source.is_empty(), "the encoder ran on nothing");
         assert!(nets.steps.is_empty(), "the decoder ran on nothing");
@@ -259,14 +313,21 @@ mod tests {
 
     #[test]
     fn a_token_outside_the_language_range_is_refused() {
-        // 128,004 through 128,103. A plain vocabulary id here would be a silent mistranslation.
+        // 256,001 through 256,202. A plain vocabulary id in either slot would be a silent
+        // mistranslation.
         let bytes = table_bytes();
         let table = Table::parse(&bytes).expect("parses");
         let mut nets = scripted(&[EOS]);
-        for wrong in [0, 2, FIRST_LANG_TOKEN - 1, FIRST_LANG_TOKEN + LANGUAGES] {
-            let error =
-                translate(&mut nets, &table, wrong, "a").expect_err("a non-language token");
-            assert!(error.contains("language tokens"), "{error}");
+        let good = FIRST_NLLB_LANG_TOKEN;
+        for (source, target) in [
+            (0, good),
+            (good, 2),
+            (FIRST_NLLB_LANG_TOKEN - 1, good),
+            (good, FIRST_NLLB_LANG_TOKEN + NLLB_LANGUAGES),
+        ] {
+            let error = translate(&mut nets, &table, source, target, "a")
+                .expect_err("a non-language token");
+            assert!(error.contains("NLLB language tokens"), "{error}");
         }
     }
 
@@ -278,5 +339,59 @@ mod tests {
         assert_eq!(argmax(&[]), None);
         // Negative logits are normal — a softmax was never taken.
         assert_eq!(argmax(&[-5.0, -1.0, -9.0]), Some(1));
+    }
+
+    #[test]
+    fn the_loop_replays_the_parity_fixture_framing() {
+        // `scripts/ml/nllb_parity_fixture.json`, pair 1 (eng_Latn -> fra_Latn): the reference
+        // `greedy_output_ids` are `[2, 256057, content…, 2]`. The script feeds the content back
+        // from step 1 on (step 0 is forced); the loop must walk exactly that chain — forced BOS
+        // fed back but never emitted, content in order, stop at the trailing `</s>`.
+        let bytes = table_bytes();
+        let table = Table::parse(&bytes).expect("parses");
+        let target = 256_057u32; // fra_Latn
+        let content = [17994u32, 141190, 248079, 25358, 123732, 248105, 30213, 385];
+        // script[0] is discarded by the forcing; script[1..] answer steps 1... The fixture ids
+        // need a full-size vocabulary, which the 200-entry helper cannot hold.
+        let mut script = vec![0u32];
+        script.extend(content);
+        script.push(EOS);
+        let mut nets = Scripted {
+            script,
+            source: Vec::new(),
+            steps: Vec::new(),
+            vocabulary: 300_000,
+        };
+        translate(&mut nets, &table, 256_047, target, "a").expect("translates");
+        let mut want = vec![(DECODER_START, 0), (target, 1)];
+        want.extend(content.iter().enumerate().map(|(i, &id)| (id, i + 2)));
+        assert_eq!(nets.steps, want);
+        // And the source framing matches the fixture's `encoder_input_ids` convention:
+        // source-lang token leads, `</s>` trails.
+        assert_eq!(nets.source.first(), Some(&256_047u32));
+        assert_eq!(nets.source.last(), Some(&EOS));
+    }
+
+    #[test]
+    fn the_source_token_leads_the_source_and_eos_starts_the_decoder() {
+        // The trap this module exists to document: the SOURCE language leads the source, and the
+        // decoder starts from `</s>` with step 0 forced to the TARGET language token. All three
+        // are asserted, because swapping source and target produces fluent text in the wrong
+        // language.
+        let bytes = table_bytes();
+        let table = Table::parse(&bytes).expect("parses");
+        let mut nets = scripted(&[EOS]);
+        let source = FIRST_NLLB_LANG_TOKEN + 3;
+        let target = FIRST_NLLB_LANG_TOKEN + 9;
+        translate(&mut nets, &table, source, target, "a b").expect("translates");
+        assert_eq!(nets.source.first(), Some(&source));
+        assert_eq!(nets.source.last(), Some(&EOS));
+        // The decoder was primed with `</s>`, not with the language token.
+        assert_eq!(nets.steps.first(), Some(&(DECODER_START, 0)));
+        // The forced-BOS token is framing, not output: it is fed back at step 1 but never
+        // emitted as translated text. The script answers EOS at step 1, so nothing is produced.
+        assert_eq!(nets.steps.get(1), Some(&(target, 1)));
+        assert!(nets.source.contains(&source));
+        assert!(!nets.source.contains(&target), "the target token is not on the source side");
     }
 }

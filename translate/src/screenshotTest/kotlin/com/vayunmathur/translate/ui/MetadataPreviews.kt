@@ -27,7 +27,7 @@ private const val PHONE = "spec:width=411dp,height=891dp,dpi=420"
  *    tests". Previews must also be class members, not top-level functions, for the same
  *    reason: the engine discovers them as JUnit tests.
  *  - Everything is a literal. The translations below are written out rather than produced
- *    by the SMaLL-100 model, which is a ~1.2 GB runtime download that no preview can load.
+ *    by the NLLB-200 model, which is a ~620 MB runtime download that no preview can load.
  *
  * Only the text screen is here. The camera screen is a live CameraX viewfinder, and
  * Layoutlib cannot open a camera — a preview of it would be an empty rectangle, which is

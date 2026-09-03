@@ -14,11 +14,13 @@ import java.util.MissingResourceException
  *
  * Two things this has to get right that a bare `engine.language = locale` does not:
  *
- *  - **Locale matching.** [Languages] codes are bare ISO-639-1 ("pt", "zh"), while the
- *    voices an engine actually has installed are usually region-qualified ("pt-BR",
- *    "zh-CN"). Asking for the bare tag can come back unsupported even though the engine
- *    plainly speaks the language, so we search the engine's own voice list for a locale
- *    with the same language and prefer the region the device is in.
+ *  - **Locale matching.** The [Languages] codes are BCP-47 tags qualified with the
+ *    NLLB script where the language needs it ("zh-Hans", "yue-Hant", "taq-Tfng"),
+ *    while the voices an engine actually has installed are usually
+ *    region-qualified ("pt-BR", "zh-CN"). Asking for the bare tag can come back
+ *    unsupported even though the engine plainly speaks the language, so we search
+ *    the engine's own voice list for a locale with the same language and prefer
+ *    the region the device is in.
  *  - **Failing loudly.** `setLanguage` returns an error code and leaves the *previous*
  *    locale in place when a language isn't installed — engines ship voice data per
  *    language, so anything the user hasn't downloaded lands here. Ignoring that return
@@ -127,7 +129,11 @@ class TtsSpeaker(context: Context) {
         }
     }
 
-    /** The best locale the engine can speak for [languageCode], or null if it has none. */
+    /** The best locale the engine can speak for [languageCode], or null if it has none.
+     *
+     * Many of the 202 NLLB languages have no system voice at all - nothing is cached for
+     * them, and the caller reports the gap through `onMissingVoice` instead of speaking
+     * in the wrong language. */
     private fun localeFor(languageCode: String): Locale? {
         val engine = synchronized(this) {
             resolved[languageCode]?.let { return it }

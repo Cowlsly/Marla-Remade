@@ -1,22 +1,24 @@
-//! SMaLL-100: a 100-language translation encoder-decoder, in one `.maml`.
+//! NLLB-200-distilled-600M: a 200-language translation encoder-decoder, in one `.maml`.
 //!
 //! # What it is
 //!
-//! M2M-100 distilled to a 3-layer decoder: 12 encoder layers, 3 decoder layers, `d_model` 1024,
-//! 16 heads of 64, a 4096-wide feed-forward, and a 128,112-entry vocabulary shared between the
-//! input embedding and the output projection. 332,735,488 parameters, 318 MiB as int8.
+//! NLLB distilled to 600M parameters: 12 encoder layers, 12 decoder layers, `d_model` 1024,
+//! 16 heads of 64, a 4096-wide feed-forward, and a 256,206-entry vocabulary shared between the
+//! input embedding and the output projection.
 //!
-//! The Kotlin it replaces claimed "36 enc + 13 dec Gemm+MHA layers". Those were **ncnn's** counts,
-//! with multi-head attention fused into one layer, and they do not map onto anything here;
-//! `scripts/ml/fetch_small100.py` asserts the real numbers against the checkpoint's `config.json`
-//! rather than trusting either.
+//! The architecture is `M2M100ForConditionalGeneration` — the same forward pass SMaLL-100 (which
+//! this replaced) used, with 12 decoder layers instead of 3 and 202 language tokens instead of
+//! 100. The two modules were kept side by side during the port so a reviewer could diff them;
+//! every difference from the old `small100.rs` is one of: the vocabulary size, the head split
+//! count and sizes, the decoder layer count, and the language-token constants in
+//! `post::translate`.
 //!
-//! # One file, three passes
+//! # One file, two passes
 //!
 //! [`Mode`] selects which of them [`build`] emits. They share the file because the embedding is
 //! **tied**: it is the encoder's input table, the decoder's input table and the logits kernel, and
-//! two files would upload 125 MiB of it twice. Each pass names the others' tensors with
-//! [`Builder::host_tensor`], and `tests::the_passes_partition_the_file_and_every_one_of_them_builds`
+//! two files would upload ~250 MiB of it twice. Each pass names the others' tensors with
+//! [`Builder::host_tensor`], and `tests::the_passes_cover_the_file_and_every_one_of_them_builds`
 //! is what keeps that from hiding a genuinely unread layer.
 //!
 //! # The embedding is gathered on the host
@@ -30,28 +32,37 @@
 //!
 //! [`embed_positions`] reads the row with [`crate::weights::Reader::int8_row`], dequantises it by
 //! that row's own scale, scales and adds the position in f32, and hands the result in as an
-//! ordinary fp16 plan input. That is 1 KB of file reads per token against a 125 MiB upload, it
-//! keeps `sqrt(1024)` out of the int8 rounding, and it is why the ncnn build's
-//! `pos_weights.f32.bin` download is gone.
+//! ordinary fp16 plan input. The math is fairseq's `M2M100SinusoidalPositionalEmbedding` with the
+//! `+ 2` offset, verified against transformers' `modeling_m2m_100.py` by model-eng.
 //!
 //! ## The position offset is 2, not 0
 //!
 //! fairseq numbers positions as `cumsum(mask) * mask + padding_idx` with `padding_idx = 1`, so the
 //! first real token sits at **position 2**. An off-by-two here produces fluent, plausible, subtly
 //! wrong output, and no shape check anywhere catches it. It is pinned in
-//! `tests::the_first_token_sits_at_position_two` and against onnxruntime.
+//! `tests::the_first_token_sits_at_position_two` and was verified against transformers'
+//! `modeling_m2m_100.py` by model-eng.
 //!
 //! The sinusoid is fairseq's, which is not the usual one either: the two halves are
 //! `[sin(all 512), cos(all 512)]` **concatenated rather than interleaved**, and the frequency
 //! spacing divides by `half_dim - 1` = 511, not 512.
 //!
-//! # The head is two ops, not one
+//! # The head is four ops, not one
 //!
-//! 128,112 classes at 1024 channels is 125.1 MiB of int8, and `maxStorageBufferRange`'s guaranteed
-//! minimum is 128 MiB — so one binding would be inside the limit only just, and an fp16 embedding
-//! would not fit at all. `scripts/ml/maml_convert.py` therefore emits the tied weight as **two**
-//! tensors over disjoint class ranges, [`Mode::Logits`] emits two `ConvPointInt8` ops, and
-//! `post::translate` argmaxes over both halves — which it already did, because it argmaxes anyway.
+//! 256,206 classes at 1024 channels is ~250 MiB of int8, and `maxStorageBufferRange`'s guaranteed
+//! minimum is 128 MiB — so `scripts/ml/maml_convert.py` emits the tied weight as **four**
+//! tensors over disjoint class ranges, [`Mode::DecodeStep`] emits four `ConvVecInt8` ops, and
+//! `post::translate` argmaxes over all four — which it already did, because it argmaxes anyway.
+//!
+//! 256,206 is not divisible by 4, so the splits are uneven: the first two hold 64,052 classes
+//! each and the last two 64,051 (see [`split_classes`]). No range is padded — padding would add
+//! dummy logits that could win the argmax.
+//!
+//! # The FFN is ReLU, not GELU
+//!
+//! `config.json` says `activation_function: relu`, so [`feed_forward`] uses [`Act::Relu`]. A GELU
+//! here would still run and still produce text, which is why the activation code is pinned in
+//! `tests::the_encoder_is_twelve_pre_norm_layers`.
 //!
 //! # No attention mask, and none needed
 //!
@@ -59,18 +70,25 @@
 //!
 //! * The encoder runs over one sentence with no padding, so every key is real.
 //! * The decoder decodes one token at a time, so a step is **one query against `step + 1` keys**,
-//!   which is causal by construction. That is what [`Builder::attn_scores`]'s support for
+//!   which is causal by construction. That is what [`Builder::attn_scores_cached`]'s support for
 //!   differing query and key lengths buys.
 //!
 //! [`Builder::attn_scores`] applies `1 / sqrt(head_dim)` itself, and `head_dim` is 64, which is
-//! exactly M2M-100's `self.scaling`. So nothing folds a query scale, unlike Supertonic's text
-//! encoder.
+//! exactly the model's `self.scaling`. So nothing folds a query scale, and `sqrt(d_model)` stays
+//! in the host gather rather than folded into the embedding.
 //!
 //! # Pre-norm
 //!
-//! `M2M100EncoderLayer` and `M2M100DecoderLayer` normalise **before** each sublayer and skip
-//! around both, and each stack ends with one more layer norm. Written the other way round the net
-//! still runs and still produces text.
+//! The encoder and decoder layers normalise **before** each sublayer and skip around both, and
+//! each stack ends with one more layer norm. Written the other way round the net still runs and
+//! still produces text.
+//!
+//! # Decode protocol
+//!
+//! NLLB puts the **source** language token on the encoder source and forces the **target**
+//! language token as the decoder's first token (forced-BOS). See
+//! `post::translate::translate`. Getting this backwards produces fluent output in the wrong
+//! language rather than an error.
 
 use super::{Act, Builder, Id, Plan, Shape, WeightSource};
 use crate::weights::Reader;
@@ -85,19 +103,35 @@ pub const HEADS: u32 = 16;
 pub const FFN: u32 = 4096;
 
 /// Vocabulary entries, shared by the embedding and the logits projection.
-pub const VOCAB: u32 = 128_112;
+///
+/// 256,000 SentencePiece pieces + 202 flores language codes + `<mask>` + 4 specials, per
+/// `config.json`'s `vocab_size` and model-eng's tokenizer inventory.
+pub const VOCAB: u32 = 256_206;
 
 /// Class ranges the tied weight is emitted as. See the module docs.
-pub const HEAD_SPLITS: usize = 2;
+pub const HEAD_SPLITS: usize = 4;
 
-/// Classes in each half. 128,112 is `2 * 64,056`, so neither range is padded.
-pub const CLASSES_PER_SPLIT: u32 = VOCAB / HEAD_SPLITS as u32;
+/// Classes in each of the first two splits. The last two hold one fewer each.
+pub const CLASSES_PER_SPLIT: u32 = 64_052;
+
+/// Classes in the last two splits: 256,206 = 2 x 64,052 + 2 x 64,051.
+pub const CLASSES_PER_TAIL_SPLIT: u32 = 64_051;
+
+/// Classes in split `split`: the first two get the extra row each.
+pub fn split_classes(split: usize) -> u32 {
+    if split < 2 {
+        CLASSES_PER_SPLIT
+    } else {
+        CLASSES_PER_TAIL_SPLIT
+    }
+}
 
 /// Encoder layers.
 pub const ENCODER_LAYERS: usize = 12;
 
-/// Decoder layers. Three is what makes SMaLL-100 four times faster than M2M-100.
-pub const DECODER_LAYERS: usize = 3;
+/// Decoder layers. Twelve: the distilled-600M keeps the full M2M-100 decoder, unlike SMaLL-100's
+/// three.
+pub const DECODER_LAYERS: usize = 12;
 
 /// `max_position_embeddings`, and therefore the longest source this can encode.
 pub const MAX_POSITIONS: u32 = 1024;
@@ -114,7 +148,7 @@ const ENCODER_LAYER_TENSORS: usize = 2 + 4 * 3 + 2 + 3 + 3;
 /// Tensors per decoder layer: an encoder layer plus a cross-attention norm and four projections.
 const DECODER_LAYER_TENSORS: usize = ENCODER_LAYER_TENSORS + 2 + 4 * 3;
 
-/// The first of the two head halves. They come first, because the embedding is read before
+/// The first of the four head splits. They come first, because the embedding is read before
 /// anything else and the file is written in forward order.
 const HEAD: usize = 0;
 
@@ -130,30 +164,20 @@ const DECODER: usize = ENCODER_NORM + 2;
 /// The decoder's trailing layer norm.
 const DECODER_NORM: usize = DECODER + DECODER_LAYERS * DECODER_LAYER_TENSORS;
 
-/// Tensors the `.maml` must hold, and the count `maml_convert.py` writes.
+/// Tensors the `.maml` must hold, and the count `maml_convert.py` writes: 12 head + 264 encoder
+/// + 2 + 432 decoder + 2.
 pub const TENSORS: usize = DECODER_NORM + 2;
 
 /// Convolutions read as int8 rather than fp16, each carrying a third tensor for its scale.
 ///
-/// **Every one of them.** Both head halves, all six projections of each encoder layer and all ten
-/// of each decoder layer — 104 tensors and 99.98% of the parameters. Nothing is excluded, and that
-/// is a measurement rather than an omission: `maml_convert.collect_small100` reports the worst
-/// per-tensor correlation between the fp32 weight and `int8 * scale` over all 104, and it is
-/// 0.999808 on a head half, against the 0.999 floor Supertonic's reverted text encoder failed at
-/// 0.99212.
-///
-/// Only the layer norms and the biases stay fp16, and they are 0.02% of the file. Quantising a
-/// rank-1 per-channel affine would save 250 KB and cost the normalisation its precision.
-///
-/// The reason this is even possible is that the weights come from the **fp32 checkpoint**: the
-/// int8 ONNX exports that exist for SMaLL-100 quantise per tensor, which throws away a factor of
-/// four on the embedding alone. See `CHECKPOINTS` in `scripts/ml/maml_convert.py`.
+/// **Every one of them.** Four head splits, all six projections of each encoder layer and all ten
+/// of each decoder layer. Only the layer norms and the biases stay fp16.
 pub const INT8_CONVS: usize = HEAD_SPLITS + ENCODER_LAYERS * 6 + DECODER_LAYERS * 10;
 
 /// Which forward pass [`build`] emits.
 ///
-/// One graph and three plans, run through [`crate::vulkan::run::Net::rebuild`] rather than three
-/// nets, so the 318 MiB upload happens once.
+/// One graph and two plans, run through [`crate::vulkan::run::Net::rebuild`] rather than two
+/// nets, so the ~600 MiB upload happens once.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Mode {
     /// The encoder over `len` tokens: `[1024, 1, len]` in, `[1024, 1, len]` out.
@@ -161,8 +185,6 @@ pub enum Mode {
         /// Source tokens, after [`embed_positions`].
         len: u32,
     },
-    /// The tied logits projection: one `[1024]` state in, two half-vocabularies out.
-    Logits,
     /// One decoder step: the token just produced in, its logits and its new K/V out.
     ///
     /// A step is **one query** against `cache_len + 1` keys — the `cache_len` positions already
@@ -222,7 +244,8 @@ fn attention(b: &mut Builder, l: &mut Layers, residual: Id, queries: Id, keys: I
     b.add(residual, projected)
 }
 
-/// The pre-norm feed-forward sublayer, plus its residual. `relu`, not `gelu`.
+/// The pre-norm feed-forward sublayer, plus its residual. `relu`, not `gelu`: `config.json` says
+/// `activation_function: relu`.
 fn feed_forward(b: &mut Builder, l: &mut Layers, x: Id) -> Id {
     let normed = b.layer_norm(x, l.take(), EPSILON);
     let inner = point(b, l, normed, FFN, Act::Relu);
@@ -230,11 +253,10 @@ fn feed_forward(b: &mut Builder, l: &mut Layers, x: Id) -> Id {
     b.add(x, projected)
 }
 
-/// Build one of SMaLL-100's three passes. See [`Mode`].
+/// Build one of NLLB's two passes. See [`Mode`].
 pub fn build(weights: &dyn WeightSource, mode: Mode) -> Result<Plan, String> {
     match mode {
         Mode::Encode { len } => encode(weights, len),
-        Mode::Logits => logits(weights),
         Mode::DecodeStep { cache_len, src_len } => decode_step(weights, cache_len, src_len),
     }
 }
@@ -249,7 +271,7 @@ pub fn build(weights: &dyn WeightSource, mode: Mode) -> Result<Plan, String> {
 /// | 1 | `[1024, 1, src_len]` | the encoder output, channel-major as the encoder produced it |
 /// | 2, 3 | `[cache_len, 1, 1024]` | layer 0's self-attention K and V, position-major |
 /// | 4, 5 | | layer 1's |
-/// | 6, 7 | | layer 2's |
+/// | … | | … |
 ///
 /// The cache pair is **omitted at step 0**, where there is nothing before the current token.
 ///
@@ -257,18 +279,18 @@ pub fn build(weights: &dyn WeightSource, mode: Mode) -> Result<Plan, String> {
 ///
 /// | | shape | |
 /// | :--- | :--- | :--- |
-/// | 0, 1 | `[64056, 1, 1]` | the two logits halves, which the host argmaxes across |
-/// | 2, 3 | `[1, 1, 1024]` | layer 0's new self-attention K and V, ready to append |
-/// | 4, 5 | | layer 1's |
-/// | 6, 7 | | layer 2's |
+/// | 0..4 | `[~64052, 1, 1]` | the four logits splits (the last two one class short), concatenated by the host |
+/// | 4, 5 | `[1, 1, 1024]` | layer 0's new self-attention K and V, ready to append |
+/// | 6, 7 | | layer 1's |
+/// | … | | … |
 ///
 /// # Why the cross-attention K and V are recomputed
 ///
 /// They depend only on the encoder output, so computing them once and caching them would save
-/// six 1024x1024 projections per step. They are not cached here because that would need a fourth
+/// twelve 1024x1024 projections per step. They are not cached here because that would need a third
 /// pass and a second kind of persistence for a saving the logits projection dwarfs: the head is
-/// 131 million multiply-accumulates against the whole decoder's 50 million. Worth revisiting only
-/// after `Kind::ConvVecInt8` makes the head cheap.
+/// ~262 million multiply-accumulates against the whole decoder's ~200 million. Worth revisiting
+/// only after `Kind::ConvVecInt8` makes the head cheap.
 fn decode_step(weights: &dyn WeightSource, cache_len: u32, src_len: u32) -> Result<Plan, String> {
     if src_len == 0 {
         return Err("a decode step with no source to attend over".into());
@@ -348,11 +370,11 @@ fn decode_step(weights: &dyn WeightSource, cache_len: u32, src_len: u32) -> Resu
         return Err(format!("the decoder norm ends at {}, not {TENSORS}", l.next));
     }
 
-    // The tied head, in the same plan: a separate `Mode::Logits` pass would mean a second
-    // `rebuild` and a round trip through the host for a `[1024]` vector.
+    // The tied head, in the same plan: a separate pass would mean a second `rebuild` and a round
+    // trip through the host for a `[1024]` vector. The last two splits are one class short.
     let head = &mut Layers { next: HEAD };
     let mut outputs: Vec<Id> = (0..HEAD_SPLITS)
-        .map(|_| point(b, head, state, CLASSES_PER_SPLIT, Act::None))
+        .map(|split| point(b, head, state, split_classes(split), Act::None))
         .collect();
     if head.next != ENCODER {
         return Err(format!("the head claims {} tensors, not {ENCODER}", head.next));
@@ -373,7 +395,7 @@ fn encode(weights: &dyn WeightSource, len: u32) -> Result<Plan, String> {
     let l = &mut Layers { next: ENCODER };
     let mut builder = Builder::new(weights);
     let b = &mut builder;
-    // The tied weight and the whole decoder belong to the other two passes. The trailing encoder
+    // The tied weight and the whole decoder belong to the other pass. The trailing encoder
     // norm is part of this range, so it runs to `DECODER` rather than to `ENCODER_NORM`.
     name_host_tensors(b, std::slice::from_ref(&(ENCODER..DECODER)));
 
@@ -394,31 +416,9 @@ fn encode(weights: &dyn WeightSource, len: u32) -> Result<Plan, String> {
     builder.finish(&[out])
 }
 
-/// The tied logits projection over one decoder state.
-///
-/// Two ops rather than one, over disjoint class ranges, so no binding approaches
-/// `maxStorageBufferRange`. Both outputs come back in declaration order and `post::translate`
-/// argmaxes across them, which needs no change: it argmaxed a single 128,112-wide vector before,
-/// and the winner of two halves is the winner of the whole.
-fn logits(weights: &dyn WeightSource) -> Result<Plan, String> {
-    let l = &mut Layers { next: HEAD };
-    let mut builder = Builder::new(weights);
-    let b = &mut builder;
-    name_host_tensors(b, std::slice::from_ref(&(HEAD..ENCODER)));
-
-    let state = b.input(Shape::new(D_MODEL, 1, 1));
-    let halves: Vec<Id> = (0..HEAD_SPLITS)
-        .map(|_| point(b, l, state, CLASSES_PER_SPLIT, Act::None))
-        .collect();
-    if l.next != ENCODER {
-        return Err(format!("the head claims {} tensors, not {ENCODER}", l.next));
-    }
-    builder.finish(&halves)
-}
-
 /// Name every tensor **outside** `read` as one this pass does not touch.
 ///
-/// [`Builder::finish`] refuses an unread tensor, and no one of the three passes reads the whole
+/// [`Builder::finish`] refuses an unread tensor, and no one of the two passes reads the whole
 /// file. Declaring the complement rather than listing it keeps the two in step: adding a layer
 /// changes the ranges and nothing else.
 fn name_host_tensors(b: &mut Builder, read: &[std::ops::Range<usize>]) {
@@ -432,14 +432,17 @@ fn name_host_tensors(b: &mut Builder, read: &[std::ops::Range<usize>]) {
 /// The shape of tensor `index`, derived from the layout constants.
 ///
 /// `host_tensor` checks it against the file, so this is a *second* statement of the table that
-/// `maml_convert.collect_small100` writes — which is the point: a converter and a runtime that
+/// `maml_convert.collect_nllb` writes — which is the point: a converter and a runtime that
 /// disagree about a shape fail here rather than on the device.
 fn dims_of(index: usize) -> Vec<u32> {
     if index < ENCODER {
-        // A head half: int8 kernel, per-class scale, synthesised zero bias.
+        // A head split: int8 kernel, per-class scale, synthesised zero bias. The last two splits
+        // are one class short.
+        let split = index / 3;
+        let classes = split_classes(split);
         return match index % 3 {
-            0 => vec![CLASSES_PER_SPLIT, D_MODEL, 1, 1],
-            _ => vec![CLASSES_PER_SPLIT],
+            0 => vec![classes, D_MODEL, 1, 1],
+            _ => vec![classes],
         };
     }
     let (base, per_layer, layers) = if index < DECODER {
@@ -486,6 +489,20 @@ fn layer_dims(within: usize, per_layer: usize) -> Vec<u32> {
     vec![D_MODEL]
 }
 
+/// Which head split holds token `id`, and its row within that split.
+///
+/// The first two splits hold [`CLASSES_PER_SPLIT`] classes each and the last two one fewer, so
+/// this is not one division: ids below twice the full width divide evenly, and the rest divide
+/// over the tail width.
+fn split_of(id: u32) -> (usize, u32) {
+    if id < CLASSES_PER_SPLIT * 2 {
+        ((id / CLASSES_PER_SPLIT) as usize, id % CLASSES_PER_SPLIT)
+    } else {
+        let rest = id - CLASSES_PER_SPLIT * 2;
+        (2 + (rest / CLASSES_PER_TAIL_SPLIT) as usize, rest % CLASSES_PER_TAIL_SPLIT)
+    }
+}
+
 /// The embedded, scaled and positioned source for `ids`, in the channel-major layout the plan
 /// wants.
 ///
@@ -506,13 +523,12 @@ pub fn embed_positions(
         if id >= VOCAB {
             return Err(format!("token {id} is past the {VOCAB}-entry vocabulary"));
         }
-        let half = (id / CLASSES_PER_SPLIT) as usize;
-        let row = id % CLASSES_PER_SPLIT;
-        let kernel = HEAD + half * 3;
+        let (split, row) = split_of(id);
+        let kernel = HEAD + split * 3;
         let embedding = weights.int8_row(
             kernel,
             kernel + 1,
-            &[CLASSES_PER_SPLIT, D_MODEL, 1, 1],
+            &[split_classes(split), D_MODEL, 1, 1],
             row,
         )?;
         let position = past + at as u32 + 1 + PADDING_IDX;
@@ -561,6 +577,10 @@ mod tests {
     /// A short sentence: a language token, six pieces and `</s>`.
     const LEN: u32 = 8;
 
+    /// `Act::Relu`'s code in `common.glsl`. `Act::code` is private, so the activation the FFN
+    /// folds is asserted as the number the shader reads rather than through the enum.
+    const ACT_RELU: u32 = 1;
+
     fn plan(mode: Mode) -> (Shapes, Plan) {
         let source = Shapes::new(TENSORS);
         let plan = build(&source, mode).expect("the pass builds");
@@ -569,15 +589,20 @@ mod tests {
 
     #[test]
     fn the_layout_matches_the_converter() {
-        // The numbers `maml_convert.py --print-layers` reports for this graph. A disagreement here
-        // is a plan that reads one layer's weights as another's.
+        // The numbers `maml_convert.py --graph nllb600 --print-layers` reports for this graph. A
+        // disagreement here is a plan that reads one layer's weights as another's.
         assert_eq!(ENCODER_LAYER_TENSORS, 22);
         assert_eq!(DECODER_LAYER_TENSORS, 36);
-        assert_eq!((HEAD, ENCODER, ENCODER_NORM), (0, 6, 270));
-        assert_eq!((DECODER, DECODER_NORM), (272, 380));
-        assert_eq!(TENSORS, 382);
-        assert_eq!(INT8_CONVS, 104);
-        assert_eq!(CLASSES_PER_SPLIT, 64_056);
+        assert_eq!((HEAD, ENCODER, ENCODER_NORM), (0, 12, 276));
+        assert_eq!((DECODER, DECODER_NORM), (278, 710));
+        assert_eq!(TENSORS, 712);
+        assert_eq!(INT8_CONVS, 196);
+        assert_eq!((split_classes(0), split_classes(1)), (64_052, 64_052));
+        assert_eq!((split_classes(2), split_classes(3)), (64_051, 64_051));
+        assert_eq!(
+            split_classes(0) + split_classes(1) + split_classes(2) + split_classes(3),
+            VOCAB
+        );
     }
 
     #[test]
@@ -588,25 +613,26 @@ mod tests {
             .map(|index| dims_of(index).iter().map(|&d| u64::from(d)).product::<u64>())
             .sum();
 
-        // One fp16 scale per output channel of each of the 104 int8 convolutions.
-        let scales = u64::from(CLASSES_PER_SPLIT) * HEAD_SPLITS as u64
-            + ENCODER_LAYERS as u64 * u64::from(4 * D_MODEL + FFN + D_MODEL)
-            + DECODER_LAYERS as u64 * u64::from(8 * D_MODEL + FFN + D_MODEL);
-        assert_eq!(scales, 278_640);
-        // And a zero bias for each head half, which a tied projection has no weight for.
-        let synthesised = u64::from(CLASSES_PER_SPLIT) * HEAD_SPLITS as u64;
+        // One fp16 scale per output channel of each of the 196 int8 convolutions.
+        let layer_scales = u64::from(4 * D_MODEL + FFN + D_MODEL);
+        let scales = u64::from(VOCAB)
+            + ENCODER_LAYERS as u64 * layer_scales
+            + DECODER_LAYERS as u64 * (layer_scales + u64::from(4 * D_MODEL));
+        assert_eq!(scales, 526_542);
+        // And a zero bias for each head split, which a tied projection has no weight for.
+        let synthesised = u64::from(VOCAB);
 
-        assert_eq!(total, 332_735_488 + scales + synthesised);
+        assert_eq!(total, 615_073_792 + scales + synthesised);
 
-        // 318.3 MiB on disk, against 1.14 GB of ncnn fp16 on the mirror today. Everything but the
-        // 104 kernels is fp16, and the kernels are 99.8% of the elements — which is the whole
-        // reason the file is a third of a fp16 one rather than half.
-        let kernels = u64::from(CLASSES_PER_SPLIT) * u64::from(D_MODEL) * HEAD_SPLITS as u64
+        // ~588.4 MiB on disk. Everything but the 196 kernels is fp16, and the kernels are 99.8%
+        // of the elements — which is the whole reason the file is barely over the parameter
+        // count in bytes.
+        let kernels = u64::from(VOCAB) * u64::from(D_MODEL)
             + ENCODER_LAYERS as u64 * u64::from(D_MODEL) * u64::from(4 * D_MODEL + 2 * FFN)
             + DECODER_LAYERS as u64 * u64::from(D_MODEL) * u64::from(8 * D_MODEL + 2 * FFN);
-        assert_eq!(kernels, 332_513_280);
+        assert_eq!(kernels, 614_676_480);
         let file = kernels + (total - kernels) * 2;
-        assert!((318 << 20..319 << 20).contains(&file), "{file} bytes");
+        assert!((588 << 20..589 << 20).contains(&file), "{file} bytes");
     }
 
     /// The tensor ranges each pass reads on the device. Everything else it names.
@@ -617,7 +643,6 @@ mod tests {
         let mut ranges = Vec::new();
         match mode {
             Mode::Encode { .. } => ranges.push(ENCODER..DECODER),
-            Mode::Logits => ranges.push(HEAD..ENCODER),
             Mode::DecodeStep { .. } => {
                 // The decode step computes the tied head itself, so it reads both ends of the file.
                 ranges.push(HEAD..ENCODER);
@@ -632,14 +657,9 @@ mod tests {
         // `Builder::finish` only checks that a tensor is read *or* named, so this is what stops
         // naming being used to hide a layer the device never touches. Together the passes must read
         // every index.
-        //
-        // Not a partition: the decode step computes the tied head itself, so it and `Mode::Logits`
-        // both read `HEAD..ENCODER`. `Mode::Logits` stays because it is the isolated case for the
-        // split head, where a device parity run has nothing else in the plan to blame.
         let mut covered = std::collections::BTreeSet::new();
         for mode in [
             Mode::Encode { len: LEN },
-            Mode::Logits,
             Mode::DecodeStep { cache_len: 0, src_len: LEN },
             Mode::DecodeStep { cache_len: 3, src_len: LEN },
         ] {
@@ -669,6 +689,18 @@ mod tests {
         // Two residuals per layer.
         assert_eq!(counts.get("Add"), Some(&(ENCODER_LAYERS * 2)), "{counts:?}");
         assert_eq!(counts.len(), 6, "{counts:?}");
+        // And the FFN inner projection folds ReLU — `config.json`'s `activation_function: relu` —
+        // one per layer, on the `FFN`-wide projection only.
+        let mut relu = 0;
+        for op in &plan.ops {
+            if let Op::Dispatch { push, .. } = op {
+                if push.out_c == FFN {
+                    assert_eq!(push.act, ACT_RELU, "the FFN inner projection is ReLU: {push:?}");
+                    relu += 1;
+                }
+            }
+        }
+        assert_eq!(relu, ENCODER_LAYERS, "{counts:?}");
     }
 
     #[test]
@@ -692,7 +724,7 @@ mod tests {
     }
 
     #[test]
-    fn a_decode_step_is_three_layers_of_two_attentions() {
+    fn a_decode_step_is_twelve_layers_of_two_attentions() {
         let (_, plan) = plan(Mode::DecodeStep { cache_len: 3, src_len: LEN });
         let mut counts = std::collections::BTreeMap::new();
         for op in &plan.ops {
@@ -700,8 +732,8 @@ mod tests {
                 *counts.entry(super::super::tests::name_of(*kind)).or_insert(0usize) += 1;
             }
         }
-        // Ten int8 convolutions per layer — two attentions of four plus fc1 and fc2 — and the two
-        // halves of the tied head.
+        // Ten int8 convolutions per layer — two attentions of four plus fc1 and fc2 — and the four
+        // splits of the tied head.
         assert_eq!(
             counts.get("ConvInt8"),
             Some(&(DECODER_LAYERS * 10 + HEAD_SPLITS)),
@@ -732,11 +764,12 @@ mod tests {
             // Position-major: the cache's channels are the positions.
             assert_eq!(binding.shape, Shape::new(cache_len, 1, D_MODEL));
         }
-        // Two logits halves, then the step's own K and V per layer.
+        // Four logits splits, then the step's own K and V per layer.
         assert_eq!(plan.outputs.len(), HEAD_SPLITS + DECODER_LAYERS * 2);
-        for binding in &plan.outputs[..HEAD_SPLITS] {
-            assert_eq!(binding.shape, Shape::new(CLASSES_PER_SPLIT, 1, 1));
-        }
+        let classes: u32 = plan.outputs.iter().take(HEAD_SPLITS).map(|b| b.shape.c).sum();
+        assert_eq!(classes, VOCAB);
+        assert_eq!(plan.outputs[0].shape.c, CLASSES_PER_SPLIT);
+        assert_eq!(plan.outputs[HEAD_SPLITS - 1].shape.c, CLASSES_PER_TAIL_SPLIT);
         for binding in &plan.outputs[HEAD_SPLITS..] {
             assert_eq!(binding.shape, Shape::new(1, 1, D_MODEL));
         }
@@ -795,7 +828,7 @@ mod tests {
     }
 
     #[test]
-    fn a_single_position_int8_convolution_becomes_a_gemv() {
+    fn a_decode_step_is_single_position_where_it_counts() {
         // Why `Kind::ConvVecInt8` exists. A decode step is one position almost throughout, and the
         // tiled kind's workgroup count is `out_c.div_ceil(16) * positions.div_ceil(16)` — so at one
         // position it pads 15 of every 16 tile columns and stores from 8 of every 64 invocations.
@@ -816,8 +849,8 @@ mod tests {
         // The split is not "everything": the cross-attention's key and value projections read the
         // **encoder output**, which is `src_len` positions, so they stay tiled and are the only
         // multi-position work a decode step does. Everything else — the four self-attention
-        // projections, the cross-attention's query and output, both feed-forwards and both head
-        // halves — is one position.
+        // projections, the cross-attention's query and output, both feed-forwards and all four
+        // head splits — is one position.
         let (vector, tiled): (Vec<_>, Vec<_>) =
             int8.iter().partition(|(kind, _, _)| *kind == Kind::ConvVecInt8);
         assert_eq!(vector.len(), DECODER_LAYERS * 8 + HEAD_SPLITS, "single-position");
@@ -835,87 +868,37 @@ mod tests {
     }
 
     #[test]
-    fn the_gemv_issues_a_sixteenth_of_the_tiled_shader_s_work() {
-        // The head is where it matters: 128,112 classes over 1024 channels, 128 times per
-        // translation, at 131 million multiply-accumulates. This is the arithmetic that makes the
-        // shader worth its own file.
-        let (_, plan) = plan(Mode::DecodeStep { cache_len: 0, src_len: LEN });
-        let head = plan
-            .ops
+    fn the_head_is_four_ops_over_disjoint_class_ranges() {
+        // Together the four splits are the whole vocabulary, which is what `post::translate`
+        // argmaxes. The last two splits are one class short each.
+        let source = Shapes::new(TENSORS);
+        let plan = build(&source, Mode::DecodeStep { cache_len: 0, src_len: LEN })
+            .expect("the step builds");
+        let heads: Vec<_> = plan
+            .outputs
             .iter()
-            .find_map(|op| match op {
-                Op::Dispatch { kind: Kind::ConvVecInt8, push, .. }
-                    if push.out_c == CLASSES_PER_SPLIT =>
-                {
-                    Some(*push)
-                }
-                _ => None,
-            })
-            .expect("a head half on the gemv path");
-
-        // Useful work: one multiply-accumulate per weight.
-        let useful = u64::from(head.out_c) * u64::from(head.in_c);
-        // The gemv issues exactly that: every lane of every workgroup contributes to eight rows.
-        let gemv = u64::from(head.count) * 64 * 8 * (u64::from(head.in_c) / 64);
-        assert_eq!(gemv, useful);
-        // The tiled path issues 64 invocations x a 2x2 register block per k-step, for a tile that
-        // is 16 channels by 16 positions of which 15 are padding.
-        let tiles = head.out_c.div_ceil(16) * 1u32.div_ceil(16);
-        let issued = u64::from(tiles) * 64 * 4 * u64::from(head.in_c);
-        assert_eq!(issued / gemv, 16, "{issued} against {gemv}");
-    }
-
-    #[test]
-    fn the_encoder_stays_on_the_tiled_path() {
-        // The gemv shader is for one position only: over a sequence the tiled kind reuses a staged
-        // weight tile across 16 positions, which is the whole reason it exists.
-        let (_, plan) = plan(Mode::Encode { len: LEN });
-        for op in &plan.ops {
-            if let Op::Dispatch { kind, push, .. } = op {
-                if super::super::tests::name_of(*kind) == "ConvInt8" {
-                    assert_eq!(*kind, Kind::ConvPointInt8, "{push:?}");
-                }
-            }
-        }
-    }
-
-    #[test]
-    fn the_head_is_two_ops_over_disjoint_class_ranges() {
-        let (_, plan) = plan(Mode::Logits);
-        let dispatches: Vec<_> = plan
-            .ops
-            .iter()
-            .filter_map(|op| match op {
-                Op::Dispatch { kind, push, .. } => Some((*kind, *push)),
-                _ => None,
-            })
+            .take(HEAD_SPLITS)
+            .map(|b| b.shape.c)
             .collect();
-        assert_eq!(dispatches.len(), HEAD_SPLITS, "{dispatches:?}");
-        for (kind, push) in &dispatches {
-            assert_eq!(super::super::tests::name_of(*kind), "ConvInt8");
-            assert_eq!(push.out_c, CLASSES_PER_SPLIT, "{push:?}");
-            assert_eq!(push.in_c, D_MODEL, "{push:?}");
-        }
-        // Different kernels, which is what "disjoint ranges" means in the file.
-        assert_ne!(dispatches[0].1.weight, dispatches[1].1.weight);
-        assert_eq!(plan.outputs.len(), HEAD_SPLITS);
-        for binding in &plan.outputs {
-            assert_eq!(binding.shape, Shape::new(CLASSES_PER_SPLIT, 1, 1));
-        }
-        // Together they are the whole vocabulary, which is what `post::translate` argmaxes.
-        let classes: u32 = plan.outputs.iter().map(|b| b.shape.c).sum();
-        assert_eq!(classes, VOCAB);
+        assert_eq!(heads, vec![64_052, 64_052, 64_051, 64_051]);
+        assert_eq!(heads.iter().sum::<u32>(), VOCAB);
     }
 
     #[test]
     fn the_head_binds_under_the_guaranteed_range() {
-        // Why the split exists: 128,112 x 1024 int8 is 125.1 MiB against a guaranteed 128 MiB, and
-        // fp16 would be 250. A half plus its scale and bias is comfortably inside either.
+        // Why the split exists and why it is four: the whole 256,206 x 1024 int8 table is ~250
+        // MiB against a guaranteed 128 MiB, and two splits would each sit just under it the way
+        // the whole small100-era 128k table did — too tight. A quarter plus its scale and bias is
+        // comfortably inside.
         let whole = u64::from(VOCAB) * u64::from(D_MODEL);
-        assert!(whole > 120 << 20, "the whole table is {whole} bytes");
-        let half = u64::from(CLASSES_PER_SPLIT) * u64::from(D_MODEL)
+        assert!(whole > 250 << 20, "the whole table is {whole} bytes");
+        // Two splits would be 128,103 classes each — just under the 128 MiB floor the way the
+        // whole small100-era 128k table was. Too tight for a binding plus its scale and bias.
+        let half = 128_103u64 * u64::from(D_MODEL);
+        assert!(half > 120 << 20, "a half would be {half} bytes: too tight");
+        let quarter = u64::from(CLASSES_PER_SPLIT) * u64::from(D_MODEL)
             + u64::from(CLASSES_PER_SPLIT) * 4;
-        assert!(half < 96 << 20, "a half is {half} bytes");
+        assert!(quarter < 96 << 20, "a quarter is {quarter} bytes");
     }
 
     #[test]
@@ -949,6 +932,40 @@ mod tests {
     }
 
     #[test]
+    fn split_of_covers_the_whole_vocabulary_without_gaps() {
+        // The uneven split is the one place an id could fall between two ranges or land in both.
+        // Every id must map to exactly one (split, row), and the row must be inside that split.
+        let mut seen = 0u32;
+        for split in 0..HEAD_SPLITS {
+            for row in 0..split_classes(split) {
+                seen += 1;
+                let _ = (split, row);
+            }
+        }
+        assert_eq!(seen, VOCAB);
+        // The boundaries: the last id of each split and the first of the next.
+        assert_eq!(split_of(0), (0, 0));
+        assert_eq!(split_of(64_051), (0, 64_051));
+        assert_eq!(split_of(64_052), (1, 0));
+        assert_eq!(split_of(128_103), (1, 64_051));
+        assert_eq!(split_of(128_104), (2, 0));
+        assert_eq!(split_of(192_154), (2, 64_050));
+        assert_eq!(split_of(192_155), (3, 0));
+        assert_eq!(split_of(256_205), (3, 64_050));
+        // And the mapping is the identity in order: walking ids walks (split, row) contiguously.
+        let mut next = 0u32;
+        for split in 0..HEAD_SPLITS {
+            let base = HEAD + split * 3;
+            let _ = base;
+            for row in 0..split_classes(split) {
+                assert_eq!(split_of(next), (split, row), "id {next}");
+                next += 1;
+            }
+        }
+        assert_eq!(next, VOCAB);
+    }
+
+    #[test]
     fn a_pass_over_nothing_or_past_the_table_is_refused() {
         let source = Shapes::new(TENSORS);
         let error = build(&source, Mode::Encode { len: 0 }).expect_err("no tokens");
@@ -959,85 +976,17 @@ mod tests {
         assert!(error.contains("positions the model has"), "{error}");
     }
 
-    /// The host embedding gather against the real 318 MiB file.
-    ///
-    /// Skipped without `SMALL100_MAML`, like the tokenizer's real-vocabulary test: the file is a
-    /// runtime download rather than a checked-in asset. `scripts/ml/fetch_small100.py` builds it.
-    ///
-    /// The pinned numbers came from reading the same file in Python and applying transformers'
-    /// `M2M100SinusoidalPositionalEmbedding.get_embedding` verbatim, so this is a cross-check of
-    /// three things at once: the int8 row dequantisation, `sqrt(1024)`, and the sinusoid's
-    /// concatenated-halves convention at the `+ 2` position.
-    #[test]
-    fn the_host_gather_agrees_with_the_reference() {
-        let Ok(path) = std::env::var("SMALL100_MAML") else {
-            return;
-        };
-        let file = std::fs::File::open(&path).unwrap_or_else(|e| panic!("{path}: {e}"));
-        let len = file.metadata().expect("metadata").len();
-        let streamed = crate::weights::Streamed::open(file, 0, len, crate::weights::graph::SMALL100)
-            .expect("the real file opens");
-        let table = streamed.offsets();
-        let reader = Reader::new(&table, &streamed);
-
-        // `__en__`, then the first piece of "Hello, world!", then `</s>` — at positions 2, 3, 4.
-        let ids = [128_022u32, 65_761, 2];
-        let out = embed_positions(reader, &ids, 0).expect("the gather succeeds");
-        assert_eq!(out.len(), D_MODEL as usize * ids.len());
-
-        // Channel-major: `out[c * len + t]`. A position-major layout would put these six values
-        // contiguously at the start instead, so this also pins the transpose.
-        let at = |channel: usize, token: usize| out[channel * ids.len() + token];
-        let want: [(usize, f32); 9] = [
-            (0, 8.618_953),
-            (1, 2.024_961),
-            (2, 1.425_964),
-            (3, 0.703_241),
-            (4, 0.835_844),
-            (5, 0.722_445),
-            (511, 0.856_828),
-            (512, -1.884_653),
-            (1023, 0.020_996),
-        ];
-        for (channel, expected) in want {
-            let got = at(channel, 0);
-            assert!(
-                (got - expected).abs() < 2e-3,
-                "channel {channel}: {got} against {expected}"
-            );
-        }
-
-        // The same token at two positions must differ by exactly the two sinusoids' difference —
-        // the property that fails if the position offset or the layout is wrong, with no fixture.
-        let twice = embed_positions(reader, &[7, 7], 0).expect("the gather succeeds");
-        for channel in 0..D_MODEL as usize {
-            let first = twice[channel * 2];
-            let second = twice[channel * 2 + 1];
-            let delta = sinusoid(2, channel) - sinusoid(3, channel);
-            assert!(
-                ((first - second) - delta).abs() < 1e-3,
-                "channel {channel}: {first} - {second} against {delta}"
-            );
-        }
-
-        // `past` shifts the position, which is how a decode step at step `s` lands on `s + 2`.
-        let shifted = embed_positions(reader, &[7], 1).expect("the gather succeeds");
-        for channel in 0..D_MODEL as usize {
-            let expected = twice[channel * 2] - sinusoid(2, channel) + sinusoid(3, channel);
-            assert!((shifted[channel] - expected).abs() < 1e-3, "channel {channel}");
-        }
-    }
-
     #[test]
     fn every_tensor_shape_is_stated_the_same_way_twice() {
-        // `dims_of` restates the table `maml_convert.collect_small100` writes, and `Layers` walks
+        // `dims_of` restates the table `maml_convert.collect_nllb` writes, and `Layers` walks
         // it. This checks the two agree for every index, which is what makes `host_tensor`'s shape
         // check meaningful rather than circular.
         let mut expected: Vec<Vec<u32>> = Vec::new();
-        for _ in 0..HEAD_SPLITS {
-            expected.push(vec![CLASSES_PER_SPLIT, D_MODEL, 1, 1]);
-            expected.push(vec![CLASSES_PER_SPLIT]);
-            expected.push(vec![CLASSES_PER_SPLIT]);
+        for split in 0..HEAD_SPLITS {
+            let classes = split_classes(split);
+            expected.push(vec![classes, D_MODEL, 1, 1]);
+            expected.push(vec![classes]);
+            expected.push(vec![classes]);
         }
         let projection = |out: u32, inputs: u32| {
             vec![vec![out, inputs, 1, 1], vec![out], vec![out]]

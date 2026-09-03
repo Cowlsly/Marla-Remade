@@ -70,12 +70,9 @@ pub mod graph {
     pub const SUPERTONIC_TTL: u32 = 13;
     /// Supertonic 3's flow-matching sampler. See [`crate::nets::supertonic_sampler`].
     pub const SUPERTONIC_VE: u32 = 14;
-    /// SMaLL-100 translation, encoder and decoder in one file. See `crate::nets::small100`.
-    ///
-    /// One graph rather than two because the 128,112-row embedding is **tied**: it is the encoder's
-    /// input table, the decoder's input table and the logits kernel, and two files would upload
-    /// 125 MiB of it twice.
-    pub const SMALL100: u32 = 15;
+    // 15 was SMaLL-100's graph, deleted when NLLB replaced it. The number is **not** reused: an
+    // id identifies a forward pass, and a `.maml` built for the old net must be rejected rather
+    // than loaded as whatever took its slot.
     /// TinyCLIP-ViT-8M/16 Text-3M, both towers in one file. See [`crate::nets::tinyclip`].
     ///
     /// One graph rather than two because the towers share a file and a [`super::Weights`] upload,
@@ -87,6 +84,17 @@ pub mod graph {
     /// One graph rather than two because the 51,865-row embedding is **tied**: it is the decoder's
     /// input table and the logits kernel, so two files would upload 26.6 MB of it twice.
     pub const WHISPER: u32 = 17;
+    /// NLLB-200-distilled-600M translation, encoder and decoder in one file. See
+    /// [`crate::nets::nllb`].
+    ///
+    /// One graph rather than two because the 256,206-row embedding is **tied**: it is the
+    /// encoder's input table, the decoder's input table and the logits kernel, and two files would
+    /// upload ~250 MiB of it twice.
+    ///
+    /// Agreed three-ways with model-eng and app-eng (team `nllb-translate`): the next free id
+    /// after whisper's 17, with 7..10 staying retired. `maml_convert.py` has `GRAPHS["nllb600"]`
+    /// at the same number.
+    pub const NLLB: u32 = 18;
 }
 
 /// One tensor's entry in the table: where it is and what shape it is.
@@ -600,12 +608,12 @@ impl<'a> Reader<'a> {
     /// One row of an int8 tensor, dequantised by that row's scale.
     ///
     /// The counterpart of [`Reader::fp16`] for a quantised table, and it exists for one caller:
-    /// [`crate::nets::small100`] gathers rows of the tied embedding on the host rather than in a
+    /// [`crate::nets::nllb`] gathers rows of the tied embedding on the host rather than in a
     /// shader. Doing so removes the need for an int8 `embed.comp`, lets `sqrt(d_model)` and the
     /// sinusoidal position be applied in f32 before anything is rounded, and reads 1 KB per token
-    /// instead of uploading a 125 MiB table a second time.
+    /// instead of uploading a ~250 MiB table a second time.
     ///
-    /// A row rather than the whole tensor because the whole tensor is 125 MiB. `dims[0]` is the
+    /// A row rather than the whole tensor because the whole tensor is ~250 MiB. `dims[0]` is the
     /// row count and a row is contiguous, which is a property of the `[out, in, 1, 1]` layout
     /// `scripts/ml/maml_convert.py` writes rather than an assumption — and `shaped` checks it.
     pub fn int8_row(

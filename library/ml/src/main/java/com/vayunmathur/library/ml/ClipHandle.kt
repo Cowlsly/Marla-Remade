@@ -106,7 +106,7 @@ class ClipHandle private constructor(private val source: String) : AutoCloseable
         /**
          * The model from the APK's assets, which is the only place it lives.
          *
-         * No `inDirectory` counterpart, unlike [Small100Handle]: at 22.6 MiB this is bundled, so
+         * No `inDirectory` counterpart: at 22.6 MiB this is bundled, so
          * there is no download directory to look in.
          */
         fun inAssets(assets: AssetManager, path: String = GRAPH): ClipHandle {

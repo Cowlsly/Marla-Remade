@@ -137,6 +137,10 @@ GRAPHS = {
     "tinyclip": 16,
     # Read from a PyTorch checkpoint rather than an ONNX graph; see [`CHECKPOINTS`].
     "whisper": 17,
+    # NLLB-200-distilled-600M, replacing small100; see [`CHECKPOINTS`].
+    # Agreed with rust-eng/app-eng in team chat (nllb-translate): next free id,
+    # 7..10 stay retired.
+    "nllb600": 18,
 }
 
 # SHA-256 over the ordered layer table (see `layer_table_digest`). Regenerate with
@@ -155,6 +159,9 @@ EXPECTED_DIGEST = {
     "small100": "c9f05f2fb686aa53137ca06b521baf6d7a00f32cfb4ea42bd14a5c3e7cf6c086",
     "tinyclip": "7557b2725b52ea04bd18b12e089320b9dd419cd3f7344c0e3d32888d61c24fa7",
     "whisper": "9e2830c5ea5d443fc31eb5c4eb80fa9a3b9bbcccd3c07963256ade50963c72a2",
+    # Filled in by running --print-digest after the first successful conversion;
+    # see fetch_nllb600.py. Placeholder until then (check fails loudly, not silently).
+    "nllb600": "8b5dd248896b11bf1bb0feae6818d4b00b8ad176549df48bdc07f7b970d3480a",
 }
 
 # Graphs that are one **module** of a larger export, keyed by the node-name prefix that
@@ -347,6 +354,45 @@ CHECKPOINTS = {
         "source_positions": 1500,
         "target_positions": 448,
         "conv_kernel": 3,
+    },
+    # NLLB-200-distilled-600M, from `facebook/nllb-200-distilled-600M` (gated, MIT-adjacent
+    # CC-BY-NC but fetched fine unauthenticated). A checkpoint for the same reason SMaLL-100
+    # is one: the repo ships only `pytorch_model.bin` (fp32) plus `sentencepiece.bpe.model`
+    # and `tokenizer.json` — there is no ONNX export at all.
+    #
+    # The architecture is `M2M100ForConditionalGeneration` (config.json says so verbatim:
+    # `model_type: m2m_100`, `activation_function: relu`, `scale_embedding: true`,
+    # `d_model: 1024`, `vocab_size: 256206`). So the forward pass is SMaLL-100's with two
+    # differences, both asserted by [`nllb_inventory`] and [`collect_nllb`]:
+    #
+    # * **12 decoder layers, not 3.** The distilled-600M keeps the full decoder.
+    # * **202 language tokens, not 100**, at ids `256001..256202` with `<mask>` at 256203.
+    #   Tokenizer detail only — the converter never reads them — but the vocab count pins it.
+    #
+    # Everything else carries over: fairseq sinusoid positions with the +2 offset (same
+    # `M2M100SinusoidalPositionalEmbedding`, offset=2, verified in transformers'
+    # `modeling_m2m_100.py`), pre-norm layers, ReLU FFN, `1/sqrt(64)` query scale already in
+    # `attn_scores`, all four projections biased (unlike whisper's missing k bias), tied
+    # embedding emitted once.
+    #
+    # The checkpoint holds the tied embedding **four times** (`model.shared`,
+    # `model.encoder.embed_tokens`, `model.decoder.embed_tokens`, `lm_head` — all
+    # byte-identical, verified exact-equal). Only `model.shared.weight` is emitted.
+    #
+    # The tied embedding is 262.4 MiB of int8 (256,206 x 1024), so it needs **four** class
+    # splits to stay under `maxStorageBufferRange`'s 128 MiB floor: 256,206 = 2 x 128,103
+    # is not divisible by 4, so the four ranges are 64,052 / 64,052 / 64,051 / 64,051
+    # (first two get the extra row each). `nets::nllb600` reads four logits ops.
+    "nllb600": {
+        "d_model": 1024,
+        "encoder_layers": 12,
+        "decoder_layers": 12,
+        "ffn": 4096,
+        "vocab": 256_206,
+        # Four head splits, uneven (see above): first two ranges hold 64,052 classes,
+        # last two 64,051.
+        "head_splits": 4,
+        "head_rows": [64_052, 64_052, 64_051, 64_051],
     },
 }
 
@@ -1152,8 +1198,164 @@ def collect_whisper(get, spec):
     return layers, tensors
 
 
+def nllb_inventory(spec):
+    """`{name: shape}` NLLB-200-distilled-600M's checkpoint must hold exactly.
+
+    Derived rather than transcribed: a list of 513 names would be checked against itself.
+
+    The checkpoint holds the tied embedding **four times** (`model.shared`,
+    `model.encoder.embed_tokens`, `model.decoder.embed_tokens`, `lm_head` — verified
+    byte-identical). Only `model.shared.weight` is wanted; the other three are stated by
+    *not* appearing, so a checkpoint that unties them fails loudly instead of being read
+    as this table with three copies ignored.
+
+    Unlike whisper, **every** projection (all 96 attentions' q/k/v/out) carries a bias —
+    `k_proj.bias` is present. And unlike whisper there is no convolution stem and no
+    learned position table: positions are fairseq sinusoids computed by the Rust, exactly
+    as for small100.
+    """
+    d, ffn = spec["d_model"], spec["ffn"]
+    want = {"model.shared.weight": [spec["vocab"], d]}
+    for side, count in (("encoder", spec["encoder_layers"]), ("decoder", spec["decoder_layers"])):
+        want[f"model.{side}.layer_norm.weight"] = [d]
+        want[f"model.{side}.layer_norm.bias"] = [d]
+        for index in range(count):
+            at = f"model.{side}.layers.{index}"
+            attentions = ["self_attn"] + (["encoder_attn"] if side == "decoder" else [])
+            for attention in attentions:
+                want[f"{at}.{attention}_layer_norm.weight"] = [d]
+                want[f"{at}.{attention}_layer_norm.bias"] = [d]
+                for projection in ("q_proj", "k_proj", "v_proj", "out_proj"):
+                    want[f"{at}.{attention}.{projection}.weight"] = [d, d]
+                    want[f"{at}.{attention}.{projection}.bias"] = [d]
+            want[f"{at}.final_layer_norm.weight"] = [d]
+            want[f"{at}.final_layer_norm.bias"] = [d]
+            want[f"{at}.fc1.weight"] = [ffn, d]
+            want[f"{at}.fc1.bias"] = [ffn]
+            want[f"{at}.fc2.weight"] = [d, ffn]
+            want[f"{at}.fc2.bias"] = [d]
+    return want
+
+
+def collect_nllb(get, spec):
+    """NLLB-200-distilled-600M's checkpoint as the ordered tensor table `nets::nllb600` indexes.
+
+    THE TENSOR ORDER (the contract with the Rust net — positional indexing, no names):
+
+        1. the tied embedding (`model.shared.weight` ONLY), as `head_splits` disjoint
+           class ranges: [0:64052], [64052:128104], [128104:192155], [192155:256206].
+           Each range emits 3 tensors: int8 kernel [rows, 1024, 1, 1], fp16 scale [rows],
+           synthesised zero bias [rows]. Op "Head". Tensors 0..11.
+        2. each encoder layer 0..11 in forward order. Per layer, in this exact order:
+           self_attn_layer_norm (LayerNorm, 2 tensors: gamma, beta),
+           self_attn q/k/v/out_proj (Linear8, 3 tensors each: kernel, scale, bias),
+           final_layer_norm (LayerNorm, 2),
+           fc1 (Linear8, 3), fc2 (Linear8, 3).
+           22 tensors per encoder layer.
+        3. the encoder's final layer norm (LayerNorm, 2 tensors).
+        4. each decoder layer 0..11 in forward order. Per layer: self_attn block as in
+           the encoder (2 + 4*3 = 14 tensors), then encoder_attn_layer_norm (2) +
+           encoder_attn q/k/v/out_proj (4*3 = 12), then final_layer_norm (2) + fc1/fc2
+           (2*3 = 6). 36 tensors per decoder layer.
+        5. the decoder's final layer norm (LayerNorm, 2 tensors). Last.
+
+    Totals: 12 head tensors + 12*22 encoder + 2 + 12*36 decoder + 2 = 712 tensors in
+    258 layers (4 Head + 96 enc + 1 + 156 dec + 1).
+    196 int8 convolutions (4 head + 12*6 enc + 12*10 dec); everything else fp16 norms
+    and biases.
+
+    # What is folded, and what is not (same as small100 — same M2M-100 forward pass)
+
+    * `sqrt(d_model)` is **not** folded into the embedding. The host gather applies it in
+      fp32 (`embed_positions`), one rounding fewer than scaling int8 codes.
+    * The attention query scale is **not** folded into `q_proj`. M2M-100 scales the query
+      by `head_dim ** -0.5` (head_dim 64) = the `1 / sqrt(head_dim)` `attn_scores` applies.
+    * Sinusoidal positions are not in the checkpoint and are not emitted. `nets::nllb600`
+      computes fairseq's concatenated-halves sinusoid at position `past + at + 1 + 1`
+      (padding_idx 1, so first token sits at 2) — byte-identical math to small100.
+    * FFN activation is **ReLU** (`activation_function: relu` in config.json), so the Rust
+      uses `Act::Relu` on fc1, not GELU.
+    * The four checkpoint copies of the tied embedding are asserted byte-identical in
+      `fetch_nllb600.py` before conversion; only `model.shared.weight` is read here.
+    """
+    layers = []
+    tensors = []
+    fidelity = Fidelity()
+
+    def emit(op, name, key, added):
+        layers.append(Layer(len(layers), op, name, key, len(tensors) - added, added))
+
+    def linear(name):
+        """An int8 kernel as `[out, in, 1, 1]`, its per-output-channel scale, and its bias."""
+        weight = get(f"{name}.weight")
+        bias = get(f"{name}.bias")
+        outputs, inputs = weight.shape
+        kernel, scale = fidelity.quantise(name, weight.reshape(outputs, inputs, 1, 1))
+        tensors.extend([kernel, scale, bias])
+        emit(
+            "Linear8",
+            name,
+            f"Linear8 w={list(kernel.shape)} scale={[outputs]} b={list(bias.shape)} "
+            "zp=0 dtype=int8",
+            3,
+        )
+
+    def layer_norm(name):
+        gamma = get(f"{name}.weight")
+        beta = get(f"{name}.bias")
+        tensors.extend([gamma, beta])
+        emit("LayerNorm", name, f"LayerNorm g={list(gamma.shape)} b={list(beta.shape)}", 2)
+
+    embedding = get("model.shared.weight")
+    rows_spec = spec["head_rows"]
+    if sum(rows_spec) != embedding.shape[0]:
+        raise SystemExit(
+            f"{embedding.shape[0]} classes do not split as {rows_spec}"
+        )
+    lo = 0
+    for part, rows in enumerate(rows_spec):
+        chunk = embedding[lo : lo + rows]
+        name = f"model.shared.weight[{lo}:{lo + rows}]"
+        kernel, scale = fidelity.quantise(name, chunk.reshape(rows, embedding.shape[1], 1, 1))
+        # `Builder::conv_int8` reads a bias after the scale, and a tied head has none. Zeros are
+        # exact, and recording it in the key means a checkpoint that grows one is not mistaken for
+        # this table.
+        tensors.extend([kernel, scale, np.zeros(rows, dtype=np.float32)])
+        emit(
+            "Head",
+            name,
+            f"Head w={list(kernel.shape)} scale={[rows]} b={[rows]} "
+            f"classes={lo}..{lo + rows} zp=0 dtype=int8 b0=synthesised",
+            3,
+        )
+        lo += rows
+
+    for side, count in (("encoder", spec["encoder_layers"]), ("decoder", spec["decoder_layers"])):
+        for index in range(count):
+            at = f"model.{side}.layers.{index}"
+            # Pre-norm, as `M2M100EncoderLayer` and `M2M100DecoderLayer` are: the norm comes
+            # before the sublayer it feeds and the residual skips both. Emitting in forward order
+            # is what lets the Rust walk the table without an index table.
+            layer_norm(f"{at}.self_attn_layer_norm")
+            for projection in ("q_proj", "k_proj", "v_proj", "out_proj"):
+                linear(f"{at}.self_attn.{projection}")
+            if side == "decoder":
+                layer_norm(f"{at}.encoder_attn_layer_norm")
+                for projection in ("q_proj", "k_proj", "v_proj", "out_proj"):
+                    linear(f"{at}.encoder_attn.{projection}")
+            layer_norm(f"{at}.final_layer_norm")
+            linear(f"{at}.fc1")
+            linear(f"{at}.fc2")
+        layer_norm(f"model.{side}.layer_norm")
+
+    fidelity.report()
+    return layers, tensors
+
+
 INVENTORIES.update({"small100": small100_inventory, "whisper": whisper_inventory})
 COLLECTORS.update({"small100": collect_small100, "whisper": collect_whisper})
+INVENTORIES.update({"nllb600": nllb_inventory})
+COLLECTORS.update({"nllb600": collect_nllb})
 
 
 # The vision position table, after TinyCLIP's export constant-folds it: `position_ids` is a

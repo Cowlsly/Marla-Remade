@@ -32,11 +32,11 @@
 #[cfg(test)]
 pub mod reference;
 pub mod mobilefacenet;
+pub mod nllb;
 pub mod ppocr_det;
 pub mod ppocr_rec;
 pub mod scrfd;
 pub mod selfie;
-pub mod small100;
 pub mod supertonic_duration;
 pub mod supertonic_sampler;
 pub mod supertonic_text;
@@ -1545,7 +1545,7 @@ impl<'a> Builder<'a> {
     /// plans — an encoder pass, a decode step and the logits projection — so no single one of them
     /// reads every tensor, and each names the others' as host tensors. The invariant that nothing
     /// is unread then has to be checked over the *union* of the plans, which is a test the net
-    /// module owes because that is where the layout is; `nets::small100` has it.
+    /// module owes because that is where the layout is; `nets::nllb` has it.
     pub fn host_tensor(&mut self, weight_index: usize, dims: &[u32]) {
         // Through `weight` so the shape is checked against the file like any other tensor.
         self.weight(weight_index, dims);

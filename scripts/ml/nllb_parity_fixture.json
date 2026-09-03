@@ -1,0 +1,132 @@
+{
+  "model": "facebook/nllb-200-distilled-600M",
+  "revision": "f8d333a098d19b4fd9a8b18f94170487ad3f821d",
+  "decode": "greedy, num_beams=1, max_length=64, forced_bos_token_id=tgt_lang",
+  "pairs": [
+    {
+      "input_text": "Hello, how are you?",
+      "src_flores": "eng_Latn",
+      "src_lang_id": 256047,
+      "tgt_flores": "fra_Latn",
+      "tgt_lang_id": 256057,
+      "encoder_input_ids": [
+        256047,
+        94124,
+        248079,
+        11657,
+        2442,
+        1259,
+        248130,
+        2
+      ],
+      "greedy_output_ids": [
+        2,
+        256057,
+        17994,
+        141190,
+        248079,
+        25358,
+        123732,
+        248105,
+        30213,
+        385,
+        2
+      ],
+      "greedy_text": "Bonjour, comment allez-vous ?"
+    },
+    {
+      "input_text": "The cat sat on the mat.",
+      "src_flores": "eng_Latn",
+      "src_lang_id": 256047,
+      "tgt_flores": "deu_Latn",
+      "tgt_lang_id": 256042,
+      "encoder_input_ids": [
+        256047,
+        1617,
+        7875,
+        4843,
+        281,
+        349,
+        601,
+        248075,
+        2
+      ],
+      "greedy_output_ids": [
+        2,
+        256042,
+        2667,
+        4939,
+        372,
+        127,
+        249358,
+        5137,
+        760,
+        3392,
+        86,
+        248075,
+        2
+      ],
+      "greedy_text": "Die Katze saß auf der Matte."
+    },
+    {
+      "input_text": "Good morning, world!",
+      "src_flores": "eng_Latn",
+      "src_lang_id": 256047,
+      "tgt_flores": "spa_Latn",
+      "tgt_lang_id": 256161,
+      "encoder_input_ids": [
+        256047,
+        24718,
+        64246,
+        248079,
+        15697,
+        248203,
+        2
+      ],
+      "greedy_output_ids": [
+        2,
+        256161,
+        8886,
+        30502,
+        2448,
+        17176,
+        248079,
+        12656,
+        248203,
+        2
+      ],
+      "greedy_text": "¡Bueno día, mundo!"
+    },
+    {
+      "input_text": "Machine translation is useful.",
+      "src_flores": "eng_Latn",
+      "src_lang_id": 256047,
+      "tgt_flores": "zho_Hans",
+      "tgt_lang_id": 256200,
+      "encoder_input_ids": [
+        256047,
+        138409,
+        200356,
+        248,
+        170580,
+        248075,
+        2
+      ],
+      "greedy_output_ids": [
+        2,
+        256200,
+        248059,
+        250857,
+        250444,
+        252156,
+        253668,
+        249221,
+        149375,
+        248506,
+        248075,
+        2
+      ],
+      "greedy_text": "机器翻译是有用的."
+    }
+  ]
+}
