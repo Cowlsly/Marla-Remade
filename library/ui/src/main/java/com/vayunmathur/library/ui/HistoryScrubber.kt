@@ -132,7 +132,7 @@ fun RowScope.HistoryStepButton(label: String, onClick: () -> Unit) {
     }
 }
 
-@OptIn(ExperimentalMaterial3Api::class, ExperimentalMaterial3ExpressiveApi::class, ExperimentalTime::class)
+@OptIn(ExperimentalTime::class)
 // Floating overlay card with no host bar to defer to: it owns its own nav-bar
 // inset. Exempt from WindowInsetsInReusableComponent (not a keyboard-tracking bar).
 @Suppress("WindowInsetsInReusableComponent")

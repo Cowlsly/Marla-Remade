@@ -51,9 +51,10 @@ import com.vayunmathur.library.ui.ListItemDefaults
 import com.vayunmathur.library.ui.MaterialTheme
 import com.vayunmathur.library.ui.ExposedDropdownMenuDefaults
 import com.vayunmathur.library.ui.DropdownMenu
-import com.vayunmathur.library.ui.DropdownMenuItem
+import com.vayunmathur.library.ui.IconCheck
 import com.vayunmathur.library.ui.OutlinedButton
 import com.vayunmathur.library.ui.OutlinedTextField
+import com.vayunmathur.library.ui.SelectableDropdownMenuItem
 import com.vayunmathur.library.ui.Slider
 import com.vayunmathur.library.ui.SheetValue
 import com.vayunmathur.library.ui.Switch
@@ -1055,23 +1056,46 @@ fun AutoToggleRow(user: User, waypoints: List<Waypoint>, actions: PersonActions)
                 trailingIcon = { ExposedDropdownMenuDefaults.TrailingIcon(expanded = expanded) }
             )
             DropdownMenu(expanded, { expanded = false }) {
-                // Never option first — disables auto-toggle; others reschedule countdown
-                DropdownMenuItem({ Text(neverLabel) }, {
-                    expanded = false
-                    actions.setUserAutoToggle(user, null)
-                })
-                labelToDuration.forEach { (label, dur) ->
-                    DropdownMenuItem({ Text(label) }, {
+                // Never option first — disables auto-toggle; others reschedule countdown.
+                // Auto-toggle modes are mutually exclusive, so exactly one option is current:
+                // "Never" while nothing is armed, or the arrival waypoint while an arrival
+                // trigger is armed. An armed countdown only stores its fire time, not the
+                // nominal duration, so the smallest option covering the remaining time is
+                // marked (exact while the head of the countdown, a shrinking bucket after).
+                val remaining = endAt?.let { it - now }
+                SelectableDropdownMenuItem(
+                    selected = endAt == null && user.sharingAutoToggleWaypointId == null,
+                    onClick = {
                         expanded = false
-                        actions.setUserAutoToggle(user, dur)
-                    })
+                        actions.setUserAutoToggle(user, null)
+                    },
+                    text = { Text(neverLabel) },
+                    selectedLeadingIcon = { IconCheck() },
+                )
+                labelToDuration.forEach { (label, dur) ->
+                    SelectableDropdownMenuItem(
+                        selected = user.sharingAutoToggleWaypointId == null && remaining != null &&
+                            remaining.inWholeSeconds > 0 && dur >= remaining &&
+                            labelToDuration.values.none { other -> other < dur && other >= remaining },
+                        onClick = {
+                            expanded = false
+                            actions.setUserAutoToggle(user, dur)
+                        },
+                        text = { Text(label) },
+                        selectedLeadingIcon = { IconCheck() },
+                    )
                 }
                 // Arrival triggers — flip sharing when "Me" arrives at a saved place (GitHub #406).
                 arrivalWaypoints.forEach { waypoint ->
-                    DropdownMenuItem({ Text(stringResource(R.string.arrival_at, waypoint.name)) }, {
-                        expanded = false
-                        actions.setUserArrivalToggle(user, waypoint.id)
-                    })
+                    SelectableDropdownMenuItem(
+                        selected = user.sharingAutoToggleWaypointId == waypoint.id,
+                        onClick = {
+                            expanded = false
+                            actions.setUserArrivalToggle(user, waypoint.id)
+                        },
+                        text = { Text(stringResource(R.string.arrival_at, waypoint.name)) },
+                        selectedLeadingIcon = { IconCheck() },
+                    )
                 }
             }
         }

@@ -50,6 +50,7 @@ typealias BottomSheetDefaults = androidx.compose.material3.BottomSheetDefaults
 typealias ButtonDefaults = androidx.compose.material3.ButtonDefaults
 typealias CardDefaults = androidx.compose.material3.CardDefaults
 typealias ExposedDropdownMenuDefaults = androidx.compose.material3.ExposedDropdownMenuDefaults
+typealias MenuDefaults = androidx.compose.material3.MenuDefaults
 typealias FilterChipDefaults = androidx.compose.material3.FilterChipDefaults
 typealias FloatingActionButtonDefaults = androidx.compose.material3.FloatingActionButtonDefaults
 typealias ListItemDefaults = androidx.compose.material3.ListItemDefaults
@@ -63,6 +64,9 @@ typealias TopAppBarDefaults = androidx.compose.material3.TopAppBarDefaults
 
 // --- Colors / elevation / shapes state ---
 typealias ListItemColors = androidx.compose.material3.ListItemColors
+typealias MenuItemColors = androidx.compose.material3.MenuItemColors
+typealias SelectableMenuItemColors = androidx.compose.material3.SelectableMenuItemColors
+typealias MenuItemShapes = androidx.compose.material3.MenuItemShapes
 typealias CheckboxColors = androidx.compose.material3.CheckboxColors
 typealias CheckboxDefaults = androidx.compose.material3.CheckboxDefaults
 typealias ListItemElevation = androidx.compose.material3.ListItemElevation
@@ -93,12 +97,14 @@ typealias SwipeToDismissBoxValue = androidx.compose.material3.SwipeToDismissBoxV
 typealias SnackbarResult = androidx.compose.material3.SnackbarResult
 typealias SnackbarDuration = androidx.compose.material3.SnackbarDuration
 typealias SelectableDates = androidx.compose.material3.SelectableDates
+typealias TimePickerSelectionMode = androidx.compose.material3.TimePickerSelectionMode
 
 // --- State classes ---
 typealias SnackbarHostState = androidx.compose.material3.SnackbarHostState
 typealias DrawerState = androidx.compose.material3.DrawerState
 typealias SwipeToDismissBoxState = androidx.compose.material3.SwipeToDismissBoxState
 typealias DatePickerState = androidx.compose.material3.DatePickerState
+typealias TimePickerState = androidx.compose.material3.TimePickerState
 typealias SheetState = androidx.compose.material3.SheetState
 typealias BottomSheetScaffoldState = androidx.compose.material3.BottomSheetScaffoldState
 typealias SliderState = androidx.compose.material3.SliderState

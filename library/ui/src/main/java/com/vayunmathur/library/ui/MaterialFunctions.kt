@@ -38,11 +38,22 @@ fun rememberDrawerState(
 ) = androidx.compose.material3.rememberDrawerState(initialValue, confirmStateChange)
 
 @Composable
-fun rememberTimePickerState(initialHour: Int = 0, initialMinute: Int = 0) =
-    androidx.compose.material3.rememberTimePickerState(
+fun rememberTimePickerState(
+    initialHour: Int = 0,
+    initialMinute: Int = 0,
+    is24Hour: Boolean = true,
+    initialSelection: TimePickerSelectionMode = TimePickerSelectionMode.Hour,
+): TimePickerState {
+    val state = androidx.compose.material3.rememberTimePickerState(
         initialHour = initialHour,
         initialMinute = initialMinute,
+        is24Hour = is24Hour,
     )
+    // M3 alpha27 exposes selection only as a mutable property, so apply the initial
+    // value once when the state is created — never on recomposition, or user taps
+    // on the minute dial would be stomped back.
+    return remember(state) { state.apply { selection = initialSelection } }
+}
 
 @Composable
 fun rememberDatePickerState(initialSelectedDateMillis: Long? = null) =
@@ -111,7 +122,7 @@ fun rememberSliderState(
 
 // --- Adaptive ---
 @Composable
-fun currentWindowAdaptiveInfo() = androidx.compose.material3.adaptive.currentWindowAdaptiveInfo()
+fun currentWindowAdaptiveInfo() = androidx.compose.material3.adaptive.currentWindowAdaptiveInfoV2()
 
 @Composable
 fun rememberSwipeToDismissBoxState(

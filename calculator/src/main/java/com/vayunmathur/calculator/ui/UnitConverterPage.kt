@@ -33,14 +33,15 @@ import com.vayunmathur.library.ui.AppScaffold
 import com.vayunmathur.library.ui.Card
 import com.vayunmathur.library.ui.Button
 import com.vayunmathur.library.ui.DropdownMenu
-import com.vayunmathur.library.ui.DropdownMenuItem
 import com.vayunmathur.library.ui.FilledTonalIconButton
 import com.vayunmathur.library.ui.IconArrowDropDown
+import com.vayunmathur.library.ui.IconCheck
 import com.vayunmathur.library.ui.IconSwapLanguages
 import com.vayunmathur.library.ui.LoadingIndicator
 import com.vayunmathur.library.ui.MaterialTheme
 import com.vayunmathur.library.ui.OutlinedButton
 import com.vayunmathur.library.ui.OutlinedTextField
+import com.vayunmathur.library.ui.SelectableDropdownMenuItem
 import com.vayunmathur.library.ui.Spacing
 import com.vayunmathur.library.ui.Text
 import com.vayunmathur.library.ui.appBarScrollBehavior
@@ -162,12 +163,14 @@ private fun CategoryDropdown(
         }
         DropdownMenu(expanded = expanded, onDismissRequest = { expanded = false }) {
             categories.forEachIndexed { index, cat ->
-                DropdownMenuItem(
-                    text = { Text(cat.name) },
+                SelectableDropdownMenuItem(
+                    selected = index == selectedIndex,
                     onClick = {
                         onSelect(index)
                         expanded = false
                     },
+                    text = { Text(cat.name) },
+                    selectedLeadingIcon = { IconCheck() },
                 )
             }
         }
@@ -240,12 +243,14 @@ private fun UnitDropdown(
         }
         DropdownMenu(expanded = expanded, onDismissRequest = { expanded = false }) {
             units.forEach { unit ->
-                DropdownMenuItem(
-                    text = { Text("${unit.symbol} — ${unit.name}") },
+                SelectableDropdownMenuItem(
+                    selected = unit.token == selectedToken,
                     onClick = {
                         onSelect(unit.token)
                         expanded = false
                     },
+                    text = { Text("${unit.symbol} — ${unit.name}") },
+                    selectedLeadingIcon = { IconCheck() },
                 )
             }
         }

@@ -28,11 +28,12 @@ import com.vayunmathur.camera.util.CameraViewModel
 import com.vayunmathur.camera.util.AudioInputSource
 import com.vayunmathur.camera.util.CodecSupport
 import com.vayunmathur.camera.util.VideoCodec
-import com.vayunmathur.library.ui.DropdownMenuItem
 import com.vayunmathur.library.ui.ExposedDropdownMenuAnchorType
 import com.vayunmathur.library.ui.ExposedDropdownMenuBox
 import com.vayunmathur.library.ui.ExposedDropdownMenuDefaults
+import com.vayunmathur.library.ui.IconCheck
 import com.vayunmathur.library.ui.OutlinedTextField
+import com.vayunmathur.library.ui.SelectableDropdownMenuItem
 import com.vayunmathur.library.ui.rememberPermissionRequest
 import com.vayunmathur.library.ui.appBarScrollBehavior
 import com.vayunmathur.library.util.NavBackStack
@@ -94,7 +95,12 @@ fun <T : NavKey> SettingsPage(backStack: NavBackStack<T>, viewModel: CameraViewM
                             onDismissRequest = { expanded = false }
                         ) {
                             availableCodecs.forEach { codec ->
-                                DropdownMenuItem(
+                                SelectableDropdownMenuItem(
+                                    selected = codec == videoCodec,
+                                    onClick = {
+                                        viewModel.setVideoCodec(codec)
+                                        expanded = false
+                                    },
                                     text = {
                                         Column {
                                             Text(stringResource(codec.labelRes))
@@ -105,10 +111,7 @@ fun <T : NavKey> SettingsPage(backStack: NavBackStack<T>, viewModel: CameraViewM
                                             )
                                         }
                                     },
-                                    onClick = {
-                                        viewModel.setVideoCodec(codec)
-                                        expanded = false
-                                    }
+                                    selectedLeadingIcon = { IconCheck() },
                                 )
                             }
                         }
@@ -138,7 +141,12 @@ fun <T : NavKey> SettingsPage(backStack: NavBackStack<T>, viewModel: CameraViewM
                         onDismissRequest = { audioExpanded = false }
                     ) {
                         AudioInputSource.entries.forEach { source ->
-                            DropdownMenuItem(
+                            SelectableDropdownMenuItem(
+                                selected = source == audioInputSource,
+                                onClick = {
+                                    viewModel.setAudioInputSource(source)
+                                    audioExpanded = false
+                                },
                                 text = {
                                     Column {
                                         Text(stringResource(source.labelRes))
@@ -149,10 +157,7 @@ fun <T : NavKey> SettingsPage(backStack: NavBackStack<T>, viewModel: CameraViewM
                                         )
                                     }
                                 },
-                                onClick = {
-                                    viewModel.setAudioInputSource(source)
-                                    audioExpanded = false
-                                }
+                                selectedLeadingIcon = { IconCheck() },
                             )
                         }
                     }

@@ -680,10 +680,68 @@ fun DropdownMenuItem(
     leadingIcon: (@Composable () -> Unit)? = null,
     trailingIcon: (@Composable () -> Unit)? = null,
     enabled: Boolean = true,
+    colors: MenuItemColors = MenuDefaults.itemColors(),
     contentPadding: PaddingValues = MenuDefaults.DropdownMenuItemContentPadding,
 ) = androidx.compose.material3.DropdownMenuItem(
     text = text, onClick = onClick, modifier = modifier, leadingIcon = leadingIcon,
-    trailingIcon = trailingIcon, enabled = enabled, contentPadding = contentPadding,
+    trailingIcon = trailingIcon, enabled = enabled, colors = colors, contentPadding = contentPadding,
+)
+
+/**
+ * A dropdown item for a single choice among [DropdownMenu] siblings.
+ *
+ * Unlike [DropdownMenuItem], the [selected] item renders with selection colors
+ * ([colors]) and an optional [selectedLeadingIcon] that only shows while
+ * selected, so a menu reads which option is current without a hand-rolled
+ * tick. Pass `MenuDefaults.selectableItemVibrantColors()` for [colors] for
+ * the vibrant variant.
+ */
+@Composable
+fun SelectableDropdownMenuItem(
+    selected: Boolean,
+    onClick: () -> Unit,
+    text: @Composable () -> Unit,
+    modifier: Modifier = Modifier,
+    enabled: Boolean = true,
+    leadingIcon: (@Composable () -> Unit)? = null,
+    selectedLeadingIcon: (@Composable () -> Unit)? = null,
+    trailingContent: (@Composable () -> Unit)? = null,
+    supportingText: (@Composable () -> Unit)? = null,
+    shapes: MenuItemShapes = MenuDefaults.itemShapes(),
+    colors: SelectableMenuItemColors = MenuDefaults.selectableItemColors(),
+    contentPadding: PaddingValues = MenuDefaults.DropdownMenuSelectableItemContentPadding,
+) = androidx.compose.material3.SelectableDropdownMenuItem(
+    selected = selected, onClick = onClick, text = text, shapes = shapes, modifier = modifier,
+    leadingIcon = leadingIcon, selectedLeadingIcon = selectedLeadingIcon,
+    trailingContent = trailingContent, supportingText = supportingText, enabled = enabled,
+    colors = colors, contentPadding = contentPadding,
+)
+
+/**
+ * A dropdown item for toggling one option on/off, e.g. a multi-choice menu.
+ *
+ * Mirrors [SelectableDropdownMenuItem] but reports the new [checked] value
+ * through [onCheckedChange] and shows [checkedLeadingIcon] while checked.
+ */
+@Composable
+fun CheckableDropdownMenuItem(
+    checked: Boolean,
+    onCheckedChange: (Boolean) -> Unit,
+    text: @Composable () -> Unit,
+    modifier: Modifier = Modifier,
+    enabled: Boolean = true,
+    leadingIcon: (@Composable () -> Unit)? = null,
+    checkedLeadingIcon: (@Composable () -> Unit)? = null,
+    trailingContent: (@Composable () -> Unit)? = null,
+    supportingText: (@Composable () -> Unit)? = null,
+    shapes: MenuItemShapes = MenuDefaults.itemShapes(),
+    colors: SelectableMenuItemColors = MenuDefaults.selectableItemColors(),
+    contentPadding: PaddingValues = MenuDefaults.DropdownMenuSelectableItemContentPadding,
+) = androidx.compose.material3.CheckableDropdownMenuItem(
+    checked = checked, onCheckedChange = onCheckedChange, text = text, shapes = shapes,
+    modifier = modifier, leadingIcon = leadingIcon, checkedLeadingIcon = checkedLeadingIcon,
+    trailingContent = trailingContent, supportingText = supportingText, enabled = enabled,
+    colors = colors, contentPadding = contentPadding,
 )
 
 // --- Chips ---

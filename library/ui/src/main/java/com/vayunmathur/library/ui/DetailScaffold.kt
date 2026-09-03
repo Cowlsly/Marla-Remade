@@ -28,7 +28,8 @@ import com.vayunmathur.library.util.NavKey
  * and free-form content; this fills the gap that every detail screen was closing
  * by hand: `AppScaffold { pad -> Column(fillMaxSize().padding(pad)
  * .padding(horizontal = 16.dp).verticalScroll(...), spacedBy(12.dp)) { ... } }`.
- * The horizontal inset ([Spacing.lg]) and the gap between blocks ([Spacing.md])
+ * The horizontal inset ([paneContentMargin], [Spacing.lg] on phones and wider on
+ * expanded widths) and the gap between blocks ([Spacing.md])
  * are normalised here so detail screens stop drifting apart.
  *
  * The content lambda runs in a [ColumnScope] that is already scrolling; use
@@ -205,7 +206,7 @@ private fun DetailColumn(pad: PaddingValues, content: @Composable ColumnScope.()
         modifier = Modifier
             .fillMaxSize()
             .padding(pad)
-            .padding(horizontal = Spacing.lg)
+            .padding(horizontal = paneContentMargin())
             .verticalScroll(rememberScrollState()),
         verticalArrangement = Arrangement.spacedBy(Spacing.md),
         content = content,
@@ -215,11 +216,12 @@ private fun DetailColumn(pad: PaddingValues, content: @Composable ColumnScope.()
 @Composable
 private fun DetailList(pad: PaddingValues, content: LazyListScope.() -> Unit) {
     val direction = LocalLayoutDirection.current
+    val margin = paneContentMargin()
     LazyColumn(
         modifier = Modifier.fillMaxSize(),
         contentPadding = PaddingValues(
-            start = pad.calculateStartPadding(direction) + Spacing.lg,
-            end = pad.calculateEndPadding(direction) + Spacing.lg,
+            start = pad.calculateStartPadding(direction) + margin,
+            end = pad.calculateEndPadding(direction) + margin,
             top = pad.calculateTopPadding(),
             bottom = pad.calculateBottomPadding(),
         ),

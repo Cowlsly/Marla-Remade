@@ -2,7 +2,6 @@ package com.vayunmathur.library.ui
 
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.layout.RowScope
-import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
@@ -63,7 +62,6 @@ fun <T> rememberSelectionState(): SelectionState<T> {
  * leaving the screen, which is what a user expects and what some of the
  * hand-rolled versions missed.
  */
-@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun <T> SelectionTopAppBar(
     state: SelectionState<T>,

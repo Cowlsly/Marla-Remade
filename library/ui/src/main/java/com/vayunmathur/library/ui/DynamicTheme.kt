@@ -1,5 +1,3 @@
-@file:OptIn(androidx.compose.material3.ExperimentalMaterial3ExpressiveApi::class)
-
 package com.vayunmathur.library.ui
 
 import androidx.compose.foundation.isSystemInDarkTheme

@@ -38,6 +38,14 @@ import androidx.compose.ui.unit.dp
  * the [TopAppBar] for you; with neither, and no [topBar], no bar is drawn. Everything
  * else matches the shared [Scaffold] wrapper (same param names/types) so it stays a
  * drop-in replacement.
+ *
+ * [expandedWidthPadding] is extra horizontal padding applied on top of
+ * [horizontalPadding] only on expanded widths - the two-pane tablet/foldable
+ * case - so list panes gain the wider gutter there while phone layouts keep
+ * exactly the [horizontalPadding] they pass today. It defaults to the adaptive
+ * [paneContentMargin], which is [Spacing.lg] on compact widths; callers that
+ * already pass their own margin (e.g. 16.dp) can pass [Spacing.lg] explicitly
+ * to stay fixed, or `0.dp` to opt out entirely.
  */
 @Composable
 fun LazyListScaffold(
@@ -52,6 +60,7 @@ fun LazyListScaffold(
     floatingActionButtonPosition: FabPosition = FabPosition.End,
     state: LazyListState = rememberLazyListState(),
     horizontalPadding: Dp = 0.dp,
+    expandedWidthPadding: Dp = paneContentMargin(),
     verticalArrangement: Arrangement.Vertical = Arrangement.Top,
     containerColor: Color = MaterialTheme.colorScheme.background,
     content: LazyListScope.() -> Unit,
@@ -70,12 +79,15 @@ fun LazyListScaffold(
     containerColor,
 ) { pad ->
     val dir = LocalLayoutDirection.current
+    // Only the width class above compact adds padding; on phones this is
+    // exactly [horizontalPadding], unchanged from before.
+    val extra = (expandedWidthPadding - Spacing.lg).coerceAtLeast(0.dp)
     LazyColumn(
         modifier = Modifier.fillMaxSize(),
         state = state,
         contentPadding = PaddingValues(
-            start = pad.calculateStartPadding(dir) + horizontalPadding,
-            end = pad.calculateEndPadding(dir) + horizontalPadding,
+            start = pad.calculateStartPadding(dir) + horizontalPadding + extra,
+            end = pad.calculateEndPadding(dir) + horizontalPadding + extra,
             top = pad.calculateTopPadding(),
             bottom = pad.calculateBottomPadding(),
         ),

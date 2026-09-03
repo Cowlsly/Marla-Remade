@@ -10,9 +10,10 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.style.TextOverflow
 import com.vayunmathur.library.ui.DropdownMenu
-import com.vayunmathur.library.ui.DropdownMenuItem
 import com.vayunmathur.library.ui.IconArrowDropDown
+import com.vayunmathur.library.ui.IconCheck
 import com.vayunmathur.library.ui.MaterialTheme
+import com.vayunmathur.library.ui.SelectableDropdownMenuItem
 import com.vayunmathur.library.ui.Text
 import com.vayunmathur.library.ui.TextButton
 
@@ -56,12 +57,14 @@ fun <T> GameModeChooser(
         }
         DropdownMenu(expanded = expanded, onDismissRequest = { expanded = false }) {
             for (option in options) {
-                DropdownMenuItem(
-                    text = { Text(menuLabel(option)) },
+                SelectableDropdownMenuItem(
+                    selected = option == selected,
                     onClick = {
                         expanded = false
                         onSelect(option)
                     },
+                    text = { Text(menuLabel(option)) },
+                    selectedLeadingIcon = { IconCheck() },
                 )
             }
         }

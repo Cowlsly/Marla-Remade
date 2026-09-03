@@ -18,8 +18,9 @@ import androidx.compose.ui.unit.dp
 import android.media.RingtoneManager
 import com.vayunmathur.clock.R
 import com.vayunmathur.library.ui.DropdownMenu
-import com.vayunmathur.library.ui.DropdownMenuItem
+import com.vayunmathur.library.ui.IconCheck
 import com.vayunmathur.library.ui.MaterialTheme
+import com.vayunmathur.library.ui.SelectableDropdownMenuItem
 import com.vayunmathur.library.ui.Switch
 import com.vayunmathur.library.ui.Text
 import com.vayunmathur.library.ui.TextButton
@@ -88,12 +89,14 @@ private fun OptionDropdown(value: String, options: List<Pair<Int, String>>, onSe
         TextButton(onClick = { expanded = true }) { Text(value) }
         DropdownMenu(expanded = expanded, onDismissRequest = { expanded = false }) {
             options.forEach { (key, text) ->
-                DropdownMenuItem(
-                    text = { Text(text) },
+                SelectableDropdownMenuItem(
+                    selected = text == value,
                     onClick = {
                         expanded = false
                         onSelect(key)
                     },
+                    text = { Text(text) },
+                    selectedLeadingIcon = { IconCheck() },
                 )
             }
         }

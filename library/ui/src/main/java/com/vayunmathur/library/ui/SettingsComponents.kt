@@ -173,13 +173,14 @@ fun <T> SettingsSelectRow(
         )
         DropdownMenu(expanded = expanded, onDismissRequest = { expanded = false }) {
             options.forEach { option ->
-                DropdownMenuItem(
-                    text = { Text(label(option)) },
+                SelectableDropdownMenuItem(
+                    selected = option == selected,
                     onClick = {
                         expanded = false
                         onSelect(option)
                     },
-                    trailingIcon = if (option == selected) ({ IconCheck() }) else null,
+                    text = { Text(label(option)) },
+                    selectedLeadingIcon = { IconCheck() },
                 )
             }
         }
@@ -195,7 +196,6 @@ fun <T> SettingsSelectRow(
  * [itemSupporting] adds a second line under each option (e.g. a codec's
  * description).
  */
-@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun <T> SettingsExposedSelectRow(
     label: String,
@@ -224,7 +224,9 @@ fun <T> SettingsExposedSelectRow(
                 .fillMaxWidth()
                 .menuAnchor(ExposedDropdownMenuAnchorType.PrimaryNotEditable),
         )
-        ExposedDropdownMenu(expanded = expanded, onDismissRequest = { expanded = false }) {
+        ExposedDropdownMenu(
+            expanded = expanded, onDismissRequest = { expanded = false }
+        ) {
             options.forEach { option ->
                 DropdownMenuItem(
                     text = {

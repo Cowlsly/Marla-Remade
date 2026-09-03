@@ -211,6 +211,10 @@ private fun SharedTextLabeledField(
  * [optionLabel] formats each dropdown option; when null the row's [typeLabel]
  * is not used for options (callers that need localized type names should pass
  * it explicitly, e.g. via `ContactDetail.default<T>().withType(option)`).
+ *
+ * The type picker is single-choice: the row's current type renders selected
+ * via [SelectableDropdownMenuItem], so [T] must expose its type through
+ * [currentType].
  */
 @Composable
 fun <T> FormDetailGroup(
@@ -225,6 +229,7 @@ fun <T> FormDetailGroup(
     onRemove: (Int) -> Unit,
     onAdd: () -> Unit,
     modifier: Modifier = Modifier,
+    currentType: (T) -> Int,
     keyboardType: KeyboardType = KeyboardType.Text,
     visualTransformation: VisualTransformation = VisualTransformation.None,
     isCustom: (T) -> Boolean = { false },
@@ -273,12 +278,14 @@ fun <T> FormDetailGroup(
                     }
                     DropdownMenu(expanded = expanded, onDismissRequest = { expanded = false }) {
                         typeOptions.forEach { option ->
-                            DropdownMenuItem(
-                                text = { Text(optionLabel?.invoke(option) ?: option.toString()) },
+                            SelectableDropdownMenuItem(
+                                selected = currentType(item) == option,
                                 onClick = {
                                     onTypeChange(index, option)
                                     expanded = false
                                 },
+                                text = { Text(optionLabel?.invoke(option) ?: option.toString()) },
+                                selectedLeadingIcon = { IconCheck() },
                             )
                         }
                     }

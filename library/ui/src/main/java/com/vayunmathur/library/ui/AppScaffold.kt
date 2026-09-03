@@ -2,7 +2,6 @@ package com.vayunmathur.library.ui
 
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.RowScope
-import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBarScrollBehavior
 import androidx.compose.runtime.Composable
@@ -52,7 +51,6 @@ enum class AppBarSize { Small, MediumFlexible, LargeFlexible }
  * [scrollBehavior] is required rather than defaulted so that every screen states how its bar
  * reacts to scrolling; [appBarScrollBehavior] gives the right one for a [size].
  */
-@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun AppScaffold(
     title: String,
@@ -92,7 +90,6 @@ fun AppScaffold(
  * For the handful of screens whose title needs more than text - a truncated
  * document name, a styled or two-line heading. Prefer the string overload.
  */
-@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun AppScaffold(
     title: @Composable () -> Unit,
@@ -132,7 +129,6 @@ fun AppScaffold(
 }
 
 /** [AppScaffold] for a screen that owns a back stack, wiring the back button to it. */
-@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun <T : NavKey> AppScaffold(
     title: String,
@@ -172,7 +168,6 @@ fun <T : NavKey> AppScaffold(
  * Kept private and shared so the three overloads cannot drift apart. [subtitle] is only rendered
  * by the flexible sizes - the small bar is a single row and has nowhere to put it.
  */
-@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun AppTopBar(
     title: @Composable () -> Unit,

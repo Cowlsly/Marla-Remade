@@ -10,6 +10,7 @@ import androidx.compose.foundation.layout.ColumnScope
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.RowScope
 import androidx.compose.material3.BottomSheetDefaults
+import androidx.compose.material3.ExposedDropdownMenu as Material3ExposedDropdownMenu
 import androidx.compose.material3.ExposedDropdownMenuBox as Material3ExposedDropdownMenuBox
 import androidx.compose.material3.FloatingActionButtonMenuItem as Material3FloatingActionButtonMenuItem
 import androidx.compose.material3.TabRowDefaults
@@ -48,7 +49,9 @@ fun ExposedDropdownMenuBoxScope.ExposedDropdownMenu(
     onDismissRequest: () -> Unit,
     modifier: Modifier = Modifier,
     content: @Composable ColumnScope.() -> Unit,
-) = ExposedDropdownMenu(expanded = expanded, onDismissRequest = onDismissRequest, modifier = modifier, content = content)
+): Unit = Material3ExposedDropdownMenu(
+    expanded = expanded, onDismissRequest = onDismissRequest, modifier = modifier, content = content,
+)
 
 // --- Navigation drawer item ---
 @Composable
@@ -84,7 +87,7 @@ fun FlexibleBottomAppBar(
 fun ModalBottomSheet(
     onDismissRequest: () -> Unit,
     modifier: Modifier = Modifier,
-    sheetState: SheetState = rememberModalBottomSheetState(),
+    sheetState: SheetState = rememberBottomSheetState(),
     containerColor: Color = BottomSheetDefaults.ContainerColor,
     content: @Composable ColumnScope.() -> Unit,
 ) = androidx.compose.material3.ModalBottomSheet(
@@ -308,7 +311,7 @@ fun NavigationSuiteScaffold(
     navigationSuiteItems: NavigationSuiteScope.() -> Unit,
     modifier: Modifier = Modifier,
     layoutType: NavigationSuiteType = androidx.compose.material3.adaptive.navigationsuite.NavigationSuiteScaffoldDefaults
-        .calculateFromAdaptiveInfo(androidx.compose.material3.adaptive.currentWindowAdaptiveInfo()),
+        .calculateFromAdaptiveInfo(androidx.compose.material3.adaptive.currentWindowAdaptiveInfoV2()),
     content: @Composable () -> Unit,
 ) = androidx.compose.material3.adaptive.navigationsuite.NavigationSuiteScaffold(
     navigationSuiteItems = navigationSuiteItems, modifier = modifier, layoutType = layoutType, content = content,

@@ -32,7 +32,6 @@ import com.vayunmathur.library.ui.R as UiR
 import com.vayunmathur.library.ui.AssistChip
 import com.vayunmathur.library.ui.Button
 import com.vayunmathur.library.ui.DropdownMenu
-import com.vayunmathur.library.ui.DropdownMenuItem
 import com.vayunmathur.library.ui.ExperimentalMaterial3Api
 import com.vayunmathur.library.ui.FilledTonalButton
 import com.vayunmathur.library.ui.FormDetailGroup
@@ -87,12 +86,14 @@ import com.vayunmathur.contacts.util.ContactViewModel
 import com.vayunmathur.library.ui.IconAddPhoto
 import com.vayunmathur.library.ui.IconArrowDropDown
 import com.vayunmathur.library.ui.IconCall
+import com.vayunmathur.library.ui.IconCheck
 import com.vayunmathur.library.ui.IconEdit
 import com.vayunmathur.library.ui.IconEvent
 import com.vayunmathur.library.ui.IconGroup
 import com.vayunmathur.library.ui.IconLocationOn
 import com.vayunmathur.library.ui.IconMail
 import com.vayunmathur.library.ui.IconRemoveCircle
+import com.vayunmathur.library.ui.SelectableDropdownMenuItem
 import com.vayunmathur.library.ui.appBarScrollBehavior
 import com.vayunmathur.library.util.NavBackStack
 import com.vayunmathur.library.util.ResultEffect
@@ -305,6 +306,7 @@ fun EditContactPage(backStack: NavBackStack<Route>, viewModel: ContactViewModel,
                 onTypeChange = { idx, opt -> viewModel.updateEditDraft { it.copy(phoneNumbers = it.phoneNumbers.toMutableList().also { l -> l[idx] = l[idx].withType(opt) }) } },
                 onRemove = { idx -> viewModel.updateEditDraft { it.copy(phoneNumbers = it.phoneNumbers.toMutableList().also { l -> l.removeAt(idx) }) } },
                 onAdd = { viewModel.updateEditDraft { it.copy(phoneNumbers = it.phoneNumbers + ContactDetail.default<PhoneNumber>()) } },
+                currentType = { it.type },
                 keyboardType = KeyboardType.Phone,
                 isCustom = { it.type == CDKPhone.TYPE_CUSTOM },
                 customLabel = { it.label },
@@ -334,6 +336,7 @@ fun EditContactPage(backStack: NavBackStack<Route>, viewModel: ContactViewModel,
                 onTypeChange = { idx, opt -> viewModel.updateEditDraft { it.copy(emails = it.emails.toMutableList().also { l -> l[idx] = l[idx].withType(opt) }) } },
                 onRemove = { idx -> viewModel.updateEditDraft { it.copy(emails = it.emails.toMutableList().also { l -> l.removeAt(idx) }) } },
                 onAdd = { viewModel.updateEditDraft { it.copy(emails = it.emails + ContactDetail.default<Email>()) } },
+                currentType = { it.type },
                 keyboardType = KeyboardType.Email,
                 isCustom = { it.type == CDKEmail.TYPE_CUSTOM },
                 customLabel = { it.label },
@@ -359,6 +362,7 @@ fun EditContactPage(backStack: NavBackStack<Route>, viewModel: ContactViewModel,
                 onTypeChange = { idx, opt -> viewModel.updateEditDraft { it.copy(addresses = it.addresses.toMutableList().also { l -> l[idx] = l[idx].withType(opt) }) } },
                 onRemove = { idx -> viewModel.updateEditDraft { it.copy(addresses = it.addresses.toMutableList().also { l -> l.removeAt(idx) }) } },
                 onAdd = { viewModel.updateEditDraft { it.copy(addresses = it.addresses + ContactDetail.default<Address>()) } },
+                currentType = { it.type },
                 isCustom = { it.type == CDKStructuredPostal.TYPE_CUSTOM },
                 customLabel = { it.label },
                 onLabelChange = { idx, v -> viewModel.updateEditDraft { it.copy(addresses = it.addresses.toMutableList().also { l -> l[idx] = l[idx].withLabel(v) }) } },
@@ -458,27 +462,31 @@ fun AccountChooser(
         )
         DropdownMenu(expanded, { expanded = false }) {
             if (accounts.none { it.name.isBlank() && it.type.isBlank() }) {
-                DropdownMenuItem(
-                    text = { Text(onDevice) },
+                SelectableDropdownMenuItem(
+                    selected = accountName.isEmpty() && accountType.isEmpty(),
                     onClick = {
                         onAccountChange("", "")
                         expanded = false
-                    }
+                    },
+                    text = { Text(onDevice) },
+                    selectedLeadingIcon = { IconCheck() },
                 )
             }
             accounts.forEach { account ->
                 val key = "${account.type}|${account.name}"
                 val label = simLabels[key] ?: account.name.ifEmpty { onDevice }
-                DropdownMenuItem(
+                SelectableDropdownMenuItem(
+                    selected = currentKey == key,
+                    onClick = {
+                        onAccountChange(account.name, account.type)
+                        expanded = false
+                    },
                     text = { Text(when {
                         simLabels.containsKey(key) -> label
                         account.type.isBlank() -> label
                         else -> stringResource(R.string.account_display_format, label, account.type)
                     }) },
-                    onClick = {
-                        onAccountChange(account.name, account.type)
-                        expanded = false
-                    }
+                    selectedLeadingIcon = { IconCheck() },
                 )
             }
         }
@@ -528,10 +536,16 @@ private fun NameAffixChooser(
             // The clear option is listed by its localized name but stores an empty affix, so
             // the contact does not end up with the word "None" as its title.
             (listOf(none) + options).forEach { option ->
-                DropdownMenuItem(text = { Text(option) }, onClick = {
-                    onValueChange(if (option == none) "" else option)
-                    expanded = false
-                })
+                val affix = if (option == none) "" else option
+                SelectableDropdownMenuItem(
+                    selected = value == affix,
+                    onClick = {
+                        onValueChange(affix)
+                        expanded = false
+                    },
+                    text = { Text(option) },
+                    selectedLeadingIcon = { IconCheck() },
+                )
             }
         }
     }
@@ -642,12 +656,14 @@ private fun ColumnScope.DateDetailsSection(
                             expanded = dropdownExpanded,
                             onDismissRequest = { dropdownExpanded = false }) {
                             options.forEach { option ->
-                                DropdownMenuItem(
+                                SelectableDropdownMenuItem(
+                                    selected = detail.type == option,
                                     onClick = {
                                         onDetailsChange(details.toMutableList().also { it[index] = detail.withType(option) })
                                         dropdownExpanded = false
                                     },
-                                    text = { Text(ContactDetail.default<Event>().withType(option).typeString(context)) }
+                                    text = { Text(ContactDetail.default<Event>().withType(option).typeString(context)) },
+                                    selectedLeadingIcon = { IconCheck() },
                                 )
                             }
                         }
