@@ -32,6 +32,7 @@
 #[cfg(test)]
 pub mod reference;
 pub mod mobilefacenet;
+pub mod maia;
 pub mod nllb;
 pub mod ppocr_det;
 pub mod ppocr_rec;
@@ -222,6 +223,17 @@ pub enum Kind {
     /// `d_model` 120 that is 120 loads a stride apart per position, which is nothing
     /// against what a contiguous layout would cost in permutes.
     LayerNorm,
+    /// Root-mean-square normalisation over the channel axis, with a per-channel gain.
+    ///
+    /// [`Kind::LayerNorm`] without the mean subtraction and without beta:
+    /// `x / sqrt(mean(x^2) + eps) * gamma`. Sixteen uses, all Maia3's `norm1` / `norm2`.
+    ///
+    /// Separate from [`Kind::LayerNorm`] rather than a flag on it because the difference
+    /// is also a difference in *weights read* — one rank-1 tensor rather than two — and
+    /// [`Kind::weight_reads`] is what `vulkan::segment` uses to decide which slice of the
+    /// `.maml` a pass has to have resident. A flag would make that arm depend on the push
+    /// block's contents rather than its kind.
+    RmsNorm,
     /// `S[h][i][j] = scale * sum_d Q[h][d][i] * K[h][d][j]`, attention's score map.
     ///
     /// Contracts over the *middle* axis of `[heads, head_dim, T]`, which is what makes
@@ -250,6 +262,24 @@ pub enum Kind {
     /// from would break four shipping nets at once if it were ever left unset. See
     /// `shaders/softmax_causal.comp`.
     SoftmaxCausal,
+    /// [`Kind::Softmax`] over only the leading `prefix + 1` entries of each row.
+    ///
+    /// The decode counterpart. Once a decode plan is built once at a maximum context rather than
+    /// rebuilt per token, a score-map row is as wide as that maximum but only its leading span was
+    /// written this step; the rest holds whatever the previous step left. Normalising the whole
+    /// row would fold that stale data into the maximum and the sum.
+    ///
+    /// A separate pipeline for the same reason [`Kind::SoftmaxCausal`] is one, and more so: plain
+    /// [`Kind::Softmax`] is shared by PP-OCRv5 recognition, both Supertonic encoders, whisper,
+    /// maia and NLLB's own encoder. See `shaders/softmax_prefix.comp`.
+    SoftmaxPrefix,
+    /// Write one position into a KV cache at the row [`crate::vulkan::run::StepParams::prefix`]
+    /// names.
+    ///
+    /// The only op whose *destination* is decided at submit time rather than at record time, and
+    /// the reason a decode plan can be recorded once. See `shaders/cache_write.comp` and
+    /// [`Builder::cache_write`].
+    CacheWrite,
     /// `O[h][d][i] = sum_j S[h][i][j] * V[h][d][j]`, attention's weighted sum.
     ///
     /// `O[h][d][i] = sum_j S[h][i][j] * V[h][d][j]`, attention's weighted sum.
@@ -420,6 +450,32 @@ pub struct Push {
     /// Not always the element count: [`Kind::LayerNorm`] and [`Kind::Softmax`] each run
     /// one invocation over a whole reduction, so for them this is the number of those.
     pub count: u32,
+    /// Non-zero when the attended key count comes from the step-params buffer, not from here.
+    ///
+    /// A decode step attends over one more position each token. Baking that into the plan is what
+    /// made [`crate::vulkan::reshape::Reshaped`] re-record per token. When this is set, the three
+    /// cached-attention kinds read `prefix + 1` from
+    /// [`crate::vulkan::run::StepParams`] instead, and `in_w` / `out_w` stop being the key *count*
+    /// and become only the key *stride* — the maximum the plan was built for.
+    ///
+    /// Zero for every net that does not decode, which is all of them but NLLB and whisper, so
+    /// their recordings and their numbers are untouched.
+    pub dyn_keys: u32,
+}
+
+/// Which span of a score-map row a [`Node::Softmax`] normalises.
+///
+/// A dedicated pipeline each, rather than one shader branching on a push field, because
+/// [`Kind::Softmax`] is shared by six shipping nets and a field left unset would break all of
+/// them at once. See [`Kind::SoftmaxCausal`] and [`Kind::SoftmaxPrefix`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SoftmaxMode {
+    /// The whole row.
+    Full,
+    /// Up to and including the diagonal; the rest is written as zero.
+    Causal,
+    /// The leading `prefix + 1` entries, the rest left untouched.
+    Prefix,
 }
 
 /// One step of a compiled forward pass.
@@ -498,8 +554,12 @@ impl Kind {
                 reads.push(WeightRead { at: elems(push.bias), field: "bias" });
             }
             // One table each: the relative position table, the literal to copy out, the
-            // embedding rows.
-            Kind::AttnScoresRelative | Kind::AttnApplyRelative | Kind::Constant | Kind::Embed => {
+            // embedding rows. RMS norm is here too: gamma with no beta.
+            Kind::AttnScoresRelative
+            | Kind::AttnApplyRelative
+            | Kind::Constant
+            | Kind::Embed
+            | Kind::RmsNorm => {
                 reads.push(WeightRead { at: elems(push.weight), field: "weight" });
             }
             // Purely elementwise or arena-only. `attn_scores`, `softmax`, `attn_apply` and
@@ -519,6 +579,8 @@ impl Kind {
             | Kind::AttnScoresCached
             | Kind::Softmax
             | Kind::SoftmaxCausal
+            | Kind::SoftmaxPrefix
+            | Kind::CacheWrite
             | Kind::AttnApply
             | Kind::AttnApplyCached
             | Kind::Rotary => {}
@@ -704,6 +766,12 @@ enum Node {
         beta: u32,
         epsilon: f32,
     },
+    RmsNorm {
+        input: Id,
+        out: Id,
+        gamma: u32,
+        epsilon: f32,
+    },
     AttnScores {
         q: Id,
         k: Id,
@@ -718,6 +786,8 @@ enum Node {
         out: Id,
         heads: u32,
         scale: f32,
+        /// Take the key count from the step rather than the cache's shape. See [`Push::dyn_keys`].
+        dynamic: bool,
     },
     /// One query against a position-major V cache. See [`Kind::AttnApplyCached`].
     AttnApplyCached {
@@ -725,12 +795,19 @@ enum Node {
         cache: Id,
         out: Id,
         heads: u32,
+        /// Take the key count from the step rather than the cache's shape. See [`Push::dyn_keys`].
+        dynamic: bool,
     },
     Softmax {
         input: Id,
         out: Id,
-        /// Truncate each row at the diagonal. See [`Kind::SoftmaxCausal`].
-        causal: bool,
+        /// Which of the three softmax shaders normalises the row.
+        mode: SoftmaxMode,
+    },
+    /// Append `row` to `cache` at the step's prefix. See [`Kind::CacheWrite`].
+    CacheWrite {
+        row: Id,
+        cache: Id,
     },
     /// Concatenation along the **width** axis, one strided run per channel row. See
     /// [`Builder::concat_positions`].
@@ -1370,6 +1447,18 @@ impl<'a> Builder<'a> {
         out
     }
 
+    /// Root-mean-square normalisation over the channel axis, with a per-channel gain.
+    ///
+    /// [`layer_norm`](Self::layer_norm) without the mean subtraction and without beta, so
+    /// `weight_index` is a single tensor rather than the start of a pair.
+    pub fn rms_norm(&mut self, input: Id, weight_index: usize, epsilon: f32) -> Id {
+        let shape = self.shape_of(input);
+        let gamma = self.weight(weight_index, &[shape.c]);
+        let out = self.tensor(shape);
+        self.nodes.push(Node::RmsNorm { input, out, gamma, epsilon });
+        out
+    }
+
     /// Attention scores from `q` and `k`, both `[d_model, 1, T]`, into `[heads, T, T]`.
     ///
     /// The `1 / sqrt(head_dim)` scale is derived here rather than taken as an argument:
@@ -1390,6 +1479,18 @@ impl<'a> Builder<'a> {
     /// One query is what makes a causal mask unnecessary — a decode step attends over exactly the
     /// positions in the cache, so the prefix bound is the tensor's own length.
     pub fn attn_scores_cached(&mut self, q: Id, cache: Id, heads: u32) -> Id {
+        self.attn_scores_cached_at(q, cache, heads, false)
+    }
+
+    /// [`Builder::attn_scores_cached`] with the key count supplied by the step, not the shape.
+    ///
+    /// `cache` is then sized to the **maximum** context the plan is built for, and only its
+    /// leading `prefix + 1` positions are attended. See [`Push::dyn_keys`].
+    pub fn attn_scores_cached_dynamic(&mut self, q: Id, cache: Id, heads: u32) -> Id {
+        self.attn_scores_cached_at(q, cache, heads, true)
+    }
+
+    fn attn_scores_cached_at(&mut self, q: Id, cache: Id, heads: u32, dynamic: bool) -> Id {
         let (sq, sc) = (self.shape_of(q), self.shape_of(cache));
         if sq.h != 1 || sq.w != 1 {
             self.fail(format!(
@@ -1409,7 +1510,7 @@ impl<'a> Builder<'a> {
         let head_dim = sq.c.checked_div(heads).unwrap_or(0);
         let scale = 1.0 / (head_dim.max(1) as f32).sqrt();
         let out = self.tensor(Shape::new(heads, 1, sc.c));
-        self.nodes.push(Node::AttnScoresCached { q, cache, out, heads, scale });
+        self.nodes.push(Node::AttnScoresCached { q, cache, out, heads, scale, dynamic });
         out
     }
 
@@ -1419,6 +1520,19 @@ impl<'a> Builder<'a> {
     /// `[d_model, 1, 1]` — back in the channel-major layout the next projection reads, so the
     /// cache layout is confined to the two operands that are caches.
     pub fn attn_apply_cached(&mut self, probs: Id, cache: Id, heads: u32) -> Id {
+        self.attn_apply_cached_at(probs, cache, heads, false)
+    }
+
+    /// [`Builder::attn_apply_cached`] with the key count supplied by the step, not the shape.
+    ///
+    /// Must be paired with [`Builder::attn_scores_cached_dynamic`] and
+    /// [`Builder::softmax_prefix`]: all three read the same bound, and mixing a dynamic score map
+    /// with a full-width sum would fold unattended positions into the result.
+    pub fn attn_apply_cached_dynamic(&mut self, probs: Id, cache: Id, heads: u32) -> Id {
+        self.attn_apply_cached_at(probs, cache, heads, true)
+    }
+
+    fn attn_apply_cached_at(&mut self, probs: Id, cache: Id, heads: u32, dynamic: bool) -> Id {
         let (sp, sc) = (self.shape_of(probs), self.shape_of(cache));
         if sp.c != heads || sp.h != 1 {
             self.fail(format!("cached attention over probs {sp:?} with {heads} heads"));
@@ -1432,7 +1546,7 @@ impl<'a> Builder<'a> {
             self.fail(format!("{} channels do not split into {heads} heads", sc.w));
         }
         let out = self.tensor(Shape::new(sc.w, 1, 1));
-        self.nodes.push(Node::AttnApplyCached { probs, cache, out, heads });
+        self.nodes.push(Node::AttnApplyCached { probs, cache, out, heads, dynamic });
         out
     }
 
@@ -1479,6 +1593,54 @@ impl<'a> Builder<'a> {
         (self.tensor(Shape::new(heads, sq.w, sk.w)), scale)
     }
 
+    /// A tensor that keeps its contents from one execution to the next.
+    ///
+    /// The arena is one device-local buffer that nothing clears between submits, so a tensor the
+    /// allocator never hands to anything else is still holding last execution's values when the
+    /// next one starts. That is what lets a decoder keep its KV cache on the device instead of
+    /// shipping it back to the host and in again every token.
+    ///
+    /// Unlike [`Builder::input`] this is **not** a plan input, which is the point: an input is
+    /// overwritten from the staging buffer at the top of every recording, so a cache declared as
+    /// one would be erased by the very submit meant to extend it.
+    ///
+    /// # What resets it
+    ///
+    /// [`crate::vulkan::run::Net::rebuild`] may allocate a larger arena and rebind to it, which
+    /// drops the contents. For a decoder that is the correct behaviour and not a hazard: a
+    /// rebuild happens when the plan's shape changes, which for NLLB means a new source sentence,
+    /// and a new sentence must start from an empty cache anyway.
+    ///
+    /// # Cost
+    ///
+    /// Pinned for the whole pass, so it never shares space with an activation. A cache sized for
+    /// the maximum context is charged in full to the arena whether or not a sentence reaches it.
+    pub fn persistent(&mut self, shape: Shape) -> Id {
+        let id = self.tensor(shape);
+        self.pinned.push(id);
+        id
+    }
+
+    /// Write `row` into `cache` at the row the step's prefix names.
+    ///
+    /// `cache` must come from [`Builder::persistent`] and be `[max_positions, 1, d_model]`; `row`
+    /// is the `[d_model, 1, 1]` a projection just produced. Returns nothing, because the cache is
+    /// not a value: it is a region later ops read by identity.
+    pub fn cache_write(&mut self, row: Id, cache: Id) {
+        let (sr, sc) = (self.shape_of(row), self.shape_of(cache));
+        if sr.len() != sc.w {
+            self.fail(format!(
+                "appending {sr:?} to a cache {sc:?}: a position is the cache's width, \
+                 {} elements",
+                sc.w
+            ));
+        }
+        if sc.h != 1 {
+            self.fail(format!("a cache is [max_positions, 1, d_model], not {sc:?}"));
+        }
+        self.nodes.push(Node::CacheWrite { row, cache });
+    }
+
     /// Softmax over the last axis, which for a score map is one query's distribution.
     pub fn softmax(&mut self, input: Id) -> Id {
         let shape = self.shape_of(input);
@@ -1486,7 +1648,7 @@ impl<'a> Builder<'a> {
             self.fail(format!("a softmax over {shape:?}, whose last axis is empty"));
         }
         let out = self.tensor(shape);
-        self.nodes.push(Node::Softmax { input, out, causal: false });
+        self.nodes.push(Node::Softmax { input, out, mode: SoftmaxMode::Full });
         out
     }
 
@@ -1508,7 +1670,21 @@ impl<'a> Builder<'a> {
             ));
         }
         let out = self.tensor(shape);
-        self.nodes.push(Node::Softmax { input, out, causal: true });
+        self.nodes.push(Node::Softmax { input, out, mode: SoftmaxMode::Causal });
+        out
+    }
+
+    /// [`Builder::softmax`] over only the leading `prefix + 1` entries of each row.
+    ///
+    /// For a decode plan built once at a maximum context: the row is `shape.w` wide, but the step
+    /// supplies how much of it was written. See [`Kind::SoftmaxPrefix`].
+    pub fn softmax_prefix(&mut self, input: Id) -> Id {
+        let shape = self.shape_of(input);
+        if shape.w == 0 {
+            self.fail(format!("a prefix softmax over {shape:?}, whose last axis is empty"));
+        }
+        let out = self.tensor(shape);
+        self.nodes.push(Node::Softmax { input, out, mode: SoftmaxMode::Prefix });
         out
     }
 
@@ -2177,6 +2353,30 @@ impl<'a> Builder<'a> {
                     invocations: positions,
                 });
             }
+            Node::RmsNorm { input, out, gamma, epsilon } => {
+                let so = shape(*out);
+                // Same dispatch shape as the layer norm above: one invocation per position,
+                // reducing over the channels.
+                let positions = so.h * so.w;
+                ops.push(Op::Dispatch {
+                    kind: Kind::RmsNorm,
+                    push: Push {
+                        in0: at(*input)?,
+                        out: at(*out)?,
+                        weight: *gamma,
+                        in_c: so.c,
+                        in_h: so.h,
+                        in_w: so.w,
+                        out_c: so.c,
+                        out_h: so.h,
+                        out_w: so.w,
+                        param1_bits: epsilon.to_bits(),
+                        count: positions,
+                        ..Push::default()
+                    },
+                    invocations: positions,
+                });
+            }
             Node::AttnScores { q, k, out, heads, scale } => {
                 let (si, so) = (shape(*q), shape(*out));
                 ops.push(Op::Dispatch {
@@ -2199,7 +2399,7 @@ impl<'a> Builder<'a> {
                     invocations: so.len(),
                 });
             }
-            Node::AttnScoresCached { q, cache, out, heads, scale } => {
+            Node::AttnScoresCached { q, cache, out, heads, scale, dynamic } => {
                 let (sq, so) = (shape(*q), shape(*out));
                 ops.push(Op::Dispatch {
                     kind: Kind::AttnScoresCached,
@@ -2218,12 +2418,13 @@ impl<'a> Builder<'a> {
                         group: *heads,
                         param0_bits: scale.to_bits(),
                         count: so.len(),
+                        dyn_keys: u32::from(*dynamic),
                         ..Push::default()
                     },
                     invocations: so.len(),
                 });
             }
-            Node::AttnApplyCached { probs, cache, out, heads } => {
+            Node::AttnApplyCached { probs, cache, out, heads, dynamic } => {
                 let (sc, so) = (shape(*cache), shape(*out));
                 ops.push(Op::Dispatch {
                     kind: Kind::AttnApplyCached,
@@ -2235,13 +2436,15 @@ impl<'a> Builder<'a> {
                         // channel count because attention preserves the width.
                         in_c: so.c,
                         in_h: 1,
-                        // The key count, which is the cache's *channel* count in this layout.
+                        // The key stride, which is the cache's *channel* count in this layout.
+                        // When `dynamic`, only the leading `prefix + 1` of them are summed.
                         in_w: sc.c,
                         out_c: so.c,
                         out_h: so.h,
                         out_w: so.w,
                         group: *heads,
                         count: so.len(),
+                        dyn_keys: u32::from(*dynamic),
                         ..Push::default()
                     },
                     invocations: so.len(),
@@ -2328,13 +2531,40 @@ impl<'a> Builder<'a> {
                     invocations: so.len(),
                 });
             }
-            Node::Softmax { input, out, causal } => {
+            Node::CacheWrite { row, cache } => {
+                let (sr, sc) = (shape(*row), shape(*cache));
+                ops.push(Op::Dispatch {
+                    kind: Kind::CacheWrite,
+                    push: Push {
+                        in0: at(*row)?,
+                        out: at(*cache)?,
+                        // The distance between cache rows, and the length of the one written.
+                        in_c: sc.w,
+                        // Positions the cache can hold, so a step past the end writes nothing.
+                        in_h: sc.c,
+                        in_w: 1,
+                        // The cache's real dimensions: their product is the region
+                        // `assert_no_aliasing` takes this op to write.
+                        out_c: sc.c,
+                        out_h: sc.h,
+                        out_w: sc.w,
+                        count: sr.len(),
+                        ..Push::default()
+                    },
+                    invocations: sr.len(),
+                });
+            }
+            Node::Softmax { input, out, mode } => {
                 let so = shape(*out);
                 // One invocation per row of the last axis, each normalising `out_w`
                 // contiguous elements, so the dispatch is rows rather than elements.
                 let rows = so.c * so.h;
                 ops.push(Op::Dispatch {
-                    kind: if *causal { Kind::SoftmaxCausal } else { Kind::Softmax },
+                    kind: match mode {
+                        SoftmaxMode::Full => Kind::Softmax,
+                        SoftmaxMode::Causal => Kind::SoftmaxCausal,
+                        SoftmaxMode::Prefix => Kind::SoftmaxPrefix,
+                    },
                     push: Push {
                         in0: at(*input)?,
                         out: at(*out)?,
@@ -2345,6 +2575,7 @@ impl<'a> Builder<'a> {
                         out_h: so.h,
                         out_w: so.w,
                         count: rows,
+                        dyn_keys: u32::from(*mode == SoftmaxMode::Prefix),
                         ..Push::default()
                     },
                     invocations: rows,
@@ -2445,6 +2676,7 @@ impl Node {
             | Node::Binary { out, .. }
             | Node::Affine { out, .. }
             | Node::LayerNorm { out, .. }
+            | Node::RmsNorm { out, .. }
             | Node::AttnScores { out, .. }
             | Node::AttnScoresCached { out, .. }
             | Node::AttnApplyCached { out, .. }
@@ -2459,6 +2691,9 @@ impl Node {
             | Node::Rotary { out, .. }
             | Node::ConcatPositions { out, .. }
             | Node::Concat { out, .. } => *out,
+            // The cache is the destination, and it is pinned, so `finish` finds it already
+            // allocated rather than making a fresh tensor for it.
+            Node::CacheWrite { cache, .. } => *cache,
         }
     }
 
@@ -2470,6 +2705,7 @@ impl Node {
             | Node::Resize { input, .. }
             | Node::Affine { input, .. }
             | Node::LayerNorm { input, .. }
+            | Node::RmsNorm { input, .. }
             | Node::Softmax { input, .. }
             | Node::Embed { ids: input, .. }
             | Node::SliceChannels { input, .. }
@@ -2487,6 +2723,10 @@ impl Node {
             }
             Node::Concat { parts, .. } => parts.clone(),
             Node::ConcatPositions { parts, .. } => parts.clone(),
+            // The cache is listed alongside the row so that neither can be freed under this op.
+            // The cache is pinned and so was never a candidate, but saying it here keeps the
+            // dependency visible to `last_use` rather than relying on that.
+            Node::CacheWrite { row, cache } => vec![*row, *cache],
             // The only op with no arena input at all: it reads the weights file.
             Node::Constant { .. } => Vec::new(),
         }
@@ -2745,7 +2985,7 @@ pub(crate) mod tests {
     fn the_push_block_has_no_padding() {
         // The shaders read it at fixed offsets, so a gap Rust inserted would shift
         // every field after it.
-        assert_eq!(std::mem::size_of::<Push>(), 26 * 4);
+        assert_eq!(std::mem::size_of::<Push>(), 27 * 4);
         assert_eq!(std::mem::align_of::<Push>(), 4);
         // Vulkan only guarantees 128 bytes of push constants, so this is the ceiling the
         // block has to stay under however many modes get added to it.

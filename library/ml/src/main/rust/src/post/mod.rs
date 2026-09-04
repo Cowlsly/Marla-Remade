@@ -13,6 +13,7 @@
 pub mod crop;
 pub mod ctc;
 pub mod dbnet;
+pub mod maia;
 pub mod nms;
 pub mod sentencepiece;
 pub mod supertonic;

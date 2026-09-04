@@ -39,7 +39,7 @@ class MetadataPreviews {
     private val now = System.currentTimeMillis()
 
     private val games = listOf(
-        HubGameEntity("chess", "com.vayunmathur.games.chess", "Chess", "Classic chess with puzzles and Stockfish", "1.0", registeredAt = now - 28 * DAY, lastSeenAt = now - HOUR, lastPlayedAt = now - HOUR, totalPlaytimeMs = 5 * HOUR + 23 * 60_000L, totalSessions = 42),
+        HubGameEntity("chess", "com.vayunmathur.games.chess", "Chess", "Classic chess with puzzles and a human-like AI", "1.0", registeredAt = now - 28 * DAY, lastSeenAt = now - HOUR, lastPlayedAt = now - HOUR, totalPlaytimeMs = 5 * HOUR + 23 * 60_000L, totalSessions = 42),
         HubGameEntity("alchemist", "com.vayunmathur.games.alchemist", "Alchemist", "Combine elements", registeredAt = now - 25 * DAY, lastSeenAt = now - 3 * HOUR, lastPlayedAt = now - 3 * HOUR, totalPlaytimeMs = 3 * HOUR, totalSessions = 28),
         HubGameEntity("pipes", "com.vayunmathur.games.pipes", "Pipes", "Connect the pipes", registeredAt = now - 20 * DAY, lastSeenAt = now - 5 * HOUR, lastPlayedAt = now - 5 * HOUR, totalPlaytimeMs = 2 * HOUR + 45 * 60_000L, totalSessions = 35),
         HubGameEntity("solitaire", "com.vayunmathur.games.solitaire", "Solitaire", "Classic Klondike", registeredAt = now - 18 * DAY, lastSeenAt = now - 8 * HOUR, lastPlayedAt = now - 8 * HOUR, totalPlaytimeMs = 4 * HOUR, totalSessions = 51),

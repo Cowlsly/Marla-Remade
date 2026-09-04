@@ -19,11 +19,14 @@ dependencyResolutionManagement {
     repositories {
         google()
         mavenCentral()
-        // JitPack serves only the personal forks that live there: Stockfish-Library
-        // (games:chess) and com.github.luben:zstd-jni. Scoped to com.github.* because JitPack
+        // JitPack serves one third-party coordinate, com.github.luben:zstd-jni. Scoped to
+        // com.github.* because JitPack
         // answers unknown coordinates with 401/429 rather than 404, and Gradle treats that as a hard
         // failure — an unscoped JitPack breaks resolution of anything Central hasn't yet
         // propagated (e.g. a freshly published artifact).
+        //
+        // No personal fork is served from here any more: ncnn-android went with ncnn, and
+        // Stockfish-Library went when `:games:chess` moved to Maia3 on `:library:ml`.
         //
         // `mavenLocal()` used to come first, so that a freshly built ncnn-android resolved even
         // when JitPack was rate-limited. Nothing is built locally now that SMaLL-100 runs on
@@ -123,6 +126,7 @@ include(":launcher")
 include(":cast")
 include(":cast:protocol")
 include(":cast:tv")
+include(":mapcompare")
 
 // Personal / private app modules live under personal/ (gitignored). Included only
 // when present so the public repo still configures without them.

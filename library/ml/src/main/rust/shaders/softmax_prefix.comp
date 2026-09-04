@@ -1,0 +1,53 @@
+#version 450
+//! Softmax over the first `step_params.prefix + 1` entries of each row, not the whole row.
+//!
+//! # Why not a flag in `softmax.comp`
+//!
+//! `softmax.comp` is shared by PP-OCRv5 recognition, both Supertonic encoders, whisper, maia and
+//! NLLB's encoder. It is the one shader a decode change most wants to touch and least should: a
+//! branch added there is a branch every one of those nets executes on every row, and a mistake in
+//! it is a mistake in all of them at once. This is a separate pipeline, reached only by
+//! `Kind::SoftmaxPrefix`, so nothing that does not decode can be affected by it.
+//!
+//! # Row length versus row stride
+//!
+//! The plan is built once at a maximum context, so a score map row is `p.out_w` elements wide but
+//! only the leading `step_params.prefix + 1` of them were written by
+//! `attn_scores_cached.comp` this step. The rest are stale values from earlier steps — not zeros,
+//! not `-inf`. Reading them would put finite garbage into both the maximum and the sum, so every
+//! one of the three passes stops at the attended count while the row *offset* keeps using the
+//! full stride.
+//!
+//! The output is written over the same leading span. Entries past it keep whatever they held,
+//! which is safe precisely because `attn_apply_cached.comp` sums over the same bound.
+
+#include "common.glsl"
+
+void main() {
+    uint row = global_index();
+    if (row >= p.count) {
+        return;
+    }
+    uint stride = p.out_w;
+    uint keys = attended_keys(stride);
+    uint at = p.in0 + row * stride;
+
+    // The most negative fp16 rather than -inf, matching `softmax.comp`: a decode step always
+    // attends over at least its own position, so the row is never empty and the seed is never
+    // the answer.
+    float peak = -65504.0;
+    for (uint i = 0u; i < keys; i++) {
+        peak = max(peak, float(arena[at + i]));
+    }
+
+    float total = 0.0;
+    for (uint i = 0u; i < keys; i++) {
+        total += exp(float(arena[at + i]) - peak);
+    }
+    float inverse = 1.0 / total;
+
+    uint out_row = p.out_at + row * stride;
+    for (uint i = 0u; i < keys; i++) {
+        arena[out_row + i] = float16_t(exp(float(arena[at + i]) - peak) * inverse);
+    }
+}

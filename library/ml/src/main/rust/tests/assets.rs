@@ -14,8 +14,8 @@
 use std::path::{Path, PathBuf};
 
 use modelrunner::nets::{
-    mobilefacenet, ppocr_det, ppocr_rec, scrfd, selfie, supertonic_duration, supertonic_sampler,
-    supertonic_text, supertonic_vocoder, tinyclip, u2netp, whisper,
+    maia, mobilefacenet, ppocr_det, ppocr_rec, scrfd, selfie, supertonic_duration,
+    supertonic_sampler, supertonic_text, supertonic_vocoder, tinyclip, u2netp, whisper,
 };
 use modelrunner::post::ctc;
 use modelrunner::weights::{graph, Weights};
@@ -150,6 +150,72 @@ fn the_shipped_character_dictionary_matches_the_recogniser_label_space() {
     assert_eq!(dictionary.label(1), Some("0"));
     assert_eq!(dictionary.label(11), Some("A"));
     assert_eq!(dictionary.label(ctc::LOGITS - 1), Some(" "));
+}
+
+#[test]
+fn the_shipped_maia_asset_builds_the_maia_forward_pass() {
+    // Against the real 259-tensor file, which is what checks `collect_maia`'s emission order
+    // against `nets::maia`'s layout constants: `Builder::conv_int8` asks for every tensor by
+    // index *and* dimensions, so a transposed projection, the fused q/k/v split done the wrong
+    // way, an RMS norm emitted with a beta it does not have, or a scale and a bias swapped all
+    // fail here rather than on device.
+    let weights = load("games/chess/src/main/assets/maia3-5m.maml", graph::MAIA);
+    assert_eq!(weights.len(), maia::TENSORS);
+
+    let plan = maia::build(&weights).expect("the shipped asset matches nets::maia");
+    let shapes: Vec<modelrunner::nets::Shape> =
+        plan.outputs.iter().map(|out| out.shape).collect();
+    assert_eq!(
+        shapes,
+        vec![
+            modelrunner::nets::Shape::new(1, maia::SQUARES, maia::SQUARES),
+            modelrunner::nets::Shape::new(maia::PROMOTIONS, 1, maia::SQUARES),
+        ]
+    );
+}
+
+#[test]
+fn the_shipped_maia_asset_blends_the_two_elo_embeddings_on_the_host() {
+    // The host blend, against the real file. `elo_embedding` is the only reader of either
+    // table, and upstream's naming is inverted — `weight_low` is `elo / 5000` and multiplies
+    // `elo_embedding_low` — so at elo 0 the vector is entirely the *high* embedding. A blend
+    // computed the intuitive way round produces a perfectly plausible vector, which is why what
+    // is pinned here is the relation between the three points rather than any one of them.
+    let weights = load("games/chess/src/main/assets/maia3-5m.maml", graph::MAIA);
+    let table = weights.offsets();
+
+    let low = maia::elo_embedding(modelrunner::weights::Reader::new(&table, &weights), 0.0)
+        .expect("the blend at elo 0");
+    let high = maia::elo_embedding(
+        modelrunner::weights::Reader::new(&table, &weights),
+        maia::ELO_MAX,
+    )
+    .expect("the blend at elo 5000");
+    let middle = maia::elo_embedding(
+        modelrunner::weights::Reader::new(&table, &weights),
+        maia::ELO_MAX / 2.0,
+    )
+    .expect("the blend at elo 2500");
+
+    assert_eq!(low.len(), maia::ELO_DIM as usize);
+    assert!(low.iter().any(|&v| v != 0.0), "the blend produced zeros");
+    // The two ends are different vectors, which is what makes the difficulty setting mean
+    // anything at all.
+    assert!(low.iter().zip(&high).any(|(a, b)| a != b), "both ends are the same vector");
+    // And the midpoint is exactly halfway, because the blend is linear.
+    for index in 0..maia::ELO_DIM as usize {
+        let want = (low[index] + high[index]) / 2.0;
+        assert!(
+            (middle[index] - want).abs() < 1e-4,
+            "channel {index}: {} against {want}",
+            middle[index]
+        );
+    }
+
+    // Past either end it clamps rather than extrapolating, as `torch.clamp` does.
+    let beyond = maia::elo_embedding(modelrunner::weights::Reader::new(&table, &weights), 9000.0)
+        .expect("the blend past the top");
+    assert_eq!(beyond, high);
 }
 
 #[test]

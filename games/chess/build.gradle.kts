@@ -14,12 +14,14 @@ android {
         applicationId = "com.vayunmathur.games.chess"
     }
     androidResources {
-        noCompress += "nnue"
+        // Maia3's weights are read in place through an `AssetFileDescriptor`, and
+        // `AssetManager.openFd` throws for a deflated entry. Costs nothing on download size:
+        // fp16 weights barely compress.
+        noCompress += "maml"
     }
 }
 
 dependencies {
     implementation(project(":sdk:games"))
-    implementation(libs.stockfish.library)
-
+    implementation(project(":library:ml"))
 }

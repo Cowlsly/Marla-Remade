@@ -41,6 +41,59 @@ use super::context::Context;
 use super::pipeline::{Pipelines, MAX_WORKGROUPS_PER_DIM, WORKGROUP};
 use super::segment::Segments;
 
+/// Values a recorded command buffer reads from memory rather than from its own recording.
+///
+/// # Why this exists
+///
+/// A decode step attends over every position decoded so far, so the loop bound grows by one each
+/// token. That bound lived in the [`Plan`] — in a push constant and in the dispatch's group count
+/// — and both are *baked into the recording*, so growing it meant re-recording: a
+/// `device_wait_idle` under the queue lock, a fresh plan, and every dispatch emitted again, per
+/// token. See [`super::reshape::Reshaped`].
+///
+/// A storage buffer is the one thing a recorded command buffer reads late. Putting the bound here
+/// lets the same recording serve every step, and a step becomes a memcpy of a few bytes.
+///
+/// # Layout
+///
+/// `repr(C)` and all `u32`, matching the `Params` block in `shaders/common.glsl` field for field.
+/// `std430` lays a struct of `uint`s out with no padding, so the two agree without alignment
+/// rules having to be restated on either side.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct StepParams {
+    /// Cache positions already written, and so the index the current step writes at.
+    ///
+    /// A cached-attention op attends over `prefix + 1` keys: the prefix plus this step's own.
+    pub prefix: u32,
+    /// First position a sliding-window attention may attend to.
+    ///
+    /// Zero means attend from the start, which is every model the runtime has today. Gemma 3n
+    /// alternates local and global layers, which is what this is for.
+    pub window_start: u32,
+}
+
+impl StepParams {
+    /// Bytes to allocate for the params buffer.
+    ///
+    /// Rounded well past `size_of::<StepParams>()` so that adding a field, or appending the
+    /// `VkDispatchIndirectCommand`s an indirect dispatch reads, does not change the allocation
+    /// and cannot silently overrun a buffer sized to an older layout.
+    pub const BYTES: vk::DeviceSize = 256;
+
+    /// The struct as the bytes the buffer holds.
+    fn as_bytes(&self) -> &[u8] {
+        // SAFETY: `repr(C)` over two `u32`s has no padding and no invalid bit patterns, so every
+        // byte of it is initialised and readable as `u8`. The slice borrows `self`.
+        unsafe {
+            std::slice::from_raw_parts(
+                std::ptr::from_ref(self).cast::<u8>(),
+                std::mem::size_of::<StepParams>(),
+            )
+        }
+    }
+}
+
 /// A compiled, recorded network ready to run.
 pub struct Net {
     context: Arc<Context>,
@@ -49,6 +102,10 @@ pub struct Net {
     weights: Buffer,
     arena: Buffer,
     staging: Buffer,
+    /// Values the shaders read that change per step without a re-record.
+    ///
+    /// See [`StepParams`] and [`Buffer::step_params`].
+    params: Buffer,
     pipelines: Pipelines,
     /// Which descriptor set each op's weights are visible through.
     ///
@@ -123,12 +180,14 @@ impl Net {
         let weights_buffer = Buffer::device_local(&context, weights_bytes)?;
         let arena = Buffer::device_local(&context, arena_bytes)?;
         let staging = Buffer::staging(&context, staging_bytes)?;
+        let params = Buffer::step_params(&context, StepParams::BYTES)?;
 
         let pipelines = Pipelines::new(
             &context,
             arena.buffer,
             arena_bytes,
             weights_buffer.buffer,
+            params.buffer,
             segments.all(),
         )?;
 
@@ -148,6 +207,7 @@ impl Net {
             weights: weights_buffer,
             arena,
             staging,
+            params,
             pipelines,
             segments,
             tensors,
@@ -162,8 +222,20 @@ impl Net {
         net.upload_weights(weights)?;
         net.command_buffer = net.allocate_command_buffer()?;
         net.fence = net.create_fence()?;
+        // Written before the first record so a shader reading it never sees uninitialised
+        // memory, even on a plan that never calls `set_params`.
+        net.set_params(StepParams::default())?;
         net.record()?;
         Ok(net)
+    }
+
+    /// Install the values the next submit reads, without touching the recording.
+    ///
+    /// The buffer is host-coherent, so the write is visible to a later submit with no flush and
+    /// no barrier. It must not be called while a submit is in flight — `infer` blocks on its
+    /// fence before returning, so holding `&mut self` is enough to guarantee that.
+    pub fn set_params(&mut self, params: StepParams) -> Result<(), String> {
+        self.params.write(params.as_bytes())
     }
 
     /// Re-record this net at `plan`'s shapes, keeping the weights already uploaded.
@@ -840,5 +912,34 @@ impl Drop for Net {
             device.destroy_command_pool(self.command_pool, None);
             self.pipelines.destroy(device);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The GLSL `Params` block is written by hand, so the two layouts agree only by inspection.
+    /// This is the part of that agreement a compiler can hold: `std430` packs a struct of `uint`s
+    /// end to end, so the Rust side must be `u32`s with no padding and nothing else.
+    #[test]
+    fn the_step_params_block_matches_the_shader_layout() {
+        assert_eq!(std::mem::size_of::<StepParams>(), 2 * 4, "two u32 fields, no padding");
+        assert_eq!(std::mem::align_of::<StepParams>(), 4);
+        assert_eq!(StepParams::default().as_bytes().len(), std::mem::size_of::<StepParams>());
+        assert!(
+            (std::mem::size_of::<StepParams>() as vk::DeviceSize) <= StepParams::BYTES,
+            "the allocation must cover the struct",
+        );
+    }
+
+    /// Field order is the whole contract with the shader, and a reorder is invisible to the type
+    /// system. Distinct values placed through the struct must land at distinct known offsets.
+    #[test]
+    fn the_step_params_fields_are_in_the_declared_order() {
+        let params = StepParams { prefix: 0x1111_1111, window_start: 0x2222_2222 };
+        let bytes = params.as_bytes();
+        assert_eq!(bytes.get(0..4), Some(&0x1111_1111u32.to_ne_bytes()[..]), "prefix first");
+        assert_eq!(bytes.get(4..8), Some(&0x2222_2222u32.to_ne_bytes()[..]), "window_start second");
     }
 }

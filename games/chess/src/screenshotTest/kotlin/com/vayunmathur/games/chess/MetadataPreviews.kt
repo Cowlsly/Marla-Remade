@@ -26,9 +26,15 @@ private const val PHONE = "spec:width=411dp,height=891dp,dpi=420"
  *
  * Positions are reached by replaying real moves through [Board], which is a pure rules model
  * — so the move list, the captured pieces and the check markers are all genuinely derived
- * rather than faked. Crucially none of this reaches Stockfish: the engine is only ever driven
+ * rather than faked. Crucially none of this reaches the model: the engine is only ever driven
  * from [com.vayunmathur.games.chess.util.ChessViewModel], and these render with
- * [ChessActions.Noop], so no native search is ever started.
+ * [ChessActions.Noop], so no Vulkan device is ever brought up.
+ *
+ * `NewGameDialog` is the one exception worth naming, because it *is* rendered here: it reads
+ * `Difficulty.entries`, which is a top-level enum with no native handle behind it, and takes
+ * the availability flag as a parameter that defaults true. Neither reaches
+ * [com.vayunmathur.games.chess.util.MaiaEngine], whose initialiser would try to load a `.so`
+ * that a JVM screenshot run does not have.
  */
 class MetadataPreviews {
 

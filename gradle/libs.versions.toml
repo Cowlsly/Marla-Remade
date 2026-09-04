@@ -127,9 +127,6 @@ robolectric = "4.14.1"
 stripe = "21.12.0"
 appauth = "0.11.1"
 
-# Own libraries (vayun-mathur, via JitPack)
-stockfishLibrary = "1.1.0"
-
 # AppStore – Play install via Aurora
 gplayapi = "3.6.4"
 
@@ -301,9 +298,6 @@ robolectric = { module = "org.robolectric:robolectric", version.ref = "robolectr
 # Payments, telephony & auth
 stripe-android = { module = "com.stripe:stripe-android", version.ref = "stripe" }
 appauth = { group = "net.openid", name = "appauth", version.ref = "appauth" }
-
-# Own libraries (vayun-mathur, via JitPack)
-stockfish-library = { module = "com.github.vayun-mathur:Stockfish-Library", version.ref = "stockfishLibrary" }
 
 # AppStore – Play install via Aurora
 auroraoss-gplayapi = { module = "com.auroraoss:gplayapi", version.ref = "gplayapi" }

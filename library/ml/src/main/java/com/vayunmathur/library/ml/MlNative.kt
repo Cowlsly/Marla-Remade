@@ -274,6 +274,59 @@ internal object MlNative {
     external fun destroyTinyclip(handle: Long)
 
     /**
+     * Bring up Maia3-5M from its one bundled `.maml`. Returns 0 on failure.
+     *
+     * One forward pass per move and no search, so unlike [createTinyclip] there is only ever
+     * one plan and native never re-records.
+     *
+     * The plan arrives as a **file descriptor** because it is a bundled asset: [offset] and
+     * [length] are the `AssetFileDescriptor`'s, since an asset is a *range of the APK* rather
+     * than a file of its own. `AssetManager.openFd` throws for a deflated entry, which is what
+     * `noCompress += "maml"` in `games/chess/build.gradle.kts` is for.
+     *
+     * Native keeps the descriptor open for the life of the handle, because the two elo
+     * embeddings are blended on the host — the blend weight is an input, so it cannot be
+     * folded into the upload.
+     *
+     * **The descriptor must be detached.** Native takes ownership and closes it, on the failure
+     * paths as much as the successful one, so a caller must not close it itself.
+     *
+     * Freed by [destroyMaia], not [destroy], [destroyOcr] or [destroySupertonic].
+     */
+    external fun createMaia(fd: Int, offset: Long, length: Long): Long
+
+    /**
+     * The 4352 move logits for a board, or null on failure.
+     *
+     * [planes] is `12 * 64` floats, plane-major, with square `rank * 8 + file` so a1 is 0 and
+     * h8 is 63. The planes are white P, N, B, R, Q, K then black P, N, B, R, Q, K.
+     *
+     * **The board must already be from the mover's side.** When black is to move the caller
+     * mirrors it vertically and swaps the colours, and un-mirrors the move it picks. The model
+     * was trained that way and the move vocabulary has no black promotions at all, so passing
+     * an unmirrored black position produces legal-looking nonsense rather than an error.
+     *
+     * [selfElo] and [oppoElo] are 0..5000 and are clamped, not rejected. They are what makes
+     * one weights file cover every difficulty.
+     *
+     * The logits are **raw**: indices 0..4095 are `from * 64 + to` and 4096..4351 are
+     * `4096 + fromFile * 32 + toFile * 4 + piece` for q, r, b, n. Legal masking, temperature
+     * and sampling all need the caller's move list and stay in Kotlin.
+     */
+    external fun maiaLogits(
+        handle: Long,
+        planes: FloatArray,
+        selfElo: Int,
+        oppoElo: Int,
+    ): FloatArray?
+
+    /**
+     * Free Maia3's network and its open weights file.
+     * Exactly once per non-zero handle from [createMaia].
+     */
+    external fun destroyMaia(handle: Long)
+
+    /**
      * Bring up whisper-base from its one `.maml` and the ids read from `generation_config.json`.
      * Returns 0 on failure.
      *

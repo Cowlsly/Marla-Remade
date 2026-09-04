@@ -95,6 +95,11 @@ pub mod graph {
     /// after whisper's 17, with 7..10 staying retired. `maml_convert.py` has `GRAPHS["nllb600"]`
     /// at the same number.
     pub const NLLB: u32 = 18;
+    /// Maia3-5M human-move prediction, one forward pass per move. See [`crate::nets::maia`].
+    ///
+    /// The next free id after NLLB's 18, with 7..10 and 15 staying retired.
+    /// `maml_convert.py` has `GRAPHS["maia"]` at the same number.
+    pub const MAIA: u32 = 19;
 }
 
 /// One tensor's entry in the table: where it is and what shape it is.

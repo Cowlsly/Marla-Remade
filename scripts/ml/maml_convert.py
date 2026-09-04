@@ -141,6 +141,9 @@ GRAPHS = {
     # Agreed with rust-eng/app-eng in team chat (nllb-translate): next free id,
     # 7..10 stay retired.
     "nllb600": 18,
+    # Maia3-5M human-move prediction, replacing Stockfish in `:games:chess`; see
+    # [`CHECKPOINTS`]. Next free id after NLLB's 18, with 7..10 and 15 staying retired.
+    "maia": 19,
 }
 
 # SHA-256 over the ordered layer table (see `layer_table_digest`). Regenerate with
@@ -162,6 +165,8 @@ EXPECTED_DIGEST = {
     # Filled in by running --print-digest after the first successful conversion;
     # see fetch_nllb600.py. Placeholder until then (check fails loudly, not silently).
     "nllb600": "8b5dd248896b11bf1bb0feae6818d4b00b8ad176549df48bdc07f7b970d3480a",
+    # Pinned with --print-digest after the first successful conversion; see fetch_maia.py.
+    "maia": "50da3ca5ebb9a1b54338c43b2a4b798df25279ac6f74fa19b64146b3964b61aa",
 }
 
 # Graphs that are one **module** of a larger export, keyed by the node-name prefix that
@@ -393,6 +398,54 @@ CHECKPOINTS = {
         # last two 64,051.
         "head_splits": 4,
         "head_rows": [64_052, 64_052, 64_051, 64_051],
+    },
+    # Maia3-5M, from `UofTCSSLab/Maia3-5M`. A checkpoint because the repo ships a single
+    # `maia3-5m.pt` pickle and nothing else — no ONNX, no safetensors. `fetch_maia.py`
+    # repacks it, as `fetch_nllb600.py` does for NLLB's `.bin`.
+    #
+    # The architecture is `MAIA3Model` from CSSLab/maia3, with `BASE_SIZE_CONFIG` plus the
+    # 5M row of `MODEL_SPECS`: 8 encoder-only blocks over 64 square tokens, `dim_vit` 256,
+    # 8 heads, `mlp_ratio` 2.0. Four things about it are unlike anything else here, and all
+    # four are asserted rather than assumed by [`maia_inventory`] and [`collect_maia`]:
+    #
+    # * **`omit_qkv_biases=True`.** `nn.MultiheadAttention(bias=False)`, so there is no
+    #   `in_proj_bias` and no `out_proj.bias`. `Builder::conv` always reads a bias after
+    #   its kernel, so four zeros per block are synthesised and recorded in the digest key.
+    # * **A fused `in_proj_weight` `[768, 256]`.** Torch packs q, k and v into one tensor;
+    #   the collector splits it into three in that order, which is
+    #   `_in_projection_packed`'s.
+    # * **`use_rms_norm=True`, post-norm.** `norm1` and `norm2` are `torch.nn.RMSNorm`, so
+    #   they carry a weight and **no bias**. A checkpoint that grew `norm1.bias` would be
+    #   an architecture change, not a detail, and fails here.
+    # * **A shared attention-bias weight.** `smolgen_shared_weight` `[4096, 64]` is one
+    #   parameter registered under nine names — itself plus
+    #   `transformer.layers.N.self_attn.smolgen_weight` for all eight blocks, all aliasing
+    #   the same storage. `fetch_maia.py` asserts that and drops the eight extras, so this
+    #   inventory names only the shared one. See [`collect_maia`] for why it is emitted
+    #   replicated eight times anyway.
+    #
+    # The value and ponder heads (`last_ln`, `fc_value*`, `fc_ponder*`) are in the
+    # checkpoint and so are in the inventory, but are deliberately **not emitted**: nothing
+    # picks a move with them. Asserting them keeps a re-trained head from passing silently.
+    #
+    # Every convolution is int8, quantised per output channel. That was chosen on measured
+    # move agreement rather than on the cosine gate — see [`collect_maia`] and
+    # `scripts/ml/maia_quant_eval.py`, which also rules out int4.
+    "maia": {
+        "d_model": 256,
+        "blocks": 8,
+        "heads": 8,
+        "ffn": 512,
+        "head_hidden": 256,
+        # `gab_intermediate_dim` and `gab_gen_size`.
+        "bias_hidden": 64,
+        "bias_gen": 64,
+        # `dim_emb`, each of the two elo embeddings' width.
+        "elo_dim": 128,
+        # `12 * history + 2 * dim_emb`, the token projection's input width.
+        "input": 12 * 8 + 2 * 128,
+        "squares": 64,
+        "promotions": 4,
     },
 }
 
@@ -1352,10 +1405,255 @@ def collect_nllb(get, spec):
     return layers, tensors
 
 
+def maia_inventory(spec):
+    """`{name: shape}` Maia3-5M's checkpoint must hold exactly, after `fetch_maia.py`'s repack.
+
+    Derived rather than transcribed: a list of 148 names would be checked against itself.
+
+    Three absences are as load-bearing as the presences, so all three are stated by *not*
+    appearing:
+
+    * **No attention biases.** `omit_qkv_biases=True`, so there is no `mha.in_proj_bias`
+      and no `mha.out_proj.bias` in any of the eight blocks.
+    * **No `norm1.bias` or `norm2.bias`.** They are `torch.nn.RMSNorm`, which has a gain
+      and nothing else. A checkpoint that grew either would be a layer norm, and the Rust
+      would silently ignore the beta.
+    * **No `transformer.layers.N.self_attn.smolgen_weight`.** Those eight names alias
+      `smolgen_shared_weight`; `fetch_maia.py` asserts that and drops them, so a checkpoint
+      whose blocks stopped sharing one weight fails here with eight unexpected names rather
+      than being converted as if they still did.
+
+    `proj_sq_from`, `proj_sq_to` and `promo_bias_proj` are `bias=False` too. The shapes are
+    `torch.nn.Linear`'s **`[out, in]`**, so a kernel is a reshape and not a transpose;
+    `linear1 [512, 256]` against `linear2 [256, 512]` is the asymmetric pair that makes a
+    transposed checkpoint fail here rather than on the device.
+    """
+    d, ffn = spec["d_model"], spec["ffn"]
+    hidden, gen, heads = spec["bias_hidden"], spec["bias_gen"], spec["heads"]
+    squares, hid = spec["squares"], spec["head_hidden"]
+    want = {
+        "smolgen_shared_weight": [squares * squares, gen],
+        "elo_embedding_low.weight": [1, spec["elo_dim"]],
+        "elo_embedding_high.weight": [1, spec["elo_dim"]],
+        "token_projection.weight": [d, spec["input"]],
+        "token_projection.bias": [d],
+    }
+    for index in range(spec["blocks"]):
+        at = f"transformer.layers.{index}"
+        want[f"{at}.self_attn.mha.in_proj_weight"] = [3 * d, d]
+        want[f"{at}.self_attn.mha.out_proj.weight"] = [d, d]
+        want[f"{at}.self_attn.sm2.weight"] = [hidden, d]
+        want[f"{at}.self_attn.sm2.bias"] = [hidden]
+        want[f"{at}.self_attn.ln1.weight"] = [hidden]
+        want[f"{at}.self_attn.ln1.bias"] = [hidden]
+        want[f"{at}.self_attn.sm3.weight"] = [heads * gen, hidden]
+        want[f"{at}.self_attn.sm3.bias"] = [heads * gen]
+        want[f"{at}.self_attn.ln2.weight"] = [heads * gen]
+        want[f"{at}.self_attn.ln2.bias"] = [heads * gen]
+        want[f"{at}.linear1.weight"] = [ffn, d]
+        want[f"{at}.linear1.bias"] = [ffn]
+        want[f"{at}.linear2.weight"] = [d, ffn]
+        want[f"{at}.linear2.bias"] = [d]
+        want[f"{at}.norm1.weight"] = [d]
+        want[f"{at}.norm2.weight"] = [d]
+    want["transformer.norm.weight"] = [d]
+    want["transformer.norm.bias"] = [d]
+    want["proj_sq_from.weight"] = [hid, d]
+    want["proj_sq_to.weight"] = [hid, d]
+    want["promo_bias_proj.weight"] = [spec["promotions"], hid]
+    # The value and ponder heads. Present, asserted, and deliberately not emitted — see
+    # [`CHECKPOINTS`] and [`collect_maia`].
+    want["last_ln.weight"] = [d]
+    want["last_ln.bias"] = [d]
+    want["fc_value_hid.weight"] = [hid, d]
+    want["fc_value_hid.bias"] = [hid]
+    want["fc_value.weight"] = [3, hid]
+    want["fc_value.bias"] = [3]
+    want["fc_ponder_hid.weight"] = [hid, d]
+    want["fc_ponder_hid.bias"] = [hid]
+    want["fc_ponder.weight"] = [1, hid]
+    want["fc_ponder.bias"] = [1]
+    return want
+
+
+def collect_maia(get, spec):
+    """Maia3-5M's checkpoint as the ordered tensor table `nets::maia` indexes.
+
+    THE TENSOR ORDER (the contract with the Rust net — positional indexing, no names):
+
+        0.  elo_embedding_low.weight   [1, 128]           op "Host"
+        1.  elo_embedding_high.weight  [1, 128]           op "Host"
+        2.  token_projection           int8 [256, 352, 1, 1] + scale [256] + bias [256]
+        5.  smolgen kernel replicated  int8 [32768, 64, 1, 1] + scale [32768] + zero bias
+        8.  each block 0..7 in forward order, 30 tensors each, in this exact order:
+              sm2 (Linear8, 3), ln1 (LayerNorm, 2), sm3 (Linear8, 3), ln2 (LayerNorm, 2),
+              q / k / v / out_proj (Linear8, 3 each — bias synthesised),
+              norm1 (RmsNorm, 1), linear1 (Linear8, 3), linear2 (Linear8, 3),
+              norm2 (RmsNorm, 1).
+        248. transformer.norm (LayerNorm, 2).
+        250. proj_sq_from (Linear8, 3 — bias synthesised).
+        253. proj_sq_to (Linear8, 3 — bias synthesised).
+        256. promo_bias_proj (Linear8, 3 — bias synthesised). Last.
+
+    Totals: 259 tensors in 104 layers, 69 of them int8 convolutions. Everything else — the
+    norms, the biases and the two elo tables — stays fp16, and is 1% of the parameters.
+
+    # The two structural rewrites
+
+    * **The fused `in_proj_weight` is split.** Torch packs q, k and v into one `[768, 256]`
+      tensor, in that order (`_in_projection_packed` chunks it three ways). Three separate
+      `[256, 256, 1, 1]` kernels come out, each with a synthesised zero bias because
+      `omit_qkv_biases=True` and `Builder::conv` always reads one.
+
+    * **`smolgen_shared_weight` is replicated eight times.** Upstream expands the bias
+      generator's `[8, 64]` output with `einsum("bhi,oi->bho")` against a `[4096, 64]`
+      weight. This runtime has no transpose op, so `nets::maia` expresses that as a
+      **grouped 1x1 convolution** with `group = 8` — and a grouped convolution's kernel is
+      `[out, in/group, 1, 1]`, which here is `[32768, 64, 1, 1]`: group `g`'s 4096 output
+      rows must each hold the same `[4096, 64]` weight. `np.tile` along axis 0 puts them in
+      exactly the order group `g` reads.
+
+      It costs +1.84M elements, and at int8 that is +1.8 MB and 30% of the file. It is
+      replicated **once, not per block**: the parameter is shared, so all eight blocks pass
+      tensor 5 as their `weight_index` and the file holds one copy of the replication.
+
+      The quantisation is done on the `[4096, 64]` original and then tiled, not the other way
+      round: the two give identical codes because the replicated rows are identical, but
+      quantising 262,144 elements instead of 2,097,152 also makes the fidelity line report the
+      tensor the checkpoint actually holds.
+
+    # int8, and why not int4
+
+    Every convolution here is int8, quantised per output channel; the norms, the biases and the
+    two elo tables stay fp16. 13.3 MiB to 6.8 MiB, with the worst per-tensor cosine at
+    0.999941 against a 0.999 gate.
+
+    `scripts/ml/maia_quant_eval.py` is what justifies that, on move agreement rather than on
+    cosine: over 400 positions at each shipping rating the int8 model picks a different move
+    0.5% to 1.0% of the time, always where the top two legal moves are within 0.017 — inside
+    what fp16 rounding does on its own. The same harness rejects int4 at 87% to 91% agreement
+    with 14 to 29 genuine changes of mind, at any group size.
+
+    # What is folded, and what is not
+
+    * The attention query scale is **not** folded into the q kernel. Torch scales the query
+      by `head_dim ** -0.5` and `head_dim` is 32, which is the `1 / sqrt(head_dim)`
+      `attn_scores` already applies. Folding it would apply it twice.
+    * The policy head's `1 / sqrt(head_hid_dim)` is not folded either, for the same reason:
+      `head_hid_dim` is 256 and `attn_scores(from, to, 1)` derives `1 / sqrt(256)` itself.
+    * `promo_bias_proj`'s `* sqrt(head_hid_dim)` is **not** folded into the kernel. It is
+      applied by `post::maia` on the host, where the score it is added to has already been
+      divided by the same factor — folding one of the pair and not the other is the easy
+      mistake, so neither is folded.
+    * The elo interpolation is not folded: the two embeddings are emitted raw and blended
+      on the host by `nets::maia::elo_embedding`, because the blend weight is an input.
+    """
+    layers = []
+    tensors = []
+    fidelity = Fidelity()
+
+    def emit(op, name, key, added):
+        layers.append(Layer(len(layers), op, name, key, len(tensors) - added, added))
+
+    def linear(name, weight=None, bias=None):
+        """An int8 kernel as `[out, in, 1, 1]`, its per-output-channel scale, and its bias."""
+        weight = get(f"{name}.weight") if weight is None else weight
+        outputs, inputs = weight.shape
+        synthesised = bias is None
+        if synthesised:
+            bias = np.zeros(outputs, dtype=np.float32)
+        kernel, scale = fidelity.quantise(name, weight.reshape(outputs, inputs, 1, 1))
+        tensors.extend([kernel, scale, bias])
+        note = " b0=synthesised" if synthesised else ""
+        emit(
+            "Linear8",
+            name,
+            f"Linear8 w={list(kernel.shape)} scale={[outputs]} b={[outputs]} "
+            f"zp=0 dtype=int8{note}",
+            3,
+        )
+
+    def layer_norm(name):
+        gamma = get(f"{name}.weight")
+        beta = get(f"{name}.bias")
+        tensors.extend([gamma, beta])
+        emit("LayerNorm", name, f"LayerNorm g={list(gamma.shape)} b={list(beta.shape)}", 2)
+
+    def rms_norm(name):
+        """An RMS norm's gain. One tensor: there is no beta to follow it."""
+        gamma = get(f"{name}.weight")
+        tensors.append(gamma)
+        emit("RmsNorm", name, f"RmsNorm g={list(gamma.shape)}", 1)
+
+    d, heads = spec["d_model"], spec["heads"]
+    gen, squares = spec["bias_gen"], spec["squares"]
+
+    for name in ("elo_embedding_low.weight", "elo_embedding_high.weight"):
+        table = get(name)
+        tensors.append(table)
+        emit("Host", name, f"Host t={list(table.shape)}", 1)
+
+    linear("token_projection", bias=get("token_projection.bias"))
+
+    shared = get("smolgen_shared_weight")
+    if list(shared.shape) != [squares * squares, gen]:
+        raise SystemExit(f"smolgen_shared_weight is {list(shared.shape)}, not {[squares*squares, gen]}")
+    # Quantise the original, then tile the codes and the scale. Tiling first would quantise
+    # 2,097,152 identical-by-construction rows to reach the same answer, and would report the
+    # fidelity of a tensor the checkpoint does not hold.
+    codes, scale = fidelity.quantise("smolgen_shared_weight", shared.reshape(*shared.shape, 1, 1))
+    replicated = np.tile(codes.reshape(squares * squares, gen), (heads, 1)).reshape(
+        heads * squares * squares, gen, 1, 1
+    )
+    scales = np.tile(scale, heads)
+    rows = replicated.shape[0]
+    tensors.extend([replicated, scales, np.zeros(rows, dtype=np.float32)])
+    emit(
+        "Smolgen8",
+        "smolgen_shared_weight",
+        f"Smolgen8 w={list(replicated.shape)} scale={[rows]} b={[rows]} group={heads} "
+        f"from={list(shared.shape)} zp=0 dtype=int8 b0=synthesised",
+        3,
+    )
+
+    for index in range(spec["blocks"]):
+        at = f"transformer.layers.{index}"
+        # The bias generator, then attention, then the feed-forward — the order
+        # `nets::maia::encoder_block` walks, so the Rust needs no index table.
+        linear(f"{at}.self_attn.sm2", bias=get(f"{at}.self_attn.sm2.bias"))
+        layer_norm(f"{at}.self_attn.ln1")
+        linear(f"{at}.self_attn.sm3", bias=get(f"{at}.self_attn.sm3.bias"))
+        layer_norm(f"{at}.self_attn.ln2")
+
+        fused = get(f"{at}.self_attn.mha.in_proj_weight")
+        if list(fused.shape) != [3 * d, d]:
+            raise SystemExit(f"{at} in_proj_weight is {list(fused.shape)}, not {[3 * d, d]}")
+        for part, projection in enumerate(("q_proj", "k_proj", "v_proj")):
+            linear(f"{at}.self_attn.{projection}", weight=fused[part * d : (part + 1) * d])
+        linear(f"{at}.self_attn.mha.out_proj")
+
+        # Post-norm: `norm1` closes the attention residual and `norm2` the feed-forward's,
+        # so both come after the sublayer they normalise rather than before it.
+        rms_norm(f"{at}.norm1")
+        linear(f"{at}.linear1", bias=get(f"{at}.linear1.bias"))
+        linear(f"{at}.linear2", bias=get(f"{at}.linear2.bias"))
+        rms_norm(f"{at}.norm2")
+
+    layer_norm("transformer.norm")
+    linear("proj_sq_from")
+    linear("proj_sq_to")
+    linear("promo_bias_proj")
+
+    fidelity.report()
+    return layers, tensors
+
+
 INVENTORIES.update({"small100": small100_inventory, "whisper": whisper_inventory})
 COLLECTORS.update({"small100": collect_small100, "whisper": collect_whisper})
 INVENTORIES.update({"nllb600": nllb_inventory})
 COLLECTORS.update({"nllb600": collect_nllb})
+INVENTORIES.update({"maia": maia_inventory})
+COLLECTORS.update({"maia": collect_maia})
 
 
 # The vision position table, after TinyCLIP's export constant-folds it: `position_ids` is a

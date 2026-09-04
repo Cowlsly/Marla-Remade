@@ -1,0 +1,71 @@
+{
+  "_comment": [
+    "Positions for scripts/ml/maia_parity.py. Chosen so that between them they exercise every",
+    "encoding decision that fails silently: the square indexing, the mirror-and-swap for black,",
+    "the promotion vocabulary, and the elo blend at both ends of its range.",
+    "",
+    "`self_elo` and `oppo_elo` are the model's SelfElo/OppoElo inputs, 0..5000. Two of the",
+    "positions sit at the ends of that range because `interpolate_elo`'s naming is inverted and a",
+    "blend computed the wrong way round is only visible where the two embeddings differ most.",
+    "",
+    "FENs are standard; the harness feeds them to python-chess and to the app's own encoder."
+  ],
+  "positions": [
+    {
+      "name": "startpos",
+      "fen": "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1",
+      "self_elo": 1500,
+      "oppo_elo": 1500,
+      "why": "White to move, no mirror. The baseline: if this disagrees, nothing else matters."
+    },
+    {
+      "name": "startpos-black",
+      "fen": "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR b KQkq - 0 1",
+      "self_elo": 1500,
+      "oppo_elo": 1500,
+      "why": "The same position with black to move. Mirrored and colour-swapped, so it must encode to the same 12 planes as startpos - and the two must therefore produce identical logits."
+    },
+    {
+      "name": "italian-middlegame",
+      "fen": "r1bqk2r/pppp1ppp/2n2n2/2b1p3/2B1P3/2N2N2/PPPP1PPP/R1BQK2R w KQkq - 6 5",
+      "self_elo": 1100,
+      "oppo_elo": 1900,
+      "why": "A real middlegame with every piece type on the board, and asymmetric elos so a self/oppo swap is visible."
+    },
+    {
+      "name": "sicilian-black-to-move",
+      "fen": "r1bqkbnr/pp1ppppp/2n5/2p5/4P3/5N2/PPPP1PPP/RNBQKB1R b KQkq - 2 3",
+      "self_elo": 2500,
+      "oppo_elo": 1100,
+      "why": "Black to move in an asymmetric position, so the mirror actually changes the planes rather than mapping the board onto itself."
+    },
+    {
+      "name": "promotion-available",
+      "fen": "8/2P2k2/8/8/8/8/5K2/8 w - - 0 1",
+      "self_elo": 1900,
+      "oppo_elo": 1900,
+      "why": "A white pawn on c7. The 256 promotion logits are only reachable from rank 7, and this is the position where they are the moves that matter."
+    },
+    {
+      "name": "promotion-available-black",
+      "fen": "8/5k2/8/8/8/8/2p2K2/8 b - - 0 1",
+      "self_elo": 1900,
+      "oppo_elo": 1900,
+      "why": "The same, mirrored: a black pawn on c2 must encode as a white pawn on c7, because the vocabulary has no black promotions at all."
+    },
+    {
+      "name": "endgame-elo-floor",
+      "fen": "8/8/4k3/8/8/4K3/4P3/8 w - - 0 1",
+      "self_elo": 0,
+      "oppo_elo": 0,
+      "why": "King and pawn, at elo 0 - where interpolate_elo puts all the weight on elo_embedding_high. Reversing the blend is invisible at 2500 and maximal here."
+    },
+    {
+      "name": "endgame-elo-ceiling",
+      "fen": "8/8/4k3/8/8/4K3/4P3/8 w - - 0 1",
+      "self_elo": 5000,
+      "oppo_elo": 5000,
+      "why": "The same board at the other end of the elo range. Its logits must differ from the floor case, which is what proves the elo input reaches the model at all."
+    }
+  ]
+}

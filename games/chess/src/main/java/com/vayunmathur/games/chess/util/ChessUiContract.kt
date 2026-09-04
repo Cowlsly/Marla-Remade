@@ -9,8 +9,8 @@ import com.vayunmathur.games.chess.data.Position
  * The screens take their state ([ChessUiState] / [PuzzleUiState], both declared next to their
  * ViewModel) plus an actions interface rather than the ViewModel itself, so they can be
  * rendered by a `@Preview` — which is what the store listing images are generated from. That
- * also keeps the engine out of the picture: nothing here can reach Stockfish, so a preview
- * renders a static position and never starts a native search.
+ * also keeps the engine out of the picture: nothing here can reach the model, so a preview
+ * renders a static position and never brings up a Vulkan device.
  *
  * Every method has a no-op default, so `Noop` is the whole implementation a preview needs.
  */

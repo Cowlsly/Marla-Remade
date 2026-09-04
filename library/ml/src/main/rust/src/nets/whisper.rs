@@ -25,7 +25,7 @@
 //! | this `.maml` | **3.19** | **0.0293** | **0.999633** |
 //!
 //! on a tensor whose largest value is 22.8. That gap is per-output-channel quantisation against the
-//! export's per-tensor dynamic quantisation, the same difference `nets::small100` was ported for.
+//! export's per-tensor dynamic quantisation, the same difference `nets::nllb` was ported for.
 //! `scripts/ml/onnx_parity.py whisper` reproduces the middle column of it.
 //!
 //! # The arithmetic, measured rather than estimated
@@ -40,13 +40,13 @@
 //! [`Mode`] selects which. They share the file because the embedding is **tied**: it is the
 //! decoder's input table and the logits kernel, and two files would upload 26.6 MB of it twice. At
 //! 51,865 x 512 that binding is well inside `maxStorageBufferRange`'s guaranteed 128 MiB, so unlike
-//! `nets::small100`'s 128,112-row head it needs no class split.
+//! `nets::nllb`'s 256,206-row head it needs no class split.
 //!
 //! # The encoder produces the cross-attention keys and values, not the hidden states
 //!
 //! Whisper's cross-attention reads the encoder output through each decoder layer's own `k_proj` and
 //! `v_proj`, and those depend on nothing that changes between steps. Recomputing them per step is
-//! what `nets::small100` does, and it is fine there because a source sentence is tens of positions.
+//! what `nets::nllb` does, and it is fine there because a source sentence is tens of positions.
 //! Here it is **1500**: twelve `512 x 512` projections over 1500 positions is 4.7 GMAC *per decode
 //! step*, against the 26.5 MMAC of the logits head. That is 177 times the head, and at 224 tokens it
 //! is a thousand GMAC.
@@ -56,7 +56,7 @@
 //! few GB/s is an order of magnitude cheaper than recomputing them — measured against arithmetic, not
 //! on a device, and flagged for the device. Nothing is transposed: a single-query cross-attention
 //! reads a channel-major sequence through the ordinary [`Builder::attn_scores`] pair, exactly as
-//! `nets::small100`'s does.
+//! `nets::nllb`'s does.
 //!
 //! # The two position tables go opposite ways
 //!
@@ -438,7 +438,7 @@ fn decode_step(weights: &dyn WeightSource, cache_len: u32) -> Result<Plan, Strin
 
 /// Every tensor `mode` reads on the **device**, in ascending order.
 ///
-/// Not a range, unlike `nets::small100`'s: [`Mode::Encode`] reads the whole encoder *and* two
+/// Not a range, unlike `nets::nllb`'s: [`Mode::Encode`] reads the whole encoder *and* two
 /// projections out of each decoder layer, because Whisper's cross-attention keys and values are a
 /// decoder weight applied to an encoder result. See the module docs.
 fn device_tensors(mode: Mode) -> Vec<usize> {
@@ -536,7 +536,7 @@ fn layer_dims(within: usize, per_layer: usize) -> Vec<u32> {
 /// summed in f32 before anything is rounded.
 ///
 /// `past` is how many positions precede these ids, which is the step number. There is **no offset**,
-/// unlike `nets::small100`'s fairseq `+ 2`: whisper's first prompt token sits at position 0.
+/// unlike `nets::nllb`'s fairseq `+ 2`: whisper's first prompt token sits at position 0.
 ///
 /// And no `sqrt(d_model)`: `config.json` has `scale_embedding: false`.
 pub fn embed_positions(

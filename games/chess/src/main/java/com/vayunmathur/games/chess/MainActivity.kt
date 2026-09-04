@@ -77,7 +77,7 @@ import com.vayunmathur.games.chess.util.LearnStatus
 import com.vayunmathur.games.chess.util.LearnProgress
 import com.vayunmathur.games.chess.data.LearnCategory
 import com.vayunmathur.games.chess.data.square
-import com.vayunmathur.games.chess.util.StockfishEngine
+import com.vayunmathur.games.chess.util.Difficulty
 import com.vayunmathur.games.chess.data.Piece
 import com.vayunmathur.games.chess.data.PieceColor
 import com.vayunmathur.games.chess.data.PieceType
@@ -168,10 +168,7 @@ class MainActivity : ComponentActivity() {
                         entry<Route.Game>(metadata = SiblingPage()) {
                             val viewModel: ChessViewModel = viewModel()
                             var showNewGameDialog by remember { mutableStateOf(false) }
-
-                            LaunchedEffect(Unit) {
-                                StockfishEngine.start(this@MainActivity)
-                            }
+                            val aiAvailable by viewModel.aiAvailable.collectAsState()
 
                             ChessGame(
                                 viewModel = viewModel,
@@ -185,7 +182,8 @@ class MainActivity : ComponentActivity() {
                                     onNewGame = {
                                         viewModel.onNewGame(it)
                                         showNewGameDialog = false
-                                    }
+                                    },
+                                    aiAvailable = aiAvailable
                                 )
                             }
                         }
@@ -234,13 +232,20 @@ class MainActivity : ComponentActivity() {
 
 }
 
+/**
+ * The new-game picker.
+ *
+ * [aiAvailable] defaults true so the store-listing preview renders the full dialog. On a real
+ * device it comes from [ChessViewModel.aiAvailable], and the AI button is hidden rather than
+ * disabled when the model cannot run: a mode that can never move is not worth explaining.
+ */
 @Composable
-fun NewGameDialog(onNewGame: (GameMode) -> Unit) {
-    var showSettings by remember { mutableStateOf<((PieceColor, StockfishEngine.Difficulty) -> Unit)?>(null) }
+fun NewGameDialog(onNewGame: (GameMode) -> Unit, aiAvailable: Boolean = true) {
+    var showSettings by remember { mutableStateOf<((PieceColor, Difficulty) -> Unit)?>(null) }
 
     showSettings?.let { startGame ->
         var selectedColor by remember { mutableStateOf(PieceColor.WHITE) }
-        var selectedDifficulty by remember {mutableStateOf(StockfishEngine.Difficulty.INTERMEDIATE)}
+        var selectedDifficulty by remember {mutableStateOf(Difficulty.INTERMEDIATE)}
         AlertDialog(
             properties = DialogProperties(usePlatformDefaultWidth = false, decorFitsSystemWindows = false),
             modifier = Modifier.fillMaxWidth(0.9f),
@@ -272,7 +277,7 @@ fun NewGameDialog(onNewGame: (GameMode) -> Unit) {
                     }
                     Spacer(Modifier.height(16.dp))
                     SingleChoiceSegmentedButtonRow {
-                        StockfishEngine.Difficulty.entries.zip(listOf(stringResource(R.string.difficulty_easy), stringResource(R.string.difficulty_medium), stringResource(R.string.difficulty_hard), stringResource(R.string.difficulty_master))).forEachIndexed { idx, (value, label) ->
+                        Difficulty.entries.zip(listOf(stringResource(R.string.difficulty_easy), stringResource(R.string.difficulty_medium), stringResource(R.string.difficulty_hard), stringResource(R.string.difficulty_master))).forEachIndexed { idx, (value, label) ->
                             SegmentedButton(
                                 shape = SegmentedButtonDefaults.itemShape(idx, 4),
                                 onClick = { selectedDifficulty = value },
@@ -301,12 +306,14 @@ fun NewGameDialog(onNewGame: (GameMode) -> Unit) {
                         Text(stringResource(R.string.two_player_local))
                     }
                     Spacer(modifier = Modifier.height(8.dp))
-                    Button(onClick = {
-                        showSettings = { color, difficulty ->
-                            onNewGame(GameMode.VsAI(color, difficulty))
+                    if (aiAvailable) {
+                        Button(onClick = {
+                            showSettings = { color, difficulty ->
+                                onNewGame(GameMode.VsAI(color, difficulty))
+                            }
+                        }) {
+                            Text(stringResource(R.string.human_vs_ai))
                         }
-                    }) {
-                        Text(stringResource(R.string.human_vs_ai))
                     }
                 }
             },
@@ -364,7 +371,7 @@ fun ChessGame(
                 achievementsManager.onAchievementUnlocked("won_fast")
             }
 
-            if (mode is GameMode.VsAI && mode.difficulty >= StockfishEngine.Difficulty.ADVANCED) {
+            if (mode is GameMode.VsAI && mode.difficulty >= Difficulty.ADVANCED) {
                 achievementsManager.onAchievementUnlocked("win_vs_ai_hard")
             }
         }
@@ -381,7 +388,7 @@ fun ChessGame(
 /**
  * The play screen, with no dependency on the ViewModel so it can be rendered from a
  * `@Preview` — see `src/screenshotTest`, which is where the store listing images come from.
- * Nothing here touches Stockfish; the engine is only ever reached through the ViewModel.
+ * Nothing here touches the model; the engine is only ever reached through the ViewModel.
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable

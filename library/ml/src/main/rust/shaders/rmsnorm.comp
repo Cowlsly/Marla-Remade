@@ -1,0 +1,50 @@
+#version 450
+//! Root-mean-square normalisation over the **channel** axis, with a per-channel gain.
+//!
+//! Sixteen uses, all in Maia3's eight post-norm encoder blocks (`norm1` and `norm2`).
+//!
+//! # The difference from `layernorm.comp`
+//!
+//! Two lines, both subtractions that are not there: the mean is never computed and never
+//! removed, and there is no beta. `x / sqrt(mean(x^2) + eps) * gamma` against layer norm's
+//! `(x - mean) / sqrt(var + eps) * gamma + beta`. That also means one pass over the input
+//! instead of two, because the sum of squares does not depend on a previously computed mean.
+//!
+//! `Kind::RmsNorm` reads a single rank-1 tensor, so unlike `Kind::LayerNorm` the `bias`
+//! field of the push block is unused. `torch.nn.RMSNorm` with the default
+//! `elementwise_affine=True` stores exactly this one `weight`, which is why the Maia3
+//! checkpoint has `norm1.weight` with no matching `norm1.bias`.
+//!
+//! # Layout
+//!
+//! Identical to layer norm's: the sequence is `[d_model, 1, T]`, one invocation per
+//! position, and the reduction strides by `in_h * in_w`. See `nets::Kind::LayerNorm` for
+//! why the layout is that way round.
+
+#include "common.glsl"
+
+void main() {
+    uint position = global_index();
+    if (position >= p.count) {
+        return;
+    }
+    // `count` is `in_h * in_w`, so `position` walks the spatial extent and the channel
+    // stride is that same extent.
+    uint stride = p.in_h * p.in_w;
+    float epsilon = uintBitsToFloat(p.param1_bits);
+
+    float squares = 0.0;
+    for (uint c = 0u; c < p.in_c; c++) {
+        float value = float(arena[p.in0 + c * stride + position]);
+        squares += value * value;
+    }
+    // Epsilon is inside the square root, matching `torch.nn.RMSNorm`.
+    float inverse = 1.0 / sqrt(squares / float(p.in_c) + epsilon);
+
+    for (uint c = 0u; c < p.in_c; c++) {
+        uint at = c * stride + position;
+        float value = float(arena[p.in0 + at]);
+        float gamma = float(weights[p.weight + c]);
+        arena[p.out_at + at] = float16_t(value * inverse * gamma);
+    }
+}

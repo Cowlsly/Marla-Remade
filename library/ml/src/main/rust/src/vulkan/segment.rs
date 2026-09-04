@@ -179,10 +179,13 @@ impl Segments {
 
     /// `push` with its three weights offsets made relative to segment `index`.
     ///
-    /// The units differ per field and per kind — `weight` is a 32-bit word index for the int8 pair
-    /// and an fp16 element index otherwise — which is why the base is divided rather than
+    /// The units differ per field and per kind — `weight` is a 32-bit word index for the int8
+    /// kinds and an fp16 element index otherwise — which is why the base is divided rather than
     /// subtracted from one normalised offset. A base is a multiple of `ALIGNMENT`, so both
     /// divisions are exact.
+    ///
+    /// The kinds named below must stay in step with the word-unit arm of [`Kind::weight_reads`],
+    /// which is the only place that decides what a `weight` offset counts in.
     pub fn rebase(&self, index: usize, kind: Kind, push: &Push) -> Push {
         let base = self.segments.get(index).map_or(0, |segment| segment.base);
         if base == 0 {
@@ -193,7 +196,12 @@ impl Segments {
         let mut out = *push;
         for read in kind.weight_reads(push) {
             match read.field {
-                "weight" if matches!(kind, Kind::ConvInt8 | Kind::ConvPointInt8) => {
+                "weight"
+                    if matches!(
+                        kind,
+                        Kind::ConvInt8 | Kind::ConvPointInt8 | Kind::ConvVecInt8
+                    ) =>
+                {
                     out.weight = push.weight.saturating_sub(words);
                 }
                 "weight" => out.weight = push.weight.saturating_sub(elems),
@@ -327,15 +335,58 @@ mod tests {
         };
         let out = segments.rebase(3, Kind::Conv, &fp16);
         assert_eq!((out.weight, out.bias), (10, 20));
-        // An int8 kernel: `weight` is a word index, `bias` and the scale are element indices.
-        let int8 = Push {
-            weight: (window.base / 4) as u32 + 5,
-            bias: (window.base / 2) as u32 + 6,
-            act_weight: (window.base / 2) as u32 + 7,
-            ..Push::default()
-        };
-        let out = segments.rebase(3, Kind::ConvPointInt8, &int8);
-        assert_eq!((out.weight, out.bias, out.act_weight), (5, 6, 7));
+        // Every int8 kind: `weight` is a word index, `bias` and the scale are element indices.
+        // Driven off a list rather than one kind because the divisor used to be picked by a
+        // `matches!` naming two of the three, which rebased `ConvVecInt8` — the op a decode step
+        // is almost entirely made of — by half as much as it needed.
+        for kind in [Kind::ConvInt8, Kind::ConvPointInt8, Kind::ConvVecInt8] {
+            let int8 = Push {
+                weight: (window.base / 4) as u32 + 5,
+                bias: (window.base / 2) as u32 + 6,
+                act_weight: (window.base / 2) as u32 + 7,
+                ..Push::default()
+            };
+            let out = segments.rebase(3, kind, &int8);
+            assert_eq!((out.weight, out.bias, out.act_weight), (5, 6, 7), "{kind:?}");
+        }
+    }
+
+    #[test]
+    fn every_int8_kind_rebases_its_kernel_in_words() {
+        // The regression proper. `weight_reads` resolves a `weight` offset to a byte address, so
+        // rebasing it and converting back must land on the byte the op started from — whatever
+        // unit the kind counts in. Asserting through bytes means this cannot pass by agreeing
+        // with `rebase`'s own arithmetic.
+        let segments = Segments::plan(333_783_488, &floor()).unwrap();
+        let window = segments.all()[3];
+        assert!(window.base > 0, "the file must actually be windowed");
+        for kind in [Kind::ConvInt8, Kind::ConvPointInt8, Kind::ConvVecInt8] {
+            let push = Push {
+                weight: (window.base / 4) as u32 + 5,
+                bias: (window.base / 2) as u32 + 6,
+                act_weight: (window.base / 2) as u32 + 7,
+                ..Push::default()
+            };
+            let absolute = kind.weight_reads(&push);
+            let out = segments.rebase(3, kind, &push);
+            let mut checked = 0;
+            for read in absolute {
+                let rebased = match read.field {
+                    "weight" => u64::from(out.weight) * 4,
+                    "bias" => u64::from(out.bias) * 2,
+                    "act_weight" => u64::from(out.act_weight) * 2,
+                    _ => continue,
+                };
+                checked += 1;
+                assert_eq!(
+                    rebased + window.base,
+                    read.at,
+                    "{kind:?} rebased {} off its byte address",
+                    read.field
+                );
+            }
+            assert_eq!(checked, 3, "{kind:?} reads a kernel, a bias and a scale");
+        }
     }
 
     #[test]
@@ -424,7 +475,7 @@ mod tests {
     #[test]
     fn a_prelu_slope_is_part_of_the_span_it_is_read_with() {
         // `prelu` in `common.glsl` reads `act_weight` for *any* kind carrying the activation, not
-        // only the int8 pair, so the slope has to be inside the same window as the kernel.
+        // only the int8 kinds, so the slope has to be inside the same window as the kernel.
         let tensors = [
             Tensor { rank: 4, dims: [4, 1, 1, 1], offset: 0, len: 4, int8: false },
             Tensor { rank: 1, dims: [4, 0, 0, 0], offset: 16, len: 4, int8: false },

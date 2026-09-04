@@ -40,7 +40,7 @@
 
 use std::cell::RefCell;
 
-use super::{Id, Kind, Op, Plan, Push, Shape, WeightSource};
+use super::{Id, Kind, Op, Plan, Push, Shape, SoftmaxMode, WeightSource};
 use crate::preprocess::{f16_to_f32, f32_to_f16};
 
 /// The `act` codes from `common.glsl`, which [`super::Act::code`] produces.
@@ -104,7 +104,22 @@ pub fn run_multi(
     weights: &[u8],
     inputs: &[&[f32]],
 ) -> Result<Vec<Vec<f32>>, String> {
+    run_multi_at(plan, weights, inputs, 0)
+}
+
+/// [`run_multi`] with the step parameters a decode plan reads.
+///
+/// `prefix` is [`crate::vulkan::run::StepParams::prefix`]: the cache positions already written.
+/// It is ignored by every op whose `Push::dyn_keys` is zero, which is every op in every net that
+/// does not decode.
+pub fn run_multi_at(
+    plan: &Plan,
+    weights: &[u8],
+    inputs: &[&[f32]],
+    prefix: u32,
+) -> Result<Vec<Vec<f32>>, String> {
     let mut reference = Reference::new(plan, weights, inputs)?;
+    reference.prefix = prefix;
     reference.execute(plan)?;
     plan.outputs
         .iter()
@@ -136,6 +151,12 @@ pub struct Reference {
     /// third more memory in a test-only interpreter and is what lets an int8 net be checked on the
     /// host at all — without it the only oracle for 605 MB of quantised weights would be a phone.
     bytes: Vec<u8>,
+    /// The device's [`crate::vulkan::run::StepParams::prefix`], for the ops that read it.
+    ///
+    /// The interpreter has no descriptor set, so the value the shaders would fetch from binding 3
+    /// is held here instead. Zero unless [`run_multi_at`] set it, which keeps every existing
+    /// caller and every fixture on the fixed-length path.
+    prefix: u32,
 }
 
 impl Reference {
@@ -162,6 +183,7 @@ impl Reference {
             arena: vec![0.0; plan.arena_elems as usize],
             weights: decoded,
             bytes: weights.to_vec(),
+            prefix: 0,
         };
         for (binding, values) in plan.inputs.iter().zip(inputs) {
             if values.len() != binding.shape.len() as usize {
@@ -196,9 +218,12 @@ impl Reference {
                     Kind::Mul => self.mul(push),
                     Kind::Affine => self.affine(push),
                     Kind::LayerNorm => self.layer_norm(push),
+                    Kind::RmsNorm => self.rms_norm(push),
                     Kind::AttnScores => self.attn_scores(push),
-                    Kind::Softmax => self.softmax(push, false),
-                    Kind::SoftmaxCausal => self.softmax(push, true),
+                    Kind::Softmax => self.softmax(push, SoftmaxMode::Full),
+                    Kind::SoftmaxCausal => self.softmax(push, SoftmaxMode::Causal),
+                    Kind::SoftmaxPrefix => self.softmax(push, SoftmaxMode::Prefix),
+                    Kind::CacheWrite => self.cache_write(push),
                     Kind::AttnApply => self.attn_apply(push),
                     Kind::AttnScoresRelative => self.attn_scores_relative(push),
                     Kind::AttnApplyRelative => self.attn_apply_relative(push),
@@ -704,6 +729,35 @@ impl Reference {
         Ok(())
     }
 
+    /// Root-mean-square normalisation over the channel axis, per spatial position.
+    ///
+    /// [`Reference::layer_norm`] without the mean and without beta, and so one pass over
+    /// the column rather than two. Epsilon is inside the square root, matching
+    /// `torch.nn.RMSNorm`.
+    fn rms_norm(&mut self, p: &Push) -> Result<(), String> {
+        if p.in_c == 0 {
+            return Err("an rms norm over zero channels".into());
+        }
+        let stride = p.in_h * p.in_w;
+        let epsilon = f32::from_bits(p.param1_bits);
+        for position in 0..p.count {
+            let mut squares = 0.0;
+            for c in 0..p.in_c {
+                let value = self.load(p.in0, c * stride + position)?;
+                squares += value * value;
+            }
+            let inverse = 1.0 / (squares / p.in_c as f32 + epsilon).sqrt();
+
+            for c in 0..p.in_c {
+                let at = c * stride + position;
+                let value = self.load(p.in0, at)?;
+                let gamma = self.weight(p.weight, c)?;
+                self.store(p.out, at, value * inverse * gamma)?;
+            }
+        }
+        Ok(())
+    }
+
     /// Elementwise sum of two equal shapes.
     fn add(&mut self, p: &Push) -> Result<(), String> {
         for i in 0..p.count {
@@ -750,21 +804,26 @@ impl Reference {
     /// `causal` truncates each row at the diagonal, as `softmax_causal.comp` does: rows are
     /// head-major with `out_h` queries per head, so query `row % out_h` reads `query + 1` keys and
     /// the rest of its row is stored as zero.
-    fn softmax(&mut self, p: &Push, causal: bool) -> Result<(), String> {
+    ///
+    /// [`SoftmaxMode::Prefix`] instead normalises the leading `prefix + 1` entries and **leaves
+    /// the rest of the row alone**, matching `softmax_prefix.comp`. Zeroing the tail would be
+    /// wrong there rather than merely wasteful: the tail belongs to positions this step does not
+    /// attend over but a later one will, and the corresponding apply stops at the same bound.
+    fn softmax(&mut self, p: &Push, mode: SoftmaxMode) -> Result<(), String> {
         if p.out_w == 0 {
             return Err("a softmax over an empty axis".into());
         }
-        if causal && p.out_h == 0 {
+        if mode == SoftmaxMode::Causal && p.out_h == 0 {
             return Err("a causal softmax over no queries".into());
         }
         for row in 0..p.count {
             let at = row * p.out_w;
-            let keys = if causal {
+            let keys = match mode {
                 // At query 0 this is 1, so the distribution is exactly `[1, 0, ...]` and the
                 // denominator can never be empty.
-                ((row % p.out_h.max(1)) + 1).min(p.out_w)
-            } else {
-                p.out_w
+                SoftmaxMode::Causal => ((row % p.out_h.max(1)) + 1).min(p.out_w),
+                SoftmaxMode::Prefix => self.attended_keys(p, p.out_w),
+                SoftmaxMode::Full => p.out_w,
             };
             let mut peak = -65504.0f32;
             for i in 0..keys {
@@ -780,11 +839,43 @@ impl Reference {
                 let value = (self.load(p.in0, at + i)? - peak).exp() * inverse;
                 self.store(p.out, at + i, value)?;
             }
-            // Written rather than left alone: `attn_apply` multiplies the whole row, and the
-            // arena is reused, so a stale masked value would contribute something unpredictable.
-            for i in keys..p.out_w {
-                self.store(p.out, at + i, 0.0)?;
+            if mode == SoftmaxMode::Causal {
+                // Written rather than left alone: `attn_apply` multiplies the whole row, and the
+                // arena is reused, so a stale masked value would contribute something
+                // unpredictable.
+                for i in keys..p.out_w {
+                    self.store(p.out, at + i, 0.0)?;
+                }
             }
+        }
+        Ok(())
+    }
+
+    /// Keys an op attends over: the step's `prefix + 1` when it asked for that, else `stride`.
+    ///
+    /// The host mirror of `attended_keys` in `shaders/common.glsl`.
+    fn attended_keys(&self, p: &Push, stride: u32) -> u32 {
+        if p.dyn_keys != 0 {
+            (self.prefix + 1).min(stride)
+        } else {
+            stride
+        }
+    }
+
+    /// Copy one position into a KV cache at the step's prefix. See `shaders/cache_write.comp`.
+    ///
+    /// The one op whose destination depends on the step rather than the recording, which is why
+    /// the interpreter has to know the prefix at all.
+    fn cache_write(&mut self, p: &Push) -> Result<(), String> {
+        // Past the end writes nothing, matching the shader. The caller stops before this; a
+        // silent drop is a better failure than a store outside the cache.
+        if self.prefix >= p.in_h {
+            return Ok(());
+        }
+        let base = self.prefix * p.in_c;
+        for index in 0..p.count {
+            let value = self.load(p.in0, index)?;
+            self.store(p.out, base + index, value)?;
         }
         Ok(())
     }
@@ -821,10 +912,11 @@ impl Reference {
     fn attn_scores_cached(&mut self, p: &Push) -> Result<(), String> {
         let head_dim = heads(p, p.in_c)?;
         let scale = f32::from_bits(p.param0_bits);
+        let keys = self.attended_keys(p, p.out_w);
         for head in 0..p.group {
             // Q is one position, so its channels are consecutive.
             let query_base = head * head_dim;
-            for key in 0..p.out_w {
+            for key in 0..keys {
                 let key_base = key * p.in_c + head * head_dim;
                 let mut total = 0.0;
                 for d in 0..head_dim {
@@ -844,10 +936,12 @@ impl Reference {
     /// count, which in this layout is the cache's channel count.
     fn attn_apply_cached(&mut self, p: &Push) -> Result<(), String> {
         let head_dim = heads(p, p.out_c)?;
-        let keys = p.in_w;
+        let stride = p.in_w;
+        let keys = self.attended_keys(p, stride);
         for channel in 0..p.out_c {
-            // One query, so a head's row of probabilities is `keys` long and starts here.
-            let row = (channel / head_dim) * keys;
+            // One query, so a head's row of probabilities starts a full stride apart even when
+            // this step attends over fewer keys than the row can hold.
+            let row = (channel / head_dim) * stride;
             let mut total = 0.0;
             for key in 0..keys {
                 total += self.load(p.in0, row + key)?
@@ -1203,7 +1297,7 @@ fn uniform(state: &mut u32) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::super::{
-        embed_lanes, mobilefacenet, ppocr_det, ppocr_rec, scrfd, selfie, supertonic_duration, supertonic_sampler,
+        embed_lanes, maia, mobilefacenet, ppocr_det, ppocr_rec, scrfd, selfie, supertonic_duration, supertonic_sampler,
         supertonic_text, supertonic_vocoder, tinyclip, u2netp, whisper, Act, Builder, EMBED_LANE,
     };
     use super::*;
@@ -1833,6 +1927,62 @@ mod tests {
             |b, x| b.layer_norm(x, 0, 1e-5),
         );
         // Zero variance, so both come out at beta rather than as NaN.
+        close(&got, &[0.0, 0.0]);
+        assert!(got.iter().all(|v| v.is_finite()), "{got:?}");
+    }
+
+    #[test]
+    fn rms_norm_divides_by_the_root_mean_square_without_centring() {
+        // Four channels at one position. Mean 2.5 is deliberately non-zero: a layer norm
+        // would subtract it, and this must not.
+        let got = one(
+            Shape::new(4, 1, 1),
+            &[1.0, 2.0, 3.0, 4.0],
+            &[(vec![4], vec![1.0; 4])],
+            |b, x| b.rms_norm(x, 0, 1e-5),
+        );
+        let rms = ((1.0 + 4.0 + 9.0 + 16.0) / 4.0f32).sqrt();
+        close(&got, &[1.0 / rms, 2.0 / rms, 3.0 / rms, 4.0 / rms]);
+    }
+
+    #[test]
+    fn rms_norm_applies_its_gain_per_channel_and_has_no_beta() {
+        // A gamma that differs per channel. The second tensor is never read, so a shader
+        // that reached for a beta the way layer norm does would pick up whatever follows.
+        let got = one(
+            Shape::new(4, 1, 1),
+            &[1.0, 2.0, 3.0, 4.0],
+            &[(vec![4], vec![1.0, 2.0, 3.0, 4.0])],
+            |b, x| b.rms_norm(x, 0, 1e-5),
+        );
+        let rms = ((1.0 + 4.0 + 9.0 + 16.0) / 4.0f32).sqrt();
+        let want: Vec<f32> = (0..4).map(|i| (i as f32 + 1.0) / rms * (i as f32 + 1.0)).collect();
+        close(&got, &want);
+    }
+
+    #[test]
+    fn rms_norm_treats_each_position_independently() {
+        // Layout is `[c, 1, T]` channel-major, so this is columns (1, 2) and (3, 6). Both
+        // have the same ratio, so both normalise identically — a reduction spanning the
+        // whole tensor would not.
+        let got = one(
+            Shape::new(2, 1, 2),
+            &[1.0, 3.0, 2.0, 6.0],
+            &[(vec![2], vec![1.0, 1.0])],
+            |b, x| b.rms_norm(x, 0, 1e-5),
+        );
+        let rms = ((1.0 + 4.0) / 2.0f32).sqrt();
+        close(&got, &[1.0 / rms, 3.0 / (3.0 * rms), 2.0 / rms, 6.0 / (3.0 * rms)]);
+    }
+
+    #[test]
+    fn rms_norm_epsilon_keeps_an_all_zero_column_finite() {
+        let got = one(
+            Shape::new(2, 1, 1),
+            &[0.0, 0.0],
+            &[(vec![2], vec![1.0, 1.0])],
+            |b, x| b.rms_norm(x, 0, 1e-5),
+        );
         close(&got, &[0.0, 0.0]);
         assert!(got.iter().all(|v| v.is_finite()), "{got:?}");
     }
@@ -3050,6 +3200,36 @@ mod tests {
             let hidden = outputs.first().expect("the hidden states");
             write(&dir.join("reference.f32"), hidden);
             println!("whisper encoder: wrote {} values", hidden.len());
+            return;
+        }
+        if graph == "maia" {
+            let path = std::env::var("PARITY_MAML").expect("PARITY_MAML");
+            let bytes = std::fs::read(&path).unwrap_or_else(|e| panic!("{path}: {e}"));
+            let weights = crate::weights::Weights::parse(&bytes, crate::weights::graph::MAIA)
+                .expect("the maia asset parses");
+            // The script writes the 12 board planes followed by the two elos, rather than a
+            // built input: the history repeat and the elo blend are host code in
+            // `nets::maia`, and running them here is what puts them under the comparison.
+            let planes = (maia::PLANES * maia::SQUARES) as usize;
+            let (board, elos) = input.split_at(planes);
+            let self_elo = maia::elo_embedding(weights.reader(), elos[0]).expect("self elo");
+            let oppo_elo = maia::elo_embedding(weights.reader(), elos[1]).expect("oppo elo");
+            let tokens = maia::tokens(board, &self_elo, &oppo_elo).expect("the input builds");
+            let plan = maia::build(&weights).expect("the forward pass builds");
+            let outputs = run_multi(&plan, weights.data(), &[&tokens]).expect("maia runs");
+            let [scores, promo] = outputs.as_slice() else {
+                panic!("{} outputs, not 2", outputs.len());
+            };
+            // The comparison is the assembled move vector, not the raw tensors, so
+            // `post::maia`'s indexing is inside the bound rather than beside it.
+            let logits = crate::post::maia::logits(scores, promo).expect("the logits assemble");
+            write(&dir.join("reference.f32"), &logits);
+            println!(
+                "maia at self {} oppo {}: wrote {} logits",
+                elos[0],
+                elos[1],
+                logits.len()
+            );
             return;
         }
         if graph == "tinyclip" || graph == "tinyclip_text" {

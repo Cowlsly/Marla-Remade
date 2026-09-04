@@ -31,8 +31,13 @@
 //!
 //! # Push fields
 //!
-//! `p.in0` is `S` at `[heads, 1, keys]`, `p.in1` the cache, `p.in_c` and `p.out_c` are `d_model`,
-//! `p.in_w` the key count and `p.group` the head count. No new field.
+//! `p.in0` is `S` at `[heads, 1, key_stride]`, `p.in1` the cache, `p.in_c` and `p.out_c` are
+//! `d_model`, `p.in_w` the key stride and `p.group` the head count.
+//!
+//! When `p.dyn_keys` is set, `p.in_w` remains the distance between rows of `S` — the maximum the
+//! plan was built for — while the number of keys summed over is `step_params.prefix + 1`. The two
+//! must not be conflated: using the attended count as the row stride would read head `h`'s row
+//! from the wrong offset the moment the step is shorter than the maximum.
 
 #include "common.glsl"
 
@@ -43,10 +48,11 @@ void main() {
     }
     // The output is `[d_model, 1, 1]`, so the index *is* the channel.
     uint channel = index;
-    uint keys = p.in_w;
+    uint stride = p.in_w;
+    uint keys = attended_keys(stride);
     uint head_dim = p.out_c / p.group;
     // `S[head][*]`, contiguous in the key index because there is one query.
-    uint row = p.in0 + (channel / head_dim) * keys;
+    uint row = p.in0 + (channel / head_dim) * stride;
 
     float total = 0.0;
     for (uint j = 0u; j < keys; j++) {

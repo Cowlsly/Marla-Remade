@@ -68,7 +68,7 @@
 //! There is no int8 `embed.comp`, and there does not need to be: CLIP's text positions are a
 //! **learned table**, so a token's input vector is a function of one embedding row and one position
 //! row. [`embed_positions`] reads both and adds them in f32, exactly as
-//! `nets::small100::embed_positions` does, and hands the result in as an ordinary fp16 plan input.
+//! `nets::nllb::embed_positions` does, and hands the result in as an ordinary fp16 plan input.
 //!
 //! The cost is that the 12.6 MiB table is uploaded to the device and never read by a shader. It
 //! stays in this file anyway: splitting it out would mean a second `.maml`, a second graph id and a
@@ -390,7 +390,7 @@ fn layer_dims(within: usize) -> Vec<u32> {
 ///
 /// `x[t] = token_embedding[ids[t]] + position_embedding[t]`, both read from the file and summed in
 /// f32 before anything is rounded. CLIP's positions are a **learned table**, not sinusoids, so
-/// unlike `nets::small100::embed_positions` there is nothing to compute — and there is no offset
+/// unlike `nets::nllb::embed_positions` there is nothing to compute — and there is no offset
 /// either: position 0 is the `<|startoftext|>` token's, which is `ids[0]`.
 pub fn embed_positions(weights: Reader<'_>, ids: &[u32]) -> Result<Vec<f32>, String> {
     if ids.is_empty() {

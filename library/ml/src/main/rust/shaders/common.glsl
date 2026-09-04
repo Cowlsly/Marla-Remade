@@ -55,6 +55,22 @@ layout(std430, binding = 2) readonly buffer Weights32 {
     uint weights32[];
 };
 
+// Values that change per step without the command buffer being re-recorded.
+//
+// Push constants below are baked into the recording, so anything that varies between two submits
+// of the *same* recording has to be read from memory. A decode step's key count is the case that
+// matters: it grows by one every token, and re-recording for it cost a `device_wait_idle` and a
+// full re-emit per token.
+//
+// Mirrors `StepParams` in `src/vulkan/run.rs` field for field. `std430` packs a struct of `uint`s
+// with no padding, so neither side has to restate an alignment rule.
+layout(std430, binding = 3) readonly buffer Params {
+    // Cache positions already written; a cached-attention op attends over `prefix + 1` keys.
+    uint prefix;
+    // First position a sliding window may attend to. Zero attends from the start.
+    uint window_start;
+} step_params;
+
 layout(push_constant) uniform Push {
     uint in0;
     uint in1;
@@ -82,7 +98,19 @@ layout(push_constant) uniform Push {
     uint param0_bits;
     uint param1_bits;
     uint count;
+    // Non-zero when the key count comes from `step_params.prefix + 1` rather than from
+    // `in_w`/`out_w`, which then carry only the stride. See `Push::dyn_keys` in `nets/mod.rs`.
+    uint dyn_keys;
 } p;
+
+// Keys a cached-attention op attends over, and the stride between rows of its score map.
+//
+// The two are equal for a plan built at a fixed length, and differ once the plan is built once at
+// a maximum and the step supplies the length. Kept here so the three cached shaders cannot
+// disagree about which of `p.in_w` / `p.out_w` is which.
+uint attended_keys(uint stride) {
+    return p.dyn_keys != 0u ? step_params.prefix + 1u : stride;
+}
 
 // `nets::Act`.
 #define ACT_NONE 0u

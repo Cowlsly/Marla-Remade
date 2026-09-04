@@ -38,10 +38,14 @@ const ADD: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/add.comp.spv"));
 const MUL_BCAST: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/mul_bcast.comp.spv"));
 const AFFINE: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/affine.comp.spv"));
 const LAYERNORM: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/layernorm.comp.spv"));
+const RMSNORM: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/rmsnorm.comp.spv"));
 const ATTN_SCORES: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/attn_scores.comp.spv"));
 const SOFTMAX: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/softmax.comp.spv"));
 const SOFTMAX_CAUSAL: &[u8] =
     include_bytes!(concat!(env!("OUT_DIR"), "/softmax_causal.comp.spv"));
+const SOFTMAX_PREFIX: &[u8] =
+    include_bytes!(concat!(env!("OUT_DIR"), "/softmax_prefix.comp.spv"));
+const CACHE_WRITE: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/cache_write.comp.spv"));
 const ATTN_APPLY: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/attn_apply.comp.spv"));
 const ATTN_SCORES_RELATIVE: &[u8] =
     include_bytes!(concat!(env!("OUT_DIR"), "/attn_scores_relative.comp.spv"));
@@ -64,7 +68,7 @@ const CONV_VEC_INT8: &[u8] =
     include_bytes!(concat!(env!("OUT_DIR"), "/conv_vec_int8.comp.spv"));
 
 /// Every shader, in the order [`Pipelines::create`] destructures them.
-const SPIRV: [&[u8]; 28] = [
+const SPIRV: [&[u8]; 31] = [
     CONV,
     CONV_TRANSPOSE,
     MAXPOOL,
@@ -93,7 +97,15 @@ const SPIRV: [&[u8]; 28] = [
     ATTN_APPLY_CACHED,
     CONV_VEC_INT8,
     SOFTMAX_CAUSAL,
+    RMSNORM,
+    SOFTMAX_PREFIX,
+    CACHE_WRITE,
 ];
+
+/// Descriptors in one set: the arena, the weights as fp16, the weights as words, the step params.
+///
+/// Named so the pool size and the write count cannot drift apart from the layout above.
+const BINDINGS: u32 = 4;
 
 /// `local_size_x` in `shaders/common.glsl`. A dispatch covers `ceil(invocations / this)`
 /// workgroups, and each shader bails on the over-dispatched tail.
@@ -149,6 +161,9 @@ pub struct Pipelines {
     attn_apply_cached: vk::Pipeline,
     conv_vec_int8: vk::Pipeline,
     softmax_causal: vk::Pipeline,
+    softmax_prefix: vk::Pipeline,
+    cache_write: vk::Pipeline,
+    rmsnorm: vk::Pipeline,
 }
 
 impl Pipelines {
@@ -190,11 +205,12 @@ impl Pipelines {
         arena: vk::Buffer,
         arena_size: vk::DeviceSize,
         weights: vk::Buffer,
+        params: vk::Buffer,
         segments: &[Segment],
     ) -> Result<Pipelines, String> {
         // SAFETY: every handle created below is destroyed by `Pipelines::destroy`, or on
         // the failure path here before returning.
-        unsafe { Self::create(context, arena, arena_size, weights, segments) }
+        unsafe { Self::create(context, arena, arena_size, weights, params, segments) }
     }
 
     unsafe fn create(
@@ -202,6 +218,7 @@ impl Pipelines {
         arena: vk::Buffer,
         arena_size: vk::DeviceSize,
         weights: vk::Buffer,
+        params: vk::Buffer,
         segments: &[Segment],
     ) -> Result<Pipelines, String> {
         let device = &context.device;
@@ -227,6 +244,13 @@ impl Pipelines {
                 .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
                 .descriptor_count(1)
                 .stage_flags(vk::ShaderStageFlags::COMPUTE),
+            // Per-step values the host rewrites without re-recording. See
+            // [`super::buffers::Buffer::step_params`] for why this cannot be a push constant.
+            vk::DescriptorSetLayoutBinding::default()
+                .binding(3)
+                .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
+                .descriptor_count(1)
+                .stage_flags(vk::ShaderStageFlags::COMPUTE),
         ];
         let descriptor_layout = device
             .create_descriptor_set_layout(
@@ -241,7 +265,7 @@ impl Pipelines {
         let count = u32::try_from(segments.len()).map_err(|_| "too many weights segments")?;
         let pool_sizes = [vk::DescriptorPoolSize::default()
             .ty(vk::DescriptorType::STORAGE_BUFFER)
-            .descriptor_count(3 * count)];
+            .descriptor_count(BINDINGS * count)];
         let descriptor_pool = device
             .create_descriptor_pool(
                 &vk::DescriptorPoolCreateInfo::default().max_sets(count).pool_sizes(&pool_sizes),
@@ -270,6 +294,10 @@ impl Pipelines {
             .buffer(arena)
             .offset(0)
             .range(arena_size);
+        let params_info = vk::DescriptorBufferInfo::default()
+            .buffer(params)
+            .offset(0)
+            .range(vk::WHOLE_SIZE);
         // Held outside the loop so the `buffer_info` borrows stay live until the one
         // `update_descriptor_sets` below.
         let weight_infos: Vec<_> = segments
@@ -281,7 +309,7 @@ impl Pipelines {
                     .range(segment.len)
             })
             .collect();
-        let mut writes = Vec::with_capacity(segments.len() * 3);
+        let mut writes = Vec::with_capacity(segments.len() * BINDINGS as usize);
         for (set, info) in descriptor_sets.iter().zip(&weight_infos) {
             writes.push(
                 vk::WriteDescriptorSet::default()
@@ -306,6 +334,15 @@ impl Pipelines {
                     .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
                     .buffer_info(std::slice::from_ref(info)),
             );
+            // The same params buffer on every set: which segment an op is dispatched through
+            // says nothing about the step it belongs to.
+            writes.push(
+                vk::WriteDescriptorSet::default()
+                    .dst_set(*set)
+                    .dst_binding(3)
+                    .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
+                    .buffer_info(std::slice::from_ref(&params_info)),
+            );
         }
         device.update_descriptor_sets(&writes, &[]);
 
@@ -313,10 +350,17 @@ impl Pipelines {
             .stage_flags(vk::ShaderStageFlags::COMPUTE)
             .offset(0)
             .size(std::mem::size_of::<Push>() as u32);
+        // **One** set layout, not one per segment. `layouts` above is a repeat of the same
+        // layout because `allocate_descriptor_sets` wants one entry per set it allocates, but a
+        // pipeline layout entry declares a distinct *bound set index*, and `record` only ever
+        // binds one set, at index 0. Passing the repeat here declared `segments.len()` sets:
+        // harmless on a desktop reporting 32, but `maxBoundDescriptorSets` is only guaranteed to
+        // be 4, and NLLB at the guaranteed `maxStorageBufferRange` needs ten windows — so the
+        // pipeline layout would fail to create on exactly the devices segmenting exists for.
         let layout = device
             .create_pipeline_layout(
                 &vk::PipelineLayoutCreateInfo::default()
-                    .set_layouts(&layouts)
+                    .set_layouts(std::slice::from_ref(&descriptor_layout))
                     .push_constant_ranges(std::slice::from_ref(&push_range)),
                 None,
             )
@@ -366,6 +410,9 @@ impl Pipelines {
             attn_apply_cached,
             conv_vec_int8,
             softmax_causal,
+            rmsnorm,
+            softmax_prefix,
+            cache_write,
         ] = match <[vk::Pipeline; SPIRV.len()]>::try_from(built) {
             Ok(all) => all,
             Err(built) => {
@@ -410,6 +457,9 @@ impl Pipelines {
             attn_apply_cached,
             conv_vec_int8,
             softmax_causal,
+            rmsnorm,
+            softmax_prefix,
+            cache_write,
         })
     }
 
@@ -427,9 +477,12 @@ impl Pipelines {
             Kind::MulBroadcast => self.mul_bcast,
             Kind::Affine => self.affine,
             Kind::LayerNorm => self.layernorm,
+            Kind::RmsNorm => self.rmsnorm,
             Kind::AttnScores => self.attn_scores,
             Kind::Softmax => self.softmax,
             Kind::SoftmaxCausal => self.softmax_causal,
+            Kind::SoftmaxPrefix => self.softmax_prefix,
+            Kind::CacheWrite => self.cache_write,
             Kind::AttnApply => self.attn_apply,
             Kind::AttnScoresRelative => self.attn_scores_relative,
             Kind::AttnApplyRelative => self.attn_apply_relative,
@@ -480,6 +533,9 @@ impl Pipelines {
             self.attn_apply_cached,
             self.conv_vec_int8,
             self.softmax_causal,
+            self.rmsnorm,
+            self.softmax_prefix,
+            self.cache_write,
         ] {
             device.destroy_pipeline(pipeline, None);
         }

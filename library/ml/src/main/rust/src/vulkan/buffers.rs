@@ -70,6 +70,29 @@ impl Buffer {
         )
     }
 
+    /// A host-visible, host-coherent buffer the shaders read as storage and the command buffer
+    /// can dispatch from.
+    ///
+    /// This is the one buffer a recorded command buffer's *contents* can change through. Push
+    /// constants are baked into the recording, so anything that varies per step - the number of
+    /// cache positions a decode step attends over, and the group counts that follow from it - has
+    /// to be read from memory instead. `INDIRECT_BUFFER` is asked for alongside `STORAGE_BUFFER`
+    /// so the same allocation can hold both the values a shader reads and the
+    /// `VkDispatchIndirectCommand`s the recording dispatches from, rather than needing a second
+    /// mapping kept in step with the first.
+    ///
+    /// Device-local would be faster for the shader to read, but then updating it would need a
+    /// transfer and a barrier, which is a submit - and the entire point is to change it without
+    /// touching the queue.
+    pub fn step_params(context: &Arc<Context>, size: vk::DeviceSize) -> Result<Buffer, String> {
+        Buffer::new(
+            context,
+            size,
+            vk::BufferUsageFlags::STORAGE_BUFFER | vk::BufferUsageFlags::INDIRECT_BUFFER,
+            vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT,
+        )
+    }
+
     fn new(
         context: &Arc<Context>,
         size: vk::DeviceSize,

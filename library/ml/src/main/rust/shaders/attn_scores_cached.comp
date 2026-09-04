@@ -35,8 +35,13 @@
 //!
 //! `p.in0` is Q at `[d_model, 1, 1]`, so channel `c` is simply element `c`. `p.in1` is the cache.
 //! `p.in_c` is `d_model` and doubles as the cache's per-position stride, `p.group` is the head
-//! count, `p.out_w` is the key count and `p.param0_bits` is `1 / sqrt(head_dim)` as raw f32 bits —
-//! all fields that already exist, so the 26-slot push block does not grow.
+//! count, `p.out_w` is the key stride and `p.param0_bits` is `1 / sqrt(head_dim)` as raw f32 bits.
+//!
+//! When `p.dyn_keys` is set the plan was built once at a maximum length and the step supplies the
+//! real one, so `p.out_w` is the *stride* between rows of the score map while the attended count
+//! is `step_params.prefix + 1`. Entries past that are left untouched rather than written with a
+//! sentinel: `softmax_prefix.comp` reads only the attended span, so what is beyond it never
+//! reaches the result.
 
 #include "common.glsl"
 
@@ -45,9 +50,14 @@ void main() {
     if (index >= p.count) {
         return;
     }
-    // The output is `[heads, 1, keys]`, so `unpack` gives head and key directly.
+    // The output is `[heads, 1, key_stride]`, so `unpack` gives head and key directly.
     uint head, unused_row, key;
     unpack(index, head, unused_row, key);
+    // Past the keys this step actually attends over. Only possible when the plan is built at a
+    // maximum, in which case the dispatch covers the whole stride.
+    if (key >= attended_keys(p.out_w)) {
+        return;
+    }
     uint head_dim = p.in_c / p.group;
     // Q is one position, so its channels are consecutive from `p.in0`.
     uint query = p.in0 + head * head_dim;

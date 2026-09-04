@@ -77,7 +77,7 @@ use crate::preprocess::RESCALE_ONLY;
 use crate::weights::{graph, write_mixed, Fixture, Streamed, Weights};
 
 use super::context::{self, Context};
-use super::run::Net;
+use super::run::{Net, StepParams};
 
 /// Fraction of the tensor's own scale two runs of the same plan may differ by.
 ///
@@ -107,6 +107,16 @@ fn on_device(plan: Plan, data: Vec<u8>, inputs: &[&[f32]]) -> Vec<Vec<f32>> {
     let weights = Weights::from_data(data);
     let mut net = Net::new(device(), plan, &weights, RESCALE_ONLY)
         .expect("the plan records into a command buffer");
+    net.infer_raw_many(inputs).expect("the command buffer submits and reads back")
+}
+
+/// Run `plan` on the device with the step parameters a decode plan reads.
+fn on_device_at(plan: Plan, data: Vec<u8>, inputs: &[&[f32]], prefix: u32) -> Vec<Vec<f32>> {
+    let weights = Weights::from_data(data);
+    let mut net = Net::new(device(), plan, &weights, RESCALE_ONLY)
+        .expect("the plan records into a command buffer");
+    net.set_params(StepParams { prefix, window_start: 0 })
+        .expect("the step params are written");
     net.infer_raw_many(inputs).expect("the command buffer submits and reads back")
 }
 
@@ -339,6 +349,78 @@ fn a_reshape_moves_the_same_elements_on_the_device() {
 
 #[test]
 #[ignore = "needs a Vulkan device"]
+fn a_decode_plan_built_at_the_maximum_matches_one_built_at_the_length() {
+    // The invariant the whole record-once decode design rests on: a plan built for `MAX` cache
+    // positions and run with `prefix = KEYS - 1` must produce what a plan built for exactly
+    // `KEYS` positions produces. If that holds, the plan stops depending on the step number and
+    // `Reshaped` stops re-recording per token.
+    //
+    // The cache is deliberately `MAX` positions of which only the first `KEYS` are real; the tail
+    // is filled with values far outside the live range. Zeros there would let a shader that
+    // ignored the bound still pass — `exp` of a zero score is a finite weight against a zero
+    // value, which perturbs little. Large values cannot be silently absorbed: if any of the three
+    // shaders reads past the bound, the softmax denominator or the weighted sum moves by orders
+    // of magnitude and the comparison fails loudly.
+    const D_MODEL: u32 = 64;
+    const HEADS: u32 = 8;
+    const KEYS: u32 = 5;
+    const MAX: u32 = 32;
+
+    let query = spread(D_MODEL as usize, 0.3);
+    let live: Vec<f32> = spread((KEYS * D_MODEL) as usize, 1.1);
+    // The same live prefix, then a tail no correct run may read.
+    let mut padded = live.clone();
+    padded.extend((0..((MAX - KEYS) * D_MODEL)).map(|i| if i % 2 == 0 { 90.0 } else { -90.0 }));
+
+    // Built at exactly the live length, with the ordinary fixed-length ops.
+    let at_length = {
+        let source = Invented::new(0);
+        let mut builder = Builder::new(&source);
+        let q = builder.input(Shape::new(D_MODEL, 1, 1));
+        let cache = builder.input(Shape::new(KEYS, 1, D_MODEL));
+        let scores = builder.attn_scores_cached(q, cache, HEADS);
+        let probs = builder.softmax(scores);
+        let out = builder.attn_apply_cached(probs, cache, HEADS);
+        let plan = builder.finish(&[out]).expect("the fixed-length decode plan builds");
+        crate::nets::tests::assert_no_aliasing(&plan);
+        on_device(plan, source.into_data(), &[&query, &live])
+    };
+
+    // Built at the maximum, told the real length at submit time.
+    let build_at_maximum = || {
+        let source = Invented::new(0);
+        let mut builder = Builder::new(&source);
+        let q = builder.input(Shape::new(D_MODEL, 1, 1));
+        let cache = builder.input(Shape::new(MAX, 1, D_MODEL));
+        let scores = builder.attn_scores_cached_dynamic(q, cache, HEADS);
+        let probs = builder.softmax_prefix(scores);
+        let out = builder.attn_apply_cached_dynamic(probs, cache, HEADS);
+        let plan = builder.finish(&[out]).expect("the maximum-length decode plan builds");
+        crate::nets::tests::assert_no_aliasing(&plan);
+        (plan, source.into_data())
+    };
+
+    // `prefix` is the positions already cached, so this step attends over those plus its own.
+    let (plan, data) = build_at_maximum();
+    let at_maximum = on_device_at(plan, data, &[&query, &padded], KEYS - 1);
+    matches("a decode plan built at its maximum", &at_length, &at_maximum);
+
+    // And the bound is really being read, rather than the two agreeing for some other reason: at
+    // a different prefix the same recording must produce something else. Without this the test
+    // would still pass if every shader ignored `step_params` and used the full width, provided
+    // the padding happened not to matter.
+    let (plan, data) = build_at_maximum();
+    let at_wrong_prefix = on_device_at(plan, data, &[&query, &padded], KEYS);
+    let moved = at_length
+        .iter()
+        .zip(&at_wrong_prefix)
+        .flat_map(|(a, b)| a.iter().zip(b))
+        .any(|(a, b)| (a - b).abs() > TOLERANCE);
+    assert!(moved, "attending over one more position changed nothing, so the bound is unread");
+}
+
+#[test]
+#[ignore = "needs a Vulkan device"]
 fn the_gemv_int8_shader_agrees_with_the_reference() {
     // `conv_vec_int8.comp`, which every ungrouped single-position 1x1 int8 convolution lowers to.
     // It is a decode step's whole int8 workload bar the cross-attention keys and values, and it
@@ -394,6 +476,85 @@ fn the_gemv_int8_shader_agrees_with_the_reference() {
         plan.ops,
     );
     compare("a gemv int8 convolution", plan, weights.data().to_vec(), &[&input]);
+}
+
+#[test]
+#[ignore = "needs a Vulkan device"]
+fn a_gemv_int8_convolution_past_a_segment_boundary_agrees_with_the_reference() {
+    // The same shader as above, but with its three tensors pushed past the first descriptor
+    // window, so `Segments::rebase` has to move a **word** offset rather than an element one.
+    //
+    // Nothing else here reaches that path on a device. Every other fixture is a few kilobytes,
+    // so it is one window with a zero base and `rebase` returns the push untouched; the only
+    // segmented net is Supertonic, which has no single-position int8 convolution. That gap is
+    // why `ConvVecInt8` was missing from the word-unit arm of `rebase` while `weight_reads`
+    // classified it correctly — the file offsets were right, the rebased offsets were half of
+    // right, and no test looked.
+    //
+    // Run it both ways. Unsegmented it is an ordinary gemv; under
+    // `MODELRUNNER_MAX_STORAGE_RANGE=33554432` the padding below guarantees a non-zero base, and
+    // a regression reads the wrong weights and fails the comparison rather than erroring.
+    // 44 MiB of fp16. The file is then windowed at an 8 MiB stride and the three tensors below
+    // land in the sixth window, 4 MiB *past* its 40 MiB base — deliberately not on the boundary
+    // itself, where a word-rebased and an element-rebased offset would both saturate to zero and
+    // agree by accident.
+    const PAD_ELEMENTS: usize = 23_068_672;
+    let out_channels = 20u32;
+    let in_channels = 100u32;
+    let kernel: Vec<i8> = (0..(out_channels * in_channels) as i32)
+        .map(|i| ((i * 37) % 251 - 125) as i8)
+        .collect();
+    let scales: Vec<f32> = (0..out_channels).map(|c| 0.007_812_5 * (1.0 + c as f32)).collect();
+    let biases: Vec<f32> = spread(out_channels as usize, 1.9);
+    let blob = write_mixed(
+        graph::SUPERTONIC_VE,
+        &[
+            // Never read. It exists only to move what follows into a later window.
+            Fixture::F16(vec![PAD_ELEMENTS as u32], vec![0.0; PAD_ELEMENTS]),
+            Fixture::I8(vec![out_channels, in_channels, 1, 1], kernel),
+            Fixture::F16(vec![out_channels], scales),
+            Fixture::F16(vec![out_channels], biases),
+        ],
+    );
+    let weights = Weights::parse(&blob, graph::SUPERTONIC_VE).expect("the fixture blob parses");
+    let input = spread(in_channels as usize, 0.7);
+
+    let mut builder = Builder::new(&weights);
+    // The padding is never dispatched over, which `finish` would otherwise reject.
+    builder.host_tensor(0, &[PAD_ELEMENTS as u32]);
+    let first = builder.input(Shape::new(in_channels, 1, 1));
+    let last = builder.conv_int8(
+        first,
+        1,
+        out_channels,
+        (1, 1),
+        (1, 1),
+        (1, 1),
+        (0, 0, 0, 0),
+        1,
+        Act::Relu,
+    );
+    let plan = builder.finish(&[last]).expect("the padded gemv int8 fixture plan builds");
+    assert!(
+        plan.ops.iter().any(|op| matches!(
+            op,
+            crate::nets::Op::Dispatch { kind: crate::nets::Kind::ConvVecInt8, .. }
+        )),
+        "a single-position int8 convolution must lower to the gemv shader",
+    );
+    // Reported rather than asserted, because the useful configuration is the forced one and a
+    // plain run should still check the numbers rather than skip.
+    let bytes = weights.data().len() as u64;
+    let range = device().limits.max_storage_buffer_range;
+    if bytes > range {
+        println!("{bytes} bytes over a {range}-byte range: the kernel is in a later window");
+    } else {
+        println!(
+            "{bytes} bytes inside a {range}-byte range: one window, so this run does not \
+             exercise rebasing. Set MODELRUNNER_MAX_STORAGE_RANGE=33554432."
+        );
+    }
+    compare("a gemv int8 convolution past a boundary", plan, weights.data().to_vec(), &[&input]);
 }
 
 #[test]

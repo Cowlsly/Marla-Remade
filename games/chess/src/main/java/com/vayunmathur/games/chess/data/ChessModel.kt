@@ -222,12 +222,69 @@ data class Board(
 
     /** True if [color] has at least one legal move (move that doesn't leave its own king in check). */
     fun hasLegalMoves(color: PieceColor): Boolean {
-        return pieces.flatMapIndexed { row, cols ->
-            cols.mapIndexedNotNull { col, piece ->
-                if (piece != null && piece.color == color) Position(row, col) else null
+        var any = false
+        walkLegalMoves(color) { _, _ ->
+            any = true
+            false
+        }
+        return any
+    }
+
+    /**
+     * Every legal move [color] can play, with the four promotion choices expanded.
+     *
+     * The engine's move list and the mate/stalemate test are the same generator, so the rules
+     * cannot disagree with themselves — [hasLegalMoves] is this with an early exit.
+     *
+     * Promotions are the one thing [isValidMove] cannot express: it validates a pawn's step to
+     * the last rank without saying what it becomes, and [movePiece] handles the choice
+     * out-of-band through [promotionPosition]. An engine has to choose up front, so a promoting
+     * step appears here four times, once per [PROMOTION_CHOICES] entry.
+     */
+    fun legalMoves(color: PieceColor): List<Move> {
+        val moves = mutableListOf<Move>()
+        walkLegalMoves(color) { start, end ->
+            val piece = pieces[start.row][start.col] ?: return@walkLegalMoves true
+            // En passant captures a pawn that is not on the destination square, so the captured
+            // piece is read the way `movePiece` reads it rather than off `end`.
+            val captured = if (piece.type == PieceType.PAWN && isEnPassant(start, end)) {
+                pieces[enPassantCaptureRow(piece.color, end.row)][end.col]
+            } else {
+                pieces[end.row][end.col]
             }
-        }.any { pos ->
-            (0..7).any { i -> (0..7).any { j -> isValidMove(pos, Position(i, j)) } }
+            if (isPromotionSquare(piece, end)) {
+                for (promotion in PROMOTION_CHOICES) {
+                    moves.add(Move(start, end, piece, captured, promotedTo = promotion))
+                }
+            } else {
+                moves.add(Move(start, end, piece, captured))
+            }
+            true
+        }
+        return moves
+    }
+
+    /**
+     * Visit every legal `(start, end)` pair for [color], stopping when [visit] returns false.
+     *
+     * The same 64x64 scan [hasLegalMoves] always did. It is cheap in practice because
+     * `isValidMoveIgnoringCheck` rejects almost all 4096 pairs before [isValidMove] clones the
+     * board, leaving around forty clones in a typical position.
+     */
+    private fun walkLegalMoves(color: PieceColor, visit: (Position, Position) -> Boolean) {
+        for (row in 0..7) {
+            for (col in 0..7) {
+                val piece = pieces[row][col] ?: continue
+                if (piece.color != color) continue
+                val start = Position(row, col)
+                for (endRow in 0..7) {
+                    for (endCol in 0..7) {
+                        val end = Position(endRow, endCol)
+                        if (!isValidMove(start, end)) continue
+                        if (!visit(start, end)) return
+                    }
+                }
+            }
         }
     }
 
@@ -420,6 +477,20 @@ data class Board(
     }
 
     companion object {
+        /**
+         * What a pawn may become, in the order Maia3's move vocabulary lists them.
+         *
+         * The order is load-bearing for `MaiaEngine.moveIndex`, which turns a promotion into
+         * `4096 + fromFile * 32 + toFile * 4 + PROMOTION_CHOICES.indexOf(piece)`. Reordering it
+         * would silently score every promotion as a different piece.
+         */
+        val PROMOTION_CHOICES = listOf(
+            PieceType.QUEEN,
+            PieceType.ROOK,
+            PieceType.BISHOP,
+            PieceType.KNIGHT,
+        )
+
         val initialState = Board(
             pieces = listOf(
                 listOf(

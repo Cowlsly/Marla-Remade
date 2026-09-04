@@ -17,7 +17,7 @@ import kotlinx.coroutines.launch
 
 sealed class GameMode {
     data object TwoPlayer : GameMode()
-    data class VsAI(val playerColor: PieceColor, val difficulty: StockfishEngine.Difficulty) : GameMode()
+    data class VsAI(val playerColor: PieceColor, val difficulty: Difficulty) : GameMode()
 }
 
 /** Terminal outcome of a game, or null while it is still in progress. */
@@ -43,14 +43,27 @@ class ChessViewModel(application: Application) : AndroidViewModel(application), 
 
     private val _uiState = MutableStateFlow(ChessUiState())
     val uiState: StateFlow<ChessUiState> = _uiState.asStateFlow()
-    private val chessApi = ChessApi()
+    private val chessApi = ChessApi(application)
+
+    /**
+     * Whether the "play against the AI" option is offered.
+     *
+     * False on a device that cannot run the model — no `libmodelrunner.so` for its ABI, or no
+     * Vulkan device with fp16 compute. Offering a mode that can never move would be worse than
+     * not offering it, so the picker hides it. Mirrors `translationAvailable`.
+     */
+    private val _aiAvailable = MutableStateFlow(false)
+    val aiAvailable: StateFlow<Boolean> = _aiAvailable.asStateFlow()
+
+    init {
+        viewModelScope.launch { _aiAvailable.value = chessApi.isAvailable() }
+    }
 
     fun onNewGame(gameMode: GameMode) {
         val isFlipped = gameMode is GameMode.VsAI && gameMode.playerColor == PieceColor.BLACK
         _uiState.value = ChessUiState(gameMode = gameMode, isBoardFlipped = isFlipped)
-        if (gameMode is GameMode.VsAI) {
-            StockfishEngine.difficulty = gameMode.difficulty
-            if (gameMode.playerColor == PieceColor.BLACK) makeAiMove()
+        if (gameMode is GameMode.VsAI && gameMode.playerColor == PieceColor.BLACK) {
+            makeAiMove()
         }
     }
 
@@ -110,18 +123,26 @@ class ChessViewModel(application: Application) : AndroidViewModel(application), 
     }
 
     private fun makeAiMove() {
+        val mode = _uiState.value.gameMode as? GameMode.VsAI ?: return
         viewModelScope.launch {
-            val board = _uiState.value.board
-            // Returns null when the engine has no move to make (mate/stalemate against the AI);
-            // without this guard the "bestmove (none)" reply would be parsed as a coordinate and crash.
-            val bestMove = chessApi.getBestMove(board) ?: return@launch
-            val newBoard = board.movePiece(bestMove.start, bestMove.end, bestMove.promotedTo)
-            val nextTurn = _uiState.value.turn.opposite
+            val state = _uiState.value
+            // The side to move comes from the UI's own state rather than from the board: the
+            // rules model infers a turn from its last move, which the puzzle path fakes.
+            // Returns null when the engine has no move to make (mate or stalemate against the
+            // AI, or an unavailable model).
+            val bestMove = chessApi.getBestMove(state.board, state.turn, mode.difficulty)
+                ?: return@launch
+            val newBoard = state.board.movePiece(bestMove.start, bestMove.end, bestMove.promotedTo)
+            val nextTurn = state.turn.opposite
             val (result, status) = statusFor(newBoard, nextTurn)
             _uiState.update {
                 it.copy(board = newBoard, turn = nextTurn, gameStatus = status, gameResult = result)
             }
         }
+    }
+
+    override fun onCleared() {
+        chessApi.close()
     }
 
     /** Terminal result for [board] when it is [turn]'s move, or null if play continues. */
