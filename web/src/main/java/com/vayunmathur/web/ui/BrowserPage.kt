@@ -466,7 +466,7 @@ fun BrowserPage(
                                     initialUrl = activeTab.url,
                                     viewModel = viewModel,
                                     webViewPool = webViewPool,
-                                    onRequestNewTab = { url -> viewModel.newTab(url = url) },
+                                    onRequestNewTab = { url -> viewModel.newTab(url = url, isPrivate = activeTab.isPrivate) },
                                     onLinkLongPress = { url -> linkContextMenuUrl = url },
                                     modifier = Modifier.fillMaxSize()
                                 )
@@ -597,7 +597,7 @@ fun BrowserPage(
                         context.getString(R.string.share_link),
                     )
                 },
-                onOpenInNewTab = { viewModel.newTab(url = linkUrl) },
+                onOpenInNewTab = { viewModel.newTab(url = linkUrl, isPrivate = viewModel.activeTab?.isPrivate ?: true) },
             )
         }
 
