@@ -1,0 +1,43 @@
+#version 450
+//! Append one position to a KV cache, at the row the step supplies.
+//!
+//! # Why an op rather than a copy
+//!
+//! `Op::Copy` is a `vkCmdCopyBuffer` with its offsets baked into the recording, and the row a
+//! decode step writes moves by one every token. Recording it is therefore exactly the thing that
+//! forced a re-record per token. This is the same copy with the destination row read from
+//! `step_params.prefix` instead, which is the whole difference between a plan that is recorded
+//! once and one that is recorded per token.
+//!
+//! # Why the projection does not just write here directly
+//!
+//! It could, in principle: the K and V projections produce this row, so a convolution that knew
+//! about the cache could store into it. That would put a dynamic destination into
+//! `conv_point_int8.comp` and every other projection shader, for one caller. Keeping it a
+//! separate op costs one `d_model` copy per layer per step - 1024 fp16 elements for NLLB, against
+//! the 1024x1024 matrix multiply that produced them - and leaves every projection shader alone.
+//!
+//! # Push fields
+//!
+//! `p.in0` is the source row, `d_model` contiguous elements. `p.out_at` is the base of the cache,
+//! which is `[max_positions, 1, d_model]`. `p.in_c` is `d_model`, the distance between rows.
+//! `p.in_h` is `max_positions`, read only to refuse a write past the end. `p.count` is `d_model`.
+//!
+//! `out_c`/`out_h`/`out_w` are left as the cache's true dimensions rather than repurposed for the
+//! bound, because their product is what `assert_no_aliasing` treats as the region this op writes.
+
+#include "common.glsl"
+
+void main() {
+    uint index = global_index();
+    if (index >= p.count) {
+        return;
+    }
+    // A cache that has run out of room drops the position rather than corrupting whatever the
+    // arena put after it. The caller is expected to stop before this; a shader cannot report it,
+    // so the safe failure is the silent one rather than an out-of-bounds store.
+    if (step_params.prefix >= p.in_h) {
+        return;
+    }
+    arena[p.out_at + step_params.prefix * p.in_c + index] = arena[p.in0 + index];
+}
