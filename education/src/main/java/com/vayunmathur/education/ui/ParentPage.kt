@@ -4,7 +4,9 @@ import androidx.compose.ui.platform.LocalContext
 import kotlin.time.Instant
 import kotlinx.datetime.TimeZone
 import kotlinx.datetime.toLocalDateTime
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
@@ -17,17 +19,17 @@ import com.vayunmathur.library.ui.AppScaffold
 import com.vayunmathur.library.ui.Button
 import com.vayunmathur.library.ui.DatePicker
 import com.vayunmathur.library.ui.DatePickerDialog
-import com.vayunmathur.library.ui.DropdownMenuItem
+import com.vayunmathur.library.ui.DropdownMenu
 import com.vayunmathur.library.ui.ExperimentalMaterial3Api
-import com.vayunmathur.library.ui.ExposedDropdownMenuBox
-import com.vayunmathur.library.ui.ExposedDropdownMenuDefaults
-import com.vayunmathur.library.ui.ExposedDropdownMenuAnchorType
+import com.vayunmathur.library.ui.IconArrowDropDown
+import com.vayunmathur.library.ui.IconCheck
 import com.vayunmathur.library.ui.HorizontalDivider
 import com.vayunmathur.library.ui.IconButton
 import com.vayunmathur.library.ui.MaterialTheme
 import com.vayunmathur.library.ui.OutlinedButton
 import com.vayunmathur.library.ui.OutlinedTextField
 import com.vayunmathur.library.ui.Scaffold
+import com.vayunmathur.library.ui.SelectableDropdownMenuItem
 import com.vayunmathur.library.ui.Text
 import com.vayunmathur.library.ui.TextButton
 import com.vayunmathur.library.ui.TopAppBar
@@ -196,61 +198,73 @@ private fun gradeLabel(grade: Int): String = when {
     else -> stringResource(R.string.grade_number, grade)
 }
 
-@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun GradeDropdown(current: Int, onSelect: (Int) -> Unit) {
     var expanded by remember { mutableStateOf(false) }
-    ExposedDropdownMenuBox(expanded = expanded, onExpandedChange = { expanded = it }) {
+    Box(Modifier.fillMaxWidth()) {
         OutlinedTextField(
             value = gradeLabel(current),
             onValueChange = {},
             readOnly = true,
             label = { Text(stringResource(R.string.grade)) },
-            trailingIcon = { ExposedDropdownMenuDefaults.TrailingIcon(expanded) },
-            modifier = Modifier
-                .fillMaxWidth()
-                .menuAnchor(ExposedDropdownMenuAnchorType.PrimaryNotEditable),
+            singleLine = true,
+            modifier = Modifier.fillMaxWidth(),
+            trailingIcon = {
+                IconButton(onClick = { expanded = true }) {
+                    IconArrowDropDown()
+                }
+            },
         )
-        ExposedDropdownMenu(expanded = expanded, onDismissRequest = { expanded = false }) {
+        DropdownMenu(expanded = expanded, onDismissRequest = { expanded = false }) {
             Grades.all.forEach { g ->
-                DropdownMenuItem(
-                    text = { Text(gradeLabel(g)) },
+                SelectableDropdownMenuItem(
+                    selected = g == current,
                     onClick = { onSelect(g); expanded = false },
+                    text = { Text(gradeLabel(g)) },
+                    selectedLeadingIcon = { IconCheck() },
                 )
             }
         }
+        Box(Modifier.matchParentSize().clickable { expanded = true })
     }
 }
 
-@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun BandOverrideDropdown(current: String?, onSelect: (Band?) -> Unit) {
     var expanded by remember { mutableStateOf(false) }
     val currentLabel = current?.let { runCatching { Band.valueOf(it) }.getOrNull() }
         ?.let { bandLabel(it) } ?: "Automatic (by grade)"
-    ExposedDropdownMenuBox(expanded = expanded, onExpandedChange = { expanded = it }) {
+    Box(Modifier.fillMaxWidth()) {
         OutlinedTextField(
             value = currentLabel,
             onValueChange = {},
             readOnly = true,
             label = { Text(stringResource(R.string.band_override)) },
-            trailingIcon = { ExposedDropdownMenuDefaults.TrailingIcon(expanded) },
-            modifier = Modifier
-                .fillMaxWidth()
-                .menuAnchor(ExposedDropdownMenuAnchorType.PrimaryNotEditable),
+            singleLine = true,
+            modifier = Modifier.fillMaxWidth(),
+            trailingIcon = {
+                IconButton(onClick = { expanded = true }) {
+                    IconArrowDropDown()
+                }
+            },
         )
-        ExposedDropdownMenu(expanded = expanded, onDismissRequest = { expanded = false }) {
-            DropdownMenuItem(
-                text = { Text(stringResource(R.string.automatic_by_grade)) },
+        DropdownMenu(expanded = expanded, onDismissRequest = { expanded = false }) {
+            SelectableDropdownMenuItem(
+                selected = current == null,
                 onClick = { onSelect(null); expanded = false },
+                text = { Text(stringResource(R.string.automatic_by_grade)) },
+                selectedLeadingIcon = { IconCheck() },
             )
             Band.entries.forEach { band ->
-                DropdownMenuItem(
-                    text = { Text(bandLabel(band)) },
+                SelectableDropdownMenuItem(
+                    selected = current == band.name,
                     onClick = { onSelect(band); expanded = false },
+                    text = { Text(bandLabel(band)) },
+                    selectedLeadingIcon = { IconCheck() },
                 )
             }
         }
+        Box(Modifier.matchParentSize().clickable { expanded = true })
     }
 }
 

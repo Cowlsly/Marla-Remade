@@ -7,3 +7,4 @@
 pub mod earcut;
 pub mod fill;
 pub mod stroke;
+pub mod text;

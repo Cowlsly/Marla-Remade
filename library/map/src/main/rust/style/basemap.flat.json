@@ -243,6 +243,8 @@
       "source": "roads",
       "type": "line",
       "kinds": ["minor_road", "other"],
+      "forbid_flags": ["bridge", "tunnel", "link"],
+      "forbid_details": ["service"],
       "light": "#d5d0c6",
       "dark": "#111318",
       "minzoom": 13,
@@ -259,6 +261,7 @@
       "source": "roads",
       "type": "line",
       "kinds": ["major_road"],
+      "forbid_flags": ["bridge", "tunnel", "link"],
       "light": "#d8c9a6",
       "dark": "#111318",
       "minzoom": 9,
@@ -275,6 +278,7 @@
       "source": "roads",
       "type": "line",
       "kinds": ["highway"],
+      "forbid_flags": ["bridge", "tunnel", "link"],
       "light": "#e0b96a",
       "dark": "#111318",
       "width": {
@@ -289,16 +293,120 @@
       }
     },
     {
+      "id": "roads-link-casing",
+      "authored": "roads_link_casing",
+      "source": "roads",
+      "type": "line",
+      "kinds": ["highway", "major_road", "minor_road"],
+      "require_flags": ["link"],
+      "light": "#d8c9a6",
+      "dark": "#111318",
+      "minzoom": 13,
+      "width": { "interpolate": "exponential", "base": 1.6, "stops": [[13, 0], [13.5, 1.5]] },
+      "gap_width": {
+        "interpolate": "exponential",
+        "base": 1.6,
+        "stops": [[13, 0], [13.5, 1], [18, 11]]
+      }
+    },
+    {
+      "id": "roads-bridges-highway-casing",
+      "authored": "roads_bridges_highway_casing",
+      "source": "roads",
+      "type": "line",
+      "kinds": ["highway"],
+      "require_flags": ["bridge"],
+      "forbid_flags": ["link"],
+      "light": "#e0e0e0",
+      "dark": "#111318",
+      "minzoom": 12,
+      "width": { "interpolate": "exponential", "base": 1.6, "stops": [[7, 0], [7.5, 1], [20, 15]] },
+      "gap_width": {
+        "interpolate": "exponential",
+        "base": 1.6,
+        "stops": [[3, 0], [3.5, 0.5], [18, 15]]
+      }
+    },
+    {
+      "id": "roads-bridges-major-casing",
+      "authored": "roads_bridges_major_casing",
+      "source": "roads",
+      "type": "line",
+      "kinds": ["major_road"],
+      "require_flags": ["bridge"],
+      "light": "#e0e0e0",
+      "dark": "#111318",
+      "minzoom": 12,
+      "width": { "interpolate": "exponential", "base": 1.6, "stops": [[9, 0], [9.5, 1.5]] },
+      "gap_width": {
+        "interpolate": "exponential",
+        "base": 1.6,
+        "stops": [[7, 0], [7.5, 0.5], [18, 10]]
+      }
+    },
+    {
+      "id": "roads-bridges-minor-casing",
+      "authored": "roads_bridges_minor_casing",
+      "source": "roads",
+      "type": "line",
+      "kinds": ["minor_road"],
+      "require_flags": ["bridge"],
+      "light": "#e0e0e0",
+      "dark": "#111318",
+      "minzoom": 12,
+      "width": { "interpolate": "exponential", "base": 1.6, "stops": [[13, 0], [13.5, 0.8]] },
+      "gap_width": {
+        "interpolate": "exponential",
+        "base": 1.6,
+        "stops": [[11, 0], [12.5, 0.5], [15, 2], [18, 11]]
+      }
+    },
+    {
+      "id": "roads-bridges-link-casing",
+      "authored": "roads_bridges_link_casing",
+      "source": "roads",
+      "type": "line",
+      "kinds": ["highway", "major_road", "minor_road"],
+      "require_flags": ["bridge", "link"],
+      "light": "#e0e0e0",
+      "dark": "#111318",
+      "minzoom": 12,
+      "width": { "interpolate": "exponential", "base": 1.6, "stops": [[12, 0], [12.5, 1.5]] },
+      "gap_width": {
+        "interpolate": "exponential",
+        "base": 1.6,
+        "stops": [[13, 0], [13.5, 1], [18, 11]]
+      }
+    },
+    {
+      "id": "roads-bridges-other-casing",
+      "authored": "roads_bridges_other_casing",
+      "source": "roads",
+      "type": "line",
+      "kinds": ["other", "path"],
+      "require_flags": ["bridge"],
+      "light": "#e0e0e0",
+      "dark": "#111318",
+      "minzoom": 12,
+      "width": { "interpolate": "exponential", "base": 1.6, "stops": [[14, 0], [20, 7]] },
+      "gap_width": {
+        "interpolate": "exponential",
+        "base": 1.6,
+        "stops": [[14, 0], [20, 7]]
+      }
+    },
+    {
       "id": "roads-path",
       "authored": "roads_other",
       "source": "roads",
       "type": "line",
       "kinds": ["path"],
+      "forbid_flags": ["bridge", "tunnel"],
       "light": "#c7bfae",
       "dark": "#26282e",
       "minzoom": 15,
       "width": { "interpolate": "exponential", "base": 1.6, "stops": [[14, 0], [20, 7]] },
-      "dash": [2, 1.5]
+      "dash": [3, 1]
     },
     {
       "id": "roads-minor",
@@ -306,6 +414,8 @@
       "source": "roads",
       "type": "line",
       "kinds": ["minor_road", "other"],
+      "forbid_flags": ["bridge", "tunnel", "link"],
+      "forbid_details": ["service"],
       "light": "#ffffff",
       "dark": "#34383f",
       "minzoom": 13,
@@ -321,6 +431,7 @@
       "source": "roads",
       "type": "line",
       "kinds": ["major_road"],
+      "forbid_flags": ["bridge", "tunnel", "link"],
       "light": "#fff8e6",
       "dark": "#464b54",
       "minzoom": 9,
@@ -336,6 +447,7 @@
       "source": "roads",
       "type": "line",
       "kinds": ["highway"],
+      "forbid_flags": ["bridge", "tunnel", "link"],
       "light": "#ffe9b0",
       "dark": "#464b54",
       "width": {
@@ -345,20 +457,126 @@
       }
     },
     {
+      "id": "roads-link",
+      "authored": "roads_link",
+      "source": "roads",
+      "type": "line",
+      "kinds": ["highway", "major_road", "minor_road"],
+      "require_flags": ["link"],
+      "light": "#fff8e6",
+      "dark": "#464b54",
+      "width": {
+        "interpolate": "exponential",
+        "base": 1.6,
+        "stops": [[13, 0], [13.5, 1], [18, 11]]
+      }
+    },
+    {
+      "id": "roads-bridges-highway",
+      "authored": "roads_bridges_highway",
+      "source": "roads",
+      "type": "line",
+      "kinds": ["highway"],
+      "require_flags": ["bridge"],
+      "forbid_flags": ["link"],
+      "light": "#ffffff",
+      "dark": "#464b54",
+      "minzoom": 12,
+      "width": {
+        "interpolate": "exponential",
+        "base": 1.6,
+        "stops": [[3, 0], [6, 1.1], [12, 1.6], [15, 5], [18, 15]]
+      }
+    },
+    {
+      "id": "roads-bridges-major",
+      "authored": "roads_bridges_major",
+      "source": "roads",
+      "type": "line",
+      "kinds": ["major_road"],
+      "require_flags": ["bridge"],
+      "light": "#f5f5f5",
+      "dark": "#464b54",
+      "minzoom": 12,
+      "width": {
+        "interpolate": "exponential",
+        "base": 1.6,
+        "stops": [[6, 0], [12, 1.6], [15, 3], [18, 13]]
+      }
+    },
+    {
+      "id": "roads-bridges-minor",
+      "authored": "roads_bridges_minor",
+      "source": "roads",
+      "type": "line",
+      "kinds": ["minor_road"],
+      "require_flags": ["bridge"],
+      "light": "#ffffff",
+      "dark": "#34383f",
+      "minzoom": 12,
+      "width": {
+        "interpolate": "exponential",
+        "base": 1.6,
+        "stops": [[11, 0], [12.5, 0.5], [15, 2], [18, 11]]
+      }
+    },
+    {
+      "id": "roads-bridges-link",
+      "authored": "roads_bridges_link",
+      "source": "roads",
+      "type": "line",
+      "kinds": ["highway", "major_road", "minor_road"],
+      "require_flags": ["bridge", "link"],
+      "light": "#ffffff",
+      "dark": "#464b54",
+      "minzoom": 12,
+      "width": {
+        "interpolate": "exponential",
+        "base": 1.6,
+        "stops": [[13, 0], [13.5, 1], [18, 11]]
+      }
+    },
+    {
+      "id": "roads-bridges-other",
+      "authored": "roads_bridges_other",
+      "source": "roads",
+      "type": "line",
+      "kinds": ["other", "path"],
+      "require_flags": ["bridge"],
+      "light": "#ebebeb",
+      "dark": "#26282e",
+      "minzoom": 12,
+      "width": { "interpolate": "exponential", "base": 1.6, "stops": [[14, 0], [20, 7]] },
+      "dash": [2, 1]
+    },
+    {
+      "id": "roads-minor-service",
+      "authored": "roads_minor_service",
+      "source": "roads",
+      "type": "line",
+      "kinds": ["minor_road"],
+      "forbid_flags": ["bridge", "tunnel", "link"],
+      "details": ["service"],
+      "light": "#ffffff",
+      "dark": "#34383f",
+      "width": { "interpolate": "exponential", "base": 1.6, "stops": [[13, 0], [18, 8]] }
+    },
+    {
       "id": "roads-rail",
       "authored": "roads_rail",
       "source": "roads",
       "type": "line",
       "kinds": ["rail"],
-      "light": "#c0bab0",
+      "light": "#a7b1b3",
       "dark": "#3a3e45",
+      "opacity": 0.5,
       "minzoom": 13,
       "width": {
         "interpolate": "exponential",
         "base": 1.6,
         "stops": [[3, 0], [6, 0.15], [18, 9]]
       },
-      "dash": [3, 3]
+      "dash": [0.3, 0.75]
     },
     {
       "id": "boundaries",
@@ -369,6 +587,64 @@
       "dark": "#4a4f57",
       "width": 0.7,
       "dash": [2, 0]
+    },
+    {
+      "id": "places-country",
+      "authored": "places_country",
+      "source": "places",
+      "type": "symbol",
+      "kinds": ["country"],
+      "light": "#a3a3a3",
+      "dark": "#a3a3a3",
+      "text_size": { "interpolate": "linear", "stops": [[2, 10], [6, 14], [8, 20]] },
+      "uppercase": true,
+      "medium": true,
+      "halo_light": "#ffffff",
+      "halo_dark": "#0d1b2a",
+      "halo_width": 1
+    },
+    {
+      "id": "places-region",
+      "authored": "places_region",
+      "source": "places",
+      "type": "symbol",
+      "kinds": ["region"],
+      "light": "#b3b3b3",
+      "dark": "#b3b3b3",
+      "text_size": { "interpolate": "linear", "stops": [[3, 11], [7, 16]] },
+      "uppercase": true,
+      "halo_light": "#ffffff",
+      "halo_dark": "#0d1b2a",
+      "halo_width": 1
+    },
+    {
+      "id": "places-locality",
+      "authored": "places_locality",
+      "source": "places",
+      "type": "symbol",
+      "kinds": ["locality"],
+      "light": "#5c5c5c",
+      "dark": "#5c5c5c",
+      "text_size": { "interpolate": "linear", "stops": [[2, 10], [6, 16], [10, 19]] },
+      "halo_light": "#ffffff",
+      "halo_dark": "#0d1b2a",
+      "halo_width": 1.5,
+      "minzoom": 2
+    },
+    {
+      "id": "places-subplace",
+      "authored": "places_subplace",
+      "source": "places",
+      "type": "symbol",
+      "kinds": ["neighbourhood", "macrohood"],
+      "light": "#8f8f8f",
+      "dark": "#8f8f8f",
+      "minzoom": 10,
+      "text_size": { "interpolate": "linear", "stops": [[11, 8], [14, 14], [18, 24]] },
+      "uppercase": true,
+      "halo_light": "#ffffff",
+      "halo_dark": "#0d1b2a",
+      "halo_width": 1
     }
   ]
 }

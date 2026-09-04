@@ -1,12 +1,26 @@
 //! The camera: a snapshot from Kotlin to a per-tile clip-space matrix.
 //!
-//! Web Mercator with a 256-logical-px tile grid, matching `:library:map`'s
-//! `Mercator.kt` exactly — the Kotlin side owns the public `Projection` in `Dp`, this
-//! side has to agree with it or every overlay drifts from the basemap under it.
+//! Web Mercator with a 256-logical-px tile grid (world = 256 * 2^zoom),
+//! matching `:library:map`'s `Mercator.kt` — the Kotlin side owns the public
+//! `Projection` in `Dp`, this side has to agree with it or every overlay
+//! drifts from the basemap under it.
+//!
+//! MapLibre parity (ground scale at the same zoom float) comes from a +1 zoom
+//! offset applied once at the JNI boundary (`bridge`), NOT from a 512 tile:
+//! tile-local math (tessellation, emission, the clip matrix) stays 256-based
+//! and known-good, while the camera views the world one level deeper so
+//! ground features render at MapLibre's 512-equivalent size. A 512 TILE_SIZE
+//! was tried (task 1, P2) and reverted: positions aligned but label quads went
+//! invisible and roads cut at tile seams — too much subtle tile-local fallout
+//! for what should be an outer-scale change.
 //!
 //! Only the camera crosses JNI, once per frame. Everything per-tile is derived here.
 
-/// Logical pixels across one tile. Web Mercator's convention, and `Mercator.kt`'s.
+/// Logical pixels across one tile: 256, the known-good tile-local grid.
+/// World scale is 256 * 2^zoom. MapLibre parity is the bridge's +1 zoom
+/// offset, not this constant: doubling here doubles tile-local assumptions
+/// everywhere (task 1, magenta verdict) while an outer zoom offset scales the
+/// final matrix only. Tile addressing (z/x/y) is floor(zoom) either way.
 pub const TILE_SIZE: f64 = 256.0;
 
 /// The camera as Kotlin measured it.
@@ -129,6 +143,8 @@ mod tests {
 
     #[test]
     fn the_world_is_256_dp_per_tile() {
+        // Known-good tile-local grid: world = 256 * 2^zoom. MapLibre parity is
+        // the bridge's +1 zoom offset, not this constant.
         assert_eq!(world_size(0.0), 256.0);
         assert_eq!(world_size(1.0), 512.0);
         assert_eq!(world_size(14.0), 256.0 * 16384.0);
@@ -164,6 +180,36 @@ mod tests {
         let (x, y) = transform(&m, 1.0, 1.0);
         assert!(x.abs() < 1e-5, "x {x}");
         assert!(y.abs() < 1e-5, "y {y}");
+    }
+
+    /// Task-1 camera-scale parity: the viewport centre always maps to clip
+    /// origin through the shared matrix, whatever the tile grid. Pins the
+    /// matrix half of the anchor contract at the 256 tile-local grid with the
+    /// +1 parity offset applied to the camera zoom.
+    #[test]
+    fn an_anchor_at_viewport_centre_projects_to_clip_origin() {
+        // z10 centred on SF: the SF tile-local centre must land at clip (0,0)
+        // through tile_to_clip.
+        let camera = Camera {
+            center_lon: -122.4194,
+            center_lat: 37.7749,
+            zoom: 10.0,
+            width_dp: 512.0,
+            height_dp: 512.0,
+            density: 1.0,
+        };
+        // The tile containing SF at z10, and SF's tile-local position in it.
+        let world = project(-122.4194, 37.7749, 10.0);
+        let span = camera.tile_span_dp(10);
+        let tx = (world.x / span).floor() as u32;
+        let ty = (world.y / span).floor() as u32;
+        let u = (world.x - tx as f64 * span) / span;
+        let v = (world.y - ty as f64 * span) / span;
+        assert!((0.0..=1.0).contains(&u) && (0.0..=1.0).contains(&v));
+        let m = camera.tile_to_clip(10, tx, ty);
+        let (cx, cy) = transform(&m, u as f32, v as f32);
+        assert!(cx.abs() < 1e-4, "SF anchor clip x {cx} (tile {tx},{ty} local {u:.4},{v:.4})");
+        assert!(cy.abs() < 1e-4, "SF anchor clip y {cy} (tile {tx},{ty} local {u:.4},{v:.4})");
     }
 
     #[test]
@@ -233,3 +279,5 @@ mod tests {
         }
     }
 }
+
+// device-verifier: mtime bump to force cargo recompile (no semantic change)

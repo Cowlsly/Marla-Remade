@@ -36,6 +36,10 @@ internal object MapNative {
      * [cacheDir] is where the range cache lives. It should be external files rather than
      * the cache dir: like the archive `maps` downloads, it is large and expensive to
      * rebuild, so it should not be the first thing the platform reclaims.
+     *
+     * [archivePath] overrides the built-in archive URL for local iteration (e.g. a
+     * freshly rebuilt `na.mamaps` pushed to the device). `null` or empty keeps the
+     * remote `BASEMAP_ARCHIVE_URL` (`planet.mamaps`).
      */
     external fun create(
         surface: Surface,
@@ -44,6 +48,7 @@ internal object MapNative {
         height: Int,
         dark: Boolean,
         muted: Boolean,
+        archivePath: String?,
     ): Long
 
     /**
@@ -81,6 +86,24 @@ internal object MapNative {
      * ranges instead of attempting a request, so a previously-viewed area keeps drawing.
      */
     external fun setOnline(handle: Long, online: Boolean)
+
+    /**
+     * Pick placed labels (task 17): the last frame's placed symbol labels
+     * whose screen boxes intersect the query box, in placement order.
+     *
+     * All four box edges are Dp from the viewport top-left. Returns one
+     * `String` per hit, fields joined by `\u0001`: `layerId \u0001 name \u0001
+     * kind \u0001 lon \u0001 lat`. A `\u0001`-joined string (not objects)
+     * keeps the boundary allocation-free on the native side and parse-trivial
+     * on the Kotlin side. Empty array when nothing was placed or nothing hits.
+     */
+    external fun pickLabels(
+        handle: Long,
+        x0Dp: Float,
+        y0Dp: Float,
+        x1Dp: Float,
+        y1Dp: Float,
+    ): Array<String>
 
     /**
      * Destroy the renderer, wait for the GPU to go idle, and release the window.

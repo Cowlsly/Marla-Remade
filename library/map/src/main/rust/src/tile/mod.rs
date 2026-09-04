@@ -6,5 +6,8 @@
 
 pub mod cache;
 pub mod geometry;
+pub mod glyph;
+pub mod placement;
 pub mod select;
 pub mod source;
+pub mod symbol;

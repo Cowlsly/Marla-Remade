@@ -19,6 +19,7 @@ use map_renderer::camera::Camera;
 use map_renderer::style;
 use map_renderer::tess::{fill, stroke};
 use map_renderer::tile::geometry;
+use map_renderer::tile::symbol;
 use map_renderer::tile::select;
 use std::process::Command;
 use tilecodec::mvt::Tile;
@@ -316,6 +317,7 @@ fn main() {
             let stride = match m.kind {
                 style::LayerKind::Fill => fill::FLOATS_PER_VERTEX,
                 style::LayerKind::Line => stroke::FLOATS_PER_VERTEX,
+                style::LayerKind::Symbol => symbol::FLOATS_PER_VERTEX,
             };
             let mut covered = 0.0f64;
             if m.kind == style::LayerKind::Fill {
@@ -346,6 +348,7 @@ fn main() {
             let stride = match m.kind {
                 style::LayerKind::Fill => fill::FLOATS_PER_VERTEX,
                 style::LayerKind::Line => stroke::FLOATS_PER_VERTEX,
+                style::LayerKind::Symbol => symbol::FLOATS_PER_VERTEX,
             };
             for chunk in m.vertices.chunks(stride) {
                 if !chunk[0].is_finite() || !chunk[1].is_finite() {

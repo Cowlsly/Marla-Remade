@@ -2,35 +2,12 @@
 -dontwarn java.beans.**
 -dontobfuscate
 
-# JavaMail / Jakarta Mail — providers are loaded via reflection and META-INF/javamail.providers
--keep class com.sun.mail.** { *; }
--keep class javax.mail.** { *; }
--keep class com.sun.activation.** { *; }
--keep class javax.activation.** { *; }
--keep class jakarta.mail.** { *; }
--keep class jakarta.activation.** { *; }
-
-# Tesseract
--keep class com.googlecode.tesseract.android.** { *; }
-
-# LiteRT LM / Gemma 4
--keep class com.google.ai.edge.litertlm.** { *; }
-
-# OpenAssistant tools: the @Tool/@ToolParam-annotated methods in the ToolSet are
-# never called from Kotlin directly — litertlm discovers and invokes them via
-# reflection (using method + parameter names to build the function schema). R8's
-# shrinker would treat them as unused and remove them, silently breaking every
-# assistant tool. Keep the ToolSet implementation (all members + names) and any
-# @Tool method, plus the attributes reflection relies on.
--keepattributes RuntimeVisibleAnnotations,RuntimeVisibleParameterAnnotations,AnnotationDefault,MethodParameters,Signature
--keep class com.vayunmathur.openassistant.util.AssistantToolSet { *; }
--keep class * implements com.google.ai.edge.litertlm.ToolSet { *; }
--keepclassmembers class * {
-    @com.google.ai.edge.litertlm.Tool <methods>;
-}
-
-# LiteRT Core - prevent R8 from deleting LiteRT classes used via reflection
--keep class com.google.ai.edge.litert.** { *; }
+# Annotation metadata is read reflectively by Room, kotlinx.serialization and
+# protobuf-lite, so these stay repo-wide. MethodParameters is deliberately NOT
+# here: it stores a name string for every parameter of every method in the app,
+# and only :openassistant reflects on parameter names. It lives in
+# openassistant/proguard-rules.pro alongside the rest of the LiteRT keeps.
+-keepattributes RuntimeVisibleAnnotations,RuntimeVisibleParameterAnnotations,AnnotationDefault,Signature
 
 # Protobuf Lite - the generated runtime schema accesses message fields (e.g.
 # platform_) reflectively, so R8 must not strip them. Without this you get
@@ -40,43 +17,41 @@
     <fields>;
 }
 
-# MediaPipe (tasks-vision) - relies on the protobuf classes above and JNI
--keep class com.google.mediapipe.** { *; }
--dontwarn com.google.mediapipe.**
-
-# Flogger (FluentLogger) - MediaPipe logs through it. forEnclosingClass() walks
-# the call stack to find the caller; R8 optimization merges/inlines Flogger's
-# internal classes which breaks the walk ("no caller found on the stack for ...
-# FluentLogger"). Keep Flogger intact so the stack-walk works.
--keep class com.google.common.flogger.** { *; }
--keep class com.google.common.flogger.backend.** { *; }
--keep class com.google.common.flogger.backend.system.** { *; }
--dontwarn com.google.common.flogger.**
-
 -keepclasseswithmembernames class * {
     native <methods>;
 }
 
-# ONNX Runtime (com.microsoft.onnxruntime:onnxruntime-android) — the native .so
-# creates Java objects and calls their constructors/methods/fields via JNI (e.g.
-# ai.onnxruntime.TensorInfo). R8 can't see those JNI uses, so in minified release
-# builds it strips the JNI-only members, causing crashes like
-# "NoSuchMethodError: no non-static method Lai/onnxruntime/TensorInfo;.<init>([J[Ljava/lang/String;I)V".
-# Keep the whole ORT API surface (classes + all members) so nothing it needs is removed.
--keep class ai.onnxruntime.** { *; }
--keep interface ai.onnxruntime.** { *; }
--dontwarn ai.onnxruntime.**
+# --- Classes that Rust resolves by literal name over JNI ---
+# The rule above only covers a class that DECLARES a native method. These are
+# looked up from Rust with FindClass/GetMethodID against a hardcoded string while
+# declaring no native members of their own, so renaming them breaks the lookup.
+# Worse, most degrade silently instead of throwing: jni_http::init just returns
+# false, and callers treat that as "no network" — maps renders blank tiles and
+# youpipe returns error envelopes, both logging a missing-dependency message that
+# points nowhere near the real cause.
 
-# ncnn (com.github.vayun-mathur:ncnn-android, used by :library:ocr, :photos, :translate,
-# :speech) — same JNI-by-name problem as ORT above. libncnn_android.so resolves result
-# types through FindClass on the literal strings "com/vayunmathur/ncnn/PpOcr$Line" and
-# "com/vayunmathur/ncnn/FaceDetector$Face", then constructs them. Neither class declares a
-# native method, so the blanket -keepclasseswithmembernames rule above does NOT cover them:
-# R8 renames the class and FindClass fails at runtime. The AAR ships no consumer rules, so
-# the keep has to live here. Only release builds minify, and `dev` (the install target used
-# during development) does not, so this only ever breaks in shipped APKs.
--keep class com.vayunmathur.ncnn.** { *; }
--dontwarn com.vayunmathur.ncnn.**
+# library/jni-http/src/main/rust/src/lib.rs:78,121 — every .so reaches the network
+# through this one bridge, so this covers maps, mapcompare, youpipe, weather, ...
+-keep class com.vayunmathur.library.network.NativeHttpBridge {
+    public static byte[] request(int, java.lang.String, byte[], byte[]);
+}
+
+# maps/src/main/rust/src/lib.rs:138 — call_method(thiz, "fetchTrafficData", ...).
+# OfflineRouter itself has native methods so its name survives, but this is a
+# plain private method and its name does not.
+-keepclassmembers class com.vayunmathur.maps.util.OfflineRouter {
+    private void fetchTrafficData(double, double, double, double, int, boolean);
+}
+
+# maps/src/main/rust/src/lib.rs:234,575,765 — FindClass + new_object on these two
+# nested result types. Neither declares a native method.
+-keep class com.vayunmathur.maps.util.OfflineRouter$RawStep { <init>(...); }
+-keep class com.vayunmathur.maps.util.OfflineRouter$RawDeparture { <init>(...); }
+
+# euicc/src/main/rust/src/jni.rs:29 — call_static_method("transmitApdu", "([B)[B").
+-keep class com.vayunmathur.euicc.EuiccNative {
+    public static byte[] transmitApdu(byte[]);
+}
 
 # Stockfish (com.github.vayun-mathur:Stockfish-Library, used by :games:chess) — the
 # native libstockfish.so calls back into Kotlin via JNI. nativeSetOutputCallback looks
@@ -129,6 +104,10 @@
 # --- Room migrations — keep reflective Companion access (see SqlCipher.kt:93, FFDatabase.kt:160) ---
 -keep class * extends androidx.room3.RoomDatabase { *; }
 -keep class * implements com.vayunmathur.library.util.DatabaseMigrations { *; }
--keepclassmembers class * { *** Companion; }
+# SqlCipher.kt:93 calls dbClass.getDeclaredField("Companion"), and dbClass is
+# always a RoomDatabase subclass — so this only has to cover those rather than
+# every class in every app. The keep above already retains all members of a
+# RoomDatabase subclass; spelling it out keeps the requirement visible if that
+# rule is ever tightened.
+-keepclassmembers class * extends androidx.room3.RoomDatabase { *** Companion; }
 -keep class androidx.room3.migration.Migration { *; }
--keep class com.vayunmathur.findfamily.data.FFDatabase$Companion { *; }

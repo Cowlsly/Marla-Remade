@@ -42,6 +42,55 @@ const DTYPE_F16: u32 = 0;
 /// that is both simpler and strictly more accurate, and it saves nothing to copy since the
 /// weights are what take the space.
 const DTYPE_I8: u32 = 1;
+
+/// Signed 4-bit, two per byte, with a **per-block** scale tensor beside it.
+///
+/// Where [`DTYPE_I8`] carries one scale per output row, this carries one per block of
+/// [`I4_BLOCK`] taps along the contraction axis, so the scale tensor is rank 2:
+/// `(out_channels, ceil(taps / I4_BLOCK))`. Four bits cannot represent a row's dynamic range
+/// well enough for a single scale; a block of 32 can.
+///
+/// Nibbles are packed **two per byte along the contraction axis**, low nibble first, so a block
+/// is contiguous and the inner loop reads it without striding. A tensor's byte length is
+/// therefore `len.div_ceil(2)` and not `len * stride` - the only dtype whose stride is
+/// fractional, which is why [`Dtype::bytes`] exists rather than a stride constant.
+const DTYPE_I4: u32 = 2;
+
+/// Taps one [`DTYPE_I4`] scale covers.
+///
+/// 32 rather than 64: at 4.5 bits per weight against 4.25 the difference is 3% of a download,
+/// and `MIN_INT8_COSINE` is a strict gate that the wider block is more likely to miss.
+pub const I4_BLOCK: u32 = 32;
+
+/// How a tensor's payload is encoded.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Dtype {
+    /// Half-precision float, two bytes an element.
+    F16,
+    /// Signed 8-bit with a per-output-channel scale. See [`DTYPE_I8`].
+    I8,
+    /// Signed 4-bit with a per-block scale. See [`DTYPE_I4`].
+    I4,
+}
+
+impl Dtype {
+    /// Bytes `len` elements of this dtype occupy.
+    ///
+    /// Not a stride: four-bit elements are half a byte each, so an odd length rounds up and the
+    /// final nibble is padding.
+    pub const fn bytes(self, len: u64) -> u64 {
+        match self {
+            Dtype::F16 => len * 2,
+            Dtype::I8 => len,
+            Dtype::I4 => len.div_ceil(2),
+        }
+    }
+
+    /// Whether the payload is integer, and so read through the 32-bit word view with a scale.
+    pub const fn is_quantised(self) -> bool {
+        !matches!(self, Dtype::F16)
+    }
+}
 /// Every tensor starts on this boundary, so an offset is a valid fp16 index too.
 const ALIGNMENT: u32 = 16;
 
@@ -113,8 +162,8 @@ pub struct Tensor {
     pub offset: u32,
     /// Elements, not bytes.
     pub len: u32,
-    /// True when the payload is [`DTYPE_I8`] rather than fp16, so one byte per element.
-    pub int8: bool,
+    /// How the payload is encoded, which decides how many bytes [`Tensor::len`] occupies.
+    pub dtype: Dtype,
 }
 
 impl Tensor {
@@ -245,10 +294,13 @@ fn parse_header(bytes: &[u8], expect_graph: u32) -> Result<Header, String> {
         let dims =
             [u32(bytes, at + 4), u32(bytes, at + 8), u32(bytes, at + 12), u32(bytes, at + 16)];
         let dtype = u32(bytes, at + 20);
-        let stride = match dtype {
-            DTYPE_F16 => 2u64,
-            DTYPE_I8 => 1,
-            other => return Err(format!("tensor {i} has dtype {other}, expected fp16 or int8")),
+        let dtype = match dtype {
+            DTYPE_F16 => Dtype::F16,
+            DTYPE_I8 => Dtype::I8,
+            DTYPE_I4 => Dtype::I4,
+            other => {
+                return Err(format!("tensor {i} has dtype {other}, expected fp16, int8 or int4"))
+            }
         };
         let offset = u32(bytes, at + 24);
         let len = u32(bytes, at + 28);
@@ -260,13 +312,13 @@ fn parse_header(bytes: &[u8], expect_graph: u32) -> Result<Header, String> {
         if !offset.is_multiple_of(ALIGNMENT) {
             return Err(format!("tensor {i} is at {offset}, not {ALIGNMENT}-aligned"));
         }
-        let end = (offset as u64) + (len as u64) * stride;
+        let end = (offset as u64) + dtype.bytes(len as u64);
         if end > data_len as u64 {
             return Err(format!(
                 "tensor {i} spans {offset}..{end} of a {data_len}-byte data section"
             ));
         }
-        tensors.push(Tensor { rank, dims, offset, len, int8: dtype == DTYPE_I8 });
+        tensors.push(Tensor { rank, dims, offset, len, dtype });
     }
     Ok(Header { graph_id, source_sha256, tensors, data_offset, data_len })
 }
@@ -383,7 +435,7 @@ impl Weights {
                 dims: [(data.len() / 2) as u32, 0, 0, 0],
                 offset: 0,
                 len: (data.len() / 2) as u32,
-                int8: false,
+                dtype: Dtype::F16,
             }],
         };
         Weights { graph_id: 0, source_sha256: [0u8; 32], table, data }
@@ -597,8 +649,8 @@ impl<'a> Reader<'a> {
     /// scale, which is a caller's decision rather than something to guess at here.
     pub fn fp16(&self, index: usize, dims: &[u32]) -> Result<Vec<f32>, String> {
         let found = self.table.shaped(index, dims)?;
-        if found.int8 {
-            return Err(format!("tensor {index} is int8, and the host reads fp16"));
+        if found.dtype.is_quantised() {
+            return Err(format!("tensor {index} is {:?}, and the host reads fp16", found.dtype));
         }
         let mut bytes = vec![0u8; (found.len as usize) * 2];
         self.data
@@ -629,8 +681,8 @@ impl<'a> Reader<'a> {
         row: u32,
     ) -> Result<Vec<f32>, String> {
         let found = self.table.shaped(index, dims)?;
-        if !found.int8 {
-            return Err(format!("tensor {index} is fp16, and this dequantises int8"));
+        if found.dtype != Dtype::I8 {
+            return Err(format!("tensor {index} is {:?}, and this dequantises int8", found.dtype));
         }
         let rows = *dims.first().ok_or("an int8 row read needs a row count")?;
         if row >= rows {
@@ -642,8 +694,8 @@ impl<'a> Reader<'a> {
         self.data.read_at(at, &mut bytes).map_err(|e| format!("tensor {index} row {row}: {e}"))?;
 
         let scale = self.table.shaped(scale_index, &[rows])?;
-        if scale.int8 {
-            return Err(format!("tensor {scale_index} is int8, and a scale is fp16"));
+        if scale.dtype.is_quantised() {
+            return Err(format!("tensor {scale_index} is {:?}, and a scale is fp16", scale.dtype));
         }
         let mut half = [0u8; 2];
         self.data
@@ -688,6 +740,10 @@ pub(crate) enum Fixture {
     F16(Vec<u32>, Vec<f32>),
     /// int8, addressed by the shaders as a 32-bit word offset. See [`Tensor::word_offset`].
     I8(Vec<u32>, Vec<i8>),
+    /// int4, two per byte, low nibble first. Values outside -8..=7 are a bug in the caller and
+    /// are masked rather than clamped, so a fixture that overflows shows up as a wrong number
+    /// rather than a silently saturated one.
+    I4(Vec<u32>, Vec<i8>),
 }
 
 /// Build a `.maml` blob from a mix of fp16 and int8 tensors, for the fixtures.
@@ -728,6 +784,21 @@ pub(crate) fn write_mixed(graph_id: u32, tensors: &[Fixture]) -> Vec<u8> {
                 DTYPE_I8,
                 values.len() as u32,
                 values.iter().map(|&v| v as u8).collect::<Vec<u8>>(),
+            ),
+            Fixture::I4(dims, values) => (
+                dims,
+                DTYPE_I4,
+                values.len() as u32,
+                values
+                    .chunks(2)
+                    .map(|pair| match pair {
+                        [low, high] => (*low as u8 & 0x0f) | ((*high as u8 & 0x0f) << 4),
+                        // An odd length leaves the high nibble of the last byte as padding,
+                        // which is what `Dtype::bytes`'s `div_ceil` accounts for.
+                        [low] => *low as u8 & 0x0f,
+                        _ => 0,
+                    })
+                    .collect::<Vec<u8>>(),
             ),
         };
         while !data.len().is_multiple_of(ALIGNMENT as usize) {
@@ -949,13 +1020,13 @@ mod tests {
         assert_eq!(weights.len(), 2);
         assert_eq!(
             weights.tensor(0).expect("first"),
-            Tensor { rank: 4, dims: [2, 1, 1, 1], offset: 0, len: 2, int8: false }
+            Tensor { rank: 4, dims: [2, 1, 1, 1], offset: 0, len: 2, dtype: Dtype::F16 }
         );
         // Tensor 0 is 4 bytes but the next starts at 16: the alignment the shaders
         // rely on, and the arithmetic most likely to be got wrong.
         assert_eq!(
             weights.tensor(1).expect("second"),
-            Tensor { rank: 1, dims: [3, 0, 0, 0], offset: 16, len: 3, int8: false }
+            Tensor { rank: 1, dims: [3, 0, 0, 0], offset: 16, len: 3, dtype: Dtype::F16 }
         );
         assert_eq!(weights.tensor(1).expect("second").elem_offset(), 8);
         assert_eq!(weights.data().len(), 16 + 6);
@@ -1000,12 +1071,12 @@ mod tests {
 
         let weights = Weights::parse(&blob, graph::SUPERTONIC_VE).expect("parses");
         let quantised = weights.tensor(0).expect("the int8 tensor");
-        assert!(quantised.int8);
+        assert_eq!(quantised.dtype, Dtype::I8);
         assert_eq!(quantised.len, 5);
         // Five elements at one byte each, so the *scale* still lands at 16: the alignment is
         // in bytes, not elements, and an int8 tensor must not be read with an fp16 stride.
         let scale = weights.tensor(1).expect("the scale");
-        assert!(!scale.int8);
+        assert_eq!(scale.dtype, Dtype::F16);
         assert_eq!(scale.offset, ALIGNMENT);
         // The shader addresses int8 through the 32-bit view, so offset 0 is word 0.
         assert_eq!(quantised.word_offset(), 0);

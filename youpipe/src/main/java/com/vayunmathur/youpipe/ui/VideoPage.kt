@@ -28,10 +28,9 @@ import com.vayunmathur.library.ui.R as UiR
 import com.vayunmathur.library.ui.Button
 import com.vayunmathur.library.ui.Card
 import com.vayunmathur.library.ui.CircularProgressIndicator
-import com.vayunmathur.library.ui.DropdownMenuItem
-import com.vayunmathur.library.ui.ExperimentalMaterial3Api
-import com.vayunmathur.library.ui.ExposedDropdownMenuBox
-import com.vayunmathur.library.ui.ExposedDropdownMenuDefaults
+import com.vayunmathur.library.ui.DropdownMenu
+import com.vayunmathur.library.ui.IconArrowDropDown
+import com.vayunmathur.library.ui.IconCheck
 import com.vayunmathur.library.ui.IconDownload
 import com.vayunmathur.library.ui.IconSave
 import com.vayunmathur.library.ui.IconThumbDown
@@ -41,9 +40,9 @@ import com.vayunmathur.library.ui.IconDelete
 import com.vayunmathur.library.ui.IconButton
 import com.vayunmathur.library.ui.ListItem
 import com.vayunmathur.library.ui.MaterialTheme
-import com.vayunmathur.library.ui.ExposedDropdownMenuAnchorType
-import com.vayunmathur.library.ui.OutlinedTextField
+import com.vayunmathur.library.ui.OutlinedButton
 import com.vayunmathur.library.ui.Scaffold
+import com.vayunmathur.library.ui.SelectableDropdownMenuItem
 import com.vayunmathur.library.ui.SecondaryTabRow
 import com.vayunmathur.library.ui.Tab
 import com.vayunmathur.library.ui.Text
@@ -65,6 +64,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalResources
 import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.Dialog
 import androidx.core.view.WindowCompat
@@ -424,7 +424,6 @@ fun VideoDetailScreen(
     }
 }
 
-@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun VideoDetails(
     state: VideoDetailUiState,
@@ -434,7 +433,6 @@ fun VideoDetails(
     var isDownloadDialogVisible by remember { mutableStateOf(false) }
 
     if (isDownloadDialogVisible) {
-        val context = LocalContext.current
         val videoStreams = state.videoStreams
         val audioStreams = state.audioStreams
         var selectedVideoStream by remember { mutableStateOf(videoStreams.maxByOrNull { it.height } ?: videoStreams.first()) }
@@ -449,9 +447,6 @@ fun VideoDetails(
         val languages = languageEntriesDownload.map { it.first }
         var selectedLanguage by remember { mutableStateOf(selectedAudioStream?.language ?: languages.firstOrNull() ?: "Default") }
 
-        var videoExpanded by remember { mutableStateOf(false) }
-        var languageExpanded by remember { mutableStateOf(false) }
-
         Dialog(onDismissRequest = { isDownloadDialogVisible = false }) {
             Card {
                 Column(Modifier.padding(16.dp)) {
@@ -460,66 +455,26 @@ fun VideoDetails(
                     
                     Text(stringResource(R.string.resolution), style = MaterialTheme.typography.titleMedium)
                     Spacer(Modifier.height(8.dp))
-                    ExposedDropdownMenuBox(
-                        expanded = videoExpanded,
-                        onExpandedChange = { videoExpanded = it }
-                    ) {
-                        OutlinedTextField(
-                            value = "${selectedVideoStream.quality} - ${Formatter.formatShortFileSize(context, selectedVideoStream.size)}",
-                            onValueChange = {},
-                            readOnly = true,
-                            trailingIcon = { ExposedDropdownMenuDefaults.TrailingIcon(expanded = videoExpanded) },
-                            colors = ExposedDropdownMenuDefaults.outlinedTextFieldColors(),
-                            modifier = Modifier.menuAnchor(ExposedDropdownMenuAnchorType.PrimaryNotEditable, true).fillMaxWidth()
-                        )
-                        ExposedDropdownMenu(
-                            expanded = videoExpanded,
-                            onDismissRequest = { videoExpanded = false }
-                        ) {
-                            videoStreams.forEach { stream ->
-                                DropdownMenuItem(
-                                    text = { Text("${stream.quality} (${getVideoCodecName(stream.codec)}) - ${Formatter.formatShortFileSize(context, stream.size)}") },
-                                    onClick = {
-                                        selectedVideoStream = stream
-                                        videoExpanded = false
-                                    }
-                                )
-                            }
-                        }
-                    }
+                    VideoQualityDropdown(
+                        streams = videoStreams,
+                        selected = selectedVideoStream,
+                        onSelect = { selectedVideoStream = it },
+                        modifier = Modifier.fillMaxWidth(),
+                    )
                     
                     if (languages.size > 1) {
                         Spacer(Modifier.height(16.dp))
                         Text(stringResource(R.string.language), style = MaterialTheme.typography.titleMedium)
                         Spacer(Modifier.height(8.dp))
-                        ExposedDropdownMenuBox(
-                            expanded = languageExpanded,
-                            onExpandedChange = { languageExpanded = it }
-                        ) {
-                            OutlinedTextField(
-                                value = languageEntriesDownload.find { it.first == selectedLanguage }?.second ?: selectedLanguage,
-                                onValueChange = {},
-                                readOnly = true,
-                                trailingIcon = { ExposedDropdownMenuDefaults.TrailingIcon(expanded = languageExpanded) },
-                                colors = ExposedDropdownMenuDefaults.outlinedTextFieldColors(),
-                                modifier = Modifier.menuAnchor(ExposedDropdownMenuAnchorType.PrimaryNotEditable, true).fillMaxWidth()
-                            )
-                            ExposedDropdownMenu(
-                                expanded = languageExpanded,
-                                onDismissRequest = { languageExpanded = false }
-                            ) {
-                                languageEntriesDownload.forEach { (code, display) ->
-                                    DropdownMenuItem(
-                                        text = { Text(display) },
-                                        onClick = {
-                                            selectedLanguage = code
-                                            selectedAudioStream = audioStreams.filter { it.language == code }.maxByOrNull { it.bitrate }
-                                            languageExpanded = false
-                                        }
-                                    )
-                                }
-                            }
-                        }
+                        AudioLanguageDropdown(
+                            options = languageEntriesDownload,
+                            selectedCode = selectedLanguage,
+                            onSelect = { code ->
+                                selectedLanguage = code
+                                selectedAudioStream = audioStreams.filter { it.language == code }.maxByOrNull { it.bitrate }
+                            },
+                            modifier = Modifier.fillMaxWidth(),
+                        )
                     }
 
                     Spacer(Modifier.height(24.dp))
@@ -591,6 +546,83 @@ fun VideoDetails(
                 style = MaterialTheme.typography.titleMedium,
                 modifier = if (titleSharedKey == null) Modifier else Modifier.sharedText(titleSharedKey),
             )
+        }
+    }
+}
+
+/**
+ * The download resolution picker, built from [OutlinedButton] + [DropdownMenu] rather than the
+ * library's `ExposedDropdownMenu` wrapper, which currently recurses into itself.
+ */
+@Composable
+private fun VideoQualityDropdown(
+    streams: List<VideoStream>,
+    selected: VideoStream,
+    onSelect: (VideoStream) -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    val context = LocalContext.current
+    var expanded by remember { mutableStateOf(false) }
+    Box(modifier) {
+        OutlinedButton(onClick = { expanded = true }, modifier = Modifier.fillMaxWidth()) {
+            Text(
+                "${selected.quality} - ${Formatter.formatShortFileSize(context, selected.size)}",
+                modifier = Modifier.weight(1f),
+                textAlign = TextAlign.Start,
+                maxLines = 1,
+            )
+            IconArrowDropDown()
+        }
+        DropdownMenu(expanded = expanded, onDismissRequest = { expanded = false }) {
+            streams.forEach { stream ->
+                SelectableDropdownMenuItem(
+                    selected = stream == selected,
+                    onClick = {
+                        onSelect(stream)
+                        expanded = false
+                    },
+                    text = { Text("${stream.quality} (${getVideoCodecName(stream.codec)}) - ${Formatter.formatShortFileSize(context, stream.size)}") },
+                    selectedLeadingIcon = { IconCheck() },
+                )
+            }
+        }
+    }
+}
+
+/**
+ * The download audio-language picker, built from [OutlinedButton] + [DropdownMenu] rather than
+ * the library's `ExposedDropdownMenu` wrapper, which currently recurses into itself.
+ */
+@Composable
+private fun AudioLanguageDropdown(
+    options: List<Pair<String, String>>,
+    selectedCode: String,
+    onSelect: (String) -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    var expanded by remember { mutableStateOf(false) }
+    Box(modifier) {
+        OutlinedButton(onClick = { expanded = true }, modifier = Modifier.fillMaxWidth()) {
+            Text(
+                options.find { it.first == selectedCode }?.second ?: selectedCode,
+                modifier = Modifier.weight(1f),
+                textAlign = TextAlign.Start,
+                maxLines = 1,
+            )
+            IconArrowDropDown()
+        }
+        DropdownMenu(expanded = expanded, onDismissRequest = { expanded = false }) {
+            options.forEach { (code, display) ->
+                SelectableDropdownMenuItem(
+                    selected = code == selectedCode,
+                    onClick = {
+                        onSelect(code)
+                        expanded = false
+                    },
+                    text = { Text(display) },
+                    selectedLeadingIcon = { IconCheck() },
+                )
+            }
         }
     }
 }

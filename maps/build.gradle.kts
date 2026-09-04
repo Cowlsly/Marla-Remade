@@ -31,11 +31,10 @@ androidComponents {
 rustNativeLib("offlinerouter", "maps")
 
 dependencies {
-    implementation(libs.maplibre.compose)
+    implementation(project(":library:map"))
+    implementation("org.maplibre.spatialk:geojson-jvm:0.7.0")
+    implementation("org.maplibre.gl:android-sdk:13.0.2")
     implementation(project(":library:image"))
-    // MapTileCache installs a MapLibre ModuleProvider whose HttpRequest runs on
-    // library:network, so the map stack never touches MapLibre's bundled OkHttp
-    // implementation.
     implementation(project(":library:network"))
 
     implementation(project(":library:downloadservice"))

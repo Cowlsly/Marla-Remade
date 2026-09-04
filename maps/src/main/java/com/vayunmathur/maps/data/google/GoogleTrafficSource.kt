@@ -26,8 +26,9 @@ import kotlinx.coroutines.withContext
  * tile degrades to a transparent gap, never a crash.
  *
  * Two ways to consume it:
- *  - [TILE_URLS] / [tileTemplate] — plug straight into a maplibre `RasterSource`
- *    so MapLibre fetches + caches tiles itself (what `MyMapLayers` uses).
+ *  - [TILE_URLS] / [tileTemplate] — the `{x}`/`{y}`/`{z}` raster template for a
+ *    raster layer source, once the renderer can draw one (currently a GAP: the
+ *    phone map keeps this as a no-op and the toggle plumbing survives).
  *  - [tile] (z,x,y) → PNG bytes — a manual keyless fetch mirroring
  *    [StreetViewDataSource.tile], for callers that need the bytes directly.
  *
@@ -41,16 +42,16 @@ object GoogleTrafficSource {
 
     // The trimmed `pb` spec selecting Google's live-traffic overlay tile. Kept as
     // a template with `{z}`/`{x}`/`{y}` tokens (order matters: `!1i{z}!2i{x}!3i{y}`)
-    // so both MapLibre and the manual [tile] fetch build the same URL.
+    // so a future raster-layer source and the manual [tile] fetch build the same URL.
     private const val TILE_PB =
         "https://www.google.com/maps/vt/pb=!1m4!1m3!1i{z}!2i{x}!3i{y}!2m9!1e2!2straffic!3i999999" +
             "!4m2!1sincidents!2s1!4m2!1sincidents_text!2s1!3m8!2sen!3sus!5e1105!12m4!1e68!2m2!1sset!2sRoadmap!4e0!5m1!1e0"
 
-    /** `{x}`/`{y}`/`{z}` raster template — MapLibre substitutes the tokens per
-     *  requested tile. */
+    /** `{x}`/`{y}`/`{z}` raster template — a raster-layer source substitutes the
+    *  tokens per requested tile, once the renderer can draw one. */
     fun tileTemplate(): String = TILE_PB
 
-    /** The traffic tile URL as a single-element maplibre `RasterSource` tile list. */
+    /** The traffic tile URL as a single-element raster-source tile list. */
     val TILE_URLS: List<String> = listOf(TILE_PB)
 
     val available: Boolean get() = TILE_URLS.isNotEmpty()

@@ -113,7 +113,7 @@ def resolve(name, alias):
     return name
 
 
-def normalise(model):
+def normalise(model, quantise=False, graph=""):
     """Strip `Identity`, fold the constant affine chains, and return the ops and tensors.
 
     Returns `(ops, layers, tensors)`: the normalised op list for transcription, the
@@ -196,6 +196,9 @@ def normalise(model):
     ops = []
     layers = []
     tensors = []
+    # Layer indices that could be read as int8, filled by `emit_conv` and used only after all
+    # folding has finished. See [`quantise_convs`].
+    quantisable = []
 
     def emit_conv(node, weight, bias, act, act_alpha, output):
         first = len(tensors)
@@ -216,6 +219,12 @@ def normalise(model):
         layers.append(
             maml_convert.Layer(len(layers), node.op_type, output, key, first, 2)
         )
+        # Only an ordinary convolution with no PRelu can be int8: `Builder::conv_int8` refuses
+        # a PRelu because its per-channel slope wants the push offset the dequantisation scale
+        # occupies, and there is no int8 `ConvTranspose` at all. Recorded here and acted on
+        # after folding; see [`quantise_convs`].
+        if node.op_type == "Conv" and act != "PRelu":
+            quantisable.append(len(layers) - 1)
         ops.append(
             Op(
                 node.op_type,
@@ -247,6 +256,12 @@ def normalise(model):
             f"k=[1, 1] d=[1, 1] p=[0, 0, 0, 0] s=[1, 1] g=1 act={act}"
         )
         layers.append(maml_convert.Layer(len(layers), "MatMul", output, key, first, 2))
+        # A `MatMul` against a constant is a 1x1 convolution in the runtime, so it quantises on
+        # exactly the same terms as `emit_conv`'s output. These are the recogniser's transformer
+        # projections and its largest tensors, so leaving them out would give up most of the
+        # saving.
+        if act != "PRelu":
+            quantisable.append(len(layers) - 1)
         ops.append(
             Op("Linear", [source], output, w=list(kernel.shape), act=act, t=first)
         )
@@ -462,7 +477,68 @@ def normalise(model):
 
     ops = merge_affines(ops, consumers)
     ops = fold_affine_into_convs(ops, tensors)
+    if quantise:
+        layers, tensors = quantise_convs(layers, tensors, quantisable, graph)
     return ops, layers, tensors
+
+
+def quantise_convs(layers, tensors, eligible, graph):
+    """Rewrite the eligible convolutions as int8 triples, in place.
+
+    **A post-fold pass, deliberately.** `fold_affine_into_convs` mutates `tensors[first]` and
+    `tensors[first + 1]` after every layer has been emitted, on the assumption that a
+    convolution owns exactly two tensors: its weight and its bias. An int8 convolution owns
+    three, and `first + 1` is then the *scale* — so quantising at emit time would have the fold
+    silently multiply a scale vector by an affine and leave the bias untouched. Nothing would
+    fail; the file would just be wrong.
+
+    Doing it here, after all folding has finished, also means the numbers quantised are the
+    ones the device actually reads rather than an intermediate.
+
+    Inserting a tensor shifts every later layer's `first_tensor`, so the table is rebuilt
+    rather than patched.
+    """
+    fidelity = maml_convert.Fidelity()
+    rebuilt_tensors = []
+    rebuilt_layers = []
+    eligible = set(eligible)
+    for layer in layers:
+        first = len(rebuilt_tensors)
+        span = tensors[layer.first_tensor: layer.first_tensor + layer.tensor_count]
+        if layer.index in eligible:
+            weight, bias = span
+            kernel, scale = fidelity.quantise(layer.name, np.asarray(weight, dtype=np.float32))
+            rebuilt_tensors.extend([kernel, scale, bias])
+            # `Conv ` for a convolution, `Linear ` for a folded MatMul; both become the same
+            # three-tensor int8 layout the Rust reads with `Builder::conv_int8`.
+            key = layer.key()
+            key = key.replace("Conv ", "ConvInt8 ", 1) if key.startswith("Conv ") else key
+            key = key.replace("Linear ", "LinearInt8 ", 1) if key.startswith("Linear ") else key
+            rebuilt_layers.append(
+                maml_convert.Layer(
+                    len(rebuilt_layers),
+                    "ConvInt8",
+                    layer.name,
+                    key + " zp=0 dtype=int8",
+                    first,
+                    3,
+                )
+            )
+        else:
+            rebuilt_tensors.extend(span)
+            rebuilt_layers.append(
+                maml_convert.Layer(
+                    len(rebuilt_layers),
+                    layer.op,
+                    layer.name,
+                    layer.key(),
+                    first,
+                    layer.tensor_count,
+                )
+            )
+    fidelity.report()
+    print(f"{graph}: {len(eligible)} of {len(layers)} layers read as int8")
+    return rebuilt_layers, rebuilt_tensors
 
 
 def transposed(weight):
@@ -841,7 +917,9 @@ def main():
     onnx_sha256 = hashlib.sha256(raw).digest()
 
     model = onnx.load(args.onnx)
-    ops, layers, tensors = normalise(model)
+    ops, layers, tensors = normalise(
+        model, quantise=args.graph in maml_convert.INT8_GRAPHS, graph=args.graph
+    )
 
     if args.print_graph:
         for index, op in enumerate(ops):

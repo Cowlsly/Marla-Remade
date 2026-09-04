@@ -1,0 +1,4 @@
+  File "<string>", line 15
+    print(f'{\"TOTAL\":10s} {grand:9d} params')
+              ^
+SyntaxError: unexpected character after line continuation character

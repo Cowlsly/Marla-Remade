@@ -25,6 +25,13 @@ import kotlin.math.abs
 import kotlin.math.sign
 
 /**
+ * A tap on the map: the geographic position under the finger plus the screen
+ * point (Dp from the viewport top-left) that produced it. The screen point is
+ * what [MapFeaturePicker]-style hit-testing needs; the geo alone cannot
+ * recover it once the camera moves.
+ */
+data class MapClick(val position: GeoPoint, val screen: DpOffset)
+/**
  * Viewport measurement and every pan/zoom/tap gesture the map supports.
  *
  * Extracted from [RasterMap] so the WebGPU renderer behaves identically rather
@@ -41,6 +48,7 @@ internal fun Modifier.mapGestures(
     zoomRange: ClosedFloatingPointRange<Float>,
     density: Float,
     onMapClick: (GeoPoint) -> Unit,
+    onMapClickWithScreen: ((MapClick) -> Unit)? = null,
 ): Modifier {
     val scope = rememberCoroutineScope()
     // In-flight double-tap zoom animation, cancelled as soon as a new gesture wants
@@ -51,7 +59,11 @@ internal fun Modifier.mapGestures(
     fun clickAt(offsetPx: Offset) {
         val projection = cameraState.projection ?: return
         val dp = toDp(offsetPx)
-        onMapClick(projection.positionFromScreenLocation(DpOffset(dp.x.dp, dp.y.dp)))
+        val screen = DpOffset(dp.x.dp, dp.y.dp)
+        onMapClick(projection.positionFromScreenLocation(screen))
+        // The screen point alongside the geo: hit-testing needs the Dp point
+        // the tap landed on, which the geo alone cannot recover.
+        onMapClickWithScreen?.invoke(MapClick(projection.positionFromScreenLocation(screen), screen))
     }
 
     return this

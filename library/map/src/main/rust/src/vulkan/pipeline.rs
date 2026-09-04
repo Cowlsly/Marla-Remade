@@ -18,6 +18,7 @@
 //! descriptor-set indirection back, because push constants are not inherited.
 
 use crate::tess::{fill, stroke};
+use crate::tile::symbol;
 use ash::vk;
 use std::ffi::CStr;
 
@@ -58,20 +59,29 @@ const FILL_VERT: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/fill.vert.spv
 const FILL_FRAG: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/fill.frag.spv"));
 const LINE_VERT: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/line.vert.spv"));
 const LINE_FRAG: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/line.frag.spv"));
+const SYMBOL_VERT: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/symbol.vert.spv"));
+const SYMBOL_FRAG: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/symbol.frag.spv"));
 
 pub struct Pipelines {
     pub layout: vk::PipelineLayout,
+    /// Layout with the atlas descriptor set (set 0) for the symbol pipeline.
+    pub symbol_layout: vk::PipelineLayout,
     pub fill: vk::Pipeline,
     pub line: vk::Pipeline,
+    pub symbol: vk::Pipeline,
 }
 
 impl Pipelines {
     /// # Safety
     ///
-    /// `render_pass` must outlive these pipelines.
+    /// `render_pass` must outlive these pipelines. `atlas_layout` is the
+    /// descriptor set layout [`images::AtlasSet`] built — `None` on a host
+    /// build that never creates pipelines (tests link this module for the
+    /// [`Push`] size asserts only).
     pub unsafe fn new(
         device: &ash::Device,
         render_pass: vk::RenderPass,
+        atlas_layout: Option<vk::DescriptorSetLayout>,
     ) -> Result<Pipelines, String> {
         let push_range = vk::PushConstantRange::default()
             .stage_flags(vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT)
@@ -87,6 +97,8 @@ impl Pipelines {
         let fill_frag = shader_module(device, FILL_FRAG)?;
         let line_vert = shader_module(device, LINE_VERT)?;
         let line_frag = shader_module(device, LINE_FRAG)?;
+        let symbol_vert = shader_module(device, SYMBOL_VERT)?;
+        let symbol_frag = shader_module(device, SYMBOL_FRAG)?;
 
         let fill_attributes = [vk::VertexInputAttributeDescription::default()
             .location(0)
@@ -115,6 +127,19 @@ impl Pipelines {
                 .format(vk::Format::R32_SFLOAT)
                 .offset(24),
         ];
+        // Symbol: position (tile-local) + uv (atlas), 4 floats.
+        let symbol_attributes = [
+            vk::VertexInputAttributeDescription::default()
+                .location(0)
+                .binding(0)
+                .format(vk::Format::R32G32_SFLOAT)
+                .offset(0),
+            vk::VertexInputAttributeDescription::default()
+                .location(1)
+                .binding(0)
+                .format(vk::Format::R32G32_SFLOAT)
+                .offset(8),
+        ];
 
         let fill = build(
             device,
@@ -135,21 +160,62 @@ impl Pipelines {
             &line_attributes,
         );
 
+        // The symbol pipeline needs the atlas descriptor set, so it gets its own
+        // layout: same push-constant range plus set 0. M2's sprite pipeline reuses
+        // this layout with a second set from the same pool.
+        let symbol_layout = match atlas_layout {
+            Some(set_layout) => {
+                let symbol_layout_info = vk::PipelineLayoutCreateInfo::default()
+                    .push_constant_ranges(std::slice::from_ref(&push_range))
+                    .set_layouts(std::slice::from_ref(&set_layout));
+                device
+                    .create_pipeline_layout(&symbol_layout_info, None)
+                    .map_err(|e| format!("create_pipeline_layout(symbol) {e:?}"))?
+            }
+            None => {
+                device.destroy_shader_module(fill_vert, None);
+                device.destroy_shader_module(fill_frag, None);
+                device.destroy_shader_module(line_vert, None);
+                device.destroy_shader_module(line_frag, None);
+                device.destroy_shader_module(symbol_vert, None);
+                device.destroy_shader_module(symbol_frag, None);
+                device.destroy_pipeline_layout(layout, None);
+                return Err("symbol pipeline needs an atlas descriptor set layout".into());
+            }
+        };
+        let symbol = build(
+            device,
+            symbol_layout,
+            render_pass,
+            symbol_vert,
+            symbol_frag,
+            (symbol::FLOATS_PER_VERTEX * 4) as u32,
+            &symbol_attributes,
+        );
+
         // The modules are only needed while the pipelines are being created.
         device.destroy_shader_module(fill_vert, None);
         device.destroy_shader_module(fill_frag, None);
         device.destroy_shader_module(line_vert, None);
         device.destroy_shader_module(line_frag, None);
+        device.destroy_shader_module(symbol_vert, None);
+        device.destroy_shader_module(symbol_frag, None);
 
-        match (fill, line) {
-            (Ok(fill), Ok(line)) => Ok(Pipelines { layout, fill, line }),
-            (fill, line) => {
+        match (fill, line, symbol) {
+            (Ok(fill), Ok(line), Ok(symbol)) => {
+                Ok(Pipelines { layout, symbol_layout, fill, line, symbol })
+            }
+            (fill, line, symbol) => {
                 if let Ok(p) = fill {
                     device.destroy_pipeline(p, None);
                 }
                 if let Ok(p) = line {
                     device.destroy_pipeline(p, None);
                 }
+                if let Ok(p) = symbol {
+                    device.destroy_pipeline(p, None);
+                }
+                device.destroy_pipeline_layout(symbol_layout, None);
                 device.destroy_pipeline_layout(layout, None);
                 Err("pipeline creation failed".into())
             }
@@ -162,6 +228,8 @@ impl Pipelines {
     pub unsafe fn destroy(&self, device: &ash::Device) {
         device.destroy_pipeline(self.fill, None);
         device.destroy_pipeline(self.line, None);
+        device.destroy_pipeline(self.symbol, None);
+        device.destroy_pipeline_layout(self.symbol_layout, None);
         device.destroy_pipeline_layout(self.layout, None);
     }
 }

@@ -96,7 +96,6 @@ apksig = "8.7.3"
 
 # Maps & geospatial
 maplibre = "0.13.0"
-flatgeobuf = "3.29.0"
 
 # JavaScript engines & HTML
 quickjs = "1.0.5"
@@ -270,7 +269,6 @@ apksig = { module = "com.android.tools.build:apksig", version.ref = "apksig" }
 
 # Maps & geospatial
 maplibre-compose = { module = "org.maplibre.compose:maplibre-compose", version.ref = "maplibre" }
-flatgeobuf = { module = "org.wololo:flatgeobuf", version.ref = "flatgeobuf" }
 
 # JavaScript engines & HTML
 quickjs-kt = { module = "io.github.dokar3:quickjs-kt", version.ref = "quickjs" }

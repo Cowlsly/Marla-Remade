@@ -10,6 +10,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
+import androidx.compose.ui.unit.DpRect
 import kotlinx.coroutines.flow.filterNotNull
 import kotlinx.coroutines.flow.first
 import kotlin.math.log2
@@ -37,6 +38,14 @@ class CameraState(initial: CameraPosition = CameraPosition()) {
     internal var viewportDp: Size? by mutableStateOf(null)
 
     /**
+     * Task-17 pick provider: registered by the rendered surface (see
+     * `VulkanMapSurface`), answering `(box, layerIds) -> placed labels`.
+     * Null until a surface registers — a projection without a live renderer
+     * answers [queryRenderedLabels][Projection.queryRenderedLabels] empty.
+     */
+    internal var labelQueryProvider: ((DpRect, Set<String>) -> List<PlacedLabel>)? by mutableStateOf(null)
+
+    /**
      * Sets the measured viewport and enforces the minimum "fill" zoom so the map
      * always covers the viewport (no blank margins when zoomed all the way out),
      * matching maplibre's behavior.
@@ -57,7 +66,7 @@ class CameraState(initial: CameraPosition = CameraPosition()) {
     /** Current projection, or null before the viewport has been measured. */
     val projection: Projection?
         get() = viewportDp?.let { vp ->
-            Projection(position.target, position.zoom, vp.width, vp.height)
+            Projection(position.target, position.zoom, vp.width, vp.height, labelQueryProvider)
         }
 
     /** Suspends until the viewport is measured, then returns the projection. */

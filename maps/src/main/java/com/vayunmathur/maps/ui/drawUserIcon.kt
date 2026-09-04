@@ -7,13 +7,14 @@ import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.drawscope.DrawScope
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.unit.dp
-import org.maplibre.compose.camera.CameraState
+import com.vayunmathur.library.map.CameraState
+import com.vayunmathur.maps.util.toGeoPoint
 import org.maplibre.spatialk.geojson.Position
 
 fun DrawScope.drawUserIcon(userPosition: Position, userBearing: Float, camera: CameraState) {
     if (userPosition != Position(0.0, 0.0) && camera.projection != null) {
         val offset =
-            camera.projection!!.screenLocationFromPosition(userPosition)
+            camera.projection!!.screenLocationFromPosition(userPosition.toGeoPoint())
 
         val centerOffset = Offset(offset.x.toPx(), offset.y.toPx())
         val arcRadius = 20.dp.toPx() // The distance from center to the arc's stroke

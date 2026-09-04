@@ -1,0 +1,32 @@
+#version 450
+//! `y = tanh(x / cap) * cap`, Gemma's `final_logit_softcapping`.
+//!
+//! # Why an op and not an activation
+//!
+//! It carries a float. The activation path threads a `uint` code and, for `PRelu`, a tensor
+//! index; a parameter would mean either a new push field on every convolution or overloading
+//! `param0_bits`, which several kinds already use for something else. This runs **once** over the
+//! logits at the end of a forward pass, not per layer, so a dedicated dispatch costs one pipeline
+//! and no complexity anywhere else.
+//!
+//! # Why it cannot be folded away
+//!
+//! It is not a scale: `tanh` saturates. Dropping it changes which token wins whenever a logit
+//! exceeds the cap, which is exactly the confident predictions - so a greedy decode diverges from
+//! the reference on the tokens it is most sure about, and only on those.
+//!
+//! # Push fields
+//!
+//! `p.in0` is the input, `p.out_at` the output, `p.param0_bits` the cap as raw f32 bits, and
+//! `p.count` the element count. Shapes are irrelevant: this is elementwise.
+
+#include "common.glsl"
+
+void main() {
+    uint index = global_index();
+    if (index >= p.count) {
+        return;
+    }
+    float cap = uintBitsToFloat(p.param0_bits);
+    arena[p.out_at + index] = float16_t(tanh(float(arena[p.in0 + index]) / cap) * cap);
+}

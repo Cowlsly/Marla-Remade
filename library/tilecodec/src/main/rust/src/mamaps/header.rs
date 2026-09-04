@@ -16,7 +16,14 @@ pub const MAGIC: &[u8; 7] = b"MAMAPS\0";
 
 /// Bumped only for a change a reader cannot ignore. The archive carries a
 /// [`build_id`](Header::build_id) for "same format, different data".
-pub const FORMAT_VERSION: u8 = 1;
+///
+/// v2 adds `places`, `poi` and `transit` layers, point geometry and per-layer name tables.
+/// Readers accept v1 **and** v2; v1 bodies simply have no points, no names and no new layers.
+pub const FORMAT_VERSION: u8 = 2;
+
+/// The last v1 version, still readable. v1 bodies carry 16-byte feature records, no point
+/// geometry and no name tables; anything the v2 fields would hold reads back as empty.
+pub const FORMAT_VERSION_V1: u8 = 1;
 
 pub const HEADER_LEN: usize = 128;
 
@@ -125,9 +132,9 @@ impl Header {
         if &buf[0..7] != MAGIC {
             return err("not a .mamaps archive (bad magic)");
         }
-        if buf[7] != FORMAT_VERSION {
+        if buf[7] != FORMAT_VERSION && buf[7] != FORMAT_VERSION_V1 {
             return err(format!(
-                "unsupported .mamaps format version {} (this reader speaks {FORMAT_VERSION})",
+                "unsupported .mamaps format version {} (this reader speaks v{FORMAT_VERSION_V1} and v{FORMAT_VERSION})",
                 buf[7],
             ));
         }

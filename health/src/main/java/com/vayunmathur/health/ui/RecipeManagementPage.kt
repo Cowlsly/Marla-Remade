@@ -372,32 +372,36 @@ fun IngredientQuantityDialog(
                     modifier = Modifier.fillMaxWidth()
                 )
 
-                ExposedDropdownMenuBox(
-                    expanded = unitExpanded,
-                    onExpandedChange = { unitExpanded = !unitExpanded }
-                ) {
+                Box(Modifier.fillMaxWidth()) {
                     OutlinedTextField(
                         value = selectedUnit.name,
                         onValueChange = {},
                         readOnly = true,
                         label = { Text(stringResource(R.string.unit)) },
-                        trailingIcon = { ExposedDropdownMenuDefaults.TrailingIcon(expanded = unitExpanded) },
-                        modifier = Modifier.menuAnchor(ExposedDropdownMenuAnchorType.PrimaryNotEditable).fillMaxWidth()
+                        trailingIcon = {
+                            IconButton(onClick = { unitExpanded = true }) {
+                                IconArrowDropDown()
+                            }
+                        },
+                        modifier = Modifier.fillMaxWidth()
                     )
-                    ExposedDropdownMenu(
+                    DropdownMenu(
                         expanded = unitExpanded,
                         onDismissRequest = { unitExpanded = false }
                     ) {
                         availableUnits.forEach { unit ->
-                            DropdownMenuItem(
-                                text = { Text(unit.name) },
+                            SelectableDropdownMenuItem(
+                                selected = unit == selectedUnit,
                                 onClick = {
                                     selectedUnit = unit
                                     unitExpanded = false
-                                }
+                                },
+                                text = { Text(unit.name) },
+                                selectedLeadingIcon = { IconCheck() },
                             )
                         }
                     }
+                    Box(Modifier.matchParentSize().clickable { unitExpanded = true })
                 }
             }
         },

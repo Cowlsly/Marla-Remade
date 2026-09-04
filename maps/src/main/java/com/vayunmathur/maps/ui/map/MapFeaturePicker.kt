@@ -3,6 +3,8 @@ package com.vayunmathur.maps.ui.map
 import androidx.compose.ui.unit.DpOffset
 import androidx.compose.ui.unit.DpRect
 import androidx.compose.ui.unit.DpSize
+import com.vayunmathur.library.map.GeoPoint
+import com.vayunmathur.library.map.PlacedLabel
 import com.vayunmathur.maps.data.Feature1
 import com.vayunmathur.maps.data.SpecificFeature
 import com.vayunmathur.maps.data.transit.TransitStop
@@ -18,6 +20,10 @@ import com.vayunmathur.maps.ui.toSelectedMaPoi
 import com.vayunmathur.maps.ui.toSelectedSavedPlace
 import com.vayunmathur.maps.ui.toSelectedSearchResult
 import com.vayunmathur.maps.ui.toTransitStop
+import com.vayunmathur.maps.util.toPosition
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
+import org.maplibre.spatialk.geojson.Point
 
 /**
  * What a tap on the map resolved to.
@@ -116,7 +122,7 @@ class MapFeaturePicker(
      * The basemap's own place labels under [offset], returned unresolved.
      *
      * Queried at the exact point rather than through the tolerance box, matching the behaviour
-     * this replaced. `queryRenderedFeatures` returns one feature per layer, so this is a
+     * this replaced. The native pick returns placed labels in placement order, so this is a
      * handful of candidates for the caller to resolve.
      */
     fun pickAdminLabels(offset: DpOffset): List<Feature1> =
@@ -131,13 +137,57 @@ class MapFeaturePicker(
         /**
          * The basemap label layers probed for a "what's here?" tap.
          *
-         * A `Set`, so this does not express a priority: the renderer decides what order it
-         * returns them in, and the caller resolves the first that parses. `_base`/`_hybrid`
-         * because the style patcher splits every layer in two by zoom.
+         * Kept in the MapLibre split-id form (`places_country_base`, …) because
+         * [MapFeaturePickerTest] pins the probe contract on it and the car path
+         * still resolves the same names. [NATIVE_LABEL_LAYER_IDS] is what the
+         * Vulkan renderer's [PlacedLabel.layerId] actually emits (flat dash ids
+         * from `basemap.flat.json`); [toFeature1] maps between the two.
          */
         val ADMIN_LABEL_LAYER_IDS: Set<String> =
             setOf("places_country", "places_region", "places_locality")
                 .flatMap { listOf("${it}_base", "${it}_hybrid") }
                 .toSet()
+
+        /**
+         * The flat layer ids the native pick emits for the same labels
+         * (see `basemap.flat.json`: `places-country`, …). `places-subplace`
+         * (neighbourhoods) has no `parse` branch and resolves to null, which
+         * is the correct fall-through to reverse-geocode.
+         */
+        val NATIVE_LABEL_LAYER_IDS: Set<String> = setOf(
+            "places-country",
+            "places-region",
+            "places-locality",
+            "places-subplace",
+        )
+
+        /** `[nativeId] -> [adminSplitBase]`, e.g. `places-country` -> `places_country`. */
+        private fun nativeToBase(nativeId: String): String? = when (nativeId) {
+            "places-country" -> "places_country"
+            "places-region" -> "places_region"
+            "places-locality" -> "places_locality"
+            else -> null
+        }
+
+        /**
+         * A native [PlacedLabel] as the [Feature1] [SpecificFeature.parse] reads:
+         * point geometry at [PlacedLabel.position] plus `{kind, name, name:en}`
+         * properties. `kind` is the `country`/`region`/`locality` discriminator
+         * `parse` switches on; only labels whose native id maps to a known admin
+         * base id convert, the rest return null and never enter the candidate list.
+         */
+        fun PlacedLabel.toFeature1(): Feature1? {
+            if (nativeToBase(layerId) == null) return null
+            return Feature1(
+                Point(position.toPosition()),
+                JsonObject(
+                    mapOf(
+                        "kind" to JsonPrimitive(kind),
+                        "name" to JsonPrimitive(name),
+                        "name:en" to JsonPrimitive(name),
+                    )
+                ),
+            )
+        }
     }
 }

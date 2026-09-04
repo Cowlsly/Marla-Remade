@@ -1,0 +1,92 @@
+#version 450
+//! `conv_point_int8.comp` for a **4-bit** kernel with **per-block** scales.
+//!
+//! # Where the scale goes
+//!
+//! Into the staged weight tile, not the accumulator. The int8 shader multiplies the finished
+//! accumulator by one per-row scale; a per-block scale cannot wait that long, because a tile's
+//! accumulator has already summed taps from more than one row's worth of blocks by the time it
+//! is stored.
+//!
+//! What makes that cheap here is that `TILE` is 16 and `I4_BLOCK` is 32, and the loop steps `k0`
+//! by `TILE`: taps `k0 .. k0 + 15` are therefore always inside a single block, so one scale
+//! covers the whole staged tile row and is fetched once per staged element rather than once per
+//! multiply-accumulate. **This is only true while `TILE` divides `I4_BLOCK`** - the assertion is
+//! recorded in `nets::gemma4`'s tests rather than being expressible here.
+//!
+//! # Push fields
+//!
+//! As `conv_point_int8.comp`, with `p.act_weight` a rank-2 `(out_channels, blocks)` table instead
+//! of a rank-1 per-row one.
+
+#include "common.glsl"
+
+/// Output channels and positions per workgroup, and input channels per staging step.
+#define TILE 16u
+/// The staged blocks. `TILE * TILE` each, so 2 KB of shared memory at fp32.
+shared float weight_tile[TILE][TILE];
+shared float input_tile[TILE][TILE];
+
+void main() {
+    uint tile = gl_WorkGroupID.y * gl_NumWorkGroups.x + gl_WorkGroupID.x;
+    if (tile >= p.count) {
+        return;
+    }
+    uint positions = p.out_h * p.out_w;
+    uint tiles_across = (positions + TILE - 1u) / TILE;
+    uint channel_base = (tile / tiles_across) * TILE;
+    uint position_base = (tile % tiles_across) * TILE;
+    uint blocks = (p.in_c + I4_BLOCK - 1u) / I4_BLOCK;
+    uint lid = gl_LocalInvocationID.x;
+    uint local_row = (lid >> 3u) * 2u;
+    uint local_col = (lid & 7u) * 2u;
+    float acc[2][2] = { { 0.0, 0.0 }, { 0.0, 0.0 } };
+    for (uint k0 = 0u; k0 < p.in_c; k0 += TILE) {
+        for (uint n = 0u; n < 4u; n++) {
+            uint slot = lid + n * 64u;
+            uint r = slot >> 4u;
+            uint c = slot & 15u;
+            uint channel = channel_base + r;
+            uint k_weight = k0 + c;
+            // The scale is folded in here, so the inner product below is unchanged from the int8
+            // shader's and the accumulator needs no second pass.
+            weight_tile[r][c] = (channel < p.out_c && k_weight < p.in_c)
+                ? float(int4_at(p.weight, channel * p.in_c + k_weight))
+                    * int4_scale(channel, k_weight / I4_BLOCK, blocks)
+                : 0.0;
+            uint k_input = k0 + r;
+            uint position = position_base + c;
+            input_tile[r][c] = (k_input < p.in_c && position < positions)
+                ? float(arena[p.in0 + k_input * positions + position])
+                : 0.0;
+        }
+        barrier();
+        for (uint k = 0u; k < TILE; k++) {
+            float a0 = weight_tile[local_row][k];
+            float a1 = weight_tile[local_row + 1u][k];
+            float b0 = input_tile[k][local_col];
+            float b1 = input_tile[k][local_col + 1u];
+            acc[0][0] += a0 * b0;
+            acc[0][1] += a0 * b1;
+            acc[1][0] += a1 * b0;
+            acc[1][1] += a1 * b1;
+        }
+        barrier();
+    }
+    for (uint i = 0u; i < 2u; i++) {
+        uint channel = channel_base + local_row + i;
+        if (channel >= p.out_c) {
+            continue;
+        }
+        float offset = float(weights[p.bias + channel]);
+        for (uint j = 0u; j < 2u; j++) {
+            uint position = position_base + local_col + j;
+            if (position >= positions) {
+                continue;
+            }
+            // Already scaled in the staging above, so only the bias is left.
+            float value = activate(acc[i][j] + offset, p.act, channel);
+            arena[p.out_at + channel * positions + position] = float16_t(value);
+        }
+    }
+}

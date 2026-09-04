@@ -46,6 +46,8 @@ const SOFTMAX_CAUSAL: &[u8] =
 const SOFTMAX_PREFIX: &[u8] =
     include_bytes!(concat!(env!("OUT_DIR"), "/softmax_prefix.comp.spv"));
 const CACHE_WRITE: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/cache_write.comp.spv"));
+const SOFTCAP: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/softcap.comp.spv"));
+const ACTIVATE: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/activate.comp.spv"));
 const ATTN_APPLY: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/attn_apply.comp.spv"));
 const ATTN_SCORES_RELATIVE: &[u8] =
     include_bytes!(concat!(env!("OUT_DIR"), "/attn_scores_relative.comp.spv"));
@@ -66,9 +68,13 @@ const ATTN_APPLY_CACHED: &[u8] =
     include_bytes!(concat!(env!("OUT_DIR"), "/attn_apply_cached.comp.spv"));
 const CONV_VEC_INT8: &[u8] =
     include_bytes!(concat!(env!("OUT_DIR"), "/conv_vec_int8.comp.spv"));
+const CONV_VEC_INT4: &[u8] =
+    include_bytes!(concat!(env!("OUT_DIR"), "/conv_vec_int4.comp.spv"));
+const CONV_POINT_INT4: &[u8] =
+    include_bytes!(concat!(env!("OUT_DIR"), "/conv_point_int4.comp.spv"));
 
 /// Every shader, in the order [`Pipelines::create`] destructures them.
-const SPIRV: [&[u8]; 31] = [
+const SPIRV: [&[u8]; 35] = [
     CONV,
     CONV_TRANSPOSE,
     MAXPOOL,
@@ -100,6 +106,10 @@ const SPIRV: [&[u8]; 31] = [
     RMSNORM,
     SOFTMAX_PREFIX,
     CACHE_WRITE,
+    SOFTCAP,
+    ACTIVATE,
+    CONV_VEC_INT4,
+    CONV_POINT_INT4,
 ];
 
 /// Descriptors in one set: the arena, the weights as fp16, the weights as words, the step params.
@@ -163,6 +173,10 @@ pub struct Pipelines {
     softmax_causal: vk::Pipeline,
     softmax_prefix: vk::Pipeline,
     cache_write: vk::Pipeline,
+    softcap: vk::Pipeline,
+    activate: vk::Pipeline,
+    conv_vec_int4: vk::Pipeline,
+    conv_point_int4: vk::Pipeline,
     rmsnorm: vk::Pipeline,
 }
 
@@ -413,6 +427,10 @@ impl Pipelines {
             rmsnorm,
             softmax_prefix,
             cache_write,
+            softcap,
+            activate,
+            conv_vec_int4,
+            conv_point_int4,
         ] = match <[vk::Pipeline; SPIRV.len()]>::try_from(built) {
             Ok(all) => all,
             Err(built) => {
@@ -460,6 +478,10 @@ impl Pipelines {
             rmsnorm,
             softmax_prefix,
             cache_write,
+            softcap,
+            activate,
+            conv_vec_int4,
+            conv_point_int4,
         })
     }
 
@@ -483,6 +505,10 @@ impl Pipelines {
             Kind::SoftmaxCausal => self.softmax_causal,
             Kind::SoftmaxPrefix => self.softmax_prefix,
             Kind::CacheWrite => self.cache_write,
+            Kind::Softcap => self.softcap,
+            Kind::Activate => self.activate,
+            Kind::ConvVecInt4 => self.conv_vec_int4,
+            Kind::ConvPointInt4 => self.conv_point_int4,
             Kind::AttnApply => self.attn_apply,
             Kind::AttnScoresRelative => self.attn_scores_relative,
             Kind::AttnApplyRelative => self.attn_apply_relative,
@@ -536,6 +562,10 @@ impl Pipelines {
             self.rmsnorm,
             self.softmax_prefix,
             self.cache_write,
+            self.softcap,
+            self.activate,
+            self.conv_vec_int4,
+            self.conv_point_int4,
         ] {
             device.destroy_pipeline(pipeline, None);
         }

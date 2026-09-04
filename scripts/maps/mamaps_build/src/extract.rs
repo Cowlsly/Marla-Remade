@@ -45,7 +45,7 @@ use std::path::Path;
 
 use osm_ingest::nodeloc::{resolve_nodes, NodeLocations};
 use osm_ingest::osm::{visit_block, Element, MEMBER_WAY};
-use osm_ingest::pbf::{self, KIND_RELATIONS, KIND_WAYS};
+use osm_ingest::pbf::{self, KIND_NODES, KIND_RELATIONS, KIND_WAYS};
 use osm_ingest::proto::{err, Result};
 use osm_ingest::rings::{self, MemberWay, RingStats};
 use osm_ingest::select::Select;
@@ -58,9 +58,16 @@ use crate::schema::{self, Class, Layers};
 use crate::store::{Sink, Store, WayCounts, WayReader, WaySink};
 
 /// One classified feature, in lon/lat, ready to tile.
+///
+/// `name` is the coalesced display label for `places` and `poi` points, `None` for every other
+/// layer. Carried here (not in [`Class`]) because it is a string and `Class` is `Copy`.
+/// `transit_color` is the aggregated route colour for `transit` lines (`0xRRGGBB`), zero for
+/// every other layer.
 pub struct Feature {
     pub class: Class,
     pub geometry: Geometry,
+    pub name: Option<String>,
+    pub transit_color: u32,
 }
 
 /// What a run of stage A did, for the build report.
@@ -75,6 +82,12 @@ pub struct Stats {
     pub nodes_needed: u64,
     /// Land polygons read from a prepared coastline product, if one was given.
     pub land_polygons: u64,
+    /// Nodes classified as `places`/`poi` labels.
+    pub nodes_classified: u64,
+    /// Route relations captured for the `transit` layer.
+    pub transit_relations: u64,
+    /// Member ways emitted as coloured `transit` lines.
+    pub transit_way_features: u64,
     pub rings: RingStats,
 }
 
@@ -82,6 +95,8 @@ pub struct Stats {
 struct Way {
     class: Class,
     refs: Vec<i64>,
+    /// The display label for `places`/`poi` ways, `None` for every other layer.
+    name: Option<String>,
 }
 
 /// A classified relation, held between passes.
@@ -94,6 +109,21 @@ struct Relation {
     /// member lines. Which it is comes from [`Class::area`] rather than from the relation's `type`
     /// tag, because both an administrative border and a protected area are `type=boundary`.
     area: bool,
+    /// The display label for a `places` relation (a country, a region), `None` otherwise.
+    name: Option<String>,
+}
+
+/// A transit route relation, held between passes alongside [`Relation`].
+///
+/// The colour (explicit, or `None` for a per-mode fallback) and the member way ids. Geometry
+/// comes later from the `members` table — a route's ways are usually classified already (they
+/// are railways), but an untagged member is still drawable track, so the transit phase reads
+/// refs rather than reusing the ways spill.
+struct RouteRel {
+    id: i64,
+    mode: &'static str,
+    color: Option<u32>,
+    members: Vec<i64>,
 }
 
 /// Read `input` and spill every feature the schema classifies to `spill_path`.
@@ -134,13 +164,14 @@ pub fn extract(
     // planet extract is most of the file.
     let mut ways = WaySink::create(&ways_path)?;
     let mut relations: Vec<Relation> = Vec::new();
+    let mut routes: Vec<RouteRel> = Vec::new();
     let blob_kinds = pbf::run_pass_sink(
         input,
         &blobs,
         None,
         KIND_WAYS | KIND_RELATIONS,
         "Pass 1: ways and relations",
-        || (Vec::<(i64, Way)>::new(), Vec::<Relation>::new()),
+        || (Vec::<(i64, Way)>::new(), Vec::<Relation>::new(), Vec::<RouteRel>::new()),
         |state, block| {
             let mut kinds = 0u8;
             visit_block(block, KIND_WAYS | KIND_RELATIONS, &mut kinds, &mut |el| {
@@ -150,11 +181,31 @@ pub fn extract(
                             return Ok(());
                         }
                         if let Some(class) = schema::classify(&way.tags, true, layers) {
-                            state.0.push((way.id, Way { class, refs: way.refs.to_vec() }));
+                            let name = schema::display_name(&way.tags, class.layer);
+                            state.0.push((way.id, Way { class, refs: way.refs.to_vec(), name }));
                         }
                     }
                     Element::Relation(relation) => {
-                        // Two relation types carry a shape. Anything else — a route, a site, a
+                        // Transit routes ride along with the shapes: their colour is aggregated
+                        // onto member ways later, so only the membership is kept here.
+                        if layers.transit && schema::transit::is_transit_route(&relation.tags) {
+                            let mode = schema::transit::route_mode(&relation.tags)
+                                .expect("checked by is_transit_route");
+                            let color = schema::transit::parse_color(&relation.tags);
+                            let members: Vec<i64> = relation
+                                .members
+                                .iter()
+                                .filter(|m| m.kind == MEMBER_WAY)
+                                .map(|m| m.id)
+                                .collect();
+                            state.2.push(RouteRel {
+                                id: relation.id,
+                                mode,
+                                color,
+                                members,
+                            });
+                        }
+                        // Two relation types carry a shape. Anything else — a site, a
                         // public_transport — does not.
                         if !matches!(
                             relation.tags.get_str("type"),
@@ -177,7 +228,8 @@ pub fn extract(
                             // one is a line while the other is a shape — which is exactly the
                             // distinction `Class::area` exists to make.
                             let area = class.area;
-                            state.1.push(Relation { class, members, area });
+                            let name = schema::display_name(&relation.tags, class.layer);
+                            state.1.push(Relation { class, members, area, name });
                         }
                     }
                     Element::Node(_) => {}
@@ -186,20 +238,22 @@ pub fn extract(
             })?;
             Ok(kinds)
         },
-        |(chunk_ways, chunk_relations)| {
+        |(chunk_ways, chunk_relations, chunk_routes)| {
             // Chunks arrive in file order and a PBF's ways are sorted by id, so appending here
             // leaves the file in ascending id order. `WaySink::push` refuses an id that does not
             // advance rather than letting an unsorted file reorder the archive silently.
             for (id, way) in chunk_ways {
-                ways.push(id, &way.class, &way.refs)?;
+                ways.push(id, &way.class, &way.refs, way.name.as_deref())?;
             }
             relations.extend(chunk_relations);
+            routes.extend(chunk_routes);
             Ok(())
         },
     )?;
     let WayCounts { ways: ways_classified, refs: way_refs, max_ref: way_max_ref } = ways.finish()?;
     stats.ways_classified = ways_classified;
     stats.relations_classified = relations.len() as u64;
+    stats.transit_relations = routes.len() as u64;
 
     // --- pass 2: the refs of every relation member way ------------------------------------
     //
@@ -212,6 +266,9 @@ pub fn extract(
         let mut wanted: Vec<i64> = relations
             .iter()
             .flat_map(|r| r.members.iter().map(|(id, _)| *id))
+            // Route members too: a transit way's geometry is read from the member table even
+            // when the way itself was never classified (untagged track in a route relation).
+            .chain(routes.iter().flat_map(|r| r.members.iter().copied()))
             .collect();
         wanted.sort_unstable();
         wanted.dedup();
@@ -282,6 +339,60 @@ pub fn extract(
     // the file rather than a step that could be forgotten.
     mark("materialising");
     let mut sink = Sink::create(spill_path)?;
+
+    // --- node pass: labels ----------------------------------------------------------------
+    //
+    // Nodes carry no refs to resolve — their coordinates are inline — so they classify and spill
+    // in one pass, straight into the sink: a label is one point and one name, and holding tens of
+    // millions of them for a later loop would be a second materialise for no reason. Ways and
+    // relations below only *add* to the sink, so spilling nodes first changes no order the tiler
+    // reads (it groups by layer id).
+    //
+    // Only label layers are consulted here: a node is never a road, a lake or a building, and
+    // running the full schema over 2 B nodes would pay the tag scan for nothing.
+    if layers.places || layers.poi {
+        pbf::run_pass_sink(
+            input,
+            &blobs,
+            Some(&blob_kinds),
+            KIND_NODES,
+            "Pass 4: nodes",
+            Vec::<(Class, f64, f64, Option<String>)>::new,
+            |state, block| {
+                let mut kinds = 0u8;
+                visit_block(block, KIND_NODES, &mut kinds, &mut |el| {
+                    if let Element::Node(node) = el {
+                        if !select.matches(|k| node.tags.get_str(k)) {
+                            return Ok(());
+                        }
+                        if let Some(class) = schema::classify(&node.tags, false, layers) {
+                            if is_label(class.layer) {
+                                let name = schema::display_name(&node.tags, class.layer);
+                                state.push((
+                                    class,
+                                    node.lon_e7 as f64 * 1e-7,
+                                    node.lat_e7 as f64 * 1e-7,
+                                    name,
+                                ));
+                            }
+                        }
+                    }
+                    Ok(())
+                })?;
+                Ok(kinds)
+            },
+            |hits| {
+                for (class, lon, lat, name) in hits {
+                    sink.push_named(&class, &Geometry::Points(vec![(lon, lat)]), name.as_deref())?;
+                    stats.features += 1;
+                    stats.nodes_classified += 1;
+                }
+                Ok(())
+            },
+        )?;
+        mark("nodes labelled");
+    }
+
     let mut reader = WayReader::open(&ways_path)?;
     let mut refs: Vec<i64> = Vec::new();
     // Silent until now, and it is not a short step: on a north-america extract this loop ran 623
@@ -301,12 +412,12 @@ pub fn extract(
     // 64 Ki ways at ~10 nodes each is a few tens of MB of geometry in flight, against a build that
     // peaks near 7 GB.
     const MATERIALISE_BATCH: usize = 64 * 1024;
-    let mut batch: Vec<(Class, Vec<i64>)> = Vec::with_capacity(MATERIALISE_BATCH);
+    let mut batch: Vec<(Class, Option<String>, Vec<i64>)> = Vec::with_capacity(MATERIALISE_BATCH);
     let mut built: Vec<Option<Geometry<(f64, f64)>>> = Vec::with_capacity(MATERIALISE_BATCH);
     loop {
         let more = reader.next(&mut refs)?;
-        if let Some((_, class)) = more {
-            batch.push((class, std::mem::take(&mut refs)));
+        if let Some((_, class, name)) = more.as_ref() {
+            batch.push((*class, name.clone(), std::mem::take(&mut refs)));
         }
         // Flushed when full, and once more at the end with whatever is left.
         if batch.len() >= MATERIALISE_BATCH || (more.is_none() && !batch.is_empty()) {
@@ -314,13 +425,22 @@ pub fn extract(
             par::install(|| {
                 batch
                     .par_iter()
-                    .map(|(class, refs)| way_geometry(&table.line(refs), class.area))
+                    .map(|(class, _, refs)| {
+                        let line = table.line(refs);
+                        // A label layer's ways are centroided to points: a town mapped as an area
+                        // is still one label, not a loop. Everything else keeps its geometry.
+                        if is_label(class.layer) {
+                            centroid(&line).map(|point| Geometry::Points(vec![point]))
+                        } else {
+                            way_geometry(&line, class.area)
+                        }
+                    })
                     .collect_into_vec(&mut built);
             });
-            for ((class, _), geometry) in batch.iter().zip(built.drain(..)) {
+            for ((class, name, _), geometry) in batch.iter().zip(built.drain(..)) {
                 match geometry {
                     Some(geometry) => {
-                        sink.push(class, &geometry)?;
+                        sink.push_named(class, &geometry, name.as_deref())?;
                         stats.features += 1;
                     }
                     None => stats.geometry_failed += 1,
@@ -347,6 +467,28 @@ pub fn extract(
     );
     for relation in &relations {
         bar.tick("relation(s)");
+        // A `places` relation (a country, a region) is labelled at its centroid: one point, not
+        // a stitched shape. The border itself lives in `boundaries`; this is the name.
+        if is_label(relation.class.layer) {
+            let line: Vec<(f64, f64)> = relation
+                .members
+                .iter()
+                .filter_map(|(id, _)| members.get(id))
+                .flat_map(|refs| table.line(refs))
+                .collect();
+            match centroid(&line) {
+                Some(point) => {
+                    sink.push_named(
+                        &relation.class,
+                        &Geometry::Points(vec![point]),
+                        relation.name.as_deref(),
+                    )?;
+                    stats.features += 1;
+                }
+                None => stats.geometry_failed += 1,
+            }
+            continue;
+        }
         // A boundary relation's members are the border. Each is emitted as its own line rather than
         // stitched: the renderer strokes them, and a gap between two member ways is invisible in a
         // stroke while a failed stitch would drop the whole border.
@@ -382,6 +524,63 @@ pub fn extract(
         stats.features += 1;
     }
     bar.finish("relation(s)");
+
+    // --- transit: colours onto member ways ------------------------------------------------
+    //
+    // After relations (which own the `members` table) and before the coastline (which only needs
+    // the bbox). Each route colours its member ways; a way shared by two routes keeps the first
+    // colour under [`schema::transit::assign_colors`]' explicit-first, lowest-id order. Geometry
+    // reads straight from the member refs — the same lines the ways loop would build — because a
+    // member way is drawable track whether or not it was classified as one.
+    if layers.transit && !routes.is_empty() {
+        let assignments = schema::transit::assign_colors(
+            &routes
+                .iter()
+                .map(|r| (r.id, r.mode, r.color, r.members.clone()))
+                .collect::<Vec<_>>(),
+        );
+        let mut bar = Progress::new(
+            "Materialise: transit".to_string(),
+            assignments.len(),
+            "way(s)",
+            true,
+        );
+        // Per-mode classes up front: one `Class` per mode, not per way.
+        let mut classes: HashMap<&'static str, Class> = HashMap::new();
+        for route in &routes {
+            classes.entry(route.mode).or_insert_with(|| {
+                schema::transit::transit_class(route.mode).expect("a carried mode has a class")
+            });
+        }
+        let mut fallback_ways = 0u64;
+        for route in &routes {
+            if route.color.is_none() {
+                fallback_ways += route.members.len() as u64;
+            }
+        }
+        for (way_id, color, mode) in assignments {
+            bar.tick("way(s)");
+            let Some(refs) = members.get(&way_id) else {
+                stats.geometry_failed += 1;
+                continue;
+            };
+            let line = table.line(refs);
+            if line.len() < 2 {
+                stats.geometry_failed += 1;
+                continue;
+            }
+            let class = classes[mode];
+            sink.push_transit(&class, &Geometry::Lines(vec![line]), color)?;
+            stats.features += 1;
+            stats.transit_way_features += 1;
+        }
+        bar.finish("way(s)");
+        if fallback_ways > 0 {
+            println!(
+                "  {fallback_ways} transit member way(s) fell back to per-mode colours (no official colour on their relations)"
+            );
+        }
+    }
     // The mainland, last, because clipping it needs the extract's own bounding box and that is
     // only known once every OSM feature has been through the sink. Order in the file does not
     // matter: the tiler groups by layer id, so `earth` is the first layer of every body whenever it
@@ -571,6 +770,26 @@ fn locate(table: &NodeLocations, id: i64) -> Option<(f64, f64)> {
     Some((lon_e7 as f64 * 1e-7, lat_e7 as f64 * 1e-7))
 }
 
+/// Is this a label layer (`places`/`poi`)? Labels are points with names: ways mapped as areas
+/// are centroided to one, relations likewise, and nodes spill directly.
+fn is_label(layer: u8) -> bool {
+    use tilecodec::mamaps::dict::{LAYER_PLACES, LAYER_POI};
+    layer == LAYER_PLACES || layer == LAYER_POI
+}
+
+/// The centroid of a coordinate list: the arithmetic mean, or `None` when there is nothing.
+///
+/// A label anchor, not a geometric centroid — cheap and exactly what a basemap needs. Area
+/// weighting would move the point toward the largest lobe; the mean keeps it among the parts.
+fn centroid(line: &[(f64, f64)]) -> Option<(f64, f64)> {
+    if line.is_empty() {
+        return None;
+    }
+    let (sx, sy) = line.iter().fold((0.0f64, 0.0f64), |(x, y), &(px, py)| (x + px, y + py));
+    let n = line.len() as f64;
+    Some((sx / n, sy / n))
+}
+
 /// A way's coordinates as the geometry its class says it is.
 ///
 /// A closed way is a ring only if the tags call it an area; the same shape is a cul-de-sac
@@ -670,7 +889,7 @@ mod tests {
         // Ascending way ids, as pass 1 produces; overlapping refs, as real ways have.
         for way in 0..64i64 {
             let refs: Vec<i64> = (0..8).map(|i| way * 5 + i).collect();
-            sink.push(way + 1, &class, &refs).expect("push");
+            sink.push(way + 1, &class, &refs, None).expect("push");
         }
         let counts = sink.finish().expect("finish");
 

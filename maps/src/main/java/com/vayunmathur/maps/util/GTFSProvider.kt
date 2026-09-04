@@ -6,7 +6,7 @@ import java.util.concurrent.ConcurrentHashMap
 
 object GTFSProvider {
     // Accessed concurrently from OfflineRouter.getRoute (Dispatchers.Default)
-    // and from MyMapLayers on the Main thread, so use a thread-safe map —
+    // and from the map layers on the Main thread, so use a thread-safe map —
     // a plain HashMap mutation race can corrupt internal buckets and cause
     // ConcurrentModificationException or infinite get() loops.
     private val routeColors = ConcurrentHashMap<String, String>() // Key: feedName:routeName, Value: #HEX

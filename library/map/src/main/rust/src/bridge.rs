@@ -114,6 +114,9 @@ struct MapHandle {
     zoom_range: Arc<ZoomRange>,
     /// Frames drawn, for the once-a-second diagnostic log.
     frames: u32,
+    /// Last frame's density (device px per Dp), for the task-17 pick path's
+    /// Dp→device-px conversion. Written every render call.
+    density: f32,
 }
 
 /// Shared so Kotlin's connectivity callback can reach the reader on the worker thread.
@@ -143,18 +146,28 @@ pub extern "system" fn Java_com_vayunmathur_library_map_MapNative_create<'l>(
     height: jint,
     dark: jboolean,
     muted: jboolean,
+    archive_path: JString<'l>,
 ) -> jlong {
     // The bridge back to `:library:network` has to be resolved before any worker thread
     // needs it; doing it here means the failure is visible at startup rather than as a
-    // silently blank map.
+    // silently blank map. For a local file archive it is not used but still initialised;
+    // a missing bridge is not a file-archive failure.
     if !jni_http::init(&mut env) {
-        log("library:network is missing, so tiles cannot be fetched");
-        return 0;
+        log("library:network is missing, so remote tiles cannot be fetched");
+        // Continue — a file:// archive does not need the HTTP bridge.
     }
 
     let cache_dir: String = match env.get_string(&cache_dir) {
         Ok(s) => s.into(),
         Err(_) => return 0,
+    };
+    let archive_path: String = if archive_path.is_null() {
+        String::new()
+    } else {
+        match env.get_string(&archive_path) {
+            Ok(s) => s.into(),
+            Err(_) => String::new(),
+        }
     };
 
     let window = unsafe {
@@ -185,15 +198,46 @@ pub extern "system" fn Java_com_vayunmathur_library_map_MapNative_create<'l>(
     let zoom_range = Arc::new(ZoomRange::unknown());
     // One `Receiver` shared by every worker, so whichever is free takes the next tile.
     let queue = Arc::new(Mutex::new(wanted_rx));
-    for index in 0..WORKER_COUNT {
-        spawn_worker(
-            index,
-            cache_dir.clone(),
-            queue.clone(),
-            finished_tx.clone(),
-            online.clone(),
-            zoom_range.clone(),
-        );
+    match normalize_local_archive_path(&archive_path) {
+        ArchiveSource::Default => {
+            for index in 0..WORKER_COUNT {
+                spawn_worker(
+                    index,
+                    BASEMAP_ARCHIVE_URL.to_string(),
+                    cache_dir.clone(),
+                    queue.clone(),
+                    finished_tx.clone(),
+                    online.clone(),
+                    zoom_range.clone(),
+                );
+            }
+        }
+        ArchiveSource::RemoteUrl(url) => {
+            log(&format!("using remote archive override {}", url));
+            for index in 0..WORKER_COUNT {
+                spawn_worker(
+                    index,
+                    url.clone(),
+                    cache_dir.clone(),
+                    queue.clone(),
+                    finished_tx.clone(),
+                    online.clone(),
+                    zoom_range.clone(),
+                );
+            }
+        }
+        ArchiveSource::LocalFile(path) => {
+            log(&format!("using local archive {}", path.display()));
+            for index in 0..WORKER_COUNT {
+                spawn_file_worker(
+                    index,
+                    Some(path.clone()),
+                    queue.clone(),
+                    finished_tx.clone(),
+                    zoom_range.clone(),
+                );
+            }
+        }
     }
 
     let handle = Box::new(MapHandle {
@@ -207,6 +251,7 @@ pub extern "system" fn Java_com_vayunmathur_library_map_MapNative_create<'l>(
         palette: Palette::new(dark != 0, muted != 0),
         zoom_range,
         frames: 0,
+        density: 1.0,
     });
     Box::into_raw(handle) as jlong
 }
@@ -221,6 +266,7 @@ pub extern "system" fn Java_com_vayunmathur_library_map_MapNative_create<'l>(
 /// is safe to share because every entry is written temp-then-renamed.
 fn spawn_worker(
     index: usize,
+    archive_url: String,
     cache_dir: String,
     queue: Arc<Mutex<Receiver<TileId>>>,
     finished: Sender<(u64, TileResult)>,
@@ -233,7 +279,7 @@ fn spawn_worker(
             // Unchecked: the origin marker includes the archive's `build_id`, which is in the
             // header, which is read through this cache. Checked below, once, when it is known.
             let cache = RangeCache::open_unchecked(cache_dir, DEFAULT_MAX_BYTES);
-            let reader = CachingRangeReader::new(BASEMAP_ARCHIVE_URL, cache, JniRangeFetcher);
+            let reader = CachingRangeReader::new(archive_url.clone(), cache, JniRangeFetcher);
             reader.set_online(online.get());
 
             let mut archive = match MamapsArchive::open(reader) {
@@ -248,7 +294,7 @@ fn spawn_worker(
             // the build before.
             archive
                 .reader()
-                .reset_origin(&basemap_origin(BASEMAP_ARCHIVE_URL, archive.header.build_id));
+                .reset_origin(&basemap_origin(&archive_url, archive.header.build_id));
             // Publish the real range. Until this lands the renderer works from a guess, and
             // a guess that is too high asks for a zoom the archive does not contain and
             // silently gets nothing back.
@@ -294,6 +340,104 @@ fn spawn_worker(
     }
 }
 
+fn spawn_file_worker(
+    index: usize,
+    path: Option<std::path::PathBuf>,
+    queue: Arc<Mutex<Receiver<TileId>>>,
+    finished: Sender<(u64, TileResult)>,
+    zoom_range: Arc<ZoomRange>,
+) {
+    let Some(path) = path else {
+        // Empty archive_path == remote fallback already handled by caller printing a log,
+        // but keep symmetry for direct callers.
+        return;
+    };
+    let started = std::thread::Builder::new()
+        .name(format!("map-tiles-file-{index}"))
+        .spawn(move || {
+            let reader = match crate::tile::source::FileRangeReader::open(&path) {
+                Ok(r) => r,
+                Err(e) => {
+                    log(&format!("file worker {index} cannot open {}: {e}", path.display()));
+                    return;
+                }
+            };
+            let mut archive = match MamapsArchive::open(reader) {
+                Ok(a) => a,
+                Err(e) => {
+                    log(&format!("file worker {index} cannot open mamaps archive {}: {e}", path.display()));
+                    return;
+                }
+            };
+            zoom_range.set(archive.header.min_zoom, archive.header.max_zoom);
+            let layers = style::layers();
+            let rings_validated = archive.header.rings_validated();
+            loop {
+                let next = match queue.lock() {
+                    Ok(guard) => guard.recv(),
+                    Err(_) => return,
+                };
+                let Ok(tile) = next else { return };
+                let key = tile.key();
+                let result = match archive.tile(tile.z, tile.x, tile.y) {
+                    Ok(Some(body)) => TileResult::Ready(geometry::build(
+                        &body, layers, tile.z, tile.x, tile.y, rings_validated,
+                    )),
+                    Ok(None) => TileResult::Absent,
+                    Err(e) => {
+                        log(&format!("file tile {}/{}/{} failed: {e}", tile.z, tile.x, tile.y));
+                        TileResult::Failed
+                    }
+                };
+                if finished.send((key, result)).is_err() {
+                    return;
+                }
+            }
+        })
+        .is_ok();
+    if !started {
+        log(&format!("cannot start file tile worker {index}"));
+    }
+}
+
+enum ArchiveSource {
+    Default,
+    RemoteUrl(String),
+    LocalFile(std::path::PathBuf),
+}
+
+fn normalize_local_archive_path(raw: &str) -> ArchiveSource {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return ArchiveSource::Default;
+    }
+    let stripped = if let Some(rest) = trimmed.strip_prefix("file://") {
+        rest
+    } else {
+        trimmed
+    };
+    let stripped = stripped.trim();
+    if stripped.is_empty() {
+        return ArchiveSource::Default;
+    }
+    if stripped.starts_with("http://") || stripped.starts_with("https://") {
+        return ArchiveSource::RemoteUrl(stripped.to_string());
+    }
+    if stripped.contains("://") {
+        return ArchiveSource::Default;
+    }
+    let looks_local = stripped.starts_with('/')
+        || stripped.starts_with("C:\\")
+        || stripped.starts_with("C:/")
+        || stripped.starts_with("/sdcard")
+        || stripped.starts_with("/data/")
+        || stripped.starts_with("/storage/");
+    if looks_local {
+        return ArchiveSource::LocalFile(std::path::PathBuf::from(stripped));
+    }
+    ArchiveSource::Default
+}
+
 /// Draw one frame from a camera snapshot. Returns false if the frame was skipped.
 #[no_mangle]
 #[allow(clippy::too_many_arguments)]
@@ -310,14 +454,25 @@ pub extern "system" fn Java_com_vayunmathur_library_map_MapNative_render<'l>(
 ) -> jboolean {
     let Some(map) = handle_mut(handle) else { return 0 };
 
+    // MapLibre parity lives HERE, once, as a +1 zoom offset — not in TILE_SIZE.
+    // A 512 TILE_SIZE was tried and reverted (task 1, magenta verdict: label
+    // quads invisible, roads cut at seams) while 256 tile-local math renders
+    // both clean. Viewing the world one level deeper doubles ground-feature
+    // size on screen — matching MapLibre's 512-equivalent display at the same
+    // zoom float — while tile addressing (floor of the OFFSET zoom, so z+1
+    // tiles), tessellation, emission and the clip matrix all stay on the
+    // known-good 256 grid. Sizes, halo and gating are screen-space ramps
+    // evaluated at the offset zoom, so labels keep their MapLibre-matched px.
     let camera = Camera {
         center_lon: center_lon as f64,
         center_lat: center_lat as f64,
-        zoom: zoom as f64,
+        zoom: zoom as f64 + 1.0,
         width_dp,
         height_dp,
         density,
     };
+    // Task-17 pick needs the frame's density for Dp→device-px; remember it.
+    map.density = density;
 
     // Upload whatever the workers finished. Doing it here rather than on a worker keeps
     // every Vulkan call on one thread.
@@ -374,7 +529,7 @@ pub extern "system" fn Java_com_vayunmathur_library_map_MapNative_render<'l>(
         log_info(&format!(
             "z{:.2} @{:.4},{:.4} vp {}x{}dp {}x{}px | resident {} tiles, {} meshes, {} draws, \
              {} tris | {} in flight, {} absent | archive z{}..{}",
-            camera.zoom,
+            camera.zoom - 1.0,
             camera.center_lon,
             camera.center_lat,
             camera.width_dp,
@@ -454,6 +609,48 @@ pub extern "system" fn Java_com_vayunmathur_library_map_MapNative_destroy<'l>(
     // Dropping the handle drops the sender, which ends the worker's `recv` loop, and then
     // the renderer, which waits for the device to go idle before freeing anything.
     unsafe { drop(Box::from_raw(handle as *mut MapHandle)) };
+}
+
+/// Task-17 pick: placed labels intersecting the query box (Dp from the
+/// viewport top-left). Returns `\u{1}`-joined `layerId/name/kind/lon/lat`
+/// strings in placement order; empty when nothing hits. Dp→device-px via the
+/// last frame's density, remembered on the map handle (same density the
+/// boxes were built with — boxes are device px, the query arrives in Dp).
+#[no_mangle]
+pub extern "system" fn Java_com_vayunmathur_library_map_MapNative_pickLabels<'l>(
+    mut env: JNIEnv<'l>,
+    _class: JClass<'l>,
+    handle: jlong,
+    x0_dp: jfloat,
+    y0_dp: jfloat,
+    x1_dp: jfloat,
+    y1_dp: jfloat,
+) -> jni::objects::JObjectArray<'l> {
+    let empty = env.new_object_array(0, "java/lang/String", JObject::null()).expect("pickLabels empty array");
+    let Some(map) = handle_mut(handle) else { return empty };
+    let density = map.density;
+    let hits = map.renderer.pick_labels((
+        x0_dp as f32 * density,
+        y0_dp as f32 * density,
+        x1_dp as f32 * density,
+        y1_dp as f32 * density,
+    ));
+    let layers = &map.layers;
+    let out = match env.new_object_array(
+        hits.len() as i32,
+        "java/lang/String",
+        JObject::null(),
+    ) {
+        Ok(a) => a,
+        Err(_) => return empty,
+    };
+    for (i, h) in hits.iter().enumerate() {
+        let layer_id = layers.get(h.layer_index).map(|l| l.id.as_str()).unwrap_or("");
+        let s = format!("{}\u{1}{}\u{1}{}\u{1}{}\u{1}{}", layer_id, h.name, h.kind, h.lon, h.lat);
+        let Ok(js) = env.new_string(s) else { continue };
+        let _ = env.set_object_array_element(&out, i as i32, js);
+    }
+    out
 }
 
 fn handle_mut(handle: jlong) -> Option<&'static mut MapHandle> {

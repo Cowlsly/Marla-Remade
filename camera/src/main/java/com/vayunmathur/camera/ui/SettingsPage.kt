@@ -1,6 +1,7 @@
 package com.vayunmathur.camera.ui
 
 import android.Manifest
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -9,7 +10,7 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import com.vayunmathur.library.ui.R as UiR
 import com.vayunmathur.library.ui.AppScaffold
-import com.vayunmathur.library.ui.ExperimentalMaterial3Api
+import com.vayunmathur.library.ui.DropdownMenu
 import com.vayunmathur.library.ui.MaterialTheme
 import com.vayunmathur.library.ui.SettingsSection
 import com.vayunmathur.library.ui.SettingsSwitchRow
@@ -22,24 +23,22 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import com.vayunmathur.camera.R
 import com.vayunmathur.camera.util.CameraViewModel
 import com.vayunmathur.camera.util.AudioInputSource
 import com.vayunmathur.camera.util.CodecSupport
 import com.vayunmathur.camera.util.VideoCodec
-import com.vayunmathur.library.ui.ExposedDropdownMenuAnchorType
-import com.vayunmathur.library.ui.ExposedDropdownMenuBox
-import com.vayunmathur.library.ui.ExposedDropdownMenuDefaults
+import com.vayunmathur.library.ui.IconArrowDropDown
 import com.vayunmathur.library.ui.IconCheck
-import com.vayunmathur.library.ui.OutlinedTextField
+import com.vayunmathur.library.ui.OutlinedButton
 import com.vayunmathur.library.ui.SelectableDropdownMenuItem
 import com.vayunmathur.library.ui.rememberPermissionRequest
 import com.vayunmathur.library.ui.appBarScrollBehavior
 import com.vayunmathur.library.util.NavBackStack
 import com.vayunmathur.library.util.NavKey
 
-@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun <T : NavKey> SettingsPage(backStack: NavBackStack<T>, viewModel: CameraViewModel) {
     val locationEnabled by viewModel.locationEnabled.collectAsState()
@@ -74,23 +73,27 @@ fun <T : NavKey> SettingsPage(backStack: NavBackStack<T>, viewModel: CameraViewM
             }
             if (availableCodecs.size > 1) {
                 SettingsSection(title = stringResource(R.string.settings_video_codec)) {
+                    // Built from [OutlinedButton] + [DropdownMenu] rather than the library's
+                    // `ExposedDropdownMenu` wrapper, which currently recurses into itself.
                     var expanded by remember { mutableStateOf(false) }
-                    ExposedDropdownMenuBox(
-                        expanded = expanded,
-                        onExpandedChange = { expanded = it }
+                    Box(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 16.dp)
                     ) {
-                        OutlinedTextField(
-                            value = "${stringResource(videoCodec.labelRes)} — ${stringResource(videoCodec.descriptionRes)}",
-                            onValueChange = {},
-                            readOnly = true,
-                            trailingIcon = { ExposedDropdownMenuDefaults.TrailingIcon(expanded = expanded) },
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .padding(horizontal = 16.dp)
-                                .menuAnchor(ExposedDropdownMenuAnchorType.PrimaryNotEditable),
-                            label = { Text(stringResource(R.string.settings_video_codec_label)) }
-                        )
-                        ExposedDropdownMenu(
+                        OutlinedButton(
+                            onClick = { expanded = true },
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Text(
+                                "${stringResource(videoCodec.labelRes)} — ${stringResource(videoCodec.descriptionRes)}",
+                                modifier = Modifier.weight(1f),
+                                textAlign = TextAlign.Start,
+                                maxLines = 1,
+                            )
+                            IconArrowDropDown()
+                        }
+                        DropdownMenu(
                             expanded = expanded,
                             onDismissRequest = { expanded = false }
                         ) {
@@ -120,23 +123,27 @@ fun <T : NavKey> SettingsPage(backStack: NavBackStack<T>, viewModel: CameraViewM
             }
 
             SettingsSection(title = stringResource(R.string.settings_audio_source)) {
+                // Built from [OutlinedButton] + [DropdownMenu] rather than the library's
+                // `ExposedDropdownMenu` wrapper, which currently recurses into itself.
                 var audioExpanded by remember { mutableStateOf(false) }
-                ExposedDropdownMenuBox(
-                    expanded = audioExpanded,
-                    onExpandedChange = { audioExpanded = it }
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 16.dp)
                 ) {
-                    OutlinedTextField(
-                        value = "${stringResource(audioInputSource.labelRes)} — ${stringResource(audioInputSource.descriptionRes)}",
-                        onValueChange = {},
-                        readOnly = true,
-                        trailingIcon = { ExposedDropdownMenuDefaults.TrailingIcon(expanded = audioExpanded) },
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(horizontal = 16.dp)
-                            .menuAnchor(ExposedDropdownMenuAnchorType.PrimaryNotEditable),
-                        label = { Text(stringResource(R.string.settings_audio_source_label)) }
-                    )
-                    ExposedDropdownMenu(
+                    OutlinedButton(
+                        onClick = { audioExpanded = true },
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Text(
+                            "${stringResource(audioInputSource.labelRes)} — ${stringResource(audioInputSource.descriptionRes)}",
+                            modifier = Modifier.weight(1f),
+                            textAlign = TextAlign.Start,
+                            maxLines = 1,
+                        )
+                        IconArrowDropDown()
+                    }
+                    DropdownMenu(
                         expanded = audioExpanded,
                         onDismissRequest = { audioExpanded = false }
                     ) {

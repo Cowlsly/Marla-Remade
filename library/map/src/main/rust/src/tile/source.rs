@@ -35,14 +35,10 @@ pub const BASEMAP_PMTILES_URL: &str = "https://data.vayunmathur.com/v4.pmtiles";
 
 /// Where this renderer reads its tiles from.
 ///
-/// **Not published yet.** This renderer now reads `.mamaps`, and no `.mamaps` archive has been
-/// built and uploaded — that is the last phase of the plan. Until then the constant names where the
-/// archive will live and the device path has nothing to open; the host probes convert `v4.pmtiles`
-/// tile by tile through `mamaps::from_mvt` instead, which is what validated everything below it.
-///
-/// Left pointing at the PMTiles URL rather than a guessed filename, so nothing fetches a 404 and
-/// the substitution is one deliberate edit when the archive exists.
-pub const BASEMAP_ARCHIVE_URL: &str = BASEMAP_PMTILES_URL;
+/// Planet cutover: now points at the live planet.mamaps uploaded to
+/// https://data.vayunmathur.com/planet.mamaps (67.85 GB, build_id 0x2e729b4449d0b1cc).
+/// BASEMAP_PMTILES_URL is kept as revert fallback.
+pub const BASEMAP_ARCHIVE_URL: &str = "https://data.vayunmathur.com/planet.mamaps";
 
 /// Bumped when the on-disk cache layout changes, so old entries are dropped rather than
 /// misread. The URL is in the marker too, because the archive is republished under the
@@ -159,6 +155,77 @@ impl<F: RangeFetcher> RangeReader for CachingRangeReader<F> {
             self.cache.write(&key, &response.body);
         }
         Ok(response.body)
+    }
+}
+
+/// A local file as a [`RangeReader`], for `file://` archives pushed to the device.
+///
+/// Each worker opens its **own** handle, so `read(offset, length)` is `read_at` and needs no
+/// seek lock. Placed here (beside `CachingRangeReader`) so the bridge can choose between this
+/// and the network path without the codec crate depending on Android.
+///
+/// Short reads are returned short — the same contract `CachingRangeReader` and the `RangeReader`
+/// trait use — and `exact` in `mamaps::read` turns a short body into a parse error.
+pub struct FileRangeReader {
+    file: std::fs::File,
+}
+
+impl FileRangeReader {
+    pub fn open(path: &std::path::Path) -> Result<Self> {
+        let file = std::fs::File::open(path)
+            .map_err(|e| tilecodec::proto::Error(format!("cannot open local archive {}: {e}", path.display())))?;
+        Ok(FileRangeReader { file })
+    }
+}
+
+impl tilecodec::stream::RangeReader for FileRangeReader {
+    fn read(&self, offset: u64, length: u32) -> Result<Vec<u8>> {
+        if length == 0 {
+            return Ok(Vec::new());
+        }
+        self.read_at(offset, length)
+    }
+}
+
+#[cfg(target_os = "android")]
+impl FileRangeReader {
+    fn read_at(&self, offset: u64, length: u32) -> Result<Vec<u8>> {
+        use std::os::unix::fs::FileExt;
+        let mut buf = vec![0u8; length as usize];
+        let mut got = 0usize;
+        while got < buf.len() {
+            let n = self.file.read_at(&mut buf[got..], offset + got as u64).map_err(|e| {
+                tilecodec::proto::Error(format!("local archive read at {offset}+{got} failed: {e}"))
+            })?;
+            if n == 0 {
+                break;
+            }
+            got += n;
+        }
+        buf.truncate(got);
+        Ok(buf)
+    }
+}
+
+#[cfg(not(target_os = "android"))]
+impl FileRangeReader {
+    fn read_at(&self, offset: u64, length: u32) -> Result<Vec<u8>> {
+        use std::io::{Read, Seek, SeekFrom};
+        let mut file = &self.file;
+        file.seek(SeekFrom::Start(offset))
+            .map_err(|e| tilecodec::proto::Error(format!("local archive seek at {offset} failed: {e}")))?;
+        let mut buf = vec![0u8; length as usize];
+        let mut got = 0usize;
+        while got < buf.len() {
+            let n = file.read(&mut buf[got..])
+                .map_err(|e| tilecodec::proto::Error(format!("local archive read at {offset}+{got} failed: {e}")))?;
+            if n == 0 {
+                break;
+            }
+            got += n;
+        }
+        buf.truncate(got);
+        Ok(buf)
     }
 }
 

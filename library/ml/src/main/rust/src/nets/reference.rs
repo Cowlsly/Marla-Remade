@@ -104,22 +104,25 @@ pub fn run_multi(
     weights: &[u8],
     inputs: &[&[f32]],
 ) -> Result<Vec<Vec<f32>>, String> {
-    run_multi_at(plan, weights, inputs, 0)
+    run_multi_at(plan, weights, inputs, 0, 0)
 }
 
 /// [`run_multi`] with the step parameters a decode plan reads.
 ///
-/// `prefix` is [`crate::vulkan::run::StepParams::prefix`]: the cache positions already written.
-/// It is ignored by every op whose `Push::dyn_keys` is zero, which is every op in every net that
-/// does not decode.
+/// `prefix` is [`crate::vulkan::run::StepParams::prefix`], the cache positions already written,
+/// and `window_start` the first position a sliding-window layer may attend to. Both are ignored
+/// by every op whose `Push::dyn_keys` is zero, which is every op in every net that does not
+/// decode.
 pub fn run_multi_at(
     plan: &Plan,
     weights: &[u8],
     inputs: &[&[f32]],
     prefix: u32,
+    window_start: u32,
 ) -> Result<Vec<Vec<f32>>, String> {
     let mut reference = Reference::new(plan, weights, inputs)?;
     reference.prefix = prefix;
+    reference.window_start = window_start;
     reference.execute(plan)?;
     plan.outputs
         .iter()
@@ -151,12 +154,13 @@ pub struct Reference {
     /// third more memory in a test-only interpreter and is what lets an int8 net be checked on the
     /// host at all — without it the only oracle for 605 MB of quantised weights would be a phone.
     bytes: Vec<u8>,
-    /// The device's [`crate::vulkan::run::StepParams::prefix`], for the ops that read it.
+    /// The device's [`crate::vulkan::run::StepParams`], for the ops that read them.
     ///
-    /// The interpreter has no descriptor set, so the value the shaders would fetch from binding 3
-    /// is held here instead. Zero unless [`run_multi_at`] set it, which keeps every existing
-    /// caller and every fixture on the fixed-length path.
+    /// The interpreter has no descriptor set, so the values the shaders would fetch from binding 3
+    /// are held here instead. Both zero unless [`run_multi_at`] set them, which keeps every
+    /// existing caller and every fixture on the fixed-length path.
     prefix: u32,
+    window_start: u32,
 }
 
 impl Reference {
@@ -184,6 +188,7 @@ impl Reference {
             weights: decoded,
             bytes: weights.to_vec(),
             prefix: 0,
+            window_start: 0,
         };
         for (binding, values) in plan.inputs.iter().zip(inputs) {
             if values.len() != binding.shape.len() as usize {
@@ -224,6 +229,8 @@ impl Reference {
                     Kind::SoftmaxCausal => self.softmax(push, SoftmaxMode::Causal),
                     Kind::SoftmaxPrefix => self.softmax(push, SoftmaxMode::Prefix),
                     Kind::CacheWrite => self.cache_write(push),
+                    Kind::Softcap => self.softcap(push),
+                    Kind::Activate => self.activate(push),
                     Kind::AttnApply => self.attn_apply(push),
                     Kind::AttnScoresRelative => self.attn_scores_relative(push),
                     Kind::AttnApplyRelative => self.attn_apply_relative(push),
@@ -240,6 +247,7 @@ impl Reference {
                     Kind::ConvInt8 | Kind::ConvPointInt8 | Kind::ConvVecInt8 => {
                         self.conv_int8(push)
                     }
+                    Kind::ConvVecInt4 | Kind::ConvPointInt4 => self.conv_int4(push),
                 },
             };
             result.map_err(|e| format!("step {step} ({op:?}): {e}"))?;
@@ -388,6 +396,33 @@ impl Reference {
         Ok(())
     }
 
+    /// A `1 x 1` int4 convolution with a per-block scale. See `shaders/conv_vec_int4.comp`.
+    ///
+    /// Only pointwise, which is what [`crate::nets::Builder::conv_int4`] offers, so there is no
+    /// kernel or padding loop: `taps` is the contraction axis and the scale changes every
+    /// [`crate::weights::I4_BLOCK`] of it.
+    fn conv_int4(&mut self, p: &Push) -> Result<(), String> {
+        let taps = p.in_c;
+        let blocks = taps.div_ceil(crate::weights::I4_BLOCK);
+        let positions = p.out_h * p.out_w;
+        for oc in 0..p.out_c {
+            let kernel_at = oc * taps;
+            for position in 0..positions {
+                let mut acc = 0.0f32;
+                for k in 0..taps {
+                    let w = f32::from(self.int4(p.weight, kernel_at + k)?);
+                    // The scale reaches the product, not the total: a block's worth of taps
+                    // shares one, and the next block's is different.
+                    let scale = self.weight(p.act_weight, oc * blocks + k / crate::weights::I4_BLOCK)?;
+                    acc += self.load(p.in0, k * positions + position)? * w * scale;
+                }
+                let biased = acc + self.weight(p.bias, oc)?;
+                self.store(p.out, oc * positions + position, activate(biased, p.act, 0.0))?;
+            }
+        }
+        Ok(())
+    }
+
     /// Element `index` of the int8 tensor whose **32-bit word** offset is `word`.
     ///
     /// The shader reads these through a `uint` alias of the weights buffer and unpacks four bytes
@@ -403,6 +438,26 @@ impl Reference {
             .get(at)
             .map(|&byte| byte as i8)
             .ok_or_else(|| format!("int8 weight byte {at} of {}", self.bytes.len()))
+    }
+
+    /// Element `index` of the int4 tensor whose **32-bit word** offset is `word`.
+    ///
+    /// Eight nibbles to a word, low nibble first, sign-extended from four bits. Mirrors
+    /// `int4_at` in `shaders/common.glsl`; reading it unsigned would be a different
+    /// quantisation, not a different spelling.
+    fn int4(&self, word: u32, index: u32) -> Result<i8, String> {
+        let at = (word as usize)
+            .checked_mul(4)
+            .and_then(|base| base.checked_add((index / 2) as usize))
+            .ok_or("an int4 weight offset overflowed")?;
+        let byte = self
+            .bytes
+            .get(at)
+            .copied()
+            .ok_or_else(|| format!("int4 weight byte {at} of {}", self.bytes.len()))?;
+        let nibble = if index % 2 == 0 { byte & 0x0f } else { byte >> 4 };
+        // Sign-extend from four bits: 0..7 stay, 8..15 become -8..-1.
+        Ok(if nibble >= 8 { nibble as i8 - 16 } else { nibble as i8 })
     }
 
     /// The PReLU slope for output channel `c`, or zero when the activation is not PReLU.
@@ -739,18 +794,28 @@ impl Reference {
             return Err("an rms norm over zero channels".into());
         }
         let stride = p.in_h * p.in_w;
+        let groups = p.group.max(1);
+        if !p.in_c.is_multiple_of(groups) {
+            return Err(format!("{} channels do not split into {groups} groups", p.in_c));
+        }
+        let per_group = p.in_c / groups;
         let epsilon = f32::from_bits(p.param1_bits);
-        for position in 0..p.count {
+        // `count` is `groups * stride`, so this walks one group at one position at a time.
+        for index in 0..p.count {
+            let group = if stride == 0 { 0 } else { index / stride };
+            let position = if stride == 0 { 0 } else { index % stride };
+            let base = group * per_group;
             let mut squares = 0.0;
-            for c in 0..p.in_c {
-                let value = self.load(p.in0, c * stride + position)?;
+            for c in 0..per_group {
+                let value = self.load(p.in0, (base + c) * stride + position)?;
                 squares += value * value;
             }
-            let inverse = 1.0 / (squares / p.in_c as f32 + epsilon).sqrt();
+            let inverse = 1.0 / (squares / per_group as f32 + epsilon).sqrt();
 
-            for c in 0..p.in_c {
-                let at = c * stride + position;
+            for c in 0..per_group {
+                let at = (base + c) * stride + position;
                 let value = self.load(p.in0, at)?;
+                // Gamma is indexed within the group, so every group shares one table.
                 let gamma = self.weight(p.weight, c)?;
                 self.store(p.out, at, value * inverse * gamma)?;
             }
@@ -822,7 +887,23 @@ impl Reference {
                 // At query 0 this is 1, so the distribution is exactly `[1, 0, ...]` and the
                 // denominator can never be empty.
                 SoftmaxMode::Causal => ((row % p.out_h.max(1)) + 1).min(p.out_w),
-                SoftmaxMode::Prefix => self.attended_keys(p, p.out_w),
+                SoftmaxMode::Prefix => {
+                    let (first, last) = self.attended(p, p.out_w);
+                    let mut peak = -65504.0f32;
+                    for i in first..=last {
+                        peak = peak.max(self.load(p.in0, at + i)?);
+                    }
+                    let mut total = 0.0;
+                    for i in first..=last {
+                        total += (self.load(p.in0, at + i)? - peak).exp();
+                    }
+                    let inverse = 1.0 / total;
+                    for i in first..=last {
+                        let value = (self.load(p.in0, at + i)? - peak).exp() * inverse;
+                        self.store(p.out, at + i, value)?;
+                    }
+                    continue;
+                }
                 SoftmaxMode::Full => p.out_w,
             };
             let mut peak = -65504.0f32;
@@ -851,15 +932,53 @@ impl Reference {
         Ok(())
     }
 
-    /// Keys an op attends over: the step's `prefix + 1` when it asked for that, else `stride`.
+    /// Keys an op attends over, as an inclusive `[first, last]` range.
     ///
-    /// The host mirror of `attended_keys` in `shaders/common.glsl`.
-    fn attended_keys(&self, p: &Push, stride: u32) -> u32 {
+    /// The host mirror of `attn_first` / `attn_last` in `shaders/common.glsl`.
+    fn attended(&self, p: &Push, stride: u32) -> (u32, u32) {
         if p.dyn_keys != 0 {
-            (self.prefix + 1).min(stride)
+            (self.window_start, self.prefix.min(stride.saturating_sub(1)))
         } else {
-            stride
+            (0, stride.saturating_sub(1))
         }
+    }
+
+    /// The KV head a query head reads from. Mirrors `kv_head_of` in `shaders/common.glsl`.
+    fn kv_head_of(p: &Push, head: u32) -> u32 {
+        let kv = if p.kv_heads == 0 { p.group } else { p.kv_heads };
+        head / (p.group / kv.max(1)).max(1)
+    }
+
+    /// Channels one cache position occupies: `kv_heads * head_dim`.
+    fn kv_stride(p: &Push, head_dim: u32) -> u32 {
+        let kv = if p.kv_heads == 0 { p.group } else { p.kv_heads };
+        kv * head_dim
+    }
+
+    /// An activation on its own. See `shaders/activate.comp`.
+    fn activate(&mut self, p: &Push) -> Result<(), String> {
+        let spatial = (p.out_h * p.out_w).max(1);
+        for index in 0..p.count {
+            let value = self.load(p.in0, index)?;
+            // The free function, not this method. `PRelu` would need a slope per channel and is
+            // not offered here - see `Kind::Activate`.
+            let slope = self.weight(p.act_weight, index / spatial).unwrap_or(0.0);
+            self.store(p.out, index, activate(value, p.act, slope))?;
+        }
+        Ok(())
+    }
+
+    /// `tanh(x / cap) * cap`. See `shaders/softcap.comp`.
+    fn softcap(&mut self, p: &Push) -> Result<(), String> {
+        let cap = f32::from_bits(p.param0_bits);
+        if !(cap > 0.0) {
+            return Err(format!("a softcap of {cap}"));
+        }
+        for index in 0..p.count {
+            let value = self.load(p.in0, index)?;
+            self.store(p.out, index, (value / cap).tanh() * cap)?;
+        }
+        Ok(())
     }
 
     /// Copy one position into a KV cache at the step's prefix. See `shaders/cache_write.comp`.
@@ -912,12 +1031,14 @@ impl Reference {
     fn attn_scores_cached(&mut self, p: &Push) -> Result<(), String> {
         let head_dim = heads(p, p.in_c)?;
         let scale = f32::from_bits(p.param0_bits);
-        let keys = self.attended_keys(p, p.out_w);
+        let (first, last) = self.attended(p, p.out_w);
+        let stride = Self::kv_stride(p, head_dim);
         for head in 0..p.group {
             // Q is one position, so its channels are consecutive.
             let query_base = head * head_dim;
-            for key in 0..keys {
-                let key_base = key * p.in_c + head * head_dim;
+            let kv_base = Self::kv_head_of(p, head) * head_dim;
+            for key in first..=last {
+                let key_base = key * stride + kv_base;
                 let mut total = 0.0;
                 for d in 0..head_dim {
                     total +=
@@ -937,15 +1058,18 @@ impl Reference {
     fn attn_apply_cached(&mut self, p: &Push) -> Result<(), String> {
         let head_dim = heads(p, p.out_c)?;
         let stride = p.in_w;
-        let keys = self.attended_keys(p, stride);
+        let (first, last) = self.attended(p, stride);
+        let vstride = Self::kv_stride(p, head_dim);
         for channel in 0..p.out_c {
+            let head = channel / head_dim;
             // One query, so a head's row of probabilities starts a full stride apart even when
             // this step attends over fewer keys than the row can hold.
-            let row = (channel / head_dim) * stride;
+            let row = head * stride;
+            let value = Self::kv_head_of(p, head) * head_dim + (channel % head_dim);
             let mut total = 0.0;
-            for key in 0..keys {
+            for key in first..=last {
                 total += self.load(p.in0, row + key)?
-                    * self.load(p.in1, key * p.in_c + channel)?;
+                    * self.load(p.in1, value + key * vstride)?;
             }
             self.store(p.out, nchw(p, channel, 0, 0), total)?;
         }

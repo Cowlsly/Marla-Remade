@@ -295,8 +295,10 @@ mod tests {
                 kind_detail: 0,
                 geom_type: *geom_type,
                 flags: 0,
+                name_idx: tilecodec::mamaps::body::NAME_NONE,
                 parts_offset,
                 part_count: parts.len() as u32,
+                transit_color: 0,
             });
         }
         layer

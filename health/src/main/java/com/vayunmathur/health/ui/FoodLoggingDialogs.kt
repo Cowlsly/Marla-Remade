@@ -2,23 +2,23 @@ package com.vayunmathur.health.ui
 
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.text.KeyboardOptions
 import com.vayunmathur.library.ui.R as UiR
 import com.vayunmathur.library.ui.AlertDialog
 import com.vayunmathur.library.ui.Button
-import com.vayunmathur.library.ui.DropdownMenuItem
+import com.vayunmathur.library.ui.DropdownMenu
 import com.vayunmathur.library.ui.ExperimentalMaterial3Api
-import com.vayunmathur.library.ui.ExposedDropdownMenuBox
-import com.vayunmathur.library.ui.ExposedDropdownMenuDefaults
+import com.vayunmathur.library.ui.IconArrowDropDown
+import com.vayunmathur.library.ui.IconCheck
 import com.vayunmathur.library.ui.MaterialTheme
-import com.vayunmathur.library.ui.ExposedDropdownMenuAnchorType
 import com.vayunmathur.library.ui.OutlinedTextField
+import com.vayunmathur.library.ui.SelectableDropdownMenuItem
 import com.vayunmathur.library.ui.Text
 import com.vayunmathur.library.ui.TextButton
 import androidx.compose.runtime.Composable
@@ -68,38 +68,30 @@ fun LogHydrationDialog(viewModel: HealthViewModel, initialTime: Instant? = null,
                             keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
                             modifier = Modifier.fillMaxWidth(),
                             trailingIcon = {
-                                ExposedDropdownMenuBox(
-                                        expanded = unitExpanded,
-                                        onExpandedChange = { unitExpanded = !unitExpanded }
+                                Row(
+                                        modifier = Modifier.clickable { unitExpanded = true },
+                                        verticalAlignment = Alignment.CenterVertically
                                 ) {
-                                    Row(
-                                            modifier =
-                                                    Modifier.menuAnchor(ExposedDropdownMenuAnchorType.PrimaryNotEditable)
-                                                            .clickable { unitExpanded = true }
-                                                            .padding(end = 8.dp),
-                                            verticalAlignment = Alignment.CenterVertically
-                                    ) {
-                                        Text(
-                                                stringResource(selectedUnit.displayName),
-                                                style = MaterialTheme.typography.bodyMedium
+                                    Text(
+                                            stringResource(selectedUnit.displayName),
+                                            style = MaterialTheme.typography.bodyMedium
+                                    )
+                                    IconArrowDropDown()
+                                }
+                                DropdownMenu(
+                                        expanded = unitExpanded,
+                                        onDismissRequest = { unitExpanded = false }
+                                ) {
+                                    HydrationUnit.entries.forEach { unit ->
+                                        SelectableDropdownMenuItem(
+                                                selected = unit == selectedUnit,
+                                                onClick = {
+                                                    selectedUnit = unit
+                                                    unitExpanded = false
+                                                },
+                                                text = { Text(stringResource(unit.displayName)) },
+                                                selectedLeadingIcon = { IconCheck() },
                                         )
-                                        ExposedDropdownMenuDefaults.TrailingIcon(
-                                                expanded = unitExpanded
-                                        )
-                                    }
-                                    ExposedDropdownMenu(
-                                            expanded = unitExpanded,
-                                            onDismissRequest = { unitExpanded = false }
-                                    ) {
-                                        HydrationUnit.entries.forEach { unit ->
-                                            DropdownMenuItem(
-                                                    text = { Text(stringResource(unit.displayName)) },
-                                                    onClick = {
-                                                        selectedUnit = unit
-                                                        unitExpanded = false
-                                                    }
-                                            )
-                                        }
                                     }
                                 }
                             }
@@ -161,25 +153,25 @@ fun LogMealDialog(viewModel: HealthViewModel, initialTime: Instant? = null, onDi
             title = { Text(stringResource(R.string.log_meal)) },
             text = {
                 Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                    ExposedDropdownMenuBox(
-                            expanded = expanded,
-                            onExpandedChange = { expanded = !expanded }
-                    ) {
+                    Box(Modifier.fillMaxWidth()) {
                         OutlinedTextField(
                                 value = selectedLoggable?.name ?: stringResource(R.string.select_recipe),
                                 onValueChange = {},
                                 readOnly = true,
-                                trailingIcon = {
-                                    ExposedDropdownMenuDefaults.TrailingIcon(expanded = expanded)
-                                },
-                                modifier = Modifier.menuAnchor(ExposedDropdownMenuAnchorType.PrimaryNotEditable).fillMaxWidth()
+                                trailingIcon = { IconArrowDropDown() },
+                                modifier = Modifier.fillMaxWidth()
                         )
-                        ExposedDropdownMenu(
+                        DropdownMenu(
                                 expanded = expanded,
                                 onDismissRequest = { expanded = false }
                         ) {
                             allLoggables.sortedBy { it.name }.forEach { loggable ->
-                                DropdownMenuItem(
+                                SelectableDropdownMenuItem(
+                                        selected = loggable == selectedLoggable,
+                                        onClick = {
+                                            selectedLoggable = loggable
+                                            expanded = false
+                                        },
                                         text = {
                                             Row(verticalAlignment = Alignment.CenterVertically) {
                                                 Text(loggable.name)
@@ -197,13 +189,11 @@ fun LogMealDialog(viewModel: HealthViewModel, initialTime: Instant? = null, onDi
                                                 }
                                             }
                                         },
-                                        onClick = {
-                                            selectedLoggable = loggable
-                                            expanded = false
-                                        }
+                                        selectedLeadingIcon = { IconCheck() },
                                 )
                             }
                         }
+                        Box(Modifier.matchParentSize().clickable { expanded = true })
                     }
 
                     val labelText = if (selectedLoggable is Loggable.IngredientWrapper) {

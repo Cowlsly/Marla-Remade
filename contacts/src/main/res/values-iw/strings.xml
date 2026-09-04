@@ -3,7 +3,7 @@
     <string name="app_name">אנשי קשר</string>
     <string name="contact_not_found">איש הקשר לא נמצא</string>
     <string name="share_contact">שיתוף איש קשר</string>
-    <string name="about_name">מידע על &lt;xliff:g id=\"first_name\" example=\"John\"&gt;%1$s&lt;/xliff:g&gt;</string>
+    <string name="about_name">מידע על %1$s</string>
     <string name="birthday">יום הולדת</string>
     <string name="note">הערה</string>
     <string name="favorites">מועדפים</string>

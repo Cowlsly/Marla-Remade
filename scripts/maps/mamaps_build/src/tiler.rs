@@ -108,8 +108,8 @@ use tile_build::subdivide;
 use tile_build::progress::Progress;
 use tile_build::simplify;
 use tilecodec::mamaps::body::{
-    Body, Feature as BodyFeature, Layer as BodyLayer, Part, GEOM_LINE, GEOM_POLYGON, WINDING_HOLE,
-    WINDING_OUTER,
+    Body, Feature as BodyFeature, Layer as BodyLayer, Part, GEOM_LINE, GEOM_POINT, GEOM_POLYGON,
+    WINDING_HOLE, WINDING_OUTER,
 };
 use tilecodec::mamaps::write::{Options, StreamWriter};
 use tilecodec::pmtiles::tile_id;
@@ -246,7 +246,46 @@ pub struct Settings {
 /// Flattening puts eleven *entries* in a node instead, and changes no order: `(tile, layer)`
 /// ascending is tile-major with layers in id order inside it, which is what the nested form yielded
 /// and what the writer needs.
-type Chunk = BTreeMap<(u64, u8), BodyLayer>;
+type Chunk = BTreeMap<(u64, u8), ChunkEntry>;
+
+/// One tile-layer in a chunk map: the geometry plus the label strings its features name.
+///
+/// Names ride beside the layer (not inside `BodyLayer`, which is the codec's type) from `push`
+/// through the spill and the merge to encode, where per-layer tables fuse into the body's one.
+/// A chunk entry's `names` is deduplicated in first-use order, so `name_idx == i` names
+/// `names[i - 1]` — the same convention as the body's table, which is what makes the merge's
+/// remap a pure index translation.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ChunkEntry {
+    pub layer: BodyLayer,
+    pub names: Vec<String>,
+}
+
+impl ChunkEntry {
+    pub(crate) fn new(layer_id: u8) -> ChunkEntry {
+        ChunkEntry { layer: BodyLayer::new(layer_id), names: Vec::new() }
+    }
+
+    /// The body's index for `name`, interning on first use. `None` in, `NAME_NONE` out.
+    fn intern(&mut self, name: Option<&str>) -> u16 {
+        intern_name(&mut self.names, name)
+    }
+}
+
+/// Intern `name` into a first-use-ordered table, returning its 1-based body index.
+fn intern_name(names: &mut Vec<String>, name: Option<&str>) -> u16 {
+    match name.filter(|n| !n.is_empty()) {
+        None => tilecodec::mamaps::body::NAME_NONE,
+        Some(name) => match names.iter().position(|n| n == name) {
+            Some(at) => at as u16 + 1,
+            None => {
+                let idx = names.len() as u16 + 1;
+                names.push(name.to_string());
+                idx
+            }
+        },
+    }
+}
 
 /// What one chunk contributed to a zoom's counters. Only ever summed, so the order they are summed
 /// in cannot change the answer.
@@ -327,7 +366,7 @@ pub fn build(store: &Store, settings: &Settings) -> Result<(Vec<u8>, Vec<ZoomSta
             let merging = std::time::Instant::now();
             // `collect` into a `Result`, because a truncated scratch file must fail the build rather
             // than end the zoom early and publish a short archive.
-            let batch: Vec<(u64, Vec<BodyLayer>)> =
+            let batch: Vec<(u64, Vec<ChunkEntry>)> =
                 merged.by_ref().take(par::batch_len()).collect::<Result<Vec<_>>>()?;
             stats.merge_ms += merging.elapsed().as_millis() as u64;
             if batch.is_empty() {
@@ -803,7 +842,7 @@ fn tile_chunk(features: &[Feature], z: u8, tolerance: f64, buffer: f64) -> (Chun
             let local = geom::to_tile(clipped, tx, ty, EXTENT);
             let layer = tiles
                 .entry((tile_id(z, tx, ty), feature.class.layer))
-                .or_insert_with(|| BodyLayer::new(feature.class.layer));
+                .or_insert_with(|| ChunkEntry::new(feature.class.layer));
             let added = push(layer, feature, &local);
             tally.features += added.0;
             tally.points += added.1;
@@ -860,7 +899,7 @@ fn merge<'a>(chunks: &[ChunkRef], spill: &'a ChunkSpill) -> Merged<'a> {
 
 /// One stream's held entry: `None` past the end of its chunk, `Err` when its bytes were not what
 /// the header claimed.
-type Held = Option<Result<((u64, u8), BodyLayer)>>;
+type Held = Option<Result<((u64, u8), ChunkEntry)>>;
 
 /// A merge in progress: one held entry per chunk, and a heap over their keys. `Reverse`, because
 /// `BinaryHeap` is a max-heap and the writer wants ascending ids.
@@ -873,11 +912,11 @@ struct Merged<'a> {
 impl Iterator for Merged<'_> {
     /// Fallible, because a truncated scratch file must fail the build rather than quietly shorten
     /// the archive.
-    type Item = Result<(u64, Vec<BodyLayer>)>;
+    type Item = Result<(u64, Vec<ChunkEntry>)>;
 
-    fn next(&mut self) -> Option<Result<(u64, Vec<BodyLayer>)>> {
+    fn next(&mut self) -> Option<Result<(u64, Vec<ChunkEntry>)>> {
         let Reverse((tile, _, _)) = *self.next.peek()?;
-        let mut layers: Vec<BodyLayer> = Vec::new();
+        let mut layers: Vec<ChunkEntry> = Vec::new();
         while let Some(&Reverse((at, layer_id, index))) = self.next.peek() {
             if at != tile {
                 break;
@@ -891,7 +930,7 @@ impl Iterator for Merged<'_> {
             // Entries for one layer are adjacent, because the key sorts the layer before the chunk.
             // So the accumulator only ever has to look at the layer it started last.
             match layers.last_mut() {
-                Some(last) if last.layer_id == layer_id => concatenate(last, layer),
+                Some(last) if last.layer.layer_id == layer_id => concatenate(last, layer),
                 _ => layers.push(layer),
             }
             let head = self.chunks[index].next().transpose();
@@ -915,18 +954,40 @@ impl Iterator for Merged<'_> {
 /// `coord_start` by the coordinates. The result is byte for byte what [`push`] would have produced
 /// had both chunks' features gone into one layer in this order, which is the claim the whole design
 /// rests on and what `concatenating_two_chunks_of_a_layer_is_one_layer` holds it to.
-fn concatenate(into: &mut BodyLayer, from: BodyLayer) {
-    let parts_base = into.parts.len() as u32;
-    let coords_base = into.coords.len() as u32;
-    into.features.extend(from.features.into_iter().map(|mut feature| {
-        feature.parts_offset += parts_base;
-        feature
-    }));
-    into.parts.extend(from.parts.into_iter().map(|mut part| {
+///
+/// Names remap alongside: each chunk's `name_idx` addresses its own table, so every incoming
+/// feature's index is translated into the accumulator's (interning on first use, in merge order —
+/// which is chunk order, which is deterministic).
+fn concatenate(into: &mut ChunkEntry, from: ChunkEntry) {
+    let parts_base = into.layer.parts.len() as u32;
+    let coords_base = into.layer.coords.len() as u32;
+    // Names remap first, while both tables are still borrowed shared: each incoming index is
+    // translated into the accumulator's (interning on first use, in merge order — which is chunk
+    // order, which is deterministic). Only then do the arenas move.
+    let remap: Vec<u16> = from
+        .layer
+        .features
+        .iter()
+        .map(|feature| {
+            if feature.name_idx == tilecodec::mamaps::body::NAME_NONE {
+                tilecodec::mamaps::body::NAME_NONE
+            } else {
+                into.intern(Some(&from.names[feature.name_idx as usize - 1]))
+            }
+        })
+        .collect();
+    into.layer.features.extend(from.layer.features.into_iter().zip(remap).map(
+        |(mut feature, name_idx)| {
+            feature.parts_offset += parts_base;
+            feature.name_idx = name_idx;
+            feature
+        },
+    ));
+    into.layer.parts.extend(from.layer.parts.into_iter().map(|mut part| {
         part.coord_start += coords_base;
         part
     }));
-    into.coords.extend_from_slice(&from.coords);
+    into.layer.coords.extend_from_slice(&from.layer.coords);
 }
 
 /// Stage C and body encoding for a batch of merged tiles, in parallel, results in tile order.
@@ -1030,7 +1091,7 @@ fn timed<R>(on: bool, counter: &std::sync::atomic::AtomicU64, f: impl FnOnce() -
 /// need no atomics and a million tiles do not contend on three cache lines.
 type Encoded = (u64, Option<(Vec<u8>, usize)>, crate::rings::Stats, crate::coalesce::Stats);
 
-fn encode_batch(batch: Vec<(u64, Vec<BodyLayer>)>) -> Result<Vec<Encoded>> {
+fn encode_batch(batch: Vec<(u64, Vec<ChunkEntry>)>) -> Result<Vec<Encoded>> {
     let min_len = par::min_task_len(batch.len());
     let on = timing();
     par::install(|| {
@@ -1051,8 +1112,8 @@ fn encode_batch(batch: Vec<(u64, Vec<BodyLayer>)>) -> Result<Vec<Encoded>> {
                     // of header -- see `crate::coalesce`. Merging them before stage C is also what
                     // keeps stage C off tens of thousands of features it would only copy through.
                     let mut lines = crate::coalesce::Stats::default();
-                    for layer in &mut layers {
-                        lines.add(crate::coalesce::coalesce_lines(layer));
+                    for entry in &mut layers {
+                        lines.add(crate::coalesce::coalesce_lines(&mut entry.layer));
                     }
                     // **Stage C**, per tile: winding normalised, hole containment resolved,
                     // degenerate rings dropped. Once, here, in `f64` with no frame budget, instead
@@ -1060,13 +1121,13 @@ fn encode_batch(batch: Vec<(u64, Vec<BodyLayer>)>) -> Result<Vec<Encoded>> {
                     // `FLAG_RINGS_VALIDATED` true.
                     let mut rings = crate::rings::Stats::default();
                     timed(on, &STAGE_C_NANOS, || {
-                        for layer in &mut layers {
-                            rings.add(crate::rings::normalise(layer));
+                        for entry in &mut layers {
+                            rings.add(crate::rings::normalise(&mut entry.layer));
                         }
                         // A layer that ended up empty - every feature in it fell below the minimum
                         // area after clipping, or lost its exterior to stage C - costs bytes in the
                         // archive and a draw call on device for nothing.
-                        layers.retain(|layer| !layer.features.is_empty());
+                        layers.retain(|entry| !entry.layer.features.is_empty());
                     });
                     if layers.is_empty() {
                         return Ok((id, None, rings, lines));
@@ -1074,11 +1135,36 @@ fn encode_batch(batch: Vec<(u64, Vec<BodyLayer>)>) -> Result<Vec<Encoded>> {
                     // What the `u16` feature index in the body format has to hold. Sampled here
                     // because this is the shape that reaches the encoder: after coalescing merged
                     // the line fragments and after stage C dropped what it drops.
-                    for layer in &layers {
-                        WIDEST_LAYER[layer.layer_id as usize]
-                            .fetch_max(layer.features.len() as u64, Ordering::Relaxed);
+                    for entry in &layers {
+                        WIDEST_LAYER[entry.layer.layer_id as usize]
+                            .fetch_max(entry.layer.features.len() as u64, Ordering::Relaxed);
                     }
-                    let body = Body { extent: EXTENT as u16, layers };
+                    // Fuse the layers' name tables into the body's one, in layer order, remapping
+                    // every feature's index as it goes. First-use order is deterministic (merge
+                    // order within a layer, layer order across them), so the same tile always
+                    // carries the same table.
+                    let mut names: Vec<String> = Vec::new();
+                    for entry in &mut layers {
+                        for feature in &mut entry.layer.features {
+                            if feature.name_idx
+                                != tilecodec::mamaps::body::NAME_NONE
+                            {
+                                let name = entry.names[feature.name_idx as usize - 1].clone();
+                                match names.iter().position(|n| *n == name) {
+                                    Some(at) => feature.name_idx = at as u16 + 1,
+                                    None => {
+                                        feature.name_idx = names.len() as u16 + 1;
+                                        names.push(name);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    let body = Body {
+                        extent: EXTENT as u16,
+                        layers: layers.into_iter().map(|entry| entry.layer).collect(),
+                        names,
+                    };
                     let encoded = timed(on, &SERIALIZE_NANOS, || {
                         tilecodec::mamaps::body::serialize_into(&body, scratch)
                     })?;
@@ -1098,7 +1184,12 @@ fn encode_batch(batch: Vec<(u64, Vec<BodyLayer>)>) -> Result<Vec<Encoded>> {
 /// A polygon becomes **one feature per ring group**, so a feature's parts are exactly one exterior
 /// and its holes — which is what the tessellator wants and what makes "one outer per feature" an
 /// invariant worth stating.
-fn push(layer: &mut BodyLayer, feature: &Feature, geometry: &IntGeometry) -> (u64, u64) {
+///
+/// A point becomes **one feature per point**, each with its own part and its own name: labels are
+/// independent features that happen to share a tile, not a multi-point geometry, because the
+/// renderer draws (and collides) them one at a time.
+fn push(entry: &mut ChunkEntry, feature: &Feature, geometry: &IntGeometry) -> (u64, u64) {
+    let layer = &mut entry.layer;
     let class = &feature.class;
     let mut added = (0u64, 0u64);
     match geometry {
@@ -1137,8 +1228,10 @@ fn push(layer: &mut BodyLayer, feature: &Feature, geometry: &IntGeometry) -> (u6
                     kind_detail: class.kind_detail,
                     geom_type: GEOM_POLYGON,
                     flags: class.flags,
+                    name_idx: tilecodec::mamaps::body::NAME_NONE,
                     parts_offset,
                     part_count: keep.len() as u32,
+                    transit_color: feature.transit_color,
                 });
                 added.0 += 1;
             }
@@ -1158,14 +1251,36 @@ fn push(layer: &mut BodyLayer, feature: &Feature, geometry: &IntGeometry) -> (u6
                     kind_detail: class.kind_detail,
                     geom_type: GEOM_LINE,
                     flags: class.flags,
+                    name_idx: tilecodec::mamaps::body::NAME_NONE,
                     parts_offset,
                     part_count,
+                    transit_color: feature.transit_color,
                 });
                 added.0 += 1;
             }
         }
-        // Points are not carried: the renderer decoded them and threw them away.
-        IntGeometry::Points(_) => {}
+        IntGeometry::Points(points) => {
+            // One feature per point, each naming its own label. Points carry no simplification
+            // survivors to filter: a label is either in the tile or it is not.
+            for point in points {
+                // Interned before the layer is borrowed: the name table lives on the entry, the
+                // geometry on the layer, and the two borrows must not overlap.
+                let name_idx = intern_name(&mut entry.names, feature.name.as_deref());
+                let parts_offset = layer.parts.len() as u32;
+                added.1 += push_part(layer, &[*point], WINDING_OUTER);
+                layer.features.push(BodyFeature {
+                    kind: class.kind,
+                    kind_detail: class.kind_detail,
+                    geom_type: GEOM_POINT,
+                    flags: class.flags,
+                    name_idx,
+                    parts_offset,
+                    part_count: 1,
+                    transit_color: feature.transit_color,
+                });
+                added.0 += 1;
+            }
+        }
     }
     added
 }
@@ -1248,6 +1363,7 @@ mod tests {
         Feature {
             class: Class::area(dict::LAYER_WATER, crate::schema::kind("lake"), min_zoom),
             geometry: square(lon, lat, size),
+            name: None, transit_color: 0,
         }
     }
 
@@ -1339,6 +1455,7 @@ mod tests {
             Feature {
                 class: Class::area(dict::LAYER_BUILDINGS, crate::schema::kind("building"), 0),
                 geometry: square(-120.1, 35.1, 0.02),
+                name: None, transit_color: 0,
             },
         ];
         let first = build(&spilled(&features), &settings(0, 8)).expect("first").0;
@@ -1363,6 +1480,7 @@ mod tests {
             Feature {
                 class: Class::area(dict::LAYER_BUILDINGS, crate::schema::kind("building"), 0),
                 geometry: square(-120.005, 35.005, 0.002),
+                name: None, transit_color: 0,
             },
         ];
         let (bytes, _) = build(&spilled(&features), &settings(14, 14)).expect("build");
@@ -1392,6 +1510,7 @@ mod tests {
         let features = vec![Feature {
             class: Class::line(dict::LAYER_WATER, crate::schema::kind("river"), 0),
             geometry: Geometry::Lines(vec![points]),
+            name: None, transit_color: 0,
         }];
         let (_, stats) = build(&spilled(&features), &settings(6, 14)).expect("build");
         let at = |z: u8| stats.iter().find(|s| s.zoom == z).expect("zoom").points;
@@ -1409,6 +1528,7 @@ mod tests {
             features.push(Feature {
                 class: Class::area(dict::LAYER_BUILDINGS, crate::schema::kind("building"), 0),
                 geometry: square(lon + 0.004, lat + 0.004, 0.004),
+                name: None, transit_color: 0,
             });
             // A line as well, so the merge has to rebase a `GEOM_LINE` feature's parts too, and a
             // long one so it crosses tiles rather than sitting inside one.
@@ -1417,6 +1537,7 @@ mod tests {
                 geometry: Geometry::Lines(vec![(0..40)
                     .map(|k| (lon + k as f64 * 0.002, lat + (k % 5) as f64 * 0.001))
                     .collect()]),
+                name: None, transit_color: 0,
             });
         }
         features
@@ -1502,6 +1623,7 @@ mod tests {
                     ..Class::area(dict::LAYER_WATER, crate::schema::kind("lake"), 0)
                 },
                 geometry: square(-120.0 + i as f64 * 0.00005, 35.0, 0.004),
+                name: None, transit_color: 0,
             })
             .collect();
         let store = spilled(&features);
@@ -1532,7 +1654,7 @@ mod tests {
     #[test]
     fn concatenating_two_chunks_of_a_layer_is_one_layer() {
         let class = Class::area(dict::LAYER_WATER, crate::schema::kind("lake"), 0);
-        let feature = Feature { class, geometry: square(0.0, 0.0, 1.0) };
+        let feature = Feature { class, geometry: square(0.0, 0.0, 1.0), name: None, transit_color: 0 };
         // Tile-local already, so the fixture is about the arenas rather than about projection, and
         // big enough that no minimum-area floor can drop it.
         let box_at = |x: i32| {
@@ -1545,23 +1667,23 @@ mod tests {
             ]]])
         };
 
-        let mut together = BodyLayer::new(dict::LAYER_WATER);
+        let mut together = ChunkEntry::new(dict::LAYER_WATER);
         assert_eq!(push(&mut together, &feature, &box_at(0)), (1, 5));
         push(&mut together, &feature, &box_at(1000));
 
-        let mut first = BodyLayer::new(dict::LAYER_WATER);
+        let mut first = ChunkEntry::new(dict::LAYER_WATER);
         push(&mut first, &feature, &box_at(0));
-        let mut second = BodyLayer::new(dict::LAYER_WATER);
+        let mut second = ChunkEntry::new(dict::LAYER_WATER);
         push(&mut second, &feature, &box_at(1000));
         concatenate(&mut first, second);
 
         assert_eq!(first, together, "two chunks concatenated are not the one-pass layer");
         // Spelled out as well, because `assert_eq` on the whole layer would also pass if both were
         // empty, and an arena its parts do not tile exactly is what the encoder rejects.
-        assert_eq!(first.features.len(), 2);
-        assert_eq!(first.features[1].parts_offset, 1);
-        assert_eq!(first.parts[1].coord_start, first.parts[0].point_count);
-        assert_eq!(first.coords.len(), 10);
+        assert_eq!(first.layer.features.len(), 2);
+        assert_eq!(first.layer.features[1].parts_offset, 1);
+        assert_eq!(first.layer.parts[1].coord_start, first.layer.parts[0].point_count);
+        assert_eq!(first.layer.coords.len(), 10);
     }
 
     /// The merge's contract on its own, without a build around it: ascending tiles, and layers in id
@@ -1573,13 +1695,13 @@ mod tests {
     #[test]
     fn the_merge_yields_ascending_tiles_with_their_layers_in_id_order() {
         let mut early: Chunk = BTreeMap::new();
-        early.insert((10, 3), BodyLayer::new(3));
-        early.insert((30, 1), BodyLayer::new(1));
+        early.insert((10, 3), ChunkEntry::new(3));
+        early.insert((30, 1), ChunkEntry::new(1));
         let mut middle: Chunk = BTreeMap::new();
-        middle.insert((10, 1), BodyLayer::new(1));
-        middle.insert((20, 2), BodyLayer::new(2));
+        middle.insert((10, 1), ChunkEntry::new(1));
+        middle.insert((20, 2), ChunkEntry::new(2));
         let mut late: Chunk = BTreeMap::new();
-        late.insert((10, 3), BodyLayer::new(3));
+        late.insert((10, 3), ChunkEntry::new(3));
 
         let spill = ChunkSpill::create(scratch()).expect("scratch");
         let refs: Vec<ChunkRef> = [early, middle, late]
@@ -1589,7 +1711,7 @@ mod tests {
 
         let merged: Vec<(u64, Vec<u8>)> = merge(&refs, &spill)
             .map(|tile| tile.expect("read a tile back"))
-            .map(|(id, layers)| (id, layers.iter().map(|l| l.layer_id).collect()))
+            .map(|(id, layers)| (id, layers.iter().map(|l| l.layer.layer_id).collect()))
             .collect();
         // Tile 10 carries layer 1 before layer 3 even though layer 3 was read first, and its two
         // separate layer-3 pieces arrive as one layer rather than two.
@@ -1647,6 +1769,7 @@ mod tests {
                 features.push(Feature {
                     class: Class::area(dict::LAYER_BUILDINGS, crate::schema::kind("building"), 14),
                     geometry: square(lon, lat, 0.0003),
+                    name: None, transit_color: 0,
                 });
             }
             let store = spilled(&features);

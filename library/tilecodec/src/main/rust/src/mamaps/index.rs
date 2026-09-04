@@ -239,13 +239,16 @@ mod tests {
 
     /// **Invariant 1 of the plan's verification list.** Header plus dictionary plus root must fit
     /// the one 16 KiB read a reader opens with, at a scale well past California.
+    ///
+    /// v2's dictionary (three layers + 29 kinds) costs five root entries against v1's 470; 460
+    /// still addresses 1.9 M tiles in one request.
     #[test]
     fn a_root_addressing_nearly_two_million_tiles_fits_the_opening_prefix() {
         let prefix = crate::stream::OPEN_PREFIX_BYTES as usize;
         let dictionary = super::super::dict::Dictionary::schema().serialize().len();
         let budget = prefix - super::super::header::HEADER_LEN - dictionary;
         let entries = budget / ROOT_ENTRY_LEN;
-        assert!(entries >= 470, "only {entries} root entries fit the prefix");
+        assert!(entries >= 460, "only {entries} root entries fit the prefix");
         assert!(
             entries * 4096 >= 1_900_000,
             "{} tiles addressable in one request",

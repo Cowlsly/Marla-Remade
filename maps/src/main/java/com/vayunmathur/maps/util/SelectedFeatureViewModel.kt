@@ -108,7 +108,7 @@ class SelectedFeatureViewModel(application: Application): AndroidViewModel(appli
      * Resolve the first basemap place label that parses, or null.
      *
      * Lives here rather than in the tap handler because `parse` may make a Wikidata round-trip
-     * per candidate. `queryRenderedFeatures` returns one feature per layer, so stopping at the
+     * per candidate. The native pick returns placed labels in placement order, so stopping at the
      * first success is what keeps a tap from doing every round-trip serially — and doing any of
      * them on the caller's thread is what made the gesture handler a hundred lines long.
      */

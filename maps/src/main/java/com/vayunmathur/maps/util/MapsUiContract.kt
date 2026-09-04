@@ -8,7 +8,7 @@ import com.vayunmathur.maps.data.SavedPlace
  *
  * A screen takes a state value plus an actions interface rather than the ViewModels
  * themselves, so it can be rendered by a `@Preview` — which is what the store listing
- * images are generated from. Anything drawn on top of [org.maplibre.compose.map.MaplibreMap]
+ * images are generated from. Anything drawn on top of [VectorMap][com.vayunmathur.library.map.VectorMap]
  * stays as it is; the map is a native surface that a preview cannot render.
  *
  * This lives in `util` rather than `ui` so the dependency runs one way: `ui` depends on

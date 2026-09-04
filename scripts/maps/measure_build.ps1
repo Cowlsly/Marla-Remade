@@ -47,6 +47,10 @@ param(
     # Skip the free-space preflight. It is a heuristic on the .pbf's size, so an unusual layer
     # selection or an already-present spill can make it wrong in either direction.
     [switch] $NoSpaceCheck,
+    # A prepared land polygon (the OSMCoastline land-polygons .shp), passed through to
+    # mamaps_build as --coastline so `earth` carries the mainland. Without it the layer has
+    # islands only. Consumed in stage A, so it cannot combine with -ReuseStore.
+    [string] $Coastline,
     [string] $Exe,
     [string] $Dump
 )
@@ -129,6 +133,10 @@ $sampler = Start-Job -ArgumentList $name, $spill, $Out, $chunks -ScriptBlock {
 $flags = @()
 if ($KeepStore)  { $flags += "--keep-store" }
 if ($ReuseStore) { $flags += "--reuse-store" }
+if ($Coastline) {
+    if ($ReuseStore) { throw "-Coastline is consumed in stage A and cannot combine with -ReuseStore" }
+    $flags += @("--coastline", (Resolve-Path $Coastline).Path)
+}
 
 Write-Output ("=== {0} -> {1}   z{2}..z{3}{4}{5}{6} ===" -f `
     (Split-Path $Pbf -Leaf), (Split-Path $Out -Leaf), $MinZoom, $MaxZoom,

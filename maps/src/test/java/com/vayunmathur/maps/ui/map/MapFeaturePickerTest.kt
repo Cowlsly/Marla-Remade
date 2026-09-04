@@ -10,7 +10,12 @@ import com.vayunmathur.maps.ui.PARKING_PIN_LAYER_ID
 import com.vayunmathur.maps.ui.SAVED_PLACE_LAYER_ID
 import com.vayunmathur.maps.ui.SEARCH_RESULT_LAYER_ID
 import com.vayunmathur.maps.ui.TRANSIT_STOP_LAYER_ID
+import com.vayunmathur.maps.ui.map.MapFeaturePicker.Companion.NATIVE_LABEL_LAYER_IDS
+import com.vayunmathur.maps.ui.map.MapFeaturePicker.Companion.toFeature1
 import com.vayunmathur.maps.ui.theme.MapChromeMetrics
+import com.vayunmathur.library.map.GeoPoint
+import com.vayunmathur.library.map.PlacedLabel
+import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.coroutines.runBlocking
 import org.maplibre.spatialk.geojson.Point
 import org.maplibre.spatialk.geojson.Position
@@ -162,5 +167,44 @@ class MapFeaturePickerTest {
             assertTrue("${level}_base" in ids, "missing ${level}_base")
             assertTrue("${level}_hybrid" in ids, "missing ${level}_hybrid")
         }
+    }
+
+    /** The native pick emits flat dash ids; the query must use those, not the split ones. */
+    @Test
+    fun `native label ids are the flat renderer ids`() {
+        assertEquals(
+            setOf("places-country", "places-region", "places-locality", "places-subplace"),
+            NATIVE_LABEL_LAYER_IDS,
+        )
+    }
+
+    /** The adapter emits the {kind, name, name:en} properties `parse` reads. */
+    @Test
+    fun `placed label converts to a parseable feature`() {
+        val feature = PlacedLabel(
+            layerId = "places-country",
+            name = "France",
+            kind = "country",
+            position = GeoPoint(2.35, 48.85),
+        ).toFeature1() ?: error("expected a feature")
+
+        val props = feature.properties ?: error("expected properties")
+        assertEquals("country", props["kind"]?.jsonPrimitive?.content)
+        assertEquals("France", props["name"]?.jsonPrimitive?.content)
+        assertEquals("France", props["name:en"]?.jsonPrimitive?.content)
+        val pos = (feature.geometry as? Point)?.coordinates ?: error("expected point")
+        assertEquals(2.35, pos.longitude)
+        assertEquals(48.85, pos.latitude)
+    }
+
+    /** Unknown native layers (and subplace, which has no parse branch) convert to null. */
+    @Test
+    fun `unmapped native layers convert to null`() {
+        assertNull(
+            PlacedLabel("roads-bridges-major-casing", "x", "road", GeoPoint(0.0, 0.0)).toFeature1()
+        )
+        assertNull(
+            PlacedLabel("places-subplace", "SoHo", "subplace", GeoPoint(-74.0, 40.7)).toFeature1()
+        )
     }
 }

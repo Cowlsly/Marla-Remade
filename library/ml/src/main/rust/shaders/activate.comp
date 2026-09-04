@@ -1,0 +1,34 @@
+#version 450
+//! An activation on its own, applied elementwise.
+//!
+//! # Why this exists when every convolution already folds one
+//!
+//! Folding is right whenever the activation follows the projection that produced the value, which
+//! until now was always. A **gated** feed-forward breaks that: one fused projection produces
+//! `[gate | up]`, and the activation applies to the gate half only. There is no convolution to
+//! fold it into, because the convolution that produced it also produced the half that must stay
+//! linear.
+//!
+//! Gemma 4's MLP is `gelu(gate) * up` over a `[1536, 2 * inner]` projection, which is the case
+//! this serves. Splitting the projection in two so each half could fold its own activation would
+//! double the number of weight tensors and halve the width of each matmul, which is worse on both
+//! counts.
+//!
+//! # Push fields
+//!
+//! `p.in0`, `p.out_at` and `p.count` as usual; `p.act` is the [`nets::Act`] code and
+//! `p.act_weight` the slope tensor if it is `PRelu`. `p.out_c` and the spatial fields carry the
+//! shape only so the channel index can be recovered for a per-channel activation.
+
+#include "common.glsl"
+
+void main() {
+    uint index = global_index();
+    if (index >= p.count) {
+        return;
+    }
+    // The channel this element belongs to, for the one activation that is per-channel.
+    uint spatial = max(p.out_h * p.out_w, 1u);
+    uint channel = index / spatial;
+    arena[p.out_at + index] = float16_t(activate(float(arena[p.in0 + index]), p.act, channel));
+}

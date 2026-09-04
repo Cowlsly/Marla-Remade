@@ -29,13 +29,19 @@
 //! 16..20  u32 coords
 //! 20..21  u8  layer_id
 //! 21..24  reserved, zero
-//! 24..    packed features (14 B), then parts (10 B), then coords (4 B)
+//! 24..28  u32 names (label strings in this entry's table)
+//! 28..32  reserved, zero
+//! 32..    packed features (14 B), then parts (10 B), then coords (4 B),
+//!          then names (u32 length + UTF-8 bytes each)
 //! ```
 //!
 //! Packed field by field rather than cast wholesale from the in-memory struct. `body::Feature` is
 //! `kind`, `kind_detail`, `geom_type`, `flags`, `parts_offset`, `part_count` -- fourteen bytes of
 //! payload in a sixteen-byte struct with no `#[repr(C)]`, so a bulk cast would be both unsound and
 //! dependent on the host's layout. Fourteen bytes is also less to write.
+//!
+//! Names ride per entry (not per chunk or per zoom) so the merge never holds more than one
+//! entry's strings at a time: a tile's labels are dozens of strings, a zoom's are millions.
 //!
 //! # Reading with a budget, not a constant
 //!
@@ -66,12 +72,18 @@ use std::sync::Mutex;
 use tilecodec::mamaps::body::{Feature as BodyFeature, Layer as BodyLayer, Part};
 use tilecodec::proto::{err, Error, Result};
 
-/// Bytes of fixed header before one entry's three arenas.
-pub const ENTRY_HEADER_BYTES: usize = 24;
+use crate::tiler::ChunkEntry;
 
-/// Packed width of one [`BodyFeature`]. Fourteen, not the struct's sixteen: see the module doc.
-const FEATURE_BYTES: usize = 14;
-/// Packed width of one [`Part`].
+/// Bytes of fixed header before one entry's arenas.
+pub const ENTRY_HEADER_BYTES: usize = 32;
+
+/// Packed width of one [`BodyFeature`] in the spill: kind, kind_detail, geom_type, flags,
+/// name_idx, parts_offset, part_count, transit_color. Twenty, wider than the body's 24-byte
+/// record only in what it omits (padding); the fields are the codec's own, so the scratch
+/// format never lags the codec by a version.
+const FEATURE_BYTES: usize = 20;
+/// Packed width of one [`Part`] in the spill: coord_start, point_count, winding. Ten — the
+/// body's 12-byte entry carries a reserved half-word the scratch format does not need.
 const PART_BYTES: usize = 10;
 /// Packed width of one `(i16, i16)` coordinate.
 const COORD_BYTES: usize = 4;
@@ -187,20 +199,20 @@ impl ChunkSpill {
     /// The byte range is reserved under the cursor lock and written outside it. That ordering is the
     /// point: the lock covers an integer add, so a worker that has just finished a chunk is never
     /// waiting on another worker's disk.
-    pub fn write_chunk(&self, map: BTreeMap<(u64, u8), BodyLayer>) -> Result<ChunkRef> {
+    pub fn write_chunk(&self, map: BTreeMap<(u64, u8), ChunkEntry>) -> Result<ChunkRef> {
         let entries = map.len() as u64;
         let mut len = 0u64;
-        for ((_, layer_id), layer) in &map {
-            if *layer_id != layer.layer_id {
+        for ((_, layer_id), entry) in &map {
+            if *layer_id != entry.layer.layer_id {
                 // The merge keys its heap on the map key and reads `layer_id` off the layer it
                 // yields, so the two disagreeing would mean the round trip had to preserve both. It
                 // is one field on disk because in this generator they are one field.
                 return err(format!(
                     "a tile chunk entry is keyed on layer {layer_id} but carries layer {}",
-                    layer.layer_id
+                    entry.layer.layer_id
                 ));
             }
-            len += entry_bytes(layer)?;
+            len += entry_bytes(entry)?;
         }
 
         let at = {
@@ -329,7 +341,7 @@ impl ChunkReader<'_> {
     /// Fallible, and that matters: a truncated scratch file must fail the build rather than silently
     /// shorten the archive.
     #[allow(clippy::should_implement_trait)]
-    pub fn next(&mut self) -> Result<Option<((u64, u8), BodyLayer)>> {
+    pub fn next(&mut self) -> Result<Option<((u64, u8), ChunkEntry)>> {
         if self.left == 0 {
             if self.used < self.buf.len() || self.at < self.end {
                 return err(format!(
@@ -344,15 +356,46 @@ impl ChunkReader<'_> {
             .try_into()
             .expect("a header's worth of bytes");
         let header = entry_header(head)?;
-        let payload = payload_bytes(header.features, header.parts, header.coords) as usize;
-        self.fill(ENTRY_HEADER_BYTES + payload)?;
+        // The fixed arenas first: their length is a pure function of the header, so one fill
+        // covers them. Names follow with inline lengths and are pulled one at a time — their
+        // byte length is known only once the previous one is read.
+        let fixed = payload_bytes(header.features, header.parts, header.coords) as usize;
+        self.fill(ENTRY_HEADER_BYTES + fixed)?;
         let body = self.used + ENTRY_HEADER_BYTES;
-        let layer = decode_entry(&header, &self.buf[body..body + payload]);
-        self.used = body + payload;
+        let mut entry = decode_fixed(&header, &self.buf[body..body + fixed])?;
+        self.used = body + fixed;
+        // Counted, not differenced: `fill` compacts the buffer when it tops up, so a span across
+        // two buffer positions is not the difference of two offsets.
+        let mut consumed = ENTRY_HEADER_BYTES + fixed;
+        for _ in 0..header.names {
+            self.fill(4)?;
+            let len = u32::from_le_bytes(
+                self.buf[self.used..self.used + 4].try_into().expect("4 bytes"),
+            ) as usize;
+            if len > 1 << 20 {
+                return err("a tile chunk entry names a megabyte-plus string".to_string());
+            }
+            self.fill(4 + len)?;
+            let bytes = &self.buf[self.used + 4..self.used + 4 + len];
+            entry.names.push(
+                std::str::from_utf8(bytes)
+                    .map_err(|_| Error("a tile chunk entry's name is not UTF-8".to_string()))?
+                    .to_string(),
+            );
+            self.used += 4 + len;
+            consumed += 4 + len;
+        }
+        // Every name index must land in the table just read: a dangling index would decode to
+        // the wrong label on device with no other symptom.
+        for feature in &entry.layer.features {
+            if feature.name_idx as usize > entry.names.len() {
+                return err("a tile chunk feature names past its entry's table".to_string());
+            }
+        }
         self.left -= 1;
-        self.spill.read.fetch_add((ENTRY_HEADER_BYTES + payload) as u64, Ordering::Relaxed);
+        self.spill.read.fetch_add(consumed as u64, Ordering::Relaxed);
         self.spill.read_entries.fetch_add(1, Ordering::Relaxed);
-        Ok(Some(((header.tile, header.layer_id), layer)))
+        Ok(Some(((header.tile, header.layer_id), entry)))
     }
 
     /// Make at least `need` unread bytes available in `buf`.
@@ -387,7 +430,8 @@ impl ChunkReader<'_> {
 }
 
 /// How many bytes one entry encodes to, or an error when an arena is past what a `u32` addresses.
-fn entry_bytes(layer: &BodyLayer) -> Result<u64> {
+fn entry_bytes(entry: &ChunkEntry) -> Result<u64> {
+    let layer = &entry.layer;
     let count = |what: &str, n: usize| -> Result<usize> {
         if n > u32::MAX as usize {
             return err(format!("a tile chunk entry holds {n} {what}, which no header can address"));
@@ -397,18 +441,24 @@ fn entry_bytes(layer: &BodyLayer) -> Result<u64> {
     let features = count("feature(s)", layer.features.len())?;
     let parts = count("part(s)", layer.parts.len())?;
     let coords = count("coordinate(s)", layer.coords.len())?;
-    Ok(ENTRY_HEADER_BYTES as u64 + payload_bytes(features, parts, coords))
+    let mut names_bytes = 0u64;
+    for name in &entry.names {
+        names_bytes += 4 + name.len() as u64;
+    }
+    Ok(ENTRY_HEADER_BYTES as u64 + payload_bytes(features, parts, coords) + names_bytes)
 }
 
 /// The payload width implied by an entry's three counts. A pure function of the header, which is
-/// what lets a reader validate before it allocates.
+/// what lets a reader validate before it allocates. Names ride after the coords and are counted
+/// in the header's own `names` field.
 fn payload_bytes(features: usize, parts: usize, coords: usize) -> u64 {
     features as u64 * FEATURE_BYTES as u64
         + parts as u64 * PART_BYTES as u64
         + coords as u64 * COORD_BYTES as u64
 }
 
-fn encode_entry(tile: u64, layer_id: u8, layer: &BodyLayer, out: &mut Vec<u8>) {
+fn encode_entry(tile: u64, layer_id: u8, entry: &ChunkEntry, out: &mut Vec<u8>) {
+    let layer = &entry.layer;
     let base = out.len();
     out.resize(base + ENTRY_HEADER_BYTES, 0);
     out[base..base + 8].copy_from_slice(&tile.to_le_bytes());
@@ -416,13 +466,19 @@ fn encode_entry(tile: u64, layer_id: u8, layer: &BodyLayer, out: &mut Vec<u8>) {
     out[base + 12..base + 16].copy_from_slice(&(layer.parts.len() as u32).to_le_bytes());
     out[base + 16..base + 20].copy_from_slice(&(layer.coords.len() as u32).to_le_bytes());
     out[base + 20] = layer_id;
+    out[base + 24..base + 28].copy_from_slice(&(entry.names.len() as u32).to_le_bytes());
     for feature in &layer.features {
+        // The spill carries the v2 index, not the v1 wire: name_idx + transit_color ride the
+        // entry and are re-encoded by the body serializer, so the scratch format never lags the
+        // codec by a version.
         out.extend_from_slice(&feature.kind.to_le_bytes());
         out.extend_from_slice(&feature.kind_detail.to_le_bytes());
         out.push(feature.geom_type);
         out.push(feature.flags);
+        out.extend_from_slice(&feature.name_idx.to_le_bytes());
         out.extend_from_slice(&feature.parts_offset.to_le_bytes());
         out.extend_from_slice(&feature.part_count.to_le_bytes());
+        out.extend_from_slice(&feature.transit_color.to_le_bytes());
     }
     for part in &layer.parts {
         out.extend_from_slice(&part.coord_start.to_le_bytes());
@@ -433,6 +489,10 @@ fn encode_entry(tile: u64, layer_id: u8, layer: &BodyLayer, out: &mut Vec<u8>) {
         out.extend_from_slice(&x.to_le_bytes());
         out.extend_from_slice(&y.to_le_bytes());
     }
+    for name in &entry.names {
+        out.extend_from_slice(&(name.len() as u32).to_le_bytes());
+        out.extend_from_slice(name.as_bytes());
+    }
 }
 
 struct EntryHeader {
@@ -441,12 +501,14 @@ struct EntryHeader {
     features: usize,
     parts: usize,
     coords: usize,
+    names: usize,
 }
 
 fn entry_header(head: &[u8; ENTRY_HEADER_BYTES]) -> Result<EntryHeader> {
-    // A newer writer would use these, so a nonzero tail means the reader is the wrong version for
-    // the file. Guessing would decode a field that has moved.
-    if head[21..ENTRY_HEADER_BYTES].iter().any(|v| *v != 0) {
+    // Both reserved tails must be zero: a newer writer would use them, so a nonzero tail means
+    // the reader is the wrong version for the file. Guessing would decode a field that moved.
+    if head[21..24].iter().any(|v| *v != 0) || head[28..ENTRY_HEADER_BYTES].iter().any(|v| *v != 0)
+    {
         return err("a tile chunk entry has a nonzero reserved tail");
     }
     let u32_at =
@@ -457,6 +519,7 @@ fn entry_header(head: &[u8; ENTRY_HEADER_BYTES]) -> Result<EntryHeader> {
         parts: u32_at(12),
         coords: u32_at(16),
         layer_id: head[20],
+        names: u32_at(24),
     };
     let len = ENTRY_HEADER_BYTES as u64
         + payload_bytes(header.features, header.parts, header.coords);
@@ -466,8 +529,9 @@ fn entry_header(head: &[u8; ENTRY_HEADER_BYTES]) -> Result<EntryHeader> {
     Ok(header)
 }
 
-/// Decode a validated entry. `payload` is exactly the bytes the header accounted for.
-fn decode_entry(header: &EntryHeader, payload: &[u8]) -> BodyLayer {
+/// Decode an entry's fixed arenas. `payload` is exactly the fixed bytes the header accounted
+/// for; names are pulled separately by the reader, one inline length at a time.
+fn decode_fixed(header: &EntryHeader, payload: &[u8]) -> Result<ChunkEntry> {
     let u16_at = |b: &[u8], o: usize| u16::from_le_bytes(b[o..o + 2].try_into().expect("2 bytes"));
     let u32_at = |b: &[u8], o: usize| u32::from_le_bytes(b[o..o + 4].try_into().expect("4 bytes"));
     let i16_at = |b: &[u8], o: usize| i16::from_le_bytes(b[o..o + 2].try_into().expect("2 bytes"));
@@ -475,20 +539,26 @@ fn decode_entry(header: &EntryHeader, payload: &[u8]) -> BodyLayer {
     let mut at = 0usize;
     let mut features = Vec::with_capacity(header.features);
     for _ in 0..header.features {
-        let b = &payload[at..at + FEATURE_BYTES];
+        let b = payload
+            .get(at..at + FEATURE_BYTES)
+            .ok_or_else(|| Error("a tile chunk entry's features run past its payload".to_string()))?;
         features.push(BodyFeature {
             kind: u16_at(b, 0),
             kind_detail: u16_at(b, 2),
             geom_type: b[4],
             flags: b[5],
-            parts_offset: u32_at(b, 6),
-            part_count: u32_at(b, 10),
+            name_idx: u16_at(b, 6),
+            parts_offset: u32_at(b, 8),
+            part_count: u32_at(b, 12),
+            transit_color: u32_at(b, 16),
         });
         at += FEATURE_BYTES;
     }
     let mut parts = Vec::with_capacity(header.parts);
     for _ in 0..header.parts {
-        let b = &payload[at..at + PART_BYTES];
+        let b = payload
+            .get(at..at + PART_BYTES)
+            .ok_or_else(|| Error("a tile chunk entry's parts run past its payload".to_string()))?;
         parts.push(Part {
             coord_start: u32_at(b, 0),
             point_count: u32_at(b, 4),
@@ -498,11 +568,18 @@ fn decode_entry(header: &EntryHeader, payload: &[u8]) -> BodyLayer {
     }
     let mut coords = Vec::with_capacity(header.coords);
     for _ in 0..header.coords {
-        let b = &payload[at..at + COORD_BYTES];
+        let b = payload
+            .get(at..at + COORD_BYTES)
+            .ok_or_else(|| Error("a tile chunk entry's coords run past its payload".to_string()))?;
         coords.push((i16_at(b, 0), i16_at(b, 2)));
         at += COORD_BYTES;
     }
-    BodyLayer { layer_id: header.layer_id, features, parts, coords }
+    debug_assert_eq!(at, payload.len(), "the fixed arenas must consume their payload exactly");
+    let names = Vec::with_capacity(header.names);
+    Ok(ChunkEntry {
+        layer: BodyLayer { layer_id: header.layer_id, features, parts, coords },
+        names,
+    })
 }
 
 /// Write all of `buf` at `offset` without moving the file's cursor.
@@ -551,76 +628,125 @@ mod tests {
             kind_detail: detail,
             geom_type: geom,
             flags,
+            name_idx: tilecodec::mamaps::body::NAME_NONE,
             parts_offset: at,
             part_count: n,
+            transit_color: 0,
         }
     }
 
+    fn named(kind: u16, name_idx: u16) -> BodyFeature {
+        BodyFeature {
+            kind,
+            kind_detail: 0,
+            geom_type: tilecodec::mamaps::body::GEOM_POINT,
+            flags: 0,
+            name_idx,
+            parts_offset: 0,
+            part_count: 1,
+            transit_color: 0,
+        }
+    }
+
+    fn entry(layer_id: u8, features: Vec<BodyFeature>, names: &[&str]) -> ChunkEntry {
+        let mut layer = BodyLayer::new(layer_id);
+        layer.features = features;
+        for (i, _) in layer.features.iter().enumerate() {
+            layer.parts.push(Part {
+                coord_start: i as u32,
+                point_count: 1,
+                winding: WINDING_OUTER,
+            });
+            layer.coords.push((i as i16, 0));
+        }
+        // Fix up parts_offset to match the pushed parts (all features above use offset 0).
+        for (i, feature) in layer.features.iter_mut().enumerate() {
+            feature.parts_offset = i as u32;
+        }
+        ChunkEntry { layer, names: names.iter().map(|s| s.to_string()).collect() }
+    }
+
     /// Every shape an entry can take, including the empty ones that a naive length check would let
-    /// through and a naive decode would trip on.
-    fn every_layer() -> Vec<((u64, u8), BodyLayer)> {
+    /// through and a naive decode would trip on — plus a named entry, because names are the one
+    /// variable-length arena in the spill.
+    fn every_layer() -> Vec<((u64, u8), ChunkEntry)> {
+        let plain = |layer_id: u8, features: Vec<BodyFeature>| ChunkEntry {
+            layer: BodyLayer { layer_id, features, parts: Vec::new(), coords: Vec::new() },
+            names: Vec::new(),
+        };
         vec![
             // Empty layer: no features, no parts, no coords.
-            ((1, 0), BodyLayer::new(0)),
+            ((1, 0), ChunkEntry::new(0)),
             // Features but no parts and no coords, which `push` cannot make and a corrupt file can.
-            (
-                (2, 1),
-                BodyLayer {
-                    layer_id: 1,
-                    features: vec![feature(1, 2, GEOM_LINE, 0, 0, 0)],
-                    parts: Vec::new(),
-                    coords: Vec::new(),
-                },
-            ),
+            ((2, 1), plain(1, vec![feature(1, 2, GEOM_LINE, 0, 0, 0)])),
             // A part with no coordinates.
             (
                 (3, 2),
-                BodyLayer {
-                    layer_id: 2,
-                    features: vec![feature(3, 4, GEOM_LINE, 1, 0, 1)],
-                    parts: vec![Part { coord_start: 0, point_count: 0, winding: WINDING_OUTER }],
-                    coords: Vec::new(),
+                ChunkEntry {
+                    layer: BodyLayer {
+                        layer_id: 2,
+                        features: vec![feature(3, 4, GEOM_LINE, 1, 0, 1)],
+                        parts: vec![Part {
+                            coord_start: 0,
+                            point_count: 0,
+                            winding: WINDING_OUTER,
+                        }],
+                        coords: Vec::new(),
+                    },
+                    names: Vec::new(),
                 },
             ),
             // The extremes of every field: `u16::MAX` kinds, `i16` at both ends, a hole.
             (
                 (4, 3),
-                BodyLayer {
-                    layer_id: 3,
-                    features: vec![
-                        feature(u16::MAX, u16::MAX, GEOM_POLYGON, 0x0f, 0, 2),
-                        feature(0, 0, GEOM_POLYGON, 0, 2, 1),
-                    ],
-                    parts: vec![
-                        Part { coord_start: 0, point_count: 2, winding: WINDING_OUTER },
-                        Part { coord_start: 2, point_count: 2, winding: WINDING_HOLE },
-                        Part { coord_start: 4, point_count: 1, winding: WINDING_OUTER },
-                    ],
-                    coords: vec![
-                        (i16::MIN, i16::MAX),
-                        (i16::MAX, i16::MIN),
-                        (0, 0),
-                        (-1, 1),
-                        (32_767, -32_768),
-                    ],
+                ChunkEntry {
+                    layer: BodyLayer {
+                        layer_id: 3,
+                        features: vec![
+                            feature(u16::MAX, u16::MAX, GEOM_POLYGON, 0x0f, 0, 2),
+                            feature(0, 0, GEOM_POLYGON, 0, 2, 1),
+                        ],
+                        parts: vec![
+                            Part { coord_start: 0, point_count: 2, winding: WINDING_OUTER },
+                            Part { coord_start: 2, point_count: 2, winding: WINDING_HOLE },
+                            Part { coord_start: 4, point_count: 1, winding: WINDING_OUTER },
+                        ],
+                        coords: vec![
+                            (i16::MIN, i16::MAX),
+                            (i16::MAX, i16::MIN),
+                            (0, 0),
+                            (-1, 1),
+                            (32_767, -32_768),
+                        ],
+                    },
+                    names: Vec::new(),
                 },
             ),
             // Several layers on one tile, which is what the merge collapses.
-            ((5, 1), BodyLayer::new(1)),
+            ((5, 1), ChunkEntry::new(1)),
             (
                 (5, 7),
-                BodyLayer {
-                    layer_id: 7,
-                    features: vec![feature(9, 9, GEOM_LINE, 0, 0, 1)],
-                    parts: vec![Part { coord_start: 0, point_count: 3, winding: WINDING_OUTER }],
-                    coords: vec![(1, 2), (3, 4), (5, 6)],
+                ChunkEntry {
+                    layer: BodyLayer {
+                        layer_id: 7,
+                        features: vec![feature(9, 9, GEOM_LINE, 0, 0, 1)],
+                        parts: vec![Part {
+                            coord_start: 0,
+                            point_count: 3,
+                            winding: WINDING_OUTER,
+                        }],
+                        coords: vec![(1, 2), (3, 4), (5, 6)],
+                    },
+                    names: Vec::new(),
                 },
             ),
-            ((5, 10), BodyLayer::new(10)),
+            ((5, 10), ChunkEntry::new(10)),
+            // A named entry: two point labels sharing one name plus an unnamed one.
+            ((6, 8), entry(8, vec![named(3, 1), named(5, 1), named(7, 0)], &["Café"])),
         ]
     }
 
-    fn drain(spill: &ChunkSpill, at: &ChunkRef, window: usize) -> Vec<((u64, u8), BodyLayer)> {
+    fn drain(spill: &ChunkSpill, at: &ChunkRef, window: usize) -> Vec<((u64, u8), ChunkEntry)> {
         let mut reader = spill.reader(at, window);
         let mut out = Vec::new();
         while let Some(entry) = reader.next().expect("read an entry back") {
@@ -633,11 +759,54 @@ mod tests {
     fn a_chunk_round_trips_through_the_scratch_file() {
         let spill = ChunkSpill::create(tmp("roundtrip")).expect("create");
         let want = every_layer();
-        let map: BTreeMap<(u64, u8), BodyLayer> = want.iter().cloned().collect();
+        let map: BTreeMap<(u64, u8), ChunkEntry> = want.iter().cloned().collect();
         let at = spill.write_chunk(map).expect("write");
         assert_eq!(at.entries, want.len() as u64);
         assert_eq!(drain(&spill, &at, 1 << 16), want);
         spill.check_books().expect("the books balance");
+    }
+
+    /// The read accounting survives a buffer compaction mid-entry. Names are pulled one inline
+    /// length at a time, so a narrow window tops the buffer up (compacting it) halfway through
+    /// an entry's names — and the bytes-read counter used to difference two offsets across that
+    /// compaction, undercounting by the compacted prefix. California z12 caught it: a megabyte
+    /// short on `check_books`. Narrow window + many long names forces the compaction here.
+    #[test]
+    fn a_narrow_window_compacting_mid_entry_still_balances_the_books() {
+        let spill = ChunkSpill::create(tmp("compactnames")).expect("create");
+        let names: Vec<String> = (0..40).map(|i| format!("name-{i}-with-padding-to-lengthen")).collect();
+        let features: Vec<BodyFeature> = names
+            .iter()
+            .enumerate()
+            .map(|(i, _)| BodyFeature {
+                kind: 1,
+                kind_detail: 0,
+                geom_type: tilecodec::mamaps::body::GEOM_POINT,
+                flags: 0,
+                name_idx: i as u16 + 1,
+                parts_offset: i as u32,
+                part_count: 1,
+                transit_color: 0,
+            })
+            .collect();
+        let mut layer = BodyLayer::new(8);
+        for (i, feature) in features.into_iter().enumerate() {
+            layer.features.push(feature);
+            layer.parts.push(Part {
+                coord_start: i as u32,
+                point_count: 1,
+                winding: WINDING_OUTER,
+            });
+            layer.coords.push((i as i16, 0));
+        }
+        let mut map: BTreeMap<(u64, u8), ChunkEntry> = BTreeMap::new();
+        map.insert((7, 8), ChunkEntry { layer, names: names.clone() });
+        let at = spill.write_chunk(map).expect("write");
+        // Window of one header: every name tops up (and compacts) mid-entry.
+        let read = drain(&spill, &at, ENTRY_HEADER_BYTES);
+        assert_eq!(read.len(), 1);
+        assert_eq!(read[0].1.names, names);
+        spill.check_books().expect("the books balance after mid-entry compaction");
     }
 
     /// The claim the whole merge rests on: the file's order is `map.keys()`, so a reader hands
@@ -646,9 +815,9 @@ mod tests {
     fn entry_order_is_the_maps_key_order() {
         let spill = ChunkSpill::create(tmp("order")).expect("create");
         // Inserted in a deliberately scrambled order; a `BTreeMap` sorts them and so must the file.
-        let mut map: BTreeMap<(u64, u8), BodyLayer> = BTreeMap::new();
+        let mut map: BTreeMap<(u64, u8), ChunkEntry> = BTreeMap::new();
         for (tile, layer) in [(30u64, 2u8), (10, 5), (10, 1), (20, 9), (10, 3), (30, 0)] {
-            map.insert((tile, layer), BodyLayer::new(layer));
+            map.insert((tile, layer), ChunkEntry::new(layer));
         }
         let keys: Vec<(u64, u8)> = map.keys().copied().collect();
         let at = spill.write_chunk(map).expect("write");
@@ -667,11 +836,12 @@ mod tests {
                     scope.spawn({
                         let spill = &spill;
                         move || {
-                            let mut map: BTreeMap<(u64, u8), BodyLayer> = BTreeMap::new();
+                            let mut map: BTreeMap<(u64, u8), ChunkEntry> = BTreeMap::new();
                             for tile in 0..64u64 {
-                                let mut layer = BodyLayer::new(1);
-                                layer.coords = vec![(i as i16, tile as i16); 1 + tile as usize];
-                                map.insert((tile, 1), layer);
+                                let mut entry = ChunkEntry::new(1);
+                                entry.layer.coords =
+                                    vec![(i as i16, tile as i16); 1 + tile as usize];
+                                map.insert((tile, 1), entry);
                             }
                             (i, spill.write_chunk(map).expect("write"))
                         }
@@ -692,7 +862,7 @@ mod tests {
         for (i, at) in refs.iter().enumerate() {
             let entries = drain(&spill, at, 1 << 15);
             assert_eq!(entries.len(), 64);
-            assert_eq!(entries[3].1.coords[0], (i as i16, 3));
+            assert_eq!(entries[3].1.layer.coords[0], (i as i16, 3));
         }
         spill.check_books().expect("the books balance");
     }
@@ -700,7 +870,7 @@ mod tests {
     #[test]
     fn a_truncated_chunk_errors_rather_than_decoding() {
         let spill = ChunkSpill::create(tmp("truncated")).expect("create");
-        let map: BTreeMap<(u64, u8), BodyLayer> = every_layer().into_iter().collect();
+        let map: BTreeMap<(u64, u8), ChunkEntry> = every_layer().into_iter().collect();
         let at = spill.write_chunk(map).expect("write");
 
         // Half a chunk: the reader is told the entry count but the bytes run out first.
@@ -735,6 +905,9 @@ mod tests {
         entry_header(&head).expect("a zero header is legal");
         head[23] = 1;
         assert!(entry_header(&head).is_err(), "a nonzero reserved tail decoded");
+        let mut head = [0u8; ENTRY_HEADER_BYTES];
+        head[31] = 1;
+        assert!(entry_header(&head).is_err(), "a nonzero second reserved tail decoded");
     }
 
     #[test]
@@ -749,13 +922,14 @@ mod tests {
     #[test]
     fn a_chunk_reads_the_same_however_the_window_is_sized() {
         let spill = ChunkSpill::create(tmp("windows")).expect("create");
-        let mut map: BTreeMap<(u64, u8), BodyLayer> = every_layer().into_iter().collect();
+        let mut map: BTreeMap<(u64, u8), ChunkEntry> = every_layer().into_iter().collect();
         // One entry far larger than the smallest window, so at least one read has to be the
         // oversize path rather than the buffered one.
-        let mut big = BodyLayer::new(4);
-        big.features = vec![feature(1, 1, GEOM_LINE, 0, 0, 1)];
-        big.parts = vec![Part { coord_start: 0, point_count: 40_000, winding: WINDING_OUTER }];
-        big.coords = (0..40_000).map(|i| (i as i16, -(i as i16))).collect();
+        let mut big = ChunkEntry::new(4);
+        big.layer.features = vec![feature(1, 1, GEOM_LINE, 0, 0, 1)];
+        big.layer.parts =
+            vec![Part { coord_start: 0, point_count: 40_000, winding: WINDING_OUTER }];
+        big.layer.coords = (0..40_000).map(|i| (i as i16, -(i as i16))).collect();
         map.insert((6, 4), big);
         let at = spill.write_chunk(map).expect("write");
 
@@ -783,8 +957,8 @@ mod tests {
         {
             let spill = ChunkSpill::create(&path).expect("create");
             // Keyed on one layer, carrying another.
-            let mut map: BTreeMap<(u64, u8), BodyLayer> = BTreeMap::new();
-            map.insert((1, 2), BodyLayer::new(3));
+            let mut map: BTreeMap<(u64, u8), ChunkEntry> = BTreeMap::new();
+            map.insert((1, 2), ChunkEntry::new(3));
             assert!(spill.write_chunk(map).is_err(), "a mislabelled entry was accepted");
         }
         assert!(!path.exists(), "the scratch file outlived a failed write");

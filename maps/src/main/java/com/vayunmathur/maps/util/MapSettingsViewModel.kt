@@ -19,7 +19,7 @@ import kotlinx.coroutines.launch
  *
  * The layer toggles live here (rather than on the map VM) so the same persisted
  * value drives both the sheet's switches and the layer visibility in
- * `MyMapLayers`. Reads use the boolean/string flows seeded with the current
+ * `MapLayers`. Reads use the boolean/string flows seeded with the current
  * snapshot so the first frame already reflects the stored value; writes are
  * fire-and-forget on `viewModelScope`.
  */

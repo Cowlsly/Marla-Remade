@@ -15,7 +15,9 @@ import androidx.compose.runtime.remember
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.unit.DpRect
 import androidx.compose.ui.viewinterop.AndroidView
+import com.vayunmathur.library.map.PlacedLabel
 import java.io.File
 
 /**
@@ -45,12 +47,24 @@ internal fun VulkanMapSurface(
     cameraState: CameraState,
     darkBasemap: Boolean,
     muted: Boolean,
+    archivePath: String? = null,
     modifier: Modifier = Modifier,
     onFrame: () -> Unit = {},
 ) {
     val context = LocalContext.current
     val density = LocalDensity.current.density
-    val host = remember(context) { MapSurfaceHost(context, cameraState, density, onFrame) }
+    val host = remember(context, archivePath) { MapSurfaceHost(context, cameraState, density, archivePath, onFrame) }
+
+    // Task-17 pick wiring: the projection answers queryRenderedLabels from
+    // the native placed-label snapshot owned by this surface's renderer.
+    // Registered here (not in the host) so disposal clears it: a projection
+    // without a live renderer answers empty rather than hitting a dead handle.
+    DisposableEffect(host, cameraState) {
+        cameraState.labelQueryProvider = { box: DpRect, layerIds: Set<String> ->
+            host.pickLabels(box, layerIds)
+        }
+        onDispose { cameraState.labelQueryProvider = null }
+    }
 
     DisposableEffect(host) { onDispose { host.dispose() } }
 
@@ -83,6 +97,7 @@ private class MapSurfaceHost(
     context: Context,
     private val cameraState: CameraState,
     private val density: Float,
+    private val archivePath: String?,
     private val onFrame: () -> Unit,
 ) {
     private val appContext = context.applicationContext
@@ -112,7 +127,7 @@ private class MapSurfaceHost(
             }
             val created = Surface(texture)
             surface = created
-            handle = MapNative.create(created, cacheDir.absolutePath, width, height, dark, muted)
+            handle = MapNative.create(created, cacheDir.absolutePath, width, height, dark, muted, archivePath)
             if (handle == 0L) {
                 Log.e(TAG, "the Vulkan renderer failed to start; see MapRenderer in logcat")
                 created.release()
@@ -176,6 +191,36 @@ private class MapSurfaceHost(
     }
 
     fun dispose() = teardown()
+
+    /**
+     * Task-17 pick: placed labels intersecting [box] (Dp), restricted to
+     * [layerIds] (our flat ids), in placement order. Parses the native
+     * `\u0001`-joined rows; empty when the renderer isn't up or nothing hits.
+     */
+    fun pickLabels(box: DpRect, layerIds: Set<String>): List<PlacedLabel> {
+        val h = handle
+        if (h == 0L) return emptyList()
+        return try {
+            MapNative.pickLabels(h, box.left.value, box.top.value, box.right.value, box.bottom.value)
+                .asSequence()
+                .map { row -> row.split('') }
+                .filter { parts -> parts.size == 5 && (layerIds.isEmpty() || parts[0] in layerIds) }
+                .map { parts ->
+                    PlacedLabel(
+                        layerId = parts[0],
+                        name = parts[1],
+                        kind = parts[2],
+                        position = GeoPoint(
+                            longitude = parts[3].toDoubleOrNull() ?: 0.0,
+                            latitude = parts[4].toDoubleOrNull() ?: 0.0,
+                        ),
+                    )
+                }
+                .toList()
+        } catch (_: Throwable) {
+            emptyList()
+        }
+    }
 
     fun setPalette(dark: Boolean, muted: Boolean) {
         this.dark = dark

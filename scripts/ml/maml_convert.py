@@ -113,6 +113,17 @@ SPEC = __doc__
 # that quantises this badly is worth looking at rather than shipping.
 MIN_INT8_COSINE = 0.999
 
+# Graphs the generic ONNX collector reads as int8. See [`int8_eligible`] for what that
+# excludes within a graph, and `scripts/ml/maml_survey.py` for how the list was chosen.
+#
+# Roughly halves each of these: 6.5 -> 3.3 MiB for mobilefacenet, 3.8 -> 1.9 for ppocr_rec,
+# 2.2 -> 1.2 for ppocr_det and u2netp, 1.2 -> 0.7 for scrfd.
+#
+# `selfie` is deliberately absent. It is a 211 KB depthwise net: a `[C, 1, 3, 3]` kernel saves
+# nine bytes per channel and spends two on the scale, so there is nothing to win and it would
+# be one more graph to re-verify.
+INT8_GRAPHS = set()
+
 # Graph ids. Shared with `library/ml/src/main/rust/src/weights.rs`; changing one
 # without the other is what the id exists to catch.
 GRAPHS = {
@@ -587,10 +598,40 @@ def fold_batch_norm(node, inits, weight, bias):
     return folded_weight, folded_bias
 
 
-def collect_layers(model, prefix=None):
+def int8_eligible(node, consumers):
+    """Whether `node`, a convolution, can be read as int8 by this runtime.
+
+    Three exclusions, all forced by the runtime rather than chosen:
+
+    * **`ConvTranspose`.** There is no int8 transposed convolution — `Builder` has `conv_int8`
+      and no `conv_transpose_int8`, and `conv_transpose.comp` has no int8 twin.
+    * **A convolution feeding a `PRelu`.** The Rust fuses that into the producing convolution
+      as `Act::PRelu`, whose per-channel slope wants the push-block offset the dequantisation
+      scale occupies. `Builder::conv_int8` refuses it outright.
+    * **Edge padding.** `conv_int8.comp` reads out-of-bounds taps as zero and has no border
+      replication, so a net that called `Builder::edge_padding` cannot quantise a *padded*
+      convolution. Only the four Supertonic graphs do, and they are not converted through
+      here — so this is documented rather than tested for.
+
+    Everything else is fair game. `conv_int8.comp` handles groups, arbitrary kernel sizes,
+    strides, dilations and zero padding, which is worth stating because
+    `nets::supertonic_vocoder::INT8_CONVS` reads as though grouping were the blocker; there,
+    the depthwise convolutions are excluded because they are *edge-padded*, not because they
+    are grouped.
+    """
+    if node.op_type != "Conv":
+        return False
+    return not any(c.op_type == "PRelu" for c in consumers.get(node.output[0], ()))
+
+
+def collect_layers(model, prefix=None, quantise=False):
     """The weighted nodes in topological order, with the tensors each contributes.
 
     `prefix` restricts the walk to one Torch module; see [`MODULES`].
+
+    `quantise` reads every eligible convolution as int8 rather than fp16 — three tensors
+    (kernel, per-output-channel scale, bias) instead of two. See [`INT8_GRAPHS`] for which
+    graphs ask for it and [`int8_eligible`] for what "eligible" excludes and why.
     """
     graph = model.graph
     inits = {i.name: i for i in graph.initializer}
@@ -621,6 +662,7 @@ def collect_layers(model, prefix=None):
 
     layers = []
     tensors = []
+    fidelity = Fidelity() if quantise else None
     for node in graph.node:
         if prefix is not None and not node.name.startswith(prefix):
             continue
@@ -635,17 +677,25 @@ def collect_layers(model, prefix=None):
             weight = array(node.input[1])
             weight, spatial = lift_to_2d(weight, node)
             bias = array(node.input[2]) if len(node.input) > 2 else None
-            if bias is None:
+            synthesised = bias is None
+            if synthesised:
                 # The shaders always add a bias, so a layer without one gets a zero. Exact,
                 # and recorded in the key so the digest notices if a layer that used to have
                 # a bias stops having one — which would otherwise look like the same table.
                 channels = weight.shape[1] if node.op_type == "ConvTranspose" else weight.shape[0]
                 bias = np.zeros(channels, dtype=np.float32)
-                key = convolution_key(node, weight, bias, spatial) + " b0=synthesised"
+            key = convolution_key(node, weight, bias, spatial)
+            if synthesised:
+                key += " b0=synthesised"
+            if quantise and int8_eligible(node, consumers):
+                kernel, scale = fidelity.quantise(node.name or node.output[0], weight)
+                tensors.append(kernel)
+                tensors.append(scale)
+                tensors.append(bias)
+                key = key.replace("Conv ", "ConvInt8 ", 1) + " zp=0 dtype=int8"
             else:
-                key = convolution_key(node, weight, bias, spatial)
-            tensors.append(weight)
-            tensors.append(bias)
+                tensors.append(weight)
+                tensors.append(bias)
         elif node.op_type == "PRelu":
             if not held(node.input[1]):
                 raise SystemExit(f"{node.output[0]}: a computed PRelu slope")
@@ -740,6 +790,8 @@ def collect_layers(model, prefix=None):
                 len(tensors) - first_tensor,
             )
         )
+    if fidelity is not None:
+        fidelity.report()
     return layers, tensors
 
 
@@ -2035,7 +2087,9 @@ def main():
     else:
         model = onnx.load(args.model)
         check_graph(model, args.graph)
-        layers, tensors = collect_layers(model, MODULES.get(args.graph))
+        layers, tensors = collect_layers(
+            model, MODULES.get(args.graph), quantise=args.graph in INT8_GRAPHS
+        )
 
     digest = layer_table_digest(layers)
     if args.print_digest:

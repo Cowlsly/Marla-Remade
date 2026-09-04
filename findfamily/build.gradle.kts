@@ -30,14 +30,7 @@ dependencies {
 
     implementation(project(":library:image"))
 
-    // Compose-native raster map (replaces maplibre; keeps spatialk coordinate types).
     implementation(project(":library:map"))
-
-    // Public AOSP ranging API (android.ranging.*) is part of the framework
-    // on Android 15+ — no third-party library needed. We intentionally avoid
-    // androidx.core.uwb because its only backend is GMS-mediated, which fails
-    // on GrapheneOS (sandboxed Play Services can't talk to the platform UWB
-    // service). All UWB code paths are gated on Build.VERSION.SDK_INT >= 35.
 }
 
 // The Compose screenshot renderer draws previews from the compiled `screenshotTest` classes

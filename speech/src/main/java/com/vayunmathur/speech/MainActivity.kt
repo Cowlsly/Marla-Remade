@@ -16,19 +16,13 @@ import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
-import androidx.compose.material3.DropdownMenuItem
-import androidx.compose.material3.ExperimentalMaterial3Api
-import androidx.compose.material3.ExposedDropdownMenuAnchorType
-import androidx.compose.material3.ExposedDropdownMenuBox
-import androidx.compose.material3.ExposedDropdownMenuDefaults
-import androidx.compose.material3.OutlinedTextField
-import androidx.compose.material3.TextFieldDefaults
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.getValue
@@ -39,15 +33,20 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
 import com.vayunmathur.library.ui.Button
 import com.vayunmathur.library.ui.Card
+import com.vayunmathur.library.ui.DropdownMenu
 import com.vayunmathur.library.ui.MaterialTheme
 import com.vayunmathur.library.ui.OutlinedButton
 import com.vayunmathur.library.ui.Scaffold
+import com.vayunmathur.library.ui.SelectableDropdownMenuItem
 import com.vayunmathur.library.ui.Text
 import com.vayunmathur.library.ui.DynamicTheme
+import com.vayunmathur.library.ui.IconArrowDropDown
+import com.vayunmathur.library.ui.IconCheck
 import com.vayunmathur.library.ui.rememberPermissionRequest
 import com.vayunmathur.speech.domain.SupertonicVoices
 import com.vayunmathur.speech.platform.SupertonicBundle
@@ -310,7 +309,6 @@ private fun TestSection(enabled: Boolean) {
     }
 }
 
-@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun TtsTestSection(
     enabled: Boolean,
@@ -325,8 +323,6 @@ private fun TtsTestSection(
             else languages.firstOrNull()?.code ?: "en"
         )
     }
-    var dropdownExpanded by remember { mutableStateOf(false) }
-
     // Hold the engine across recompositions and release it when leaving the screen.
     val engine = remember { mutableStateOf<TextToSpeech?>(null) }
     DisposableEffect(Unit) {
@@ -377,38 +373,13 @@ private fun TtsTestSection(
             Text(stringResource(R.string.try_the_voice), fontWeight = FontWeight.Bold)
 
             if (languages.isNotEmpty()) {
-                // Language picker for TTS test — using simple ExposedDropdown
-                ExposedDropdownMenuBox(
-                    expanded = dropdownExpanded,
-                    onExpandedChange = { dropdownExpanded = !dropdownExpanded },
-                ) {
-                    OutlinedTextField(
-                        value = languages.firstOrNull { it.code == selectedCode }
-                            ?.let { "${it.nativeName} (${it.englishName})" } ?: selectedCode,
-                        onValueChange = {},
-                        readOnly = true,
-                        label = { Text("Voice language") },
-                        trailingIcon = { ExposedDropdownMenuDefaults.TrailingIcon(expanded = dropdownExpanded) },
-                        colors = TextFieldDefaults.colors(),
-                        modifier = Modifier
-                            .menuAnchor(ExposedDropdownMenuAnchorType.PrimaryNotEditable)
-                            .fillMaxWidth(),
-                    )
-                    ExposedDropdownMenu(
-                        expanded = dropdownExpanded,
-                        onDismissRequest = { dropdownExpanded = false },
-                    ) {
-                        languages.forEach { voice ->
-                            DropdownMenuItem(
-                                text = { Text("${voice.nativeName} · ${voice.englishName} (${voice.code})") },
-                                onClick = {
-                                    selectedCode = voice.code
-                                    dropdownExpanded = false
-                                },
-                            )
-                        }
-                    }
-                }
+                // Language picker for the TTS test.
+                VoiceLanguageDropdown(
+                    languages = languages,
+                    selectedCode = selectedCode,
+                    onSelect = { selectedCode = it },
+                    modifier = Modifier.fillMaxWidth(),
+                )
             }
 
             Button(
@@ -446,6 +417,45 @@ private fun TtsTestSection(
                 },
             ) { Text(stringResource(R.string.speak_sample)) }
             if (status.isNotBlank()) Text(status, color = MaterialTheme.colorScheme.primary)
+        }
+    }
+}
+
+/**
+ * The voice-language picker, built from [OutlinedButton] + [DropdownMenu] rather than the
+ * library's `ExposedDropdownMenu` wrapper, which currently recurses into itself.
+ */
+@Composable
+private fun VoiceLanguageDropdown(
+    languages: List<TtsVoiceUiState>,
+    selectedCode: String,
+    onSelect: (String) -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    var expanded by remember { mutableStateOf(false) }
+    val selected = languages.firstOrNull { it.code == selectedCode }
+    Box(modifier) {
+        OutlinedButton(onClick = { expanded = true }, modifier = Modifier.fillMaxWidth()) {
+            Text(
+                selected?.let { "${it.nativeName} (${it.englishName})" } ?: selectedCode,
+                modifier = Modifier.weight(1f),
+                textAlign = TextAlign.Start,
+                maxLines = 1,
+            )
+            IconArrowDropDown()
+        }
+        DropdownMenu(expanded = expanded, onDismissRequest = { expanded = false }) {
+            languages.forEach { voice ->
+                SelectableDropdownMenuItem(
+                    selected = voice.code == selectedCode,
+                    onClick = {
+                        onSelect(voice.code)
+                        expanded = false
+                    },
+                    text = { Text("${voice.nativeName} · ${voice.englishName} (${voice.code})") },
+                    selectedLeadingIcon = { IconCheck() },
+                )
+            }
         }
     }
 }

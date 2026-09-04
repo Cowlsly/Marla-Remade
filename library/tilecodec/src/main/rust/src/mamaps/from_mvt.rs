@@ -141,7 +141,7 @@ pub fn from_tile(tile: &Tile) -> Result<(Body, Stats)> {
     let extent = u16::try_from(extent).map_err(|_| {
         crate::proto::Error(format!("an MVT extent of {extent} does not fit a .mamaps body"))
     })?;
-    Ok((Body { extent, layers }, stats))
+    Ok((Body { extent, layers, names: Vec::new() }, stats))
 }
 
 /// Append one feature and its parts, skipping degenerate paths.
@@ -179,7 +179,17 @@ fn push_feature(
     if part_count == 0 {
         return;
     }
-    layer.features.push(Feature { kind, kind_detail, geom_type, flags, parts_offset, part_count });
+    layer.features.push(Feature {
+        kind,
+        kind_detail,
+        geom_type,
+        flags,
+        // MVT conversion drops names: it exists to compare geometry, not labels.
+        name_idx: super::body::NAME_NONE,
+        parts_offset,
+        part_count,
+        transit_color: 0,
+    });
 }
 
 /// A property value as a small non-negative integer, for a boundary's admin level.
@@ -293,11 +303,11 @@ mod tests {
     }
 
     /// A source layer the schema does not carry is skipped whole and counted, not an error: the
-    /// upstream archive has 20-odd layers and this format draws seven.
+    /// upstream archive has 20-odd layers and this format draws ten.
     #[test]
     fn a_layer_the_schema_does_not_carry_is_skipped_and_counted() {
         let tile = tile_with(vec![
-            layer_of("places", vec![line_feature("locality", &[(0, 0), (1, 1)])]),
+            layer_of("transit_routes", vec![line_feature("locality", &[(0, 0), (1, 1)])]),
             roads_layer(vec![line_feature("highway", &[(0, 0), (1, 1)])]),
         ]);
         let (body, stats) = from_tile(&tile).expect("convert");

@@ -176,6 +176,13 @@ configure<com.android.build.api.dsl.ApplicationExtension> {
             proguardFiles(
                 getDefaultProguardFile("proguard-android-optimize.txt"), proguardFile.absolutePath,
             )
+            // App-specific keeps belong next to the app, not in the shared root file.
+            // Resolved to an absolute path here at configuration time so no Project
+            // reference is captured in a task action (configuration cache).
+            val appProguardFile = File(projectDir, "proguard-rules.pro")
+            if (appProguardFile.exists()) {
+                proguardFiles(appProguardFile.absolutePath)
+            }
             buildConfigField("boolean", "DEV_BUILD", "false")
         }
         create("dev") {
@@ -210,6 +217,20 @@ configure<com.android.build.api.dsl.ApplicationExtension> {
                 "META-INF/LICENSE.md",
                 "META-INF/NOTICE.md",
             )
+        }
+        // AGP defaults both of these to false, which stores .so and .dex entries
+        // uncompressed so the platform can mmap them straight out of the APK. That
+        // trade is right for Play, which ships app bundles and compresses on the
+        // wire anyway. These apps are distributed as bare APKs through :appstore,
+        // where the stored bytes _are_ the download, and native code plus dex is
+        // the bulk of every APK here (dex ~236 MB and .so ~165 MB across the repo,
+        // both roughly halving under deflate). Cost is install size and a slower
+        // first launch, since the libs now get extracted.
+        jniLibs {
+            useLegacyPackaging = true
+        }
+        dex {
+            useLegacyPackaging = true
         }
     }
 }

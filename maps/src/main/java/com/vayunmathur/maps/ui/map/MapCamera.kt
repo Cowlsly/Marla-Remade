@@ -2,33 +2,34 @@ package com.vayunmathur.maps.ui.map
 
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import com.vayunmathur.library.map.CameraState
 import com.vayunmathur.maps.util.NavigationProgress
+import com.vayunmathur.maps.util.toGeoPoint
 import kotlin.time.Duration.Companion.milliseconds
-import org.maplibre.compose.camera.CameraState
 
 /** How long the follow animation takes. Matched to the ~1s GPS cadence so it never catches up
  *  to itself and stutters. */
-private val FOLLOW_ANIMATION = 800.milliseconds
+private val FOLLOW_ANIMATION_MS = 800.milliseconds.inWholeMilliseconds.toInt()
 
 /**
  * A camera move within this window of our own `animateTo` is assumed to be that animation.
  *
- * `isCameraMoving` reports that the camera is moving but not who started it, so telling a user
- * pan apart from our own follow animation has to be done on timing. Generous relative to
- * [FOLLOW_ANIMATION] because the animation's settle can outlast its nominal duration.
+ * library:map's [CameraState] has no `isCameraMoving`, so the pan-away detection the MapLibre
+ * version had is gone with it (GAP: renderer owns the gesture API — see the task-7 report).
+ * `autoFollow` therefore stays on until the user toggles it via the recenter control, and this
+ * timestamp is kept so that detection can be re-added without re-threading the state.
  */
 private const val PROGRAMMATIC_MOVE_WINDOW_MS = 1_200
 
-/** Zoom and tilt the camera adopts while following the puck. */
+/** Zoom the camera adopts while following the puck. */
 private const val FOLLOW_ZOOM = 17.0
-private const val FOLLOW_TILT = 60.0
 
 /**
- * Follow the puck while navigating, and stop following when the user pans away.
+ * Follow the puck while navigating.
  *
- * Two effects that only make sense as a pair: the first moves the camera, the second decides
- * whether a move was ours. Keeping them together is what makes the timing relationship between
- * [FOLLOW_ANIMATION] and [PROGRAMMATIC_MOVE_WINDOW_MS] visible.
+ * North-up always: library:map's camera is target + zoom only, so there is no heading-up tilt
+ * or course-over-ground bearing to drive (GAP: same renderer gap as above). The follow still
+ * tracks the snapped position and zoom, which is the part that keeps the puck on screen.
  */
 @Composable
 fun NavigationCameraFollow(
@@ -37,26 +38,17 @@ fun NavigationCameraFollow(
     navProgress: NavigationProgress?,
     isNavigating: Boolean,
 ) {
-    LaunchedEffect(navProgress, chrome.autoFollow, chrome.northUp) {
+    LaunchedEffect(navProgress, chrome.autoFollow, isNavigating) {
+        if (!isNavigating) return@LaunchedEffect
         val progress = navProgress ?: return@LaunchedEffect
         if (!chrome.autoFollow) return@LaunchedEffect
         chrome.lastProgrammaticMoveMs = System.currentTimeMillis()
         camera.animateTo(
             camera.position.copy(
-                target = progress.snappedPosition,
-                bearing = if (chrome.northUp) 0.0 else progress.courseOverGround.toDouble(),
-                tilt = if (chrome.northUp) 0.0 else FOLLOW_TILT,
+                target = progress.snappedPosition.toGeoPoint(),
                 zoom = FOLLOW_ZOOM,
             ),
-            FOLLOW_ANIMATION,
+            FOLLOW_ANIMATION_MS,
         )
-    }
-
-    LaunchedEffect(camera.isCameraMoving, isNavigating) {
-        if (!isNavigating) return@LaunchedEffect
-        val sinceOurMove = System.currentTimeMillis() - chrome.lastProgrammaticMoveMs
-        if (camera.isCameraMoving && sinceOurMove > PROGRAMMATIC_MOVE_WINDOW_MS) {
-            chrome.autoFollow = false
-        }
     }
 }

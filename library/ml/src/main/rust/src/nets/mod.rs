@@ -31,6 +31,7 @@
 /// so it adds nothing to the shipped `.so`.
 #[cfg(test)]
 pub mod reference;
+pub mod gemma4;
 pub mod mobilefacenet;
 pub mod maia;
 pub mod nllb;
@@ -280,6 +281,15 @@ pub enum Kind {
     /// the reason a decode plan can be recorded once. See `shaders/cache_write.comp` and
     /// [`Builder::cache_write`].
     CacheWrite,
+    /// `tanh(x / cap) * cap`, Gemma's `final_logit_softcapping`. See `shaders/softcap.comp`.
+    Softcap,
+    /// An [`Act`] applied on its own, for a value no convolution produced. See
+    /// `shaders/activate.comp`.
+    ///
+    /// [`Act::PRelu`] is **not** supported: its slope is a weight tensor, and the one caller
+    /// this exists for wants `Gelu`. Passing it here silently uses a zero slope, which is a
+    /// plain `Relu` - so [`Builder::activate`] refuses it rather than letting that happen.
+    Activate,
     /// `O[h][d][i] = sum_j S[h][i][j] * V[h][d][j]`, attention's weighted sum.
     ///
     /// `O[h][d][i] = sum_j S[h][i][j] * V[h][d][j]`, attention's weighted sum.
@@ -357,6 +367,12 @@ pub enum Kind {
     ///
     /// Chosen automatically by [`Builder`]; no net asks for it.
     ConvVecInt8,
+    /// [`Kind::ConvVecInt8`] with a four-bit kernel and a per-block scale. See
+    /// `shaders/conv_vec_int4.comp`.
+    ConvVecInt4,
+    /// [`Kind::ConvPointInt8`] with a four-bit kernel and a per-block scale. See
+    /// `shaders/conv_point_int4.comp`.
+    ConvPointInt4,
     Embed,
     /// `out[i] = weights[i]`, a learned tensor copied into the arena.
     ///
@@ -461,6 +477,14 @@ pub struct Push {
     /// Zero for every net that does not decode, which is all of them but NLLB and whisper, so
     /// their recordings and their numbers are untouched.
     pub dyn_keys: u32,
+    /// Key/value heads, when fewer than [`Push::group`]. Zero means as many as `group`.
+    ///
+    /// Grouped- and multi-query attention: several query heads share one key/value head, so a
+    /// cache position is `kv_heads * head_dim` channels rather than `group * head_dim`. Gemma 4's
+    /// text decoder is the extreme case, eight query heads to **one** key/value head.
+    ///
+    /// Zero for every net that predates this, so their caches and their pushes are unchanged.
+    pub kv_heads: u32,
 }
 
 /// Which span of a score-map row a [`Node::Softmax`] normalises.
@@ -476,6 +500,19 @@ pub enum SoftmaxMode {
     Causal,
     /// The leading `prefix + 1` entries, the rest left untouched.
     Prefix,
+}
+
+/// How wide a quantised convolution's kernel is, and so how its scale is shaped.
+///
+/// The two are not interchangeable at the same scale layout: eight bits carry a row's dynamic
+/// range with one scale per output channel, four bits do not, so [`Quant::I4`] takes a rank-2
+/// scale of one per block of [`crate::weights::I4_BLOCK`] taps.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Quant {
+    /// Signed 8-bit, one scale per output channel.
+    I8,
+    /// Signed 4-bit, one scale per block of taps.
+    I4,
 }
 
 /// One step of a compiled forward pass.
@@ -548,6 +585,13 @@ impl Kind {
                 reads.push(WeightRead { at: elems(push.bias), field: "bias" });
                 reads.push(WeightRead { at: elems(push.act_weight), field: "act_weight" });
             }
+            // The same three reads: an int4 kernel is addressed through the identical 32-bit
+            // word view, and its scale table is fp16 like an int8 one - only wider.
+            Kind::ConvVecInt4 | Kind::ConvPointInt4 => {
+                reads.push(WeightRead { at: words(push.weight), field: "weight" });
+                reads.push(WeightRead { at: elems(push.bias), field: "bias" });
+                reads.push(WeightRead { at: elems(push.act_weight), field: "act_weight" });
+            }
             // Gamma then beta, both rank-1.
             Kind::LayerNorm => {
                 reads.push(WeightRead { at: elems(push.weight), field: "weight" });
@@ -581,6 +625,8 @@ impl Kind {
             | Kind::SoftmaxCausal
             | Kind::SoftmaxPrefix
             | Kind::CacheWrite
+            | Kind::Softcap
+            | Kind::Activate
             | Kind::AttnApply
             | Kind::AttnApplyCached
             | Kind::Rotary => {}
@@ -668,8 +714,8 @@ impl WeightSource for crate::weights::Offsets {
     }
     fn shaped_words(&self, index: usize, dims: &[u32]) -> Result<u32, String> {
         let found = crate::weights::Offsets::shaped(self, index, dims)?;
-        if !found.int8 {
-            return Err(format!("tensor {index} is fp16, but the pass wants int8"));
+        if !found.dtype.is_quantised() {
+            return Err(format!("tensor {index} is fp16, but the pass wants a quantised kernel"));
         }
         Ok(found.word_offset())
     }
@@ -687,8 +733,8 @@ impl WeightSource for crate::weights::Weights {
     }
     fn shaped_words(&self, index: usize, dims: &[u32]) -> Result<u32, String> {
         let found = crate::weights::Weights::shaped(self, index, dims)?;
-        if !found.int8 {
-            return Err(format!("tensor {index} is fp16, but the pass wants int8"));
+        if !found.dtype.is_quantised() {
+            return Err(format!("tensor {index} is fp16, but the pass wants a quantised kernel"));
         }
         Ok(found.word_offset())
     }
@@ -771,6 +817,8 @@ enum Node {
         out: Id,
         gamma: u32,
         epsilon: f32,
+        /// Contiguous runs of channels normalised independently. One for a whole-axis norm.
+        groups: u32,
     },
     AttnScores {
         q: Id,
@@ -785,8 +833,10 @@ enum Node {
         cache: Id,
         out: Id,
         heads: u32,
+        /// Heads supplying the keys. Equal to `heads` for ordinary multi-head attention.
+        kv_heads: u32,
         scale: f32,
-        /// Take the key count from the step rather than the cache's shape. See [`Push::dyn_keys`].
+        /// Take the key range from the step rather than the cache's shape. See [`Push::dyn_keys`].
         dynamic: bool,
     },
     /// One query against a position-major V cache. See [`Kind::AttnApplyCached`].
@@ -795,7 +845,9 @@ enum Node {
         cache: Id,
         out: Id,
         heads: u32,
-        /// Take the key count from the step rather than the cache's shape. See [`Push::dyn_keys`].
+        /// Heads supplying the values. Equal to `heads` for ordinary multi-head attention.
+        kv_heads: u32,
+        /// Take the key range from the step rather than the cache's shape. See [`Push::dyn_keys`].
         dynamic: bool,
     },
     Softmax {
@@ -808,6 +860,18 @@ enum Node {
     CacheWrite {
         row: Id,
         cache: Id,
+    },
+    /// `tanh(x / cap) * cap`. See [`Kind::Softcap`].
+    Softcap {
+        input: Id,
+        out: Id,
+        cap: f32,
+    },
+    /// An activation on its own. See [`Kind::Activate`].
+    Activate {
+        input: Id,
+        out: Id,
+        act: Act,
     },
     /// Concatenation along the **width** axis, one strided run per channel row. See
     /// [`Builder::concat_positions`].
@@ -848,6 +912,8 @@ enum Node {
         pad: (u32, u32),
         group: u32,
         act: Act,
+        /// Whether the kernel is eight bits or four. See [`Quant`].
+        quant: Quant,
     },
     AttnApply {
         probs: Id,
@@ -1033,9 +1099,8 @@ impl<'a> Builder<'a> {
     ) -> Id {
         let in_shape = self.shape_of(input);
         let (kh, kw) = kernel;
-        let splits = group != 0
-            && in_shape.c.is_multiple_of(group)
-            && m.is_multiple_of(group);
+        let splits =
+            group != 0 && in_shape.c.is_multiple_of(group) && m.is_multiple_of(group);
         if !splits {
             self.fail(format!(
                 "tensor {weight_index}: {} in / {m} out channels do not split into \
@@ -1046,7 +1111,6 @@ impl<'a> Builder<'a> {
         let per_group = in_shape.c.checked_div(group).unwrap_or(0);
         let weight = self.weight(weight_index, &[m, per_group, kh, kw]);
         let bias = self.weight(weight_index + 1, &[m]);
-
         let (pad_t, pad_l, pad_b, pad_r) = pads;
         let out_h = conv_out(in_shape.h, kh, stride.0, dilation.0, pad_t + pad_b);
         let out_w = conv_out(in_shape.w, kw, stride.1, dilation.1, pad_l + pad_r);
@@ -1077,21 +1141,9 @@ impl<'a> Builder<'a> {
     /// table entry is already full at 32 bytes, and a companion tensor needs no format version
     /// bump.
     ///
-    /// # Per channel, not per tensor
-    ///
-    /// Read off `encoder_model_quantized.onnx` rather than assumed, and the opposite of what this
-    /// was first written for: onnxruntime's dynamic quantiser emits **one scale per output
-    /// column**, so a `[1024, 4096]` `MatMul` carries a `[4096]` scale. All 72 weight
-    /// `MatMulInteger`s in the SMaLL-100 encoder are that shape. The zero points are per-column
-    /// vectors too, but every one of them is zero, so the quantisation is symmetric and a value
-    /// is still just `int8 * scale`.
-    ///
-    /// It costs nothing over a scalar: the scale multiplies the finished accumulator either way,
-    /// so the inner loop is the same integer-to-float convert and multiply-add the fp16 path does.
-    /// A per-*tap* scale would not work this way, which is why the rank is checked.
-    ///
-    /// `Act::PRelu` is refused: it would need a second weights offset and the push block has
-    /// one spare, which the scale is using.
+    /// The quantisation is symmetric and per output channel, so a value is `int8 * scale` and the
+    /// scale multiplies the finished accumulator once. `Act::PRelu` is refused: it would need a
+    /// second weights offset, and the push block has one spare which the scale is using.
     #[allow(clippy::too_many_arguments)]
     pub fn conv_int8(
         &mut self,
@@ -1104,6 +1156,53 @@ impl<'a> Builder<'a> {
         pads: (u32, u32, u32, u32),
         group: u32,
         act: Act,
+    ) -> Id {
+        self.conv_quantised(
+            input, weight_index, m, kernel, stride, dilation, pads, group, act, Quant::I8,
+        )
+    }
+
+    /// [`Builder::conv_int8`] with a **four-bit** kernel and a per-block scale.
+    ///
+    /// The scale tensor is rank 2, `(m, ceil(taps / I4_BLOCK))`, where a tap is one element of
+    /// `per_group * kh * kw`. Four bits cannot hold an output row's dynamic range under a single
+    /// scale; a block of 32 taps can.
+    ///
+    /// Only `1 x 1` is offered. The padded and grouped shader has no int4 counterpart, and the
+    /// tensors worth quantising this far - projections and feed-forwards - are all pointwise.
+    pub fn conv_int4(&mut self, input: Id, weight_index: usize, m: u32, act: Act) -> Id {
+        self.conv_quantised(
+            input,
+            weight_index,
+            m,
+            (1, 1),
+            (1, 1),
+            (1, 1),
+            (0, 0, 0, 0),
+            1,
+            act,
+            Quant::I4,
+        )
+    }
+
+    /// The body behind [`Builder::conv_int8`] and [`Builder::conv_int4`].
+    ///
+    /// The two differ only in the scale tensor's rank and in which shaders the plan lowers to, so
+    /// everything else - the group check, the word-addressed kernel, the refusal of `PRelu` - is
+    /// stated once here.
+    #[allow(clippy::too_many_arguments)]
+    fn conv_quantised(
+        &mut self,
+        input: Id,
+        weight_index: usize,
+        m: u32,
+        kernel: (u32, u32),
+        stride: (u32, u32),
+        dilation: (u32, u32),
+        pads: (u32, u32, u32, u32),
+        group: u32,
+        act: Act,
+        quant: Quant,
     ) -> Id {
         let in_shape = self.shape_of(input);
         let (kh, kw) = kernel;
@@ -1118,7 +1217,7 @@ impl<'a> Builder<'a> {
         }
         if let Act::PRelu(_) = act {
             self.fail(format!(
-                "tensor {weight_index}: an int8 convolution cannot carry a PRelu, whose \
+                "tensor {weight_index}: a quantised convolution cannot carry a PRelu, whose \
                  per-channel slope would need the offset the scale occupies"
             ));
         }
@@ -1135,9 +1234,16 @@ impl<'a> Builder<'a> {
                 0
             }
         };
-        let scale = self.weight(weight_index + 1, &[m]);
+        let scale = match quant {
+            Quant::I8 => self.weight(weight_index + 1, &[m]),
+            // One per block of taps, so the table is `(out, blocks)`. Resolved by shape, which is
+            // what stops an int8 scale being read as an int4 one.
+            Quant::I4 => {
+                let blocks = (per_group * kh * kw).div_ceil(crate::weights::I4_BLOCK);
+                self.weight(weight_index + 1, &[m, blocks])
+            }
+        };
         let bias = self.weight(weight_index + 2, &[m]);
-
         let (pad_t, pad_l, pad_b, pad_r) = pads;
         let out_h = conv_out(in_shape.h, kh, stride.0, dilation.0, pad_t + pad_b);
         let out_w = conv_out(in_shape.w, kw, stride.1, dilation.1, pad_l + pad_r);
@@ -1154,6 +1260,7 @@ impl<'a> Builder<'a> {
             pad: (pad_t, pad_l),
             group,
             act,
+            quant,
         });
         out
     }
@@ -1452,10 +1559,33 @@ impl<'a> Builder<'a> {
     /// [`layer_norm`](Self::layer_norm) without the mean subtraction and without beta, so
     /// `weight_index` is a single tensor rather than the start of a pair.
     pub fn rms_norm(&mut self, input: Id, weight_index: usize, epsilon: f32) -> Id {
+        self.rms_norm_grouped(input, weight_index, epsilon, 1)
+    }
+
+    /// [`Builder::rms_norm`] over each of `groups` contiguous runs of channels independently.
+    ///
+    /// One gain table of `channels / groups` entries, re-used by every group. This is Gemma 4's
+    /// QK-norm: a query is `[heads * head_dim, 1, 1]` and each head's `head_dim` slice is
+    /// normalised on its own, against one `head_dim`-long gamma.
+    ///
+    /// Not expressible as a reshape. The channels are head-major, so head `h`'s slice is
+    /// contiguous at `h * head_dim`; a `[head_dim, 1, heads]` view would stride the wrong way and
+    /// silently normalise across heads instead of within them.
+    pub fn rms_norm_grouped(
+        &mut self,
+        input: Id,
+        weight_index: usize,
+        epsilon: f32,
+        groups: u32,
+    ) -> Id {
         let shape = self.shape_of(input);
-        let gamma = self.weight(weight_index, &[shape.c]);
+        if groups == 0 || !shape.c.is_multiple_of(groups) {
+            self.fail(format!("{} channels do not split into {groups} groups", shape.c));
+        }
+        let per_group = shape.c.checked_div(groups.max(1)).unwrap_or(0);
+        let gamma = self.weight(weight_index, &[per_group]);
         let out = self.tensor(shape);
-        self.nodes.push(Node::RmsNorm { input, out, gamma, epsilon });
+        self.nodes.push(Node::RmsNorm { input, out, gamma, epsilon, groups });
         out
     }
 
@@ -1479,7 +1609,7 @@ impl<'a> Builder<'a> {
     /// One query is what makes a causal mask unnecessary — a decode step attends over exactly the
     /// positions in the cache, so the prefix bound is the tensor's own length.
     pub fn attn_scores_cached(&mut self, q: Id, cache: Id, heads: u32) -> Id {
-        self.attn_scores_cached_at(q, cache, heads, false)
+        self.attn_scores_cached_at(q, cache, heads, heads, false, true)
     }
 
     /// [`Builder::attn_scores_cached`] with the key count supplied by the step, not the shape.
@@ -1487,10 +1617,49 @@ impl<'a> Builder<'a> {
     /// `cache` is then sized to the **maximum** context the plan is built for, and only its
     /// leading `prefix + 1` positions are attended. See [`Push::dyn_keys`].
     pub fn attn_scores_cached_dynamic(&mut self, q: Id, cache: Id, heads: u32) -> Id {
-        self.attn_scores_cached_at(q, cache, heads, true)
+        self.attn_scores_cached_at(q, cache, heads, heads, true, true)
     }
 
-    fn attn_scores_cached_at(&mut self, q: Id, cache: Id, heads: u32, dynamic: bool) -> Id {
+    /// [`Builder::attn_scores_cached_dynamic`] where `kv_heads` heads supply the keys.
+    ///
+    /// The cache is then `[keys, 1, kv_heads * head_dim]` rather than `[keys, 1, d_model]`, which
+    /// is how a decoder holding one KV head for eight query heads stores an eighth as much.
+    pub fn attn_scores_cached_grouped(
+        &mut self,
+        q: Id,
+        cache: Id,
+        heads: u32,
+        kv_heads: u32,
+    ) -> Id {
+        self.attn_scores_cached_at(q, cache, heads, kv_heads, true, true)
+    }
+
+    /// [`Builder::attn_scores_cached_grouped`] for a query that is **already scaled**.
+    ///
+    /// The usual `1 / sqrt(head_dim)` is a property of the head geometry, so every other entry
+    /// point derives it rather than taking it. Gemma 4 is the exception: its export folds the
+    /// scale into `q_norm`'s gamma and applies none between the projection and the score matmul,
+    /// so deriving it here as well would apply it twice - which is not a shape error, does not
+    /// fail any layout test, and merely flattens every attention distribution in the model.
+    pub fn attn_scores_cached_prescaled(
+        &mut self,
+        q: Id,
+        cache: Id,
+        heads: u32,
+        kv_heads: u32,
+    ) -> Id {
+        self.attn_scores_cached_at(q, cache, heads, kv_heads, true, false)
+    }
+
+    fn attn_scores_cached_at(
+        &mut self,
+        q: Id,
+        cache: Id,
+        heads: u32,
+        kv_heads: u32,
+        dynamic: bool,
+        derive_scale: bool,
+    ) -> Id {
         let (sq, sc) = (self.shape_of(q), self.shape_of(cache));
         if sq.h != 1 || sq.w != 1 {
             self.fail(format!(
@@ -1498,19 +1667,29 @@ impl<'a> Builder<'a> {
                  [d_model, 1, 1]"
             ));
         }
-        if sc.h != 1 || sc.w != sq.c {
+        if sc.h != 1 {
             self.fail(format!(
                 "a cached score map over q {sq:?} and a cache {sc:?}: a cache is \
-                 [keys, 1, d_model], so its width is d_model and its channels are the keys"
+                 [keys, 1, kv_heads * head_dim], so its channels are the keys"
             ));
         }
         if heads == 0 || !sq.c.is_multiple_of(heads) {
             self.fail(format!("{} channels do not split into {heads} heads", sq.c));
         }
         let head_dim = sq.c.checked_div(heads).unwrap_or(0);
-        let scale = 1.0 / (head_dim.max(1) as f32).sqrt();
+        if kv_heads == 0 || heads % kv_heads != 0 {
+            self.fail(format!("{heads} query heads do not group into {kv_heads} key/value heads"));
+        }
+        if sc.w != kv_heads * head_dim {
+            self.fail(format!(
+                "a cache {sc:?} for {kv_heads} key/value heads of {head_dim}: its width should \
+                 be {}",
+                kv_heads * head_dim
+            ));
+        }
+        let scale = if derive_scale { 1.0 / (head_dim.max(1) as f32).sqrt() } else { 1.0 };
         let out = self.tensor(Shape::new(heads, 1, sc.c));
-        self.nodes.push(Node::AttnScoresCached { q, cache, out, heads, scale, dynamic });
+        self.nodes.push(Node::AttnScoresCached { q, cache, out, heads, kv_heads, scale, dynamic });
         out
     }
 
@@ -1520,7 +1699,7 @@ impl<'a> Builder<'a> {
     /// `[d_model, 1, 1]` — back in the channel-major layout the next projection reads, so the
     /// cache layout is confined to the two operands that are caches.
     pub fn attn_apply_cached(&mut self, probs: Id, cache: Id, heads: u32) -> Id {
-        self.attn_apply_cached_at(probs, cache, heads, false)
+        self.attn_apply_cached_at(probs, cache, heads, heads, false)
     }
 
     /// [`Builder::attn_apply_cached`] with the key count supplied by the step, not the shape.
@@ -1529,10 +1708,31 @@ impl<'a> Builder<'a> {
     /// [`Builder::softmax_prefix`]: all three read the same bound, and mixing a dynamic score map
     /// with a full-width sum would fold unattended positions into the result.
     pub fn attn_apply_cached_dynamic(&mut self, probs: Id, cache: Id, heads: u32) -> Id {
-        self.attn_apply_cached_at(probs, cache, heads, true)
+        self.attn_apply_cached_at(probs, cache, heads, heads, true)
     }
 
-    fn attn_apply_cached_at(&mut self, probs: Id, cache: Id, heads: u32, dynamic: bool) -> Id {
+    /// [`Builder::attn_apply_cached_dynamic`] where `kv_heads` heads supply the values.
+    ///
+    /// `out_channels` is the query side's width, `heads * head_dim`, which is what the next
+    /// projection reads — it cannot be inferred from a cache that is narrower.
+    pub fn attn_apply_cached_grouped(
+        &mut self,
+        probs: Id,
+        cache: Id,
+        heads: u32,
+        kv_heads: u32,
+    ) -> Id {
+        self.attn_apply_cached_at(probs, cache, heads, kv_heads, true)
+    }
+
+    fn attn_apply_cached_at(
+        &mut self,
+        probs: Id,
+        cache: Id,
+        heads: u32,
+        kv_heads: u32,
+        dynamic: bool,
+    ) -> Id {
         let (sp, sc) = (self.shape_of(probs), self.shape_of(cache));
         if sp.c != heads || sp.h != 1 {
             self.fail(format!("cached attention over probs {sp:?} with {heads} heads"));
@@ -1542,11 +1742,18 @@ impl<'a> Builder<'a> {
                 "cached attention over probs {sp:?} and a cache {sc:?}: the key counts differ"
             ));
         }
-        if heads == 0 || !sc.w.is_multiple_of(heads) {
-            self.fail(format!("{} channels do not split into {heads} heads", sc.w));
+        if heads == 0 || kv_heads == 0 || heads % kv_heads != 0 {
+            self.fail(format!("{heads} query heads do not group into {kv_heads} key/value heads"));
         }
-        let out = self.tensor(Shape::new(sc.w, 1, 1));
-        self.nodes.push(Node::AttnApplyCached { probs, cache, out, heads, dynamic });
+        if !sc.w.is_multiple_of(kv_heads.max(1)) {
+            self.fail(format!("{} cache channels do not split into {kv_heads} heads", sc.w));
+        }
+        // The output is the **query** side's width, `heads * head_dim`, which is what the next
+        // projection reads. Under grouped- or multi-query attention the cache is narrower than
+        // that, so taking the width from the cache would silently produce a shorter tensor.
+        let head_dim = sc.w.checked_div(kv_heads.max(1)).unwrap_or(0);
+        let out = self.tensor(Shape::new(heads * head_dim, 1, 1));
+        self.nodes.push(Node::AttnApplyCached { probs, cache, out, heads, kv_heads, dynamic });
         out
     }
 
@@ -1639,6 +1846,31 @@ impl<'a> Builder<'a> {
             self.fail(format!("a cache is [max_positions, 1, d_model], not {sc:?}"));
         }
         self.nodes.push(Node::CacheWrite { row, cache });
+    }
+
+    /// An [`Act`] applied on its own, for a value no convolution produced.
+    ///
+    /// Every other activation in this runtime is folded into the projection before it. A gated
+    /// feed-forward is the exception - see [`Kind::Activate`].
+    pub fn activate(&mut self, input: Id, act: Act) -> Id {
+        if matches!(act, Act::PRelu(_)) {
+            self.fail("a standalone PRelu, whose slope is a weight this op does not bind".into());
+        }
+        let shape = self.shape_of(input);
+        let out = self.tensor(shape);
+        self.nodes.push(Node::Activate { input, out, act });
+        out
+    }
+
+    /// `tanh(x / cap) * cap`, elementwise. See [`Kind::Softcap`].
+    pub fn softcap(&mut self, input: Id, cap: f32) -> Id {
+        if !(cap > 0.0) {
+            self.fail(format!("a softcap of {cap}, which must be positive"));
+        }
+        let shape = self.shape_of(input);
+        let out = self.tensor(shape);
+        self.nodes.push(Node::Softcap { input, out, cap });
+        out
     }
 
     /// Softmax over the last axis, which for a score map is one query's distribution.
@@ -2029,6 +2261,7 @@ impl<'a> Builder<'a> {
                 pad,
                 group,
                 act,
+                quant,
             } => {
                 let (si, so) = (shape(*input), shape(*out));
                 // The same test `Node::Conv` applies below, less the two cases that cannot arise
@@ -2051,15 +2284,25 @@ impl<'a> Builder<'a> {
                 let vector = tiled && positions == 1;
                 let tiles = so.c.div_ceil(CONV_POINT_TILE) * positions.div_ceil(CONV_POINT_TILE);
                 let rows = so.c.div_ceil(CONV_VEC_ROWS);
-                let kind = match (tiled, vector) {
-                    (_, true) => Kind::ConvVecInt8,
-                    (true, false) => Kind::ConvPointInt8,
-                    (false, false) => Kind::ConvInt8,
+                let kind = match (quant, tiled, vector) {
+                    (Quant::I8, _, true) => Kind::ConvVecInt8,
+                    (Quant::I8, true, false) => Kind::ConvPointInt8,
+                    (Quant::I8, false, false) => Kind::ConvInt8,
+                    (Quant::I4, _, true) => Kind::ConvVecInt4,
+                    (Quant::I4, true, false) => Kind::ConvPointInt4,
+                    (Quant::I4, false, false) => {
+                        return Err(format!(
+                            "an int4 convolution with a {}x{} kernel or {group} groups: only the \
+                             two 1x1 lowerings are quantised to four bits, because the padded \
+                             and grouped shader has no int4 counterpart",
+                            kernel.0, kernel.1
+                        ))
+                    }
                 };
-                // Workgroups for the two staged kinds, output elements for the untiled one.
+                // Workgroups for the staged kinds, output elements for the untiled one.
                 let count = match kind {
-                    Kind::ConvVecInt8 => rows,
-                    Kind::ConvPointInt8 => tiles,
+                    Kind::ConvVecInt8 | Kind::ConvVecInt4 => rows,
+                    Kind::ConvPointInt8 | Kind::ConvPointInt4 => tiles,
                     _ => so.len(),
                 };
                 ops.push(Op::Dispatch {
@@ -2097,10 +2340,13 @@ impl<'a> Builder<'a> {
                         count,
                         ..Push::default()
                     },
-                    // One workgroup of 64 per unit for the two staged shaders; one invocation per
+                    // One workgroup of 64 per unit for the staged shaders; one invocation per
                     // output element for the untiled one.
                     invocations: match kind {
-                        Kind::ConvVecInt8 | Kind::ConvPointInt8 => count * 64,
+                        Kind::ConvVecInt8
+                        | Kind::ConvPointInt8
+                        | Kind::ConvVecInt4
+                        | Kind::ConvPointInt4 => count * 64,
                         _ => count,
                     },
                 });
@@ -2353,11 +2599,10 @@ impl<'a> Builder<'a> {
                     invocations: positions,
                 });
             }
-            Node::RmsNorm { input, out, gamma, epsilon } => {
+            Node::RmsNorm { input, out, gamma, epsilon, groups } => {
                 let so = shape(*out);
-                // Same dispatch shape as the layer norm above: one invocation per position,
-                // reducing over the channels.
-                let positions = so.h * so.w;
+                // One invocation per group per position, reducing over that group's channels.
+                let positions = so.h * so.w * groups.max(&1);
                 ops.push(Op::Dispatch {
                     kind: Kind::RmsNorm,
                     push: Push {
@@ -2370,6 +2615,7 @@ impl<'a> Builder<'a> {
                         out_c: so.c,
                         out_h: so.h,
                         out_w: so.w,
+                        group: *groups,
                         param1_bits: epsilon.to_bits(),
                         count: positions,
                         ..Push::default()
@@ -2399,7 +2645,7 @@ impl<'a> Builder<'a> {
                     invocations: so.len(),
                 });
             }
-            Node::AttnScoresCached { q, cache, out, heads, scale, dynamic } => {
+            Node::AttnScoresCached { q, cache, out, heads, kv_heads, scale, dynamic } => {
                 let (sq, so) = (shape(*q), shape(*out));
                 ops.push(Op::Dispatch {
                     kind: Kind::AttnScoresCached,
@@ -2419,12 +2665,13 @@ impl<'a> Builder<'a> {
                         param0_bits: scale.to_bits(),
                         count: so.len(),
                         dyn_keys: u32::from(*dynamic),
+                        kv_heads: *kv_heads,
                         ..Push::default()
                     },
                     invocations: so.len(),
                 });
             }
-            Node::AttnApplyCached { probs, cache, out, heads, dynamic } => {
+            Node::AttnApplyCached { probs, cache, out, heads, kv_heads, dynamic } => {
                 let (sc, so) = (shape(*cache), shape(*out));
                 ops.push(Op::Dispatch {
                     kind: Kind::AttnApplyCached,
@@ -2445,6 +2692,7 @@ impl<'a> Builder<'a> {
                         group: *heads,
                         count: so.len(),
                         dyn_keys: u32::from(*dynamic),
+                        kv_heads: *kv_heads,
                         ..Push::default()
                     },
                     invocations: so.len(),
@@ -2552,6 +2800,46 @@ impl<'a> Builder<'a> {
                         ..Push::default()
                     },
                     invocations: sr.len(),
+                });
+            }
+            Node::Activate { input, out, act } => {
+                let so = shape(*out);
+                ops.push(Op::Dispatch {
+                    kind: Kind::Activate,
+                    push: Push {
+                        in0: at(*input)?,
+                        out: at(*out)?,
+                        in_c: so.c,
+                        in_h: so.h,
+                        in_w: so.w,
+                        out_c: so.c,
+                        out_h: so.h,
+                        out_w: so.w,
+                        act: act.code(),
+                        count: so.len(),
+                        ..Push::default()
+                    },
+                    invocations: so.len(),
+                });
+            }
+            Node::Softcap { input, out, cap } => {
+                let so = shape(*out);
+                ops.push(Op::Dispatch {
+                    kind: Kind::Softcap,
+                    push: Push {
+                        in0: at(*input)?,
+                        out: at(*out)?,
+                        in_c: so.c,
+                        in_h: so.h,
+                        in_w: so.w,
+                        out_c: so.c,
+                        out_h: so.h,
+                        out_w: so.w,
+                        param0_bits: cap.to_bits(),
+                        count: so.len(),
+                        ..Push::default()
+                    },
+                    invocations: so.len(),
                 });
             }
             Node::Softmax { input, out, mode } => {
@@ -2691,6 +2979,8 @@ impl Node {
             | Node::Rotary { out, .. }
             | Node::ConcatPositions { out, .. }
             | Node::Concat { out, .. } => *out,
+            | Node::Softcap { out, .. } => *out,
+            | Node::Activate { out, .. } => *out,
             // The cache is the destination, and it is pinned, so `finish` finds it already
             // allocated rather than making a fresh tensor for it.
             Node::CacheWrite { cache, .. } => *cache,
@@ -2707,6 +2997,8 @@ impl Node {
             | Node::LayerNorm { input, .. }
             | Node::RmsNorm { input, .. }
             | Node::Softmax { input, .. }
+            | Node::Softcap { input, .. }
+            | Node::Activate { input, .. }
             | Node::Embed { ids: input, .. }
             | Node::SliceChannels { input, .. }
             | Node::ConvInt8 { input, .. }
@@ -2932,24 +3224,42 @@ pub(crate) mod tests {
                             vec![(push.in0, push.group * push.out_w * push.in_w), (push.in1, dense)]
                         }
                         // One query against a position-major cache. Q is one position of `in_c`
-                        // channels; the cache is `out_w` positions of `in_c`. Not `dense`, whose
-                        // `in_h` and `in_w` are 1 here.
+                        // channels; the cache is `out_w` positions of `kv_heads * head_dim`,
+                        // which under grouped- or multi-query attention is narrower than `in_c`.
                         Kind::AttnScoresCached => {
-                            vec![(push.in0, push.in_c), (push.in1, push.out_w * push.in_c)]
+                            let head_dim = push.in_c / push.group.max(1);
+                            let kv = if push.kv_heads == 0 { push.group } else { push.kv_heads };
+                            vec![(push.in0, push.in_c), (push.in1, push.out_w * kv * head_dim)]
                         }
                         // One query's row of probabilities is `in_w` keys long, and the cache is
-                        // `in_w` positions of `in_c`.
+                        // `in_w` positions of `kv_heads * head_dim`.
                         Kind::AttnApplyCached => {
-                            vec![(push.in0, push.group * push.in_w), (push.in1, push.in_w * push.in_c)]
+                            let head_dim = push.out_c / push.group.max(1);
+                            let kv = if push.kv_heads == 0 { push.group } else { push.kv_heads };
+                            vec![
+                                (push.in0, push.group * push.in_w),
+                                (push.in1, push.in_w * kv * head_dim),
+                            ]
                         }
                         // One id per position per lane, so the read is `in_c * out_w` and
                         // not `dense` - `in_w` here is the *table's* row count.
                         Kind::Embed => vec![(push.in0, push.in_c * push.out_w)],
+                        // One row in, one row of the cache out. Not `dense`: `in_h` here is the
+                        // cache's capacity, not a spatial extent, so the generic read span would
+                        // be the whole cache and would overlap the write by construction.
+                        //
+                        // The write is reported as the whole cache rather than the single row it
+                        // touches, because which row that is comes from the step and is not
+                        // known here. That is the conservative direction - it can only refuse a
+                        // plan that would have been fine, never accept one that aliases - and it
+                        // is still disjoint from the source, which is a different tensor.
+                        Kind::CacheWrite => vec![(push.in0, push.count)],
                         // As `Conv`: the whole input plane, whatever the kernel touches.
                         Kind::ConvInt8 => vec![(push.in0, dense)],
                         // count is tiles or channel groups here, so the read span is the input
                         // plane. `ConvVecInt8`'s is one position of it.
-                        Kind::ConvPoint | Kind::ConvPointInt8 | Kind::ConvVecInt8 => {
+                        Kind::ConvPoint | Kind::ConvPointInt8 | Kind::ConvVecInt8
+                        | Kind::ConvPointInt4 | Kind::ConvVecInt4 => {
                             vec![(push.in0, dense)]
                         }
                         _ => vec![(push.in0, dense)],
@@ -2985,7 +3295,7 @@ pub(crate) mod tests {
     fn the_push_block_has_no_padding() {
         // The shaders read it at fixed offsets, so a gap Rust inserted would shift
         // every field after it.
-        assert_eq!(std::mem::size_of::<Push>(), 27 * 4);
+        assert_eq!(std::mem::size_of::<Push>(), 28 * 4);
         assert_eq!(std::mem::align_of::<Push>(), 4);
         // Vulkan only guarantees 128 bytes of push constants, so this is the ceiling the
         // block has to stay under however many modes get added to it.

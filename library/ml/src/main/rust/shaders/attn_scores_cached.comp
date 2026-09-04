@@ -53,16 +53,17 @@ void main() {
     // The output is `[heads, 1, key_stride]`, so `unpack` gives head and key directly.
     uint head, unused_row, key;
     unpack(index, head, unused_row, key);
-    // Past the keys this step actually attends over. Only possible when the plan is built at a
+    // Outside the range this step attends over. Only possible when the plan is built at a
     // maximum, in which case the dispatch covers the whole stride.
-    if (key >= attended_keys(p.out_w)) {
+    if (key < attn_first() || key > attn_last(p.out_w)) {
         return;
     }
     uint head_dim = p.in_c / p.group;
     // Q is one position, so its channels are consecutive from `p.in0`.
     uint query = p.in0 + head * head_dim;
-    // Position `key` of the cache, then this head's slice within it.
-    uint keys = p.in1 + key * p.in_c + head * head_dim;
+    // Position `key` of the cache, then this head's *key/value* head slice within it. Under
+    // multi-query attention several query heads land on the same slice.
+    uint keys = p.in1 + key * kv_stride(head_dim) + kv_head_of(head) * head_dim;
 
     float total = 0.0;
     for (uint d = 0u; d < head_dim; d++) {

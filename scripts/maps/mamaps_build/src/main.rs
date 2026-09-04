@@ -249,8 +249,12 @@ fn run(
         let (store, stats) = extract::extract(input, layers, run.coastline.as_deref(), &spill)
             .map_err(|e| format!("{}: {e}", input.display()))?;
         println!(
-            "classified {} way(s) and {} relation(s) -> {} feature(s), {} node(s) resolved",
-            stats.ways_classified, stats.relations_classified, stats.features, stats.nodes_needed,
+            "classified {} way(s), {} relation(s) and {} node(s) -> {} feature(s), {} node(s) resolved",
+            stats.ways_classified,
+            stats.relations_classified,
+            stats.nodes_classified,
+            stats.features,
+            stats.nodes_needed,
         );
         if stats.geometry_failed > 0 {
             // Expected at an extract's cut edges, and worth reporting because a large count means
@@ -259,6 +263,12 @@ fn run(
         }
         if stats.land_polygons > 0 {
             println!("  including {} prepared land polygon(s)", stats.land_polygons);
+        }
+        if stats.transit_relations > 0 {
+            println!(
+                "  including {} transit route relation(s) -> {} coloured way(s)",
+                stats.transit_relations, stats.transit_way_features,
+            );
         }
         if run.keep_store {
             let index = store.save_index(provenance, stats.features).map_err(|e| e.to_string())?;
@@ -443,6 +453,9 @@ fn derive_build_id(
         u8::from(layers.boundaries),
         u8::from(layers.landcover),
         u8::from(layers.landuse),
+        u8::from(layers.places),
+        u8::from(layers.poi),
+        u8::from(layers.transit),
         min_zoom,
         max_zoom,
     ]);
@@ -466,6 +479,9 @@ fn build_report(
     out.push_str(&format!("  \"file_bytes\": {bytes},\n"));
     out.push_str(&format!("  \"ways_classified\": {},\n", stats.ways_classified));
     out.push_str(&format!("  \"relations_classified\": {},\n", stats.relations_classified));
+    out.push_str(&format!("  \"nodes_classified\": {},\n", stats.nodes_classified));
+    out.push_str(&format!("  \"transit_relations\": {},\n", stats.transit_relations));
+    out.push_str(&format!("  \"transit_way_features\": {},\n", stats.transit_way_features));
     out.push_str(&format!("  \"features\": {},\n", stats.features));
     out.push_str(&format!("  \"geometry_failed\": {},\n", stats.geometry_failed));
     out.push_str(&format!("  \"nodes_needed\": {},\n", stats.nodes_needed));

@@ -28,21 +28,27 @@ void main() {
     if (position >= p.count) {
         return;
     }
-    // `count` is `in_h * in_w`, so `position` walks the spatial extent and the channel
-    // stride is that same extent.
+    // `count` is `groups * in_h * in_w`, so an invocation owns one group at one position and
+    // the channel stride is the spatial extent.
     uint stride = p.in_h * p.in_w;
+    uint groups = max(p.group, 1u);
+    uint per_group = p.in_c / groups;
+    uint group = position / stride;
+    uint at_pos = position % stride;
+    uint base = group * per_group;
     float epsilon = uintBitsToFloat(p.param1_bits);
-
     float squares = 0.0;
-    for (uint c = 0u; c < p.in_c; c++) {
-        float value = float(arena[p.in0 + c * stride + position]);
+    for (uint c = 0u; c < per_group; c++) {
+        float value = float(arena[p.in0 + (base + c) * stride + at_pos]);
         squares += value * value;
     }
     // Epsilon is inside the square root, matching `torch.nn.RMSNorm`.
-    float inverse = 1.0 / sqrt(squares / float(p.in_c) + epsilon);
+    float inverse = 1.0 / sqrt(squares / float(per_group) + epsilon);
 
-    for (uint c = 0u; c < p.in_c; c++) {
-        uint at = c * stride + position;
+    for (uint c = 0u; c < per_group; c++) {
+        // Gamma is indexed *within* the group, so a per-head norm re-uses one `head_dim`-long
+        // table across every head rather than needing one per head.
+        uint at = (base + c) * stride + at_pos;
         float value = float(arena[p.in0 + at]);
         float gamma = float(weights[p.weight + c]);
         arena[p.out_at + at] = float16_t(value * inverse * gamma);

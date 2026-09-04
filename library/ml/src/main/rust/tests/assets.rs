@@ -300,17 +300,15 @@ fn the_shipped_whisper_asset_builds_both_passes() {
         );
     }
 
-    // Step 0 has no self-attention cache; every later step's grows by one. The plan is rebuilt per
-    // step, so every length in a transcript has to lower.
-    for cache_len in [0u32, 1, 4, 63, whisper::MAX_POSITIONS - 1] {
-        let step = whisper::build(&weights, whisper::Mode::DecodeStep { cache_len })
-            .unwrap_or_else(|e| panic!("at cache {cache_len}: {e}"));
-        assert_eq!(
-            step.outputs[0].shape,
-            modelrunner::nets::Shape::new(whisper::VOCAB, 1, 1),
-            "at cache {cache_len}"
-        );
-    }
+    // The decode plan is recorded once at `MAX_POSITIONS` and the step supplies how much of the
+    // cache is live, so there is one plan per transcript rather than one per token.
+    let step = whisper::build(&weights, whisper::Mode::DecodeStep).expect("the decode step builds");
+    assert_eq!(
+        step.outputs[0].shape,
+        modelrunner::nets::Shape::new(whisper::VOCAB, 1, 1),
+    );
+    // The logits and nothing else: the self-attention caches stay on the device.
+    assert_eq!(step.outputs.len(), 1);
 }
 
 #[test]

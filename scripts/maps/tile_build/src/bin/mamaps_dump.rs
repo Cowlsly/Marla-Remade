@@ -28,7 +28,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::process::ExitCode;
 
-use tile_build::mamaps::body::{Body, GEOM_LINE, GEOM_POLYGON};
+use tile_build::mamaps::body::{Body, GEOM_LINE, GEOM_POINT, GEOM_POLYGON};
 use tile_build::mamaps::{dict, read};
 use tile_build::pmtiles::tile_zxy;
 
@@ -166,7 +166,7 @@ fn run(
         }
         return Ok(ExitCode::SUCCESS);
     }
-    if !matches!(mode, "summary" | "tiles" | "geometry" | "rings") {
+    if !matches!(mode, "summary" | "tiles" | "geometry" | "rings" | "names") {
         eprintln!("mamaps_dump: unknown mode '{mode}'");
         return Ok(ExitCode::from(2));
     }
@@ -198,6 +198,21 @@ fn run(
                     continue;
                 }
                 let mut geoms: BTreeMap<&str, usize> = BTreeMap::new();
+                if mode == "names" {
+                    // One line per named feature: the label spot-check. Unnamed features are
+                    // silent, so an empty result means "no names here" rather than "no features".
+                    for (fi, feature) in layer.features.iter().enumerate() {
+                        if let Some(label) = feature.name(&body) {
+                            let kind = dictionary
+                                .kind_name(feature.kind)
+                                .unwrap_or("?");
+                            println!(
+                                "{z}/{x}/{y}\t{name}\tfeature={fi}\tkind={kind}\tlabel={label}"
+                            );
+                        }
+                    }
+                    continue;
+                }
                 let mut kinds: BTreeSet<String> = BTreeSet::new();
                 let mut points = 0usize;
                 for feature in &layer.features {
@@ -210,8 +225,15 @@ fn run(
                     for (fi, feature) in layer.features.iter().enumerate() {
                         for (pi, part) in layer.parts_of(feature).iter().enumerate() {
                             let pts = layer.points(part);
+                            // Transit colour rides along when set: the spot-check for coloured
+                            // lines (empty for every other layer).
+                            let color = if feature.transit_color != 0 {
+                                format!("\ttcolor={:06X}", feature.transit_color)
+                            } else {
+                                String::new()
+                            };
                             println!(
-                                "{z}/{x}/{y}\t{name}\tfeature={fi}\tpart={pi}\tkind={}\twinding={}\tpoints={}\tsigned={:.2}\tfirst={:?}\tlast={:?}",
+                                "{z}/{x}/{y}\t{name}\tfeature={fi}\tpart={pi}\tkind={}\twinding={}\tpoints={}\tsigned={:.2}\tfirst={:?}\tlast={:?}{color}",
                                 kind_label(&dictionary, feature),
                                 if part.is_hole() { "hole" } else { "outer" },
                                 part.point_count,
@@ -341,6 +363,7 @@ fn geom_name(geom_type: u8) -> &'static str {
     match geom_type {
         GEOM_LINE => "line",
         GEOM_POLYGON => "polygon",
+        GEOM_POINT => "point",
         _ => "unknown",
     }
 }
@@ -383,6 +406,6 @@ fn join_counts_owned(m: &BTreeMap<String, usize>) -> String {
 
 fn usage() {
     eprintln!(
-        "usage: mamaps_dump IN.mamaps [--mode summary|tiles|geometry|header|dict] [--layer NAME]"
+        "usage: mamaps_dump IN.mamaps [--mode summary|tiles|geometry|rings|names|header|dict] [--layer NAME] [--tile Z/X/Y]"
     );
 }

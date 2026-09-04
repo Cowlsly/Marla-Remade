@@ -54,7 +54,7 @@
 //! [`Plan`]: crate::nets::Plan
 
 use crate::nets::{Kind, Push};
-use crate::weights::Tensor;
+use crate::weights::{Dtype, Tensor};
 
 use super::context::Limits;
 
@@ -255,7 +255,7 @@ impl Segments {
 fn tensor_end(at: u64, tensors: &[Tensor]) -> Option<u64> {
     tensors.iter().find_map(|tensor| {
         let start = u64::from(tensor.offset);
-        let bytes = u64::from(tensor.len) * if tensor.int8 { 1 } else { 2 };
+        let bytes = tensor.dtype.bytes(u64::from(tensor.len));
         (at >= start && at < start + bytes.max(1)).then_some(start + bytes)
     })
 }
@@ -401,7 +401,7 @@ mod tests {
     #[test]
     fn an_offset_in_no_tensor_is_refused() {
         let segments = Segments::plan(1024, &floor()).unwrap();
-        let tensors = [Tensor { rank: 1, dims: [8, 0, 0, 0], offset: 0, len: 8, int8: false }];
+        let tensors = [Tensor { rank: 1, dims: [8, 0, 0, 0], offset: 0, len: 8, dtype: Dtype::F16 }];
         let push = Push { weight: 0, bias: 400, ..Push::default() };
         let error = segments.for_op(2, Kind::Conv, &push, &tensors).unwrap_err();
         assert!(error.contains("step 2"), "{error}");
@@ -416,7 +416,7 @@ mod tests {
         // gets the whole range. So this is placed *off* the stride, at 1536: window 1 covers
         // 1024..5120 and the span runs to 5136.
         let tensors =
-            [Tensor { rank: 1, dims: [1800, 0, 0, 0], offset: 1536, len: 1800, int8: false }];
+            [Tensor { rank: 1, dims: [1800, 0, 0, 0], offset: 1536, len: 1800, dtype: Dtype::F16 }];
         let push = Push { weight: 768, bias: 768, ..Push::default() };
         let error = segments.for_op(0, Kind::Conv, &push, &tensors).unwrap_err();
         assert!(error.contains("Split the tensor in the converter"), "{error}");
@@ -442,10 +442,10 @@ mod tests {
                 dims: [out, inputs, 1, 1],
                 offset: kernel_at as u32,
                 len: out * inputs,
-                int8: true,
+                dtype: Dtype::I8,
             },
-            Tensor { rank: 1, dims: [out, 0, 0, 0], offset: scale_at as u32, len: out, int8: false },
-            Tensor { rank: 1, dims: [out, 0, 0, 0], offset: bias_at as u32, len: out, int8: false },
+            Tensor { rank: 1, dims: [out, 0, 0, 0], offset: scale_at as u32, len: out, dtype: Dtype::F16 },
+            Tensor { rank: 1, dims: [out, 0, 0, 0], offset: bias_at as u32, len: out, dtype: Dtype::F16 },
         ];
         let segments = Segments::plan(total, &limits).unwrap();
         assert!(segments.all().len() > 1, "the limit must actually force windowing");
@@ -477,9 +477,9 @@ mod tests {
         // `prelu` in `common.glsl` reads `act_weight` for *any* kind carrying the activation, not
         // only the int8 kinds, so the slope has to be inside the same window as the kernel.
         let tensors = [
-            Tensor { rank: 4, dims: [4, 1, 1, 1], offset: 0, len: 4, int8: false },
-            Tensor { rank: 1, dims: [4, 0, 0, 0], offset: 16, len: 4, int8: false },
-            Tensor { rank: 1, dims: [4, 0, 0, 0], offset: 32, len: 4, int8: false },
+            Tensor { rank: 4, dims: [4, 1, 1, 1], offset: 0, len: 4, dtype: Dtype::F16 },
+            Tensor { rank: 1, dims: [4, 0, 0, 0], offset: 16, len: 4, dtype: Dtype::F16 },
+            Tensor { rank: 1, dims: [4, 0, 0, 0], offset: 32, len: 4, dtype: Dtype::F16 },
         ];
         let segments = Segments::plan(40, &floor()).unwrap();
         let push = Push { weight: 0, bias: 8, act_weight: 16, act: 4, ..Push::default() };

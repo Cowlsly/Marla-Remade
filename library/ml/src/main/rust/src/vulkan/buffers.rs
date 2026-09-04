@@ -76,10 +76,16 @@ impl Buffer {
     /// This is the one buffer a recorded command buffer's *contents* can change through. Push
     /// constants are baked into the recording, so anything that varies per step - the number of
     /// cache positions a decode step attends over, and the group counts that follow from it - has
-    /// to be read from memory instead. `INDIRECT_BUFFER` is asked for alongside `STORAGE_BUFFER`
-    /// so the same allocation can hold both the values a shader reads and the
-    /// `VkDispatchIndirectCommand`s the recording dispatches from, rather than needing a second
-    /// mapping kept in step with the first.
+    /// `INDIRECT_BUFFER` is asked for alongside `STORAGE_BUFFER` so the same allocation could
+    /// hold `VkDispatchIndirectCommand`s as well as the values a shader reads.
+    ///
+    /// Nothing uses that yet, and measurement says nothing should: a decode plan built at a
+    /// maximum over-dispatches the cached-attention scores and lets the extra invocations return
+    /// immediately, and quadrupling that waste (NLLB's cache bound from 128 to 512 positions)
+    /// moved per-token cost by less than the run-to-run noise. The invocations are trivial next
+    /// to the matrix multiplies in the same step. The usage flag stays because it is free and
+    /// because a model with a far longer context may yet change that answer — but it should be
+    /// re-measured, not assumed.
     ///
     /// Device-local would be faster for the shader to read, but then updating it would need a
     /// transfer and a barrier, which is a submit - and the entire point is to change it without

@@ -46,6 +46,7 @@ Variant rules (see .llms/rules/installing.md):
 Notes:
   - NEVER uninstalls an app (no uninstall tasks)
   - Validates modules against app modules (those applying common-conventions-app)
+  - Installs to the first connected device whose serial does not start with 'emulator'
   - Set INSTALL_DRY_RUN=1 or pass --dry-run for dry-run mode
 
 EOF
@@ -73,7 +74,7 @@ get_app_modules_slash() {
     | tr ':' '/' \
     | while IFS= read -r p; do
         case "$p" in "" ) continue;; esac
-        if [[ -f "$ROOT/$p/build.gradle.kts" ]] && grep -q "common-conventions-app" "$ROOT/$p/build.gradle.kts" 2>/dev/null; then
+        if [[ -f "$ROOT/$p/build.gradle.kts" ]] && grep -qF 'id("common-conventions-app")' "$ROOT/$p/build.gradle.kts" 2>/dev/null; then
           echo "$p"
         fi
       done | sort -u
@@ -270,7 +271,7 @@ while [[ $idx -lt ${#MODULES_RAW[@]} ]]; do
   if [[ "$norm" != *":"* ]]; then
     for auto_prefix in games personal; do
       pref_path="$ROOT/$auto_prefix/$norm"
-      if [[ -f "$pref_path/build.gradle.kts" ]] && grep -q "common-conventions-app" "$pref_path/build.gradle.kts" 2>/dev/null; then
+      if [[ -f "$pref_path/build.gradle.kts" ]] && grep -qF 'id("common-conventions-app")' "$pref_path/build.gradle.kts" 2>/dev/null; then
         expanded="$auto_prefix:$norm"
         echo "Info: Expanding shorthand '$raw' ($norm) -> $expanded (found $auto_prefix/$norm)"
         norm="$expanded"
@@ -318,7 +319,7 @@ while [[ $idx -lt ${#NORMALIZED_MODULES[@]} ]]; do
   if [[ ! -f "$full_path/build.gradle.kts" ]]; then
     INVALID_MODULES+=("$mod (not found: $fs_path/build.gradle.kts)")
   else
-    if ! grep -q "common-conventions-app" "$full_path/build.gradle.kts" 2>/dev/null; then
+    if ! grep -qF 'id("common-conventions-app")' "$full_path/build.gradle.kts" 2>/dev/null; then
       INVALID_MODULES+=("$mod (exists but is not an app module - missing common-conventions-app)")
     fi
   fi
@@ -372,6 +373,49 @@ echo "Variant: $VARIANT_LC (task suffix: install${VARIANT_CAP})"
 echo "Modules (${#NORMALIZED_MODULES[@]}): $modules_str"
 echo "Gradle tasks: $tasks_str"
 echo ""
+
+# --- Device selection: first connected device whose serial doesn't start with 'emulator' ---
+ADB_BIN=""
+if command -v adb >/dev/null 2>&1; then
+  ADB_BIN="adb"
+else
+  for adb_base in "${ANDROID_HOME:-}" "${ANDROID_SDK_ROOT:-}" "$HOME/Android/Sdk" "$HOME/Library/Android/sdk"; do
+    if [[ -n "$adb_base" && -x "$adb_base/platform-tools/adb" ]]; then
+      ADB_BIN="$adb_base/platform-tools/adb"
+      break
+    fi
+  done
+fi
+
+TARGET_SERIAL=""
+if [[ -n "$ADB_BIN" ]]; then
+  while read -r dev_serial dev_state _; do
+    [[ "$dev_state" == "device" ]] || continue
+    case "$dev_serial" in emulator*) continue;; esac
+    TARGET_SERIAL="$dev_serial"
+    break
+  done < <("$ADB_BIN" devices 2>/dev/null)
+fi
+
+if [[ -z "$ADB_BIN" ]]; then
+  if [[ $DRY_RUN -eq 1 ]]; then
+    echo "[DRY-RUN] Warning: adb not found; a device could not be selected."
+  else
+    echo "Error: adb not found; cannot select a target device."
+    echo "Install Android platform-tools and put adb on PATH (or set ANDROID_HOME)."
+    exit 1
+  fi
+elif [[ -n "$TARGET_SERIAL" ]]; then
+  export ANDROID_SERIAL="$TARGET_SERIAL"
+  echo "Target device: $ANDROID_SERIAL (first connected device not starting with 'emulator')"
+elif [[ $DRY_RUN -eq 1 ]]; then
+  echo "[DRY-RUN] Warning: no non-emulator device connected; ANDROID_SERIAL not set."
+else
+  echo "Error: No non-emulator device connected."
+  echo "Connect a physical device (check 'adb devices'); refusing to install to an emulator."
+  exit 1
+fi
+
 if [[ $DRY_RUN -eq 1 ]]; then
   echo "[DRY-RUN] Would execute: $SCRIPT_DIR/gradlew $tasks_str"
   exit 0

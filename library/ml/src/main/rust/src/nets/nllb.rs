@@ -136,6 +136,18 @@ pub const DECODER_LAYERS: usize = 12;
 /// `max_position_embeddings`, and therefore the longest source this can encode.
 pub const MAX_POSITIONS: u32 = 1024;
 
+/// Decoder positions the KV cache is built to hold.
+///
+/// The decode plan is recorded once at this length rather than rebuilt per token, so this is
+/// charged to the arena in full for every translation: `2 * DECODER_LAYERS` caches of
+/// `MAX_DECODE_POSITIONS * D_MODEL` fp16, which is 6 MB at these numbers.
+///
+/// It matches `post::translate::MAX_TOKENS`, the cap on the greedy loop, so the loop cannot
+/// outrun the cache. Raising one without the other either wastes arena or drops positions:
+/// `shaders/cache_write.comp` refuses a write past the end rather than running off it.
+/// [`MAX_POSITIONS`] is the *positional embedding* limit and is a different, larger number.
+pub const MAX_DECODE_POSITIONS: u32 = 128;
+
 /// fairseq's padding id, which is also the offset every position is shifted by.
 const PADDING_IDX: u32 = 1;
 
@@ -185,18 +197,18 @@ pub enum Mode {
         /// Source tokens, after [`embed_positions`].
         len: u32,
     },
-    /// One decoder step: the token just produced in, its logits and its new K/V out.
+    /// One decoder step: the token just produced in, its logits out.
     ///
-    /// A step is **one query** against `cache_len + 1` keys — the `cache_len` positions already
-    /// decoded plus this one — which is causal by construction and needs no mask. The K and V for
-    /// the prefix arrive as ordinary inputs in [`Mode::DecodeStep`]'s declaration order, the step's
-    /// own K and V leave as outputs, and the host appends them for the next step.
+    /// A step is **one query** against `prefix + 1` keys — the positions already decoded plus this
+    /// one — which is causal by construction and needs no mask.
     ///
-    /// Position-major, so appending is one contiguous copy of `d_model` elements rather than
-    /// `d_model` scattered ones. See [`crate::nets::Kind::AttnScoresCached`].
+    /// The key count is deliberately **not** part of this. It changes every token, and a plan
+    /// keyed on it is re-recorded every token: a `device_wait_idle` under the queue lock, a fresh
+    /// plan and a full re-emit, per token. So the plan is built once for
+    /// [`MAX_DECODE_POSITIONS`], the K and V caches live on the device across steps
+    /// ([`Builder::persistent`]), and how much of them is live arrives in
+    /// [`crate::vulkan::run::StepParams::prefix`] at submit time.
     DecodeStep {
-        /// Positions already in the cache, which is also the step number.
-        cache_len: u32,
         /// Source positions the cross-attention attends over.
         src_len: u32,
     },
@@ -257,7 +269,7 @@ fn feed_forward(b: &mut Builder, l: &mut Layers, x: Id) -> Id {
 pub fn build(weights: &dyn WeightSource, mode: Mode) -> Result<Plan, String> {
     match mode {
         Mode::Encode { len } => encode(weights, len),
-        Mode::DecodeStep { cache_len, src_len } => decode_step(weights, cache_len, src_len),
+        Mode::DecodeStep { src_len } => decode_step(weights, src_len),
     }
 }
 
@@ -291,12 +303,9 @@ pub fn build(weights: &dyn WeightSource, mode: Mode) -> Result<Plan, String> {
 /// pass and a second kind of persistence for a saving the logits projection dwarfs: the head is
 /// ~262 million multiply-accumulates against the whole decoder's ~200 million. Worth revisiting
 /// only after `Kind::ConvVecInt8` makes the head cheap.
-fn decode_step(weights: &dyn WeightSource, cache_len: u32, src_len: u32) -> Result<Plan, String> {
+fn decode_step(weights: &dyn WeightSource, src_len: u32) -> Result<Plan, String> {
     if src_len == 0 {
         return Err("a decode step with no source to attend over".into());
-    }
-    if cache_len >= MAX_POSITIONS {
-        return Err(format!("a cache of {cache_len}, at the {MAX_POSITIONS}-position limit"));
     }
 
     let l = &mut Layers { next: DECODER };
@@ -308,45 +317,39 @@ fn decode_step(weights: &dyn WeightSource, cache_len: u32, src_len: u32) -> Resu
 
     let mut x = b.input(Shape::new(D_MODEL, 1, 1));
     let encoded = b.input(Shape::new(D_MODEL, 1, src_len));
-    // Every layer's cache pair, declared up front so the host uploads them in one block rather
-    // than interleaved with anything else.
+    // Every layer's cache pair, held on the device across steps rather than handed in and out.
     //
-    // None at step 0: the only key is the token itself, and a `[0, 1, 1024]` binding would be a
-    // zero-length upload, which Vulkan refuses.
-    let caches: Vec<Option<(Id, Id)>> = (0..DECODER_LAYERS)
+    // Sized for the longest decode the loop will run, not for this step, which is what lets one
+    // recording serve every token: the plan no longer mentions the step number, so
+    // `Reshaped::at` stops matching a new key and re-recording on each one. How much of each
+    // cache is live comes from `StepParams::prefix` at submit time.
+    let caches: Vec<(Id, Id)> = (0..DECODER_LAYERS)
         .map(|_| {
-            (cache_len > 0).then(|| {
-                let k = b.input(Shape::new(cache_len, 1, D_MODEL));
-                let v = b.input(Shape::new(cache_len, 1, D_MODEL));
-                (k, v)
-            })
+            let k = b.persistent(Shape::new(MAX_DECODE_POSITIONS, 1, D_MODEL));
+            let v = b.persistent(Shape::new(MAX_DECODE_POSITIONS, 1, D_MODEL));
+            (k, v)
         })
         .collect();
 
-    let mut produced: Vec<Id> = Vec::new();
-    for past in &caches {
-        // Self-attention, pre-norm, with the cache.
+    for &(cache_k, cache_v) in &caches {
+        // Self-attention, pre-norm, against the cache this step is about to extend.
         let normed = b.layer_norm(x, l.take(), EPSILON);
         let q = point(b, l, normed, D_MODEL, Act::None);
         let k_new = point(b, l, normed, D_MODEL, Act::None);
         let v_new = point(b, l, normed, D_MODEL, Act::None);
         // A projection writes `[d_model, 1, 1]`; a cache position is `[1, 1, d_model]`. The same
-        // bytes, so this is a relabelling and the append below is one contiguous copy.
+        // bytes, so this is a relabelling and the write below is one contiguous copy.
         let k_row = b.reshaped(k_new, Shape::new(1, 1, D_MODEL));
         let v_row = b.reshaped(v_new, Shape::new(1, 1, D_MODEL));
-        let (k, v) = match *past {
-            Some((past_k, past_v)) => {
-                (b.concat(&[past_k, k_row]), b.concat(&[past_v, v_row]))
-            }
-            None => (k_row, v_row),
-        };
-        let scores = b.attn_scores_cached(q, k, HEADS);
-        let probs = b.softmax(scores);
-        let mixed = b.attn_apply_cached(probs, v, HEADS);
+        // Written into the cache at the row the step names, replacing the concatenation that
+        // used to copy the entire prefix on every layer of every token.
+        b.cache_write(k_row, cache_k);
+        b.cache_write(v_row, cache_v);
+        let scores = b.attn_scores_cached_dynamic(q, cache_k, HEADS);
+        let probs = b.softmax_prefix(scores);
+        let mixed = b.attn_apply_cached_dynamic(probs, cache_v, HEADS);
         let projected = point(b, l, mixed, D_MODEL, Act::None);
         x = b.add(x, projected);
-        produced.push(k_row);
-        produced.push(v_row);
 
         // Cross-attention over the encoder output, which is channel-major and a different length,
         // so it uses the ordinary pair rather than the cached one.
@@ -373,13 +376,14 @@ fn decode_step(weights: &dyn WeightSource, cache_len: u32, src_len: u32) -> Resu
     // The tied head, in the same plan: a separate pass would mean a second `rebuild` and a round
     // trip through the host for a `[1024]` vector. The last two splits are one class short.
     let head = &mut Layers { next: HEAD };
-    let mut outputs: Vec<Id> = (0..HEAD_SPLITS)
+    let outputs: Vec<Id> = (0..HEAD_SPLITS)
         .map(|split| point(b, head, state, split_classes(split), Act::None))
         .collect();
     if head.next != ENCODER {
         return Err(format!("the head claims {} tensors, not {ENCODER}", head.next));
     }
-    outputs.append(&mut produced);
+    // The K and V rows are no longer outputs: they are in the cache, on the device, and the host
+    // never sees them again.
     builder.finish(&outputs)
 }
 
@@ -660,8 +664,7 @@ mod tests {
         let mut covered = std::collections::BTreeSet::new();
         for mode in [
             Mode::Encode { len: LEN },
-            Mode::DecodeStep { cache_len: 0, src_len: LEN },
-            Mode::DecodeStep { cache_len: 3, src_len: LEN },
+            Mode::DecodeStep { src_len: LEN },
         ] {
             let source = Shapes::new(TENSORS);
             build(&source, mode).unwrap_or_else(|e| panic!("{mode:?}: {e}"));
@@ -725,7 +728,7 @@ mod tests {
 
     #[test]
     fn a_decode_step_is_twelve_layers_of_two_attentions() {
-        let (_, plan) = plan(Mode::DecodeStep { cache_len: 3, src_len: LEN });
+        let (_, plan) = plan(Mode::DecodeStep { src_len: LEN });
         let mut counts = std::collections::BTreeMap::new();
         for op in &plan.ops {
             if let Op::Dispatch { kind, .. } = op {
@@ -746,85 +749,89 @@ mod tests {
         assert_eq!(counts.get("AttnApplyCached"), Some(&DECODER_LAYERS), "{counts:?}");
         assert_eq!(counts.get("AttnScores"), Some(&DECODER_LAYERS), "{counts:?}");
         assert_eq!(counts.get("AttnApply"), Some(&DECODER_LAYERS), "{counts:?}");
-        assert_eq!(counts.get("Softmax"), Some(&(DECODER_LAYERS * 2)), "{counts:?}");
+        // The self-attention softmax is the prefix-bounded one; the cross-attention's is not.
+        assert_eq!(counts.get("Softmax"), Some(&DECODER_LAYERS), "{counts:?}");
+        assert_eq!(counts.get("SoftmaxPrefix"), Some(&DECODER_LAYERS), "{counts:?}");
+        // K and V into the cache, per layer.
+        assert_eq!(counts.get("CacheWrite"), Some(&(DECODER_LAYERS * 2)), "{counts:?}");
         // Three residuals per layer.
         assert_eq!(counts.get("Add"), Some(&(DECODER_LAYERS * 3)), "{counts:?}");
         assert_no_aliasing(&plan);
     }
 
     #[test]
-    fn a_decode_step_declares_its_cache_in_and_out() {
-        let cache_len = 5;
-        let (_, plan) = plan(Mode::DecodeStep { cache_len, src_len: LEN });
-        // The token, the encoder output, then a K/V pair per layer.
-        assert_eq!(plan.inputs.len(), 2 + DECODER_LAYERS * 2);
+    fn a_decode_step_takes_only_the_token_and_the_source() {
+        let (_, plan) = plan(Mode::DecodeStep { src_len: LEN });
+        // The token and the encoder output, and nothing else: the KV cache is on the device.
+        // This is the shape of the change - twenty-four cache bindings used to be uploaded on
+        // every token, growing by a position each time.
+        assert_eq!(plan.inputs.len(), 2);
         assert_eq!(plan.inputs[0].shape, Shape::new(D_MODEL, 1, 1));
         assert_eq!(plan.inputs[1].shape, Shape::new(D_MODEL, 1, LEN));
-        for binding in &plan.inputs[2..] {
-            // Position-major: the cache's channels are the positions.
-            assert_eq!(binding.shape, Shape::new(cache_len, 1, D_MODEL));
-        }
-        // Four logits splits, then the step's own K and V per layer.
-        assert_eq!(plan.outputs.len(), HEAD_SPLITS + DECODER_LAYERS * 2);
+        // Four logits splits, and no cache rows coming back.
+        assert_eq!(plan.outputs.len(), HEAD_SPLITS);
         let classes: u32 = plan.outputs.iter().take(HEAD_SPLITS).map(|b| b.shape.c).sum();
         assert_eq!(classes, VOCAB);
         assert_eq!(plan.outputs[0].shape.c, CLASSES_PER_SPLIT);
         assert_eq!(plan.outputs[HEAD_SPLITS - 1].shape.c, CLASSES_PER_TAIL_SPLIT);
-        for binding in &plan.outputs[HEAD_SPLITS..] {
-            assert_eq!(binding.shape, Shape::new(1, 1, D_MODEL));
-        }
     }
 
     #[test]
-    fn the_first_step_has_no_cache_to_read() {
-        // At step 0 the only key is the token itself, so there is nothing to concatenate and no
-        // cache input. A `[0, 1, 1024]` binding would be a zero-length upload, which Vulkan
-        // refuses and which would make the first step the one special case on the device.
-        let (_, plan) = plan(Mode::DecodeStep { cache_len: 0, src_len: LEN });
-        assert_eq!(plan.inputs.len(), 2);
-        assert_eq!(plan.outputs.len(), HEAD_SPLITS + DECODER_LAYERS * 2);
-        // And the scores are over exactly one key.
-        for op in &plan.ops {
-            if let Op::Dispatch { kind: Kind::AttnScoresCached, push, .. } = op {
-                assert_eq!((push.group, push.out_w), (HEADS, 1), "{push:?}");
-            }
-        }
-        assert_no_aliasing(&plan);
+    fn the_decode_plan_does_not_depend_on_the_step() {
+        // The property the whole record-once design rests on. Two steps of the same translation
+        // produce the same key, so `Reshaped::at` matches and never re-records; and because the
+        // plan is identical, the arena offsets - including the caches' - are identical too, which
+        // is what lets the cache survive from one submit to the next.
+        let (_, first) = plan(Mode::DecodeStep { src_len: LEN });
+        let (_, again) = plan(Mode::DecodeStep { src_len: LEN });
+        assert_eq!(first.ops, again.ops);
+        assert_eq!(first.arena_elems, again.arena_elems);
+        assert_eq!(Mode::DecodeStep { src_len: LEN }, Mode::DecodeStep { src_len: LEN });
     }
 
     #[test]
-    fn a_decode_step_attends_over_the_prefix_and_the_current_token() {
-        let cache_len = 7;
-        let (_, plan) = plan(Mode::DecodeStep { cache_len, src_len: LEN });
+    fn the_caches_are_built_for_the_longest_decode_the_loop_can_run() {
+        // Sized to `MAX_DECODE_POSITIONS`, not to a step, so a plan recorded once covers every
+        // token. If this and `post::translate::MAX_TOKENS` ever disagree the loop either wastes
+        // arena or silently drops positions at the end of a long sentence.
+        let (_, plan) = plan(Mode::DecodeStep { src_len: LEN });
+        let mut writes = 0;
         for op in &plan.ops {
             match op {
-                // Self-attention: one query, `cache_len + 1` keys. An off-by-one here would drop
-                // the current token from its own attention, which is fluent and wrong.
+                Op::Dispatch { kind: Kind::CacheWrite, push, .. } => {
+                    writes += 1;
+                    assert_eq!(push.in_h, MAX_DECODE_POSITIONS, "{push:?}");
+                    assert_eq!(push.in_c, D_MODEL, "the row stride is d_model: {push:?}");
+                    assert_eq!(push.count, D_MODEL, "a position is d_model long: {push:?}");
+                }
+                // The score map is as wide as the cache, and the bound comes from the step.
                 Op::Dispatch { kind: Kind::AttnScoresCached, push, .. } => {
-                    assert_eq!((push.out_h, push.out_w), (1, cache_len + 1), "{push:?}");
+                    assert_eq!((push.out_h, push.out_w), (1, MAX_DECODE_POSITIONS), "{push:?}");
+                    assert_ne!(push.dyn_keys, 0, "the key count must come from the step");
                 }
                 Op::Dispatch { kind: Kind::AttnApplyCached, push, .. } => {
-                    assert_eq!((push.in_w, push.out_c), (cache_len + 1, D_MODEL), "{push:?}");
+                    assert_eq!((push.in_w, push.out_c), (MAX_DECODE_POSITIONS, D_MODEL), "{push:?}");
+                    assert_ne!(push.dyn_keys, 0, "the key count must come from the step");
                 }
-                // Cross-attention: one query over the source, which is a different length.
+                // Cross-attention: one query over the source, which is a different length and a
+                // fixed one, so it stays static.
                 Op::Dispatch { kind: Kind::AttnScores, push, .. } => {
                     assert_eq!((push.out_h, push.out_w), (1, LEN), "{push:?}");
+                    assert_eq!(push.dyn_keys, 0, "cross-attention is not prefix-bounded");
                 }
                 _ => {}
             }
         }
+        assert_eq!(writes, DECODER_LAYERS * 2, "a K and a V per layer");
+        assert_no_aliasing(&plan);
     }
 
     #[test]
-    fn a_decode_step_over_nothing_or_past_the_cache_is_refused() {
+    fn a_decode_step_over_nothing_is_refused() {
         let source = Shapes::new(TENSORS);
-        let error = build(&source, Mode::DecodeStep { cache_len: 0, src_len: 0 })
-            .expect_err("no source");
+        let error =
+            build(&source, Mode::DecodeStep { src_len: 0 }).expect_err("no source");
         assert!(error.contains("no source"), "{error}");
-        let source = Shapes::new(TENSORS);
-        let error = build(&source, Mode::DecodeStep { cache_len: MAX_POSITIONS, src_len: LEN })
-            .expect_err("cache full");
-        assert!(error.contains("position limit") || error.contains("limit"), "{error}");
     }
 
     #[test]
@@ -832,7 +839,7 @@ mod tests {
         // Why `Kind::ConvVecInt8` exists. A decode step is one position almost throughout, and the
         // tiled kind's workgroup count is `out_c.div_ceil(16) * positions.div_ceil(16)` — so at one
         // position it pads 15 of every 16 tile columns and stores from 8 of every 64 invocations.
-        let (_, plan) = plan(Mode::DecodeStep { cache_len: 3, src_len: LEN });
+        let (_, plan) = plan(Mode::DecodeStep { src_len: LEN });
         let int8: Vec<_> = plan
             .ops
             .iter()
@@ -872,7 +879,7 @@ mod tests {
         // Together the four splits are the whole vocabulary, which is what `post::translate`
         // argmaxes. The last two splits are one class short each.
         let source = Shapes::new(TENSORS);
-        let plan = build(&source, Mode::DecodeStep { cache_len: 0, src_len: LEN })
+        let plan = build(&source, Mode::DecodeStep { src_len: LEN })
             .expect("the step builds");
         let heads: Vec<_> = plan
             .outputs

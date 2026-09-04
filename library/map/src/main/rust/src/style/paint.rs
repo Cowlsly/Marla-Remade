@@ -49,6 +49,7 @@
 use super::{Layer, LayerKind};
 use serde_json::Value as Json;
 use std::sync::OnceLock;
+use tilecodec::mamaps::body::{FLAG_IS_BRIDGE, FLAG_IS_LINK, FLAG_IS_TUNNEL};
 use tilecodec::mamaps::dict;
 
 /// The flat style, vendored beside the sources.
@@ -242,12 +243,22 @@ fn layer(json: &Json) -> Result<Layer, String> {
         "source",
         "type",
         "kinds",
+        "require_flags",
+        "forbid_flags",
+        "details",
+        "forbid_details",
         "light",
         "dark",
         "opacity",
         "width",
         "gap_width",
         "dash",
+        "text_size",
+        "uppercase",
+        "medium",
+        "halo_light",
+        "halo_dark",
+        "halo_width",
         "minzoom",
         "maxzoom",
     ];
@@ -259,6 +270,7 @@ fn layer(json: &Json) -> Result<Layer, String> {
     let kind = match json.get("type").and_then(Json::as_str) {
         Some("fill") => LayerKind::Fill,
         Some("line") => LayerKind::Line,
+        Some("symbol") => LayerKind::Symbol,
         other => return Err(format!("`{id}` has an unknown type {other:?}")),
     };
     let zoom = |key: &str, default: u8| -> Result<u8, String> {
@@ -313,6 +325,52 @@ fn layer(json: &Json) -> Result<Layer, String> {
     // Sorted so the render path's membership test is a binary search over a `u16` slice.
     kind_ids.sort_unstable();
     kind_ids.dedup();
+    // The road flag/detail filters, as interned ids and bitmasks. `require_flags` names
+    // features that must carry a bit (`["link"]`); `forbid_flags` names bits that must be
+    // absent (`["bridge", "tunnel"]` on a surface layer). `details`/`forbid_details` are
+    // `kind_detail` names (`service`), interned through the same DETAILS table the tiler
+    // wrote. All four default to empty/zero — no filter — so fills never name them.
+    let flag_bits = |key: &str| -> Result<u8, String> {
+        let mut bits = 0u8;
+        match json.get(key) {
+            None => Ok(0),
+            Some(Json::Array(names)) => {
+                for name in names {
+                    bits |= match name.as_str() {
+                        Some("tunnel") => FLAG_IS_TUNNEL,
+                        Some("bridge") => FLAG_IS_BRIDGE,
+                        Some("link") => FLAG_IS_LINK,
+                        other => {
+                            return Err(format!(
+                                "`{id}`'s {key} names an unknown flag {other:?}"
+                            ))
+                        }
+                    };
+                }
+                Ok(bits)
+            }
+            Some(_) => Err(format!("`{id}`'s {key} must be an array of flag names")),
+        }
+    };
+    let detail_ids_of = |key: &str| -> Result<Vec<u16>, String> {
+        let mut ids: Vec<u16> = match json.get(key) {
+            None => Vec::new(),
+            Some(Json::Array(names)) => names
+                .iter()
+                .map(|name| {
+                    name.as_str()
+                        .and_then(super::detail_id)
+                        .ok_or_else(|| {
+                            format!("`{id}` filters on detail `{name}`, which the schema cannot emit")
+                        })
+                })
+                .collect::<Result<_, _>>()?,
+            Some(_) => return Err(format!("`{id}`'s {key} must be an array of detail names")),
+        };
+        ids.sort_unstable();
+        ids.dedup();
+        Ok(ids)
+    };
 
     Ok(Layer {
         source_layer: source,
@@ -321,12 +379,26 @@ fn layer(json: &Json) -> Result<Layer, String> {
         kind,
         kinds,
         kind_ids,
+        require_flags: flag_bits("require_flags")?,
+        forbid_flags: flag_bits("forbid_flags")?,
+        detail_ids: detail_ids_of("details")?,
+        forbid_details: detail_ids_of("forbid_details")?,
         light: color(json.get("light"), &id)?,
         dark: color(json.get("dark"), &id)?,
         opacity: Ramp::parse(json.get("opacity"), &id, "opacity", 1.0)?,
         width: Ramp::parse(json.get("width"), &id, "width", 0.0)?,
         gap_width: Ramp::parse(json.get("gap_width"), &id, "gap_width", 0.0)?,
         dash,
+        text_size: Ramp::parse(json.get("text_size"), &id, "text_size", 0.0)?,
+        uppercase: json.get("uppercase").and_then(Json::as_bool).unwrap_or(false),
+        medium: json.get("medium").and_then(Json::as_bool).unwrap_or(false),
+        halo_light: color(json.get("halo_light"), &id).unwrap_or(0x00000000),
+        halo_dark: color(json.get("halo_dark"), &id).unwrap_or(0x00000000),
+        halo_width: json
+            .get("halo_width")
+            .and_then(Json::as_f64)
+            .map(|v| v as f32)
+            .unwrap_or(1.0),
         min_zoom: zoom("minzoom", 0)?,
         max_zoom: zoom("maxzoom", MAX_ZOOM)?,
         id,
@@ -401,11 +473,17 @@ mod tests {
     #[test]
     fn the_vendored_flat_style_parses() {
         let style = parse(FLAT).expect("style/basemap.flat.json should parse");
-        // 24 fills and 9 lines. Asserted exactly: the file is the layer set, so a layer
-        // appearing or disappearing is a decision rather than an incidental restyle.
+        // 24 fills, 22 lines and 4 symbols. Asserted exactly: the file is the layer
+        // set, so a layer appearing or disappearing is a decision rather than an
+        // incidental restyle. The 22 lines are the 12 surface/link layers plus 10
+        // bridge layers (5 casings + 5 fills): the authored `is_bridge` pass the
+        // flat file used to drop entirely, which is what hid the Bay Bridge and
+        // the Golden Gate (task 8). The 4 symbols are the places hierarchy
+        // (country/region/locality/subplace).
         let fills = style.layers.iter().filter(|l| l.kind == LayerKind::Fill).count();
         let lines = style.layers.iter().filter(|l| l.kind == LayerKind::Line).count();
-        assert_eq!((fills, lines), (24, 9));
+        let symbols = style.layers.iter().filter(|l| l.kind == LayerKind::Symbol).count();
+        assert_eq!((fills, lines, symbols), (24, 22, 4));
         assert_eq!(style.background, (0xFF80DEEA, 0xFF0D1B2A));
     }
 
@@ -595,7 +673,9 @@ mod tests {
             assert_eq!(layer.gapped(), ever, "`{}` disagrees with its gap ramp", layer.id);
         }
         assert!(find("roads-major-casing").gapped());
+        assert!(find("roads-link-casing").gapped(), "a link casing is still a casing");
         assert!(!find("roads-major").gapped());
+        assert!(!find("roads-link").gapped(), "a link fill is a single centred stroke");
         assert!(!find("earth").gapped());
     }
 
@@ -610,7 +690,7 @@ mod tests {
     /// map — otherwise this trades one visible defect for another.
     #[test]
     fn roads_are_still_drawn_at_street_zoom() {
-        for id in ["roads-highway", "roads-major", "roads-minor"] {
+        for id in ["roads-highway", "roads-major", "roads-minor", "roads-link"] {
             let width = find(id).stroke(16.0).width_dp;
             assert!(width >= 1.0, "`{id}` is {width} Dp at z16");
         }
@@ -664,6 +744,62 @@ mod tests {
         let minor = of("roads-minor", 14.87).expect("drawn");
         assert!((5.0..6.0).contains(&minor), "{minor} px");
         assert!(minor < highway, "a minor road must be narrower than a highway");
+        // A link is narrower than the class road it leaves: at z14.87 the link ramp reads
+        // ~2.24 Dp (~6.7 px) against the highway's ~4.73 Dp. Before the link layers
+        // existed the ramp drew at full highway width, which is the too-wide super-zoom
+        // roads this file's new layers fix.
+        let link = of("roads-link", 14.87).expect("drawn");
+        assert!((6.0..7.5).contains(&link), "{link} px");
+        assert!(link < highway, "a slip road must be narrower than the highway it joins");
+    }
+
+    // --- the link/service split (issue #3) -----------------------------------
+
+    /// The link casing carries the authored link-casing ramp, and the fill the link
+    /// ramp — both narrower than the class layers (z18: 11 Dp vs 15 Dp with no link
+    /// casing at all on the class side, since a link is not a highway).
+    #[test]
+    fn a_link_is_narrower_than_the_class_road_it_joins() {
+        let (link, highway) = (find("roads-link"), find("roads-highway"));
+        for tenth in [160, 170, 180] {
+            let zoom = tenth as f64 / 10.0;
+            let (l, h) = (link.stroke(zoom).width_dp, highway.stroke(zoom).width_dp);
+            assert!(l > 0.0 && h > 0.0, "both drawn at z{zoom}");
+            assert!(l < h, "link {l} Dp is not narrower than highway {h} Dp at z{zoom}");
+        }
+        assert_eq!(link.stroke(18.0).width_dp, 11.0, "the authored z18 link width");
+        assert_eq!(highway.stroke(18.0).width_dp, 15.0);
+        assert_eq!(link.gap_width.peak(), 0.0, "a link fill is a single centred stroke");
+        assert_eq!(find("roads-link-casing").stroke(18.0).gap_width_dp, 11.0);
+        // The highway casing's gap ramp ends at z18 with 15 Dp: a link must never be
+        // outlined by it, which the `link` forbid-flag on the class layers guarantees
+        // (see `surface_road_layers_draw_only_plain_surface_roads`).
+        assert!(highway.forbid_flags & 0b100 != 0, "highway layers forbid links");
+    }
+
+    /// Service streets draw at the service width, not at full minor width.
+    #[test]
+    fn a_service_street_is_narrower_than_a_minor_road() {
+        let (service, minor) = (find("roads-minor-service"), find("roads-minor"));
+        assert_eq!(service.stroke(18.0).width_dp, 8.0, "the authored z18 service width");
+        assert_eq!(minor.stroke(18.0).width_dp, 11.0);
+        assert!(service.stroke(18.0).width_dp < minor.stroke(18.0).width_dp);
+    }
+
+    // --- rail: a dashed translucent line, not a solid road (issue #6) --------
+
+    /// Rail renders as the authored dashed grey line: `[0.3, 0.75]` in line widths at
+    /// 0.5 opacity in `#a7b1b3` — not the solid road-coloured band the comparator
+    /// showed down the Market St corridor.
+    #[test]
+    fn rail_is_a_dashed_translucent_grey_line() {
+        let rail = find("roads-rail");
+        assert_eq!(rail.dash, (0.3, 0.75), "the authored line-dasharray");
+        assert_eq!(rail.opacity_at(16.0), 0.5, "the authored line-opacity");
+        assert_eq!(rail.light, 0xFFA7B1B3, "the authored line-color");
+        // The width ramp is unchanged: the dash and translucency are the fix, not the
+        // width.
+        assert_eq!(rail.stroke(18.0).width_dp, 9.0);
     }
 
     // --- fills -------------------------------------------------------------
@@ -722,16 +858,79 @@ mod tests {
         for layer in layers() {
             match layer.kind {
                 LayerKind::Line => {
-                    assert!(layer.width.peak() > 0.0, "{} needs a width", layer.id);
-                    assert_eq!(layer.opacity, Ramp::constant(1.0), "{} is a line", layer.id);
+                    // A casing needs a width OR a gap: gap-only casings
+                    // (bridges-other: authored gap, no width — the casing IS
+                    // the gap band) tessellate off the gap peak.
+                    assert!(
+                        layer.width.peak() > 0.0 || layer.gap_width.peak() > 0.0,
+                        "{} needs a width",
+                        layer.id
+                    );
+                    // A line's opacity is 1 except where the authored style paints it
+                    // translucent — today only rail's 0.5, which is what makes a railway a
+                    // faint dashed line rather than a solid road.
+                    let expected_opacity = if layer.id == "roads-rail" { 0.5 } else { 1.0 };
+                    assert_eq!(
+                        layer.opacity,
+                        Ramp::constant(expected_opacity),
+                        "{} carries an opacity the authored style did not give it",
+                        layer.id
+                    );
                 }
                 LayerKind::Fill => {
                     assert_eq!(layer.width.peak(), 0.0, "{} is a fill", layer.id);
                     assert_eq!(layer.gap_width.peak(), 0.0, "{} is a fill", layer.id);
                     assert_eq!(layer.dash, (0.0, 0.0), "{} is a fill", layer.id);
                 }
+                LayerKind::Symbol => {
+                    // Symbols carry text paint, not stroke paint.
+                    assert!(layer.text_size.peak() > 0.0, "{} needs a text size", layer.id);
+                    assert_eq!(layer.width.peak(), 0.0, "{} is a symbol", layer.id);
+                    assert_eq!(layer.gap_width.peak(), 0.0, "{} is a symbol", layer.id);
+                    // Halo width stays authored (1px everywhere in basemap.json);
+                    // halo COLOR is deliberately high-contrast (white/dark) where
+                    // the authored #e0e0e0 washes out on our land — pinned here,
+                    // Halo width is 1px almost everywhere; locality takes 1.5
+                    // for legibility at city sizes (pinned below).
+                    assert!(
+                        layer.halo_width == 1.0 || layer.id == "places-locality",
+                        "{} halo width",
+                        layer.id
+                    );
+                    assert!(layer.halo_light >> 24 > 0, "{} halo is fully transparent", layer.id);
+                }
             }
         }
+    }
+
+    /// Symbol halos are high-contrast by decision, not transcription: white in
+    /// light mode, the dark backdrop in dark mode. The authored #e0e0e0 halo
+    /// is indistinguishable from our #e2dfda land, so labels smear instead of
+    /// reading — the M1 legibility verdict. Width stays authored (cross-check).
+    #[test]
+    fn symbol_halos_contrast_against_both_land_and_text() {
+        for id in ["places-country", "places-region", "places-locality", "places-subplace"] {
+            let layer = find(id);
+            assert_eq!(layer.halo_light, 0xFFFFFFFF, "{id} light halo");
+            assert_eq!(layer.halo_dark, 0xFF0D1B2A, "{id} dark halo");
+        }
+    }
+
+    /// City labels track the authored big-city arm at the zooms MapLibre is
+    /// compared at — not the small-town arm. The authored `text-size` is
+    /// data-driven (`case` over `population_rank`, so the cross-check skips it);
+    /// the flat file transcribes one value, and the M1 parity verdict moved it
+    /// from mid-arm to big-arm at city zooms (z6: 14 → 16 against big-17).
+    #[test]
+    fn city_labels_track_the_big_city_arm_at_compared_zooms() {
+        let at = |id: &str, zoom: f64| find(id).text_size.at(zoom);
+        assert_eq!(at("places-locality", 6.0), 16.0);
+        assert_eq!(at("places-locality", 10.0), 19.0);
+        // Region and subplace are plain ramps, so the cross-check already pins
+        // them stop-for-stop against basemap.json; locality and country are
+        // data-driven there and transcribed here.
+        assert_eq!(at("places-region", 7.0), 16.0);
+        assert_eq!(at("places-subplace", 14.0), 14.0);
     }
 
     // --- the cross-check against basemap.json ------------------------------
@@ -826,6 +1025,25 @@ mod tests {
         authored_ramp(json)
     }
 
+    /// The authored value of one _layout_ property (`text-size` lives in `layout`,
+    /// not `paint`). A data-driven `text-size` with `case`/`get` arms has no flat
+    /// equivalent — the caller transcribes the constant the arms evaluate to at the
+    /// reference zooms, and this reads the same arms-free ramps only. Returns `None`
+    /// when the value is data-driven, so the cross-check skips rather than lies.
+    fn authored_layout_ramp(layer: &Json, property: &str) -> Option<Ramp> {
+        let json = layer.get("layout")?.get(property)?;
+        if let Some(value) = json.as_f64() {
+            return Some(Ramp::constant(value as f32));
+        }
+        // A plain `interpolate` over zoom transcribes directly; anything data-driven
+        // (`case`, `get`, `step` over feature properties) is M1-out-of-scope.
+        let text = serde_json::to_string(json).unwrap_or_default();
+        if text.contains("\"case\"") || text.contains("\"get\"") {
+            return None;
+        }
+        authored_ramp(json)
+    }
+
     /// **The mitigation for the one risk this module has a history of.** Hand-transcribing
     /// `basemap.json` failed twice before, so every value that exists in both files is compared
     /// here and divergence fails a build rather than being noticed on a screenshot.
@@ -868,10 +1086,46 @@ mod tests {
                 LayerKind::Line => {
                     let width = authored_property(&authored, "line-width")
                         .unwrap_or_else(|| Ramp::constant(1.0));
-                    assert_ramps_agree(&layer.id, "width", &layer.width, &width);
+                    // Gap-only casings (bridges-other: authored gap, no width —
+                    // the casing IS the gap band, no centre stroke) carry no
+                    // width ramp of their own; the stroke tessellator keys off
+                    // the gap peak, so width agreement is vacuous there. The
+                    // default-1.0 only fires when authored has NO line-width.
+                    let authored_has_width = authored
+                        .get("paint")
+                        .and_then(|p| p.get("line-width"))
+                        .is_some();
+                    if authored_has_width {
+                        assert_ramps_agree(&layer.id, "width", &layer.width, &width);
+                    }
                     let gap = authored_property(&authored, "line-gap-width")
                         .unwrap_or_else(|| Ramp::constant(0.0));
                     assert_ramps_agree(&layer.id, "gap_width", &layer.gap_width, &gap);
+                }
+                LayerKind::Symbol => {
+                    // Text sizes are layout properties in the authored style, not
+                    // paint — compared stop-for-stop against `text-size`. Data-driven
+                    // sizes (`case` over population_rank) are transcribed as the
+                    // constant the arms evaluate to at the reference zooms (see the
+                    // flat file), so the cross-check only covers plain ramps.
+                    if let Some(authored_size) = authored_layout_ramp(&authored, "text-size") {
+                        assert_ramps_agree(&layer.id, "text_size", &layer.text_size, &authored_size);
+                    }
+                    // Halo WIDTH stays authored (1px everywhere): a transcription
+                    // slip is a halo that is missing (0) or doubled, so it fails
+                    // the build like any other value. Halo COLOR is deliberately
+                    // Halo WIDTH stays authored (1px everywhere) except the
+                    // deliberate locality legibility bump (pinned in
+                    // `a_line_layer_has_a_width...`); halo COLOR is ours (see
+                    // above), not the authored #e0e0e0.
+                    if let Some(width) = authored.get("paint").and_then(|p| p.get("text-halo-width")).and_then(Json::as_f64) {
+                        let expected = if layer.id == "places-locality" { 1.5 } else { width as f32 };
+                        assert!(
+                            (layer.halo_width - expected).abs() < 1e-6,
+                            "`{}`'s halo_width is {} where basemap.json says {width}",
+                            layer.id, layer.halo_width,
+                        );
+                    }
                 }
             }
         }

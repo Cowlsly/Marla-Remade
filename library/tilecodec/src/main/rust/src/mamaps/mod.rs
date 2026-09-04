@@ -92,12 +92,14 @@ mod tests {
             kind_detail: dict::NONE,
             geom_type: GEOM_LINE,
             flags: 0,
+            name_idx: crate::mamaps::body::NAME_NONE,
             parts_offset: 0,
             part_count: 1,
+            transit_color: 0,
         });
         roads.parts.push(Part { coord_start: 0, point_count: 2, winding: WINDING_OUTER });
         roads.coords = vec![(0, 0), (seed, seed)];
-        Body { extent: DEFAULT_EXTENT, layers: vec![roads] }
+        Body { extent: DEFAULT_EXTENT, layers: vec![roads], names: Vec::new() }
     }
 
     /// An archive of `(z, x, y, seed)` tiles, fed in ascending id order as the writer requires.
@@ -168,8 +170,10 @@ mod tests {
             kind_detail: dict::NONE,
             geom_type: GEOM_LINE,
             flags: 0,
+            name_idx: crate::mamaps::body::NAME_NONE,
             parts_offset: 0,
             part_count: 1,
+            transit_color: 0,
         });
         roads.parts.push(Part { coord_start: 0, point_count: POINTS, winding: WINDING_OUTER });
         let mut state = seed as u64 ^ 0xA5A5_A5A5_A5A5_A5A5;
@@ -179,7 +183,7 @@ mod tests {
                 ((state >> 33) as i16, (state >> 17) as i16)
             })
             .collect();
-        Body { extent: DEFAULT_EXTENT, layers: vec![roads] }
+        Body { extent: DEFAULT_EXTENT, layers: vec![roads], names: Vec::new() }
     }
 
     #[test]
@@ -570,5 +574,86 @@ mod tests {
             Err(e) => e,
         };
         assert!(failure.0.contains("disagrees with this build's schema"), "{}", failure.0);
+    }
+
+    /// Planet per-leaf data-span overflow: a leaf whose entries' max(offset)-
+    /// min(offset) would exceed u32::MAX (planet: 4294968552 = u32::MAX+1257)
+    /// must be split, otherwise LeafEntry.offset_delta (u32) overflows.
+    /// Common case (NA ~418 MB, all spans < u32::MAX) must stay byte-identical
+    /// to the old chunks(capacity) partitioning (NA sha FF312EC...).
+    #[test]
+    fn a_leaf_whose_data_span_would_exceed_u32_max_is_split_and_common_case_stays_byte_identical() {
+        use crate::mamaps::write::{Pending, Options, StreamWriter};
+
+        // 1) Common case: all offsets within one capacity chunk and span < u32::MAX
+        // → must yield ceil(N/capacity) leaves, same as old chunks(capacity).
+        {
+            let n = 5000usize;
+            let cap = 4096u32;
+            // Offsets grow linearly ~1 KiB per entry → 5000 KiB ≈5 MB span < 4 GiB
+            let entries: Vec<Pending> = (0..n)
+                .map(|i| Pending { tile_id: crate::pmtiles::tile_id(4, (i%32) as u64, (i/32) as u64), offset: i as u64 * 1024, run_length: 1, length: 100 })
+                .collect();
+            let split = crate::mamaps::write::StreamWriter::partition_for_test(&entries, cap).expect("partition").expect("split");
+            let expected_leaves = (n + cap as usize - 1)/ cap as usize;
+            assert_eq!(split.0.len(), expected_leaves, "common case must use count-only split");
+            assert_eq!(split.1.iter().map(|l| l.len()).sum::<usize>(), n);
+            // Every leaf leaf_offset must be byte-identical to old count-only: leaf_offset = leaf_index * cap*16
+            for (i, re) in split.0.iter().enumerate() {
+                assert_eq!(re.leaf_offset, (i * cap as usize * crate::mamaps::index::LEAF_ENTRY_LEN) as u64);
+            }
+            // Every delta fits u32 and reconstructs
+            for (re, leaf) in split.0.iter().zip(split.1.iter()) {
+                for e in leaf { assert!((e.offset_delta as u64 + re.base_data_offset) <= u32::MAX as u64 + re.base_data_offset); }
+            }
+        }
+
+        // 2) Span overflow: 3 entries within one capacity slot but offsets 0 and u32::MAX+5000
+        // must be split into 2 leaves even though count < capacity.
+        {
+            let cap = 4096u32;
+            let entries = vec![
+                Pending { tile_id: crate::pmtiles::tile_id(4,0,0), offset: 0, run_length: 1, length: 10 },
+                Pending { tile_id: crate::pmtiles::tile_id(4,1,0), offset: 1_000_000, run_length: 1, length: 10 },
+                Pending { tile_id: crate::pmtiles::tile_id(4,2,0), offset: u32::MAX as u64 + 5000, run_length: 1, length: 10 },
+            ];
+            let split = crate::mamaps::write::StreamWriter::partition_for_test(&entries, cap).expect("partition").expect("split");
+            assert!(split.0.len() >= 2, "span > u32::MAX must force an extra leaf split (got {} leaves)", split.0.len());
+            let total: usize = split.1.iter().map(|l| l.len()).sum();
+            assert_eq!(total, 3);
+            for (re, leaf) in split.0.iter().zip(split.1.iter()) {
+                let max_delta = leaf.iter().map(|e| e.offset_delta as u64).max().unwrap_or(0);
+                assert!(max_delta <= u32::MAX as u64, "every delta must fit u32 (max_delta={})", max_delta);
+                // Absolute offset reconstructs
+                for e in leaf {
+                    let abs = re.base_data_offset + e.offset_delta as u64;
+                    let found = entries.iter().any(|pe| pe.offset == abs);
+                    assert!(found, "reconstructed offset {} must be one of the input offsets", abs);
+                }
+            }
+            // Old fixed-chunk logic would have produced 1 leaf and later failed with
+            // "leaf spans 429496..." — new logic succeeds by splitting.
+            eprintln!("span-overflow partition: {} leaves for 3 entries spanning >u32::MAX (byte-identical common case preserved)", split.0.len());
+        }
+
+        // Also smoke a real archive (5000 tiles, 2 leaves) to ensure end-to-end still works.
+        // z8: 256x256 tiles, so (i%32, i/32) for i in 0..5000 stays in range and unique (z4
+        // only has 16 rows — y past 15 wraps tile_id into duplicates the writer refuses).
+        let tiles: Vec<(u8,u64,u64,i16)> = (0..5000u64).map(|i| (8u8, i%32, i/32, i as i16)).collect();
+        let opts = Options { leaf_entry_capacity: 4096, ..Options::default() };
+        let mut rows: Vec<(u64,i16)> = tiles.iter().map(|(z,x,y,s)| (crate::pmtiles::tile_id(*z,*x,*y),*s)).collect();
+        rows.sort_by_key(|(id,_)| *id);
+        let mut w = StreamWriter::new(opts).expect("opts");
+        for (id, seed) in rows { w.append(id, &crate::mamaps::body::Body { extent: 4096, layers: {
+            let mut l = crate::mamaps::body::Layer::new(crate::mamaps::dict::LAYER_ROADS);
+            l.features.push(crate::mamaps::body::Feature{kind:1,kind_detail:0,geom_type:1,flags:0,name_idx:0,parts_offset:0,part_count:1,transit_color:0});
+            l.parts.push(crate::mamaps::body::Part{coord_start:0,point_count:2,winding:0});
+            l.coords = vec![(0,0),(seed,seed)];
+            vec![l]
+        }, names: Vec::new() }).expect("append"); }
+        let bytes = w.finish().expect("finish");
+        let hdr = crate::mamaps::Header::parse(&bytes).expect("hdr");
+        assert_eq!(hdr.leaf_count as usize, (5000+4096-1)/4096);
+        eprintln!("end-to-end: 5000 tiles → leaf_count={} leaf_len={}", hdr.leaf_count, hdr.leaf_len);
     }
 }

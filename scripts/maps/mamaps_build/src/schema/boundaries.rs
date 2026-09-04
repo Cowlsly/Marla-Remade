@@ -16,7 +16,7 @@ use tilecodec::mamaps::dict::LAYER_BOUNDARIES;
 
 use super::{kind, Class, TagSource};
 
-pub const FILTERS: &[&str] = &["boundary", "admin_level"];
+pub const FILTERS: &[&str] = &["boundary", "admin_level", "maritime"];
 
 /// Every `kind` this module can emit.
 #[cfg_attr(not(test), allow(dead_code))]
@@ -29,6 +29,13 @@ const MAX_LEVEL: u16 = 8;
 
 pub fn classify(tags: &(impl TagSource + ?Sized)) -> Option<Class> {
     if tags.get("boundary") != Some("administrative") {
+        return None;
+    }
+    // A maritime boundary (an EEZ or territorial-water limit drawn across open sea) is
+    // `boundary=administrative` over water, not inland/coastline admin, and the reference
+    // style's boundary layers do not show it. Dropped here, in the tiler, so the layer
+    // carries what the style draws rather than lines across the ocean.
+    if tags.get("maritime") == Some("yes") {
         return None;
     }
     let level: u16 = tags.get("admin_level")?.trim().parse().ok()?;
@@ -151,6 +158,27 @@ mod tests {
         assert!(
             classify_tags(&[("boundary", "administrative"), ("admin_level", "0")]).is_none(),
             "level 0 is not a level",
+        );
+    }
+
+    #[test]
+    fn a_maritime_administrative_boundary_is_not_drawn() {
+        // An EEZ / territorial-water limit: `boundary=administrative` over water, tagged
+        // `maritime=yes`. The reference style's boundary layers show inland/coastline admin
+        // only, so the tiler drops these rather than drawing lines across open sea.
+        assert!(
+            classify_tags(&[
+                ("boundary", "administrative"),
+                ("admin_level", "2"),
+                ("maritime", "yes"),
+            ])
+            .is_none(),
+            "a maritime boundary should not be a boundary",
+        );
+        // And the inland equivalent still classifies.
+        assert!(
+            classify_tags(&[("boundary", "administrative"), ("admin_level", "2")]).is_some(),
+            "an inland country border still counts",
         );
     }
 

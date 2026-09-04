@@ -64,7 +64,15 @@ fun VectorMap(
     options: MapOptions = MapOptions(),
     imageOverlay: ImageOverlay? = null,
     onMapClick: (GeoPoint) -> Unit = {},
+    /**
+     * Tap with the screen point attached (see [MapClick]): what
+     * `MapFeaturePicker`-style hit-testing needs. Null (default) means
+     * taps report geo only, exactly as before — existing call sites,
+     * including mapcompare, are unaffected.
+     */
+    onMapClickWithScreen: ((MapClick) -> Unit)? = null,
     onFrame: () -> Unit = {},
+    archivePath: String? = null,
     content: @Composable () -> Unit = {},
 ) {
     val density = LocalDensity.current.density
@@ -87,12 +95,13 @@ fun VectorMap(
             .onSizeChanged {
                 cameraState.setViewport(Size(it.width / density, it.height / density))
             }
-            .mapGestures(cameraState, options.gestureOptions, zoomRange, density, onMapClick),
+            .mapGestures(cameraState, options.gestureOptions, zoomRange, density, onMapClick, onMapClickWithScreen),
     ) {
         VulkanMapSurface(
             cameraState = cameraState,
             darkBasemap = darkBasemap,
             muted = style == MapStyle.Muted,
+            archivePath = archivePath,
             modifier = Modifier.fillMaxSize(),
             onFrame = onFrame,
         )
@@ -102,12 +111,6 @@ fun VectorMap(
         }
 
         content()
-
-        // Structurally non-disableable: the data is OpenStreetMap's under ODbL and the
-        // schema is Protomaps', so this is a licence condition rather than a preference.
-        // `MapOptions.kt:22-23` already asserts as much, and there is deliberately no
-        // parameter to hide it — `OrnamentOptions.AllDisabled` cannot.
-        MapAttribution(Modifier.align(Alignment.BottomStart))
     }
 }
 
@@ -159,23 +162,15 @@ private const val LIGHT_BACKGROUND = 0xFFE9E7E2
 /** `BasemapPalette.Fill.Background`, so this and `maps` agree in the dark. */
 private const val DARK_BACKGROUND = 0xFF1B1D22
 
-/** `© OpenStreetMap contributors` and the schema's author, as both licences require. */
-@Composable
-internal fun MapAttribution(modifier: Modifier = Modifier) {
-    BasicText(
-        text = ATTRIBUTION,
-        modifier = modifier
-            .padding(2.dp)
-            .background(Color(0xB3FFFFFF))
-            .padding(horizontal = 4.dp, vertical = 1.dp),
-        style = TextStyle(color = Color(0xFF444444), fontSize = 9.sp, fontFamily = FontFamily.SansSerif),
-    )
-}
-
 /**
- * The tiles are OpenStreetMap data under ODbL, tiled to the Protomaps v4 schema.
+ * The attribution text the overlay used to draw: "© OpenStreetMap contributors · Protomaps".
  *
- * CARTO is deliberately gone: we no longer use their CDN, and still crediting them would be
- * as wrong as omitting OpenStreetMap.
+ * REMOVED from the map by task 51 (#9): the overlay no longer exists. The string stays as
+ * the canonical credit for any host About/Legal screen to reuse — the tiles are still
+ * OpenStreetMap data under ODbL tiled to the Protomaps schema, and the ODbL requires the
+ * credit *somewhere* visible. No app currently shows it elsewhere (checked: maps,
+ * findfamily, weather, photos, communicate have no OSM/ODbL/attribution screen or string),
+ * so until a host adds one this product ships WITHOUT the required attribution — the user
+ * must place it. CARTO is deliberately not credited: we no longer use their CDN.
  */
 internal const val ATTRIBUTION = "© OpenStreetMap contributors · Protomaps"

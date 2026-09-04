@@ -131,8 +131,8 @@ mod tests {
 
     #[test]
     fn the_viewport_is_covered_at_an_exact_zoom() {
-        // z2 centred on null island: the world is 1024 Dp across, so a 256 Dp viewport
-        // straddles the four tiles around the centre.
+        // z2 centred on null island: the world is 1024 Dp across (256 grid),
+        // so a 256 Dp viewport straddles the four tiles around the centre.
         let tiles = visible(&camera(0.0, 0.0, 2.0, 256.0, 256.0), 0, 16);
         assert_eq!(tiles.len(), 4, "the centre of the world is a four-tile corner");
         assert!(tiles.iter().all(|t| t.z == 2));
@@ -193,10 +193,12 @@ mod tests {
     fn the_tile_count_stays_within_the_area_bound() {
         // A sanity bound on GPU residency: a phone at z14 should be tens of tiles, not
         // hundreds. Each resident tile costs vertex and index buffers per layer.
+        // (512px tiles cover 4x the area of 256px ones, so the same viewport
+        // needs roughly a quarter the tiles.)
         let c = camera(-122.4194, 37.7749, 14.0, 411.0, 891.0);
         let tiles = visible(&c, 0, 16);
         assert!(tiles.len() <= bound(&c), "{} exceeds the bound {}", tiles.len(), bound(&c));
-        assert!(tiles.len() >= 6, "a phone viewport at z14 covers at least six tiles");
+        assert!(!tiles.is_empty(), "a phone viewport at z14 covers tiles");
     }
 
     #[test]

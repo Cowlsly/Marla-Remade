@@ -49,7 +49,7 @@ use crate::preprocess::{
 };
 use crate::vulkan::context;
 use crate::vulkan::reshape::Reshaped;
-use crate::vulkan::run::Net;
+use crate::vulkan::run::{Net, StepParams};
 use crate::weights::{graph, Offsets, Streamed, Weights};
 
 /// One segmenter. Handed to Kotlin as an opaque `jlong`.
@@ -1176,31 +1176,22 @@ fn nllb_plan(offsets: &Offsets, mode: nllb::Mode) -> Result<Plan, String> {
     nllb::build(offsets, mode)
 }
 
-/// The two GPU passes, as [`translate::Nets`] wants them, plus the host-side KV cache.
+/// The two GPU passes, as [`translate::Nets`] wants them.
 ///
-/// Built per translation and dropped with it, so a cache cannot leak into the next sentence — the
-/// failure `Net::reset` would otherwise exist to prevent.
+/// There is no host-side KV cache any more: the decode plan holds one in the arena and writes to
+/// it in place. A sentence cannot leak into the next one because switching back to
+/// [`nllb::Mode::Encode`] and out again re-records the plan, and the first step of a translation
+/// writes row zero before reading anything.
 struct NllbNets<'a> {
     net: &'a mut Reshaped<nllb::Mode>,
     weights: &'a Streamed,
-    /// Per decoder layer, the K then V for every position decoded so far, position-major and
-    /// concatenated. `[cache_len * D_MODEL]` each, appended one row at a time.
-    cache: Vec<Vec<f32>>,
     /// Source positions, so a decode step records at the length the encoder ran at.
     src_len: u32,
 }
 
-/// K and V per decoder layer, which is how many cache buffers there are.
-const NLLB_CACHES: usize = nllb::DECODER_LAYERS * 2;
-
 impl NllbNets<'_> {
     fn new<'a>(handle: &'a mut NllbHandle) -> NllbNets<'a> {
-        NllbNets {
-            net: &mut handle.net,
-            weights: &handle.weights,
-            cache: vec![Vec::new(); NLLB_CACHES],
-            src_len: 0,
-        }
+        NllbNets { net: &mut handle.net, weights: &handle.weights, src_len: 0 }
     }
 }
 
@@ -1227,6 +1218,12 @@ impl translate::Nets for NllbNets<'_> {
     ) -> Result<Vec<f32>, String> {
         let width = nllb::D_MODEL as usize;
         let cache_len = u32::try_from(step).map_err(|_| "a step past u32")?;
+        if cache_len >= nllb::MAX_DECODE_POSITIONS {
+            return Err(format!(
+                "step {step} is past the {} the KV cache holds",
+                nllb::MAX_DECODE_POSITIONS
+            ));
+        }
         let reader = self.weights.reader();
         // `past = step`, which is what puts this token at position `step + 2`.
         let embedded = nllb::embed_positions(reader, &[token], cache_len)?;
@@ -1240,25 +1237,21 @@ impl translate::Nets for NllbNets<'_> {
         // Back to `[d_model, 1, src_len]`, which is what the cross-attention projections read.
         let source = transpose(encoded, encoded.len() / width, width);
 
-        let net = self.net.at(nllb::Mode::DecodeStep { cache_len, src_len })?;
-        // Declaration order: the token, the encoder output, then each layer's K and V. The cache
-        // pair is absent at step 0, where there is nothing before this token.
-        let mut inputs: Vec<&[f32]> = Vec::with_capacity(2 + NLLB_CACHES);
-        inputs.push(&embedded);
-        inputs.push(&source);
-        if cache_len > 0 {
-            for held in &self.cache {
-                inputs.push(held);
-            }
-        }
-        let out = net.infer_raw_many(&inputs)?;
+        // The key no longer carries the step, so this matches after the first decode step and
+        // `at` stops re-recording. The KV cache stays in the arena between submits.
+        let net = self.net.at(nllb::Mode::DecodeStep { src_len })?;
+        // The one thing that changes per token, and it is a memcpy rather than a re-record.
+        net.set_params(StepParams { prefix: cache_len, window_start: 0 })?;
+        let out = net.infer_raw_many(&[&embedded, &source])?;
 
-        // Four logits splits, then this step's K and V per layer. The splits are consecutive class
-        // ranges (the last two one class short), so concatenating them is the full-vocabulary
-        // vector `post::translate` argmaxes.
-        let expected = nllb::HEAD_SPLITS + NLLB_CACHES;
-        if out.len() != expected {
-            return Err(format!("a decode step returned {} tensors, not {expected}", out.len()));
+        // Four logits splits and nothing else: the K and V rows are written straight into the
+        // device-side cache by the plan, so there is no cache to bring back.
+        if out.len() != nllb::HEAD_SPLITS {
+            return Err(format!(
+                "a decode step returned {} tensors, not {}",
+                out.len(),
+                nllb::HEAD_SPLITS
+            ));
         }
         let mut logits = Vec::with_capacity(nllb::VOCAB as usize);
         for half in out.iter().take(nllb::HEAD_SPLITS) {
@@ -1266,14 +1259,6 @@ impl translate::Nets for NllbNets<'_> {
         }
         if logits.len() != nllb::VOCAB as usize {
             return Err(format!("{} logits, not {}", logits.len(), nllb::VOCAB));
-        }
-        for (held, row) in self.cache.iter_mut().zip(out.iter().skip(nllb::HEAD_SPLITS)) {
-            if row.len() != width {
-                return Err(format!("a cache row of {} values, not {width}", row.len()));
-            }
-            // Position-major, so appending is a plain extend and the plan's own concatenation of
-            // it is one contiguous copy.
-            held.extend_from_slice(row);
         }
         Ok(logits)
     }
@@ -1839,31 +1824,21 @@ fn whisper_plan(offsets: &Offsets, mode: whisper::Mode) -> Result<Plan, String> 
 /// Cross-attention caches per decoder layer, K then V. See [`WhisperHandle`].
 const WHISPER_CROSS: usize = whisper::DECODER_LAYERS * 2;
 
-/// Self-attention caches per decoder layer, K then V.
-const WHISPER_SELF: usize = whisper::DECODER_LAYERS * 2;
-
-/// The two GPU passes, as [`whisper_post::Nets`] wants them, plus both kinds of cache.
+/// The two GPU passes, as [`whisper_post::Nets`] wants them, plus the cross-attention caches.
 ///
-/// Built per transcription and dropped with it, so neither cache can leak into the next utterance.
+/// Built per transcription and dropped with it. The **self-attention** caches are not here at all
+/// any more: the decode plan holds them in the arena and writes to them in place.
 struct WhisperNets<'a> {
     net: &'a mut Reshaped<whisper::Mode>,
     weights: &'a Streamed,
     /// Each layer's cross-attention K then V, `[512 * 1500]` each, channel-major and constant for
     /// the whole transcript.
     cross: Vec<Vec<f32>>,
-    /// Each layer's self-attention K then V for every position decoded so far, position-major and
-    /// concatenated, `[step * 512]` each.
-    past: Vec<Vec<f32>>,
 }
 
 impl WhisperNets<'_> {
     fn new<'a>(handle: &'a mut WhisperHandle) -> WhisperNets<'a> {
-        WhisperNets {
-            net: &mut handle.net,
-            weights: &handle.weights,
-            cross: Vec::new(),
-            past: vec![Vec::new(); WHISPER_SELF],
-        }
+        WhisperNets { net: &mut handle.net, weights: &handle.weights, cross: Vec::new() }
     }
 }
 
@@ -1888,43 +1863,34 @@ impl whisper_post::Nets for WhisperNets<'_> {
         if self.cross.len() != WHISPER_CROSS {
             return Err("a decode step before the encoder ran".into());
         }
-        let width = whisper::D_MODEL as usize;
         let cache_len = u32::try_from(step).map_err(|_| "a step past u32")?;
+        if cache_len >= whisper::MAX_POSITIONS {
+            return Err(format!(
+                "step {step} is past the {} the KV cache holds",
+                whisper::MAX_POSITIONS
+            ));
+        }
         // The embedding row and the learned position, both on the host and summed in f32.
         let embedded = whisper::embed_positions(self.weights.reader(), &[token], cache_len)?;
 
-        let net = self.net.at(whisper::Mode::DecodeStep { cache_len })?;
-        // Declaration order: the token, the twelve cross caches, then the twelve self caches. The
-        // self pairs are absent at step 0, where there is nothing before this token.
-        let mut inputs: Vec<&[f32]> = Vec::with_capacity(1 + WHISPER_CROSS + WHISPER_SELF);
+        // One key for every step, so this re-records once - leaving `Encode` - and never again.
+        let net = self.net.at(whisper::Mode::DecodeStep)?;
+        net.set_params(StepParams { prefix: cache_len, window_start: 0 })?;
+        // Declaration order: the token, then the twelve cross caches.
+        let mut inputs: Vec<&[f32]> = Vec::with_capacity(1 + WHISPER_CROSS);
         inputs.push(&embedded);
         for held in &self.cross {
             inputs.push(held);
         }
-        if cache_len > 0 {
-            for held in &self.past {
-                inputs.push(held);
-            }
-        }
         let out = net.infer_raw_many(&inputs)?;
 
-        // The logits, then this step's K and V per layer.
-        let expected = 1 + WHISPER_SELF;
-        if out.len() != expected {
-            return Err(format!("a decode step returned {} tensors, not {expected}", out.len()));
+        // The logits, and nothing else: the self-attention rows went into the device-side cache.
+        if out.len() != 1 {
+            return Err(format!("a decode step returned {} tensors, not one", out.len()));
         }
-        let mut out = out.into_iter();
-        let logits = out.next().ok_or("no logits")?;
+        let logits = out.into_iter().next().ok_or("no logits")?;
         if logits.len() != whisper::VOCAB as usize {
             return Err(format!("{} logits, not {}", logits.len(), whisper::VOCAB));
-        }
-        for (held, row) in self.past.iter_mut().zip(out) {
-            if row.len() != width {
-                return Err(format!("a cache row of {} values, not {width}", row.len()));
-            }
-            // Position-major, so appending is a plain extend and the plan's own concatenation of it
-            // is one contiguous copy.
-            held.extend_from_slice(&row);
         }
         Ok(logits)
     }

@@ -1234,7 +1234,8 @@ class CameraViewModel(private val app: Application) : AndroidViewModel(app) {
             boundCamera?.cameraInfo?.zoomState?.value?.let {
                 updateZoomLevels(it.minZoomRatio, it.maxZoomRatio)
                 restoreZoom(it.minZoomRatio, it.maxZoomRatio)
-                Log.d("NightPreview", "setupPhotoSession() after levels=
+                Log.d("NightPreview", "setupPhotoSession() after levels=${_availableZoomLevels.value} ratio=${_zoomRatio.value}")
+            }
             _sloMoSupported.value = true
             _highSpeedActive.value = true
             true
@@ -1396,7 +1397,7 @@ class CameraViewModel(private val app: Application) : AndroidViewModel(app) {
                 Log.d("NightPreview", "setupPhotoSession() calling updateZoomLevels min=${it.minZoomRatio} max=${it.maxZoomRatio} – should show .5,1x,2x,5x if >1x else only 1x")
                 updateZoomLevels(it.minZoomRatio, it.maxZoomRatio)
                 restoreZoom(it.minZoomRatio, it.maxZoomRatio)
-                Log.d("NightPreview", "setupNightPreviewSession() updated zoomRatio=
+                Log.d("NightPreview", "setupNightPreviewSession() updated zoomRatio=${_zoomRatio.value} levels=${_availableZoomLevels.value}")
             }
             readManualControlRanges()
             applyManualControls()
@@ -1511,7 +1512,7 @@ class CameraViewModel(private val app: Application) : AndroidViewModel(app) {
                 Log.d("NightPreview", "setupNightPreviewSession() calling updateZoomLevels min=${it.minZoomRatio} max=${it.maxZoomRatio}")
                 updateZoomLevels(it.minZoomRatio, it.maxZoomRatio)
                 restoreZoom(it.minZoomRatio, it.maxZoomRatio)
-                Log.d("NightPreview", "setupPanoramaSession() levels=
+                Log.d("NightPreview", "setupPanoramaSession() levels=${_availableZoomLevels.value}")
             }
             // Do NOT observe getNightModeIndicator() on the extension camera: it reports
             // UNKNOWN/NOT_RECOMMENDED there, which fights the normal session's RECOMMENDED reading
@@ -1624,7 +1625,7 @@ class CameraViewModel(private val app: Application) : AndroidViewModel(app) {
                 Log.d("NightPreview", "setupPanoramaSession() updateZoomLevels min=${it.minZoomRatio} max=${it.maxZoomRatio}")
                 updateZoomLevels(it.minZoomRatio, it.maxZoomRatio)
                 restoreZoom(it.minZoomRatio, it.maxZoomRatio)
-                Log.d("NightPreview", "setupPortraitSession() after update levels=
+                Log.d("NightPreview", "setupPortraitSession() after update levels=${_availableZoomLevels.value} ratio=${_zoomRatio.value}")
             }
             _photoSessionActive.value = true
             Log.d("NightPreview", "setupPanoramaSession() SUCCESS photoActive=true surface=${_surfaceRequest.value?.resolution}")

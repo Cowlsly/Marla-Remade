@@ -175,12 +175,13 @@ private val DarkMapTokens = MapTokens(
 fun mapTokens(isDark: Boolean): MapTokens = if (isDark) DarkMapTokens else LightMapTokens
 
 /**
- * Render as a MapLibre style colour string.
+ * Render as a style colour string.
  *
- * MapLibre parses CSS colour syntax, so this emits `#rrggbb`, or `rgba()` when there is
+ * Parses as CSS colour syntax, so this emits `#rrggbb`, or `rgba()` when there is
  * alpha — `#aarrggbb` is an Android convention and is **not** valid CSS, which is the trap
  * this exists to close. Needed wherever a colour has to survive a round-trip through a
- * GeoJSON feature property or the style JSON rather than staying a typed expression.
+ * GeoJSON feature property (e.g. the Canvas-drawn route's `route-color`) rather than
+ * staying a typed value.
  */
 fun Color.toStyleHex(): String {
     val r = (red * 255f + 0.5f).toInt()

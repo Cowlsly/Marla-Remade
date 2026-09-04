@@ -57,6 +57,7 @@ Variant rules (see .llms/rules/installing.md):
 Notes:
   - NEVER uninstalls an app (no uninstall tasks)
   - Validates modules against app modules (those applying common-conventions-app)
+  - Installs to the first connected device whose serial does not start with 'emulator'
   - Set INSTALL_DRY_RUN=1 or pass --dry-run for dry-run mode
 '@
 }
@@ -80,7 +81,7 @@ function Get-AppModulesSlash {
             if ([string]::IsNullOrEmpty($slash)) { continue }
             $buildFile = Join-Path $Root (Join-Path $slash 'build.gradle.kts')
             if ((Test-Path -LiteralPath $buildFile) -and
-                (Select-String -LiteralPath $buildFile -Pattern 'common-conventions-app' -SimpleMatch -Quiet)) {
+                (Select-String -LiteralPath $buildFile -Pattern 'id("common-conventions-app")' -SimpleMatch -Quiet)) {
                 $found += $slash
             }
         }
@@ -109,6 +110,35 @@ function Print-ValidModules {
     Write-Host 'Shorthand: ./install dev voxels  (auto-expands to games:voxels if games/<name> exists)'
     Write-Host '           ./install dev dooraccess  (auto-expands to personal:dooraccess if personal/<name> exists)'
     Write-Host 'All: ./install all  (installs every app module)'
+}
+
+function Find-Adb {
+    $cmd = Get-Command adb -ErrorAction SilentlyContinue
+    if ($cmd) { return $cmd.Source }
+    $bases = @($env:ANDROID_HOME, $env:ANDROID_SDK_ROOT, (Join-Path $env:LOCALAPPDATA 'Android\Sdk'))
+    foreach ($base in $bases) {
+        if ([string]::IsNullOrEmpty($base)) { continue }
+        $candidate = Join-Path $base 'platform-tools\adb.exe'
+        if (Test-Path -LiteralPath $candidate) { return $candidate }
+    }
+    return $null
+}
+
+function Select-TargetSerial([string]$adb) {
+    $out = & $adb devices 2>$null
+    foreach ($line in $out) {
+        $line = $line.Trim()
+        if ([string]::IsNullOrEmpty($line)) { continue }
+        if ($line -like 'List of devices*') { continue }
+        $parts = $line -split '\s+'
+        if ($parts.Count -lt 2) { continue }
+        $serial = $parts[0]
+        $state = $parts[1]
+        if ($state -ne 'device') { continue }
+        if ($serial -like 'emulator*') { continue }
+        return $serial
+    }
+    return $null
 }
 
 # --- Handle zero args early ---
@@ -238,7 +268,7 @@ foreach ($raw in $modulesRaw) {
             $prefPath = Join-Path $Root (Join-Path $autoPrefix $norm)
             $prefBuild = Join-Path $prefPath 'build.gradle.kts'
             if ((Test-Path -LiteralPath $prefBuild) -and
-                (Select-String -LiteralPath $prefBuild -Pattern 'common-conventions-app' -SimpleMatch -Quiet)) {
+                (Select-String -LiteralPath $prefBuild -Pattern 'id("common-conventions-app")' -SimpleMatch -Quiet)) {
                 $expanded = "${autoPrefix}:${norm}"
                 Write-Host "Info: Expanding shorthand '$raw' ($norm) -> $expanded (found $autoPrefix/$norm)"
                 $norm = $expanded
@@ -274,7 +304,7 @@ foreach ($mod in $normalizedModules) {
     if (-not (Test-Path -LiteralPath $buildFile)) {
         $invalidModules += "$mod (not found: $fsPath/build.gradle.kts)"
     }
-    elseif (-not (Select-String -LiteralPath $buildFile -Pattern 'common-conventions-app' -SimpleMatch -Quiet)) {
+    elseif (-not (Select-String -LiteralPath $buildFile -Pattern 'id("common-conventions-app")' -SimpleMatch -Quiet)) {
         $invalidModules += "$mod (exists but is not an app module - missing common-conventions-app)"
     }
 }
@@ -301,6 +331,35 @@ $tasksStr = $tasks -join ' '
 Write-Host "Variant: $VariantLc (task suffix: install${VariantCap})"
 Write-Host "Modules ($($normalizedModules.Count)): $modulesStr"
 Write-Host "Gradle tasks: $tasksStr"
+Write-Host ''
+
+# --- Device selection: first connected device whose serial doesn't start with 'emulator' ---
+$adb = Find-Adb
+if (-not $adb) {
+    if ($DryRun) {
+        Write-Host '[DRY-RUN] Warning: adb not found; a device could not be selected.'
+    }
+    else {
+        Write-Host 'Error: adb not found; cannot select a target device.'
+        Write-Host 'Install Android platform-tools and put adb on PATH (or set ANDROID_HOME).'
+        exit 1
+    }
+}
+else {
+    $target = Select-TargetSerial $adb
+    if ($target) {
+        $env:ANDROID_SERIAL = $target
+        Write-Host "Target device: $target (first connected device not starting with 'emulator')"
+    }
+    elseif ($DryRun) {
+        Write-Host '[DRY-RUN] Warning: no non-emulator device connected; ANDROID_SERIAL not set.'
+    }
+    else {
+        Write-Host 'Error: No non-emulator device connected.'
+        Write-Host "Connect a physical device (check 'adb devices'); refusing to install to an emulator."
+        exit 1
+    }
+}
 Write-Host ''
 
 $gradlew = Join-Path $ScriptDir 'gradlew.bat'

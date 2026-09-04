@@ -376,8 +376,10 @@ mod tests {
             kind_detail: dict::NONE,
             geom_type: GEOM_POLYGON,
             flags: 0,
+            name_idx: tilecodec::mamaps::body::NAME_NONE,
             parts_offset: 0,
             part_count: rings.len() as u32,
+            transit_color: 0,
         });
         for (index, ring) in rings.iter().enumerate() {
             layer.parts.push(Part {
@@ -496,8 +498,10 @@ mod tests {
             kind_detail: dict::NONE,
             geom_type: GEOM_LINE,
             flags: 0,
+            name_idx: tilecodec::mamaps::body::NAME_NONE,
             parts_offset: 0,
             part_count: 1,
+            transit_color: 0,
         });
         layer.parts.push(Part { coord_start: 0, point_count: 3, winding: WINDING_OUTER });
         layer.coords = vec![(0, 0), (50, 0), (50, 50)];
@@ -544,6 +548,7 @@ mod tests {
         let body = tilecodec::mamaps::body::Body {
             extent: 4096,
             layers: vec![layer],
+            names: Vec::new(),
         };
         // The encoder's own contiguity check, which is the real proof.
         assert!(tilecodec::mamaps::body::serialize(&body).is_ok());
@@ -572,6 +577,7 @@ mod tests {
                     // A hole, wound the same way as its exterior, which stage C has to reverse.
                     ring(-120.2, 35.2, 0.3),
                 ]]),
+                name: None, transit_color: 0,
             },
             crate::extract::Feature {
                 class: Class::area(dict::LAYER_WATER, crate::schema::kind("water"), 0),
@@ -580,6 +586,7 @@ mod tests {
                     // A hole nowhere near its exterior, which stage C has to drop.
                     ring(-100.0, 20.0, 0.1),
                 ]]),
+                name: None, transit_color: 0,
             },
         ];
         let settings = crate::tiler::Settings {

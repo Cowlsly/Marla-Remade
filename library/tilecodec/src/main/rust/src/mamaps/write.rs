@@ -158,12 +158,13 @@ pub struct StreamWriter {
 /// archive stopped at `a .mamaps data section past 4 GiB needs a wider offset field` after 56 minutes
 /// of work, on a limit the format does not actually have. The narrowing belongs at
 /// [`StreamWriter::partition`], where the leaf base is known.
-struct Pending {
-    tile_id: u64,
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct Pending {
+    pub(crate) tile_id: u64,
     /// Absolute within the data section.
-    offset: u64,
-    run_length: u32,
-    length: u32,
+    pub(crate) offset: u64,
+    pub(crate) run_length: u32,
+    pub(crate) length: u32,
 }
 
 /// A root index and its leaves, as [`StreamWriter::partition`] produces them.
@@ -495,19 +496,44 @@ impl StreamWriter {
     /// Chop the entries into leaves of at most `capacity`, rebasing each leaf's ids and offsets.
     ///
     /// `None` when some leaf's tile-id span will not fit the `u32` a [`LeafEntry::tile_id_lo`]
-    /// carries, which the caller answers by choosing a different capacity. `Err` when a leaf's
-    /// data-offset span will not fit [`LeafEntry::offset_delta`], which no capacity fixes and which
-    /// [`MAX_DEDUP_REACH`] exists to make unreachable -- so it is reported rather than retried.
-    /// Truncating either would put a body at the wrong tile or the wrong offset with no diagnostic.
+    /// carries, which the caller answers by choosing a different capacity. A leaf is also
+    /// closed early when its data span would exceed u32::MAX — at planet scale the data
+    /// section is >4 GiB and a count-only leaf can span 4294968552 bytes (u32::MAX+1257
+    /// in the failed run) which the old `chunks(capacity)` path turned into a hard
+    /// `u32::try_from` abort. Splitting by span as well as count bounds every
+    /// LeafEntry.offset_delta to u32 without changing the wire format.
+    ///
+    /// Byte-identity: when no leaf's span nears 4 GiB (NA, us-west), this yields
+    /// exactly the same leaf boundaries as `chunks(capacity)` — the span check
+    /// only adds *earlier* splits for planet and never alters count-based splits.
     fn partition(&self, capacity: u32) -> Result<Option<Split>> {
         let mut root = Vec::new();
         let mut leaves = Vec::new();
-        for chunk in self.entries.chunks(capacity as usize) {
-            let base_tile_id = chunk[0].tile_id;
-            // The **minimum** offset in the chunk, not the first. Content dedup lets a tile in
-            // this leaf point at a body written for an earlier one, so basing on the first entry
-            // would make that delta negative.
+        let cap = capacity as usize;
+        let mut start = 0usize;
+        let mut leaf_data_offset: u64 = 0; // cumulative leaf section offset (packed, not stride)
+        while start < self.entries.len() {
+            // Greedily grow this leaf until capacity or 4 GiB span would be exceeded.
+            // Base is the *minimum* offset in the leaf, since content dedup lets a
+            // later entry point at a body written for an earlier tile (negative delta
+            // if based on first entry). Track min/max incrementally O(cap) per leaf.
+            let mut end = start + 1;
+            let mut cur_min = self.entries[start].offset;
+            let mut cur_max = cur_min;
+            while end < self.entries.len() && (end - start) < cap {
+                let next_off = self.entries[end].offset;
+                let new_min = cur_min.min(next_off);
+                let new_max = cur_max.max(next_off);
+                if new_max - new_min > u32::MAX as u64 {
+                    break;
+                }
+                cur_min = new_min;
+                cur_max = new_max;
+                end += 1;
+            }
+            let chunk = &self.entries[start..end];
             let base_data_offset = chunk.iter().map(|e| e.offset).min().unwrap_or(0);
+            let base_tile_id = chunk[0].tile_id;
             let last = &chunk[chunk.len() - 1];
             if !index::span_fits(last.tile_id + last.run_length as u64 - 1 - base_tile_id) {
                 return Ok(None);
@@ -529,15 +555,38 @@ impl StreamWriter {
                     length: entry.length,
                 });
             }
+            let leaf_len_before = leaf.len() as u64;
             root.push(RootEntry {
                 base_tile_id,
-                leaf_offset: (leaves.len() * capacity as usize * index::LEAF_ENTRY_LEN) as u64,
+                leaf_offset: leaf_data_offset,
                 base_data_offset,
                 leaf_entry_count: chunk.len() as u32,
             });
+            leaf_data_offset += leaf_len_before * index::LEAF_ENTRY_LEN as u64;
             leaves.push(leaf);
+            start = end;
         }
         Ok(Some((root, leaves)))
+    }
+
+    #[cfg(all(test, feature = "write"))]
+    #[allow(dead_code)]
+    pub(crate) fn partition_for_test(
+        entries: &[Pending],
+        capacity: u32,
+    ) -> Result<Option<Split>> {
+        let w = StreamWriter {
+            options: Options::default(),
+            data: Spill::create(None).expect("spill"),
+            entries: entries.to_vec(),
+            seen: std::collections::HashMap::new(),
+            last_id: None,
+            last_body: Vec::new(),
+            tiles_addressed: entries.len() as u64,
+            distinct: entries.len() as u64,
+            runs_used: false,
+        };
+        w.partition(capacity)
     }
 }
 

@@ -44,6 +44,7 @@ tilecodec = { path = "../../../../tilecodec/src/main/rust" }
 # HTTP goes back out through Kotlin: this crate opens no sockets and carries no TLS
 # stack, so pmtiles range requests keep `library:network`'s reduced CA bundle.
 jni_http = { path = "../../../../jni-http/src/main/rust" }
+ab_glyph = "0.2.32"
 
 # `default-features = false` drops the `linked` feature, so nothing links against
 # libvulkan at build time; `loaded` dlopen's it, which is what an Android app must

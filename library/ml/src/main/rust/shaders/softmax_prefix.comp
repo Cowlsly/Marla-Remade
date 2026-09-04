@@ -29,25 +29,26 @@ void main() {
         return;
     }
     uint stride = p.out_w;
-    uint keys = attended_keys(stride);
+    uint first = attn_first();
+    uint last = attn_last(stride);
     uint at = p.in0 + row * stride;
 
     // The most negative fp16 rather than -inf, matching `softmax.comp`: a decode step always
-    // attends over at least its own position, so the row is never empty and the seed is never
+    // attends over at least its own position, so the range is never empty and the seed is never
     // the answer.
     float peak = -65504.0;
-    for (uint i = 0u; i < keys; i++) {
+    for (uint i = first; i <= last; i++) {
         peak = max(peak, float(arena[at + i]));
     }
 
     float total = 0.0;
-    for (uint i = 0u; i < keys; i++) {
+    for (uint i = first; i <= last; i++) {
         total += exp(float(arena[at + i]) - peak);
     }
     float inverse = 1.0 / total;
 
     uint out_row = p.out_at + row * stride;
-    for (uint i = 0u; i < keys; i++) {
+    for (uint i = first; i <= last; i++) {
         arena[out_row + i] = float16_t(exp(float(arena[at + i]) - peak) * inverse);
     }
 }

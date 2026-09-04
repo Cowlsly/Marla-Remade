@@ -27,7 +27,10 @@ pub mod boundaries;
 pub mod buildings;
 pub mod earth;
 pub mod land;
+pub mod places;
+pub mod poi;
 pub mod roads;
+pub mod transit;
 pub mod water;
 
 /// Tag lookup, so a rule is a pure function of its tags.
@@ -156,6 +159,9 @@ pub struct Layers {
     pub boundaries: bool,
     pub landcover: bool,
     pub landuse: bool,
+    pub places: bool,
+    pub poi: bool,
+    pub transit: bool,
 }
 
 impl Layers {
@@ -168,6 +174,11 @@ impl Layers {
             boundaries: true,
             landcover: true,
             landuse: true,
+            places: true,
+            poi: true,
+            // Reserved by v2; populated when transit lands (task 52). Selected by default so
+            // the layer set — and therefore the build id — does not shift when it does.
+            transit: true,
         }
     }
 
@@ -180,6 +191,9 @@ impl Layers {
             boundaries: false,
             landcover: false,
             landuse: false,
+            places: false,
+            poi: false,
+            transit: false,
         }
     }
 
@@ -195,10 +209,13 @@ impl Layers {
                 "boundaries" => layers.boundaries = true,
                 "landcover" => layers.landcover = true,
                 "landuse" => layers.landuse = true,
+                "places" => layers.places = true,
+                "poi" => layers.poi = true,
+                "transit" => layers.transit = true,
                 other => {
                     return Err(format!(
                         "unknown layer `{other}`; this generator produces earth, water, buildings, \
-                         roads, boundaries, landcover and landuse"
+                         roads, boundaries, landcover, landuse, places, poi and transit"
                     ))
                 }
             }
@@ -219,6 +236,9 @@ impl Layers {
             dict::LAYER_BOUNDARIES => self.boundaries,
             dict::LAYER_LANDCOVER => self.landcover,
             dict::LAYER_LANDUSE => self.landuse,
+            dict::LAYER_PLACES => self.places,
+            dict::LAYER_POI => self.poi,
+            dict::LAYER_TRANSIT => self.transit,
             _ => false,
         }
     }
@@ -260,8 +280,9 @@ pub fn classify(
             return Some(class);
         }
     }
-    // Last, because it is the layer everything else is drawn on top of. One classifier produces
-    // both `landcover` and `landuse`, so which of the two was asked for is checked after the fact.
+    // Last among geometry, because it is the layer everything else is drawn on top of. One
+    // classifier produces both `landcover` and `landuse`, so which of the two was asked for is
+    // checked after the fact.
     if layers.landcover || layers.landuse {
         if let Some(class) = land::classify(tags) {
             if layers.wants(class.layer) {
@@ -269,7 +290,33 @@ pub fn classify(
             }
         }
     }
+    // Labels last of all: an area-mapped feature keeps its fill (a park stays a `landuse`
+    // polygon, a museum its `buildings` footprint) and only what no geometry layer claimed —
+    // overwhelmingly nodes — becomes a point label. Ways that reach here are centroided by
+    // extract; see `places` for why points.
+    if layers.places {
+        if let Some(class) = places::classify(tags) {
+            return Some(class);
+        }
+    }
+    if layers.poi {
+        if let Some(class) = poi::classify(tags) {
+            return Some(class);
+        }
+    }
     None
+}
+
+/// A label's display name for a classified feature, or `None` when the layer carries none.
+///
+/// Only `places` and `poi` name features (`name:en` → `name`, as the style coalesces). Called
+/// by extract at each classify site; the name travels beside the class into the spill.
+pub fn display_name(tags: &(impl TagSource + ?Sized), layer: u8) -> Option<String> {
+    match layer {
+        dict::LAYER_PLACES => places::display_name(tags),
+        dict::LAYER_POI => poi::display_name(tags),
+        _ => None,
+    }
 }
 
 /// The `osmium tags-filter` expressions that pre-screen each layer, as one list.
@@ -294,6 +341,15 @@ pub fn filters(layers: Layers) -> Vec<&'static str> {
     if layers.boundaries {
         out.extend_from_slice(boundaries::FILTERS);
     }
+    if layers.places {
+        out.extend_from_slice(places::FILTERS);
+    }
+    if layers.poi {
+        out.extend_from_slice(poi::FILTERS);
+    }
+    if layers.transit {
+        out.extend_from_slice(transit::FILTERS);
+    }
     if layers.landcover || layers.landuse {
         out.extend_from_slice(land::FILTERS);
     }
@@ -315,6 +371,8 @@ mod tests {
             .chain(boundaries::KINDS)
             .chain(land::KINDS)
             .chain(earth::KINDS)
+            .chain(places::KINDS)
+            .chain(poi::KINDS)
         {
             assert!(
                 dict::KINDS.contains(name),
@@ -338,10 +396,15 @@ mod tests {
             Layers { water: true, ..Layers::none() },
         );
         assert_eq!(
-            Layers::parse("earth,water,buildings,roads,boundaries,landcover,landuse").expect("all"),
+            Layers::parse("earth,water,buildings,roads,boundaries,landcover,landuse,places,poi,transit")
+                .expect("all"),
             Layers::all(),
         );
-        assert!(Layers::parse("places").is_err(), "this generator draws no labels");
+        assert_eq!(
+            Layers::parse("places,poi").expect("labels"),
+            Layers { places: true, poi: true, ..Layers::none() },
+        );
+        assert!(Layers::parse("labels").is_err(), "this generator draws no labels layer");
         assert!(Layers::parse("").is_err(), "nothing selected");
     }
 
@@ -382,7 +445,8 @@ mod tests {
         // Every key a rule reads for a *decision* has to be in the screen, or the rule never runs.
         for key in [
             "natural", "waterway", "landuse", "building", "highway", "railway", "boundary",
-            "leisure", "amenity",
+            "leisure", "amenity", "place", "shop", "tourism", "aeroway", "name",
+            "type", "route", "colour", "color", "station",
         ] {
             assert!(all.contains(&key), "the screen omits `{key}`");
         }

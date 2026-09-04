@@ -5,8 +5,8 @@
 //! The generator that will produce real archives is `scripts/maps/mamaps_build`.
 
 use tile_build::mamaps::body::{
-    Body, Feature, Layer, Part, DEFAULT_EXTENT, GEOM_LINE, GEOM_POLYGON, WINDING_HOLE,
-    WINDING_OUTER,
+    Body, Feature, Layer, Part, DEFAULT_EXTENT, GEOM_LINE, GEOM_POLYGON, NAME_NONE,
+    WINDING_HOLE, WINDING_OUTER,
 };
 use tile_build::mamaps::write::{Options, StreamWriter};
 use tile_build::mamaps::{dict, read};
@@ -60,8 +60,10 @@ fn tile(z: u8, x: u64, _y: u64) -> Body {
         kind_detail: dict::NONE,
         geom_type: GEOM_POLYGON,
         flags: 0,
+        name_idx: NAME_NONE,
         parts_offset: 0,
         part_count: 1,
+        transit_color: 0,
     });
     earth.parts.push(Part { coord_start: 0, point_count: 4, winding: WINDING_OUTER });
     let e = DEFAULT_EXTENT as i16;
@@ -74,8 +76,10 @@ fn tile(z: u8, x: u64, _y: u64) -> Body {
         kind_detail: dict::NONE,
         geom_type: GEOM_POLYGON,
         flags: 0,
+        name_idx: NAME_NONE,
         parts_offset: 0,
         part_count: 2,
+        transit_color: 0,
     });
     water.parts.push(Part { coord_start: 0, point_count: 4, winding: WINDING_OUTER });
     water.parts.push(Part { coord_start: 4, point_count: 4, winding: WINDING_HOLE });
@@ -98,12 +102,14 @@ fn tile(z: u8, x: u64, _y: u64) -> Body {
             kind_detail: dict::NONE,
             geom_type: GEOM_LINE,
             flags: 0,
+            name_idx: NAME_NONE,
             parts_offset: 0,
             part_count: 1,
+            transit_color: 0,
         });
         roads.parts.push(Part { coord_start: 0, point_count: 3, winding: WINDING_OUTER });
         roads.coords = vec![(0, e / 2), (e / 2, e / 2 + 64), (e, e / 2)];
         layers.push(roads);
     }
-    Body { extent: DEFAULT_EXTENT, layers }
+    Body { extent: DEFAULT_EXTENT, layers, names: Vec::new() }
 }

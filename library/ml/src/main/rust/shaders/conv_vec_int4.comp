@@ -1,0 +1,78 @@
+#version 450
+//! `conv_vec_int8.comp` for a **4-bit** kernel with **per-block** scales.
+//!
+//! # What differs from the int8 gemv
+//!
+//! Only where the scale is applied. An int8 kernel has one scale per output row, so it multiplies
+//! the finished accumulator once. Four bits cannot hold a row's dynamic range at one scale, so
+//! there is one per block of `I4_BLOCK` taps along the contraction axis, and the scale has to
+//! reach the product rather than the total.
+//!
+//! The scale table is rank 2, `(out_channels, ceil(in_c / I4_BLOCK))`, at `p.act_weight` - the
+//! same push field the int8 shaders use for their per-row scale, since it means the same thing
+//! one rank up.
+//!
+//! # The lane pattern is unchanged, and that costs a fetch
+//!
+//! Lanes stride by 64 over the contraction axis, which is right for coalescing and wrong for
+//! block reuse: at `I4_BLOCK` 32 a lane's block changes on every iteration, so the scale is
+//! fetched per tap per row rather than hoisted per block. Fetching it from the fp16 view is a
+//! cached read and the alternative - giving each lane a contiguous chunk so its blocks are
+//! consecutive - trades that for uncoalesced weight reads, which is the worse end of the deal at
+//! these widths. Worth re-measuring if this ever becomes the bottleneck; it is written the simple
+//! way deliberately.
+//!
+//! # Push fields
+//!
+//! As `conv_vec_int8.comp`: `p.weight` is a 32-bit **word** offset, `p.act_weight` the scale
+//! table, `p.bias` the bias, `p.in_c` the taps, `p.out_c` the output channels and `p.count` the
+//! workgroup count, one per group of [`ROWS`] channels.
+
+#include "common.glsl"
+
+/// Output channels one workgroup owns. As `conv_vec_int8.comp`.
+#define ROWS 8u
+
+/// Per-lane partial sums, one row of 64 per output channel.
+shared float partial[ROWS][64];
+
+void main() {
+    uint tile = gl_WorkGroupID.y * gl_NumWorkGroups.x + gl_WorkGroupID.x;
+    if (tile >= p.count) {
+        return;
+    }
+    uint channel_base = tile * ROWS;
+    uint lane = gl_LocalInvocationID.x;
+    uint blocks = (p.in_c + I4_BLOCK - 1u) / I4_BLOCK;
+    float acc[ROWS];
+    for (uint r = 0u; r < ROWS; r++) {
+        acc[r] = 0.0;
+    }
+    for (uint k = lane; k < p.in_c; k += 64u) {
+        float x = float(arena[p.in0 + k]);
+        uint block = k / I4_BLOCK;
+        for (uint r = 0u; r < ROWS; r++) {
+            uint channel = channel_base + r;
+            float w = float(int4_at(p.weight, channel * p.in_c + k));
+            acc[r] += w * int4_scale(channel, block, blocks) * x;
+        }
+    }
+    for (uint r = 0u; r < ROWS; r++) {
+        partial[r][lane] = acc[r];
+    }
+    barrier();
+    if (lane >= ROWS) {
+        return;
+    }
+    uint channel = channel_base + lane;
+    if (channel >= p.out_c) {
+        return;
+    }
+    float total = 0.0;
+    for (uint i = 0u; i < 64u; i++) {
+        total += partial[lane][i];
+    }
+    // Already scaled inside the loop, so only the bias is left.
+    float offset = float(weights[p.bias + channel]);
+    arena[p.out_at + channel] = float16_t(activate(total + offset, p.act, channel));
+}

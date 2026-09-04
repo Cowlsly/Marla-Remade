@@ -22,8 +22,9 @@
 //!
 //! # Size
 //!
-//! Seven layers, 79 kinds and 41 details, at a length byte each: 1092 bytes as measured, which is
-//! what lets the header, the dictionary and the root index share one 16 KiB opening read.
+//! Ten layers, ~108 kinds and 41 details, at a length byte each: under 2 KiB as measured,
+//! which is what lets the header, the dictionary and the root index share one 16 KiB opening
+//! read.
 
 use crate::proto::{err, Result};
 
@@ -36,11 +37,21 @@ pub const NONE: u16 = 0;
 
 /// The layers this format carries, in draw order.
 ///
-/// A layer's id **is** its index here. Seven, which is what the style draws; the format has no
-/// room for an eighth without a version bump, and that is deliberate — a layer nothing paints is
-/// bytes every reader downloads and discards.
-pub const LAYERS: &[&str] =
-    &["earth", "water", "landcover", "landuse", "roads", "boundaries", "buildings"];
+/// A layer's id **is** its index here. Ten: the seven the style draws, plus `places`
+/// (labels), `poi` (icons) and `transit` (reserved by v2; populated when transit lands).
+/// `u8` ids fit with room to spare.
+pub const LAYERS: &[&str] = &[
+    "earth",
+    "water",
+    "landcover",
+    "landuse",
+    "roads",
+    "boundaries",
+    "buildings",
+    "places",
+    "poi",
+    "transit",
+];
 
 pub const LAYER_EARTH: u8 = 0;
 pub const LAYER_WATER: u8 = 1;
@@ -49,6 +60,9 @@ pub const LAYER_LANDUSE: u8 = 3;
 pub const LAYER_ROADS: u8 = 4;
 pub const LAYER_BOUNDARIES: u8 = 5;
 pub const LAYER_BUILDINGS: u8 = 6;
+pub const LAYER_PLACES: u8 = 7;
+pub const LAYER_POI: u8 = 8;
+pub const LAYER_TRANSIT: u8 = 9;
 
 /// Every `kind` value the schema can emit, id 1 upward. Index 0 is [`NONE`].
 ///
@@ -155,6 +169,43 @@ pub const KINDS: &[&str] = &[
     "locality",
     "overlay_limit",
     "unrecognized_country",
+    // places + poi (v2, append-only). Most of the POI set the reference style's `pois`
+    // layer draws already exists above as landuse kinds (`beach`, `forest`, `park`, `zoo`,
+    // `garden`, `aerodrome`, `university`, `school`, `building`) and is NOT repeated: ids are
+    // archive-wide, so `park` means the same id on `landuse` and on `poi`. Only names the
+    // original table lacks are appended here. Every name must equal the v4/light sprite name
+    // where they overlap, because the renderer resolves the icon image from the kind. Values
+    // the style does not name (e.g. a bare `amenity=yes`) never reach here: the tiler only
+    // emits kinds the style draws.
+    "neighbourhood",
+    "macrohood",
+    "marina",
+    "peak",
+    "bench",
+    "station",
+    "bus_stop",
+    "ferry_terminal",
+    "stadium",
+    "library",
+    "animal",
+    "toilets",
+    "drinking_water",
+    "post_office",
+    "townhall",
+    "restaurant",
+    "fast_food",
+    "cafe",
+    "bar",
+    "supermarket",
+    "convenience",
+    "books",
+    "beauty",
+    "electronics",
+    "clothes",
+    "attraction",
+    "museum",
+    "theatre",
+    "artwork",
 ];
 
 /// Every `kind_detail` value, id 1 upward. Index 0 is [`NONE`].
@@ -215,6 +266,14 @@ pub const DETAILS: &[&str] = &[
     "river",
     "stream",
     "rock",
+    // transit stations (v2): the mode a `poi` station names in its detail, so the renderer can
+    // show stations with Transit on and POIs off. Appended, like everything since the first
+    // measurement — ids before this line do not move.
+    "station",
+    "halt",
+    // transit lines (task 52): the route modes `roads` never needed details for. Same rule.
+    "train",
+    "monorail",
     // buildings
     "yes",
 ];
@@ -312,6 +371,12 @@ impl Dictionary {
     /// A **whole-table** comparison rather than a length check: the point of a constant table is
     /// that id 17 means `national_park` in every archive ever written, so an archive that
     /// disagrees anywhere would render some layer in the wrong colour with no other symptom.
+    ///
+    /// Strict by deliberate scope decision (no backward-compat requirement: nobody is using the
+    /// app): the dict is frozen, every archive is built from this tree, and an archive built
+    /// from anything else is refused rather than reinterpreted. An older archive — including
+    /// prod planet.mamaps with its v1 dict — does NOT open under this reader; rebuild it from
+    /// the frozen tree instead.
     pub fn check_matches_schema(&self) -> Result<()> {
         let schema = Dictionary::schema();
         for (what, ours, theirs) in [
@@ -370,7 +435,10 @@ mod tests {
         assert_eq!(d.detail_name(4), Some("service"));
         assert_eq!(d.detail_name(5), Some("motorway"), "the road classes follow");
         assert_eq!(d.layer_name(LAYER_ROADS), Some("roads"));
-        assert_eq!(d.layer_name(7), None);
+        assert_eq!(d.layer_name(LAYER_PLACES), Some("places"), "v2's label layer");
+        assert_eq!(d.layer_name(LAYER_POI), Some("poi"), "v2's icon layer");
+        assert_eq!(d.layer_name(LAYER_TRANSIT), Some("transit"), "v2 reserves transit");
+        assert_eq!(d.layer_name(10), None, "past the table");
     }
 
     /// A duplicate would give one value two ids, so half the features carrying it would filter
@@ -405,9 +473,23 @@ mod tests {
         renamed.kinds[16] = "national_parks".to_string();
         let message = renamed.check_matches_schema().expect_err("should be refused").0;
         assert!(message.contains("from id 16"), "{message}");
+        // Renaming a layer is equally refused: id 0 must mean `earth` everywhere.
+        let mut renamed_layer = Dictionary::schema();
+        renamed_layer.layers[0] = "ground".to_string();
+        assert!(renamed_layer.check_matches_schema().is_err());
+        // A shorter table is refused too, even when it is a prefix: the dict is frozen and an
+        // archive built from anything but this tree is a different contract, not an older one.
+        // (No backward-compat requirement: rebuild the archive instead.)
         let mut short = Dictionary::schema();
-        short.details.pop();
-        assert!(short.check_matches_schema().is_err());
+        short.layers.truncate(7);
+        assert!(short.check_matches_schema().is_err(), "a 7-layer table opened");
+        let mut short_details = Dictionary::schema();
+        short_details.details.truncate(40);
+        assert!(short_details.check_matches_schema().is_err(), "a 40-detail table opened");
+        // And a table *longer* than the schema is refused: those ids mean nothing here.
+        let mut long = Dictionary::schema();
+        long.kinds.push("future_kind".to_string());
+        assert!(long.check_matches_schema().is_err());
     }
 
     #[test]

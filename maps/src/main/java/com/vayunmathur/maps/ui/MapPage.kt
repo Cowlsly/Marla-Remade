@@ -27,6 +27,9 @@ import com.vayunmathur.library.ui.rememberFreeHeightSheetState
 import com.vayunmathur.library.ui.rememberMessenger
 import com.vayunmathur.library.ui.appBarScrollBehavior
 import com.vayunmathur.library.util.NavBackStack
+import com.vayunmathur.library.map.CameraPosition
+import com.vayunmathur.library.map.GeoPoint
+import com.vayunmathur.library.map.rememberCameraState
 import com.vayunmathur.maps.Route
 import com.vayunmathur.maps.data.SpecificFeature
 import com.vayunmathur.maps.ui.map.LayerToggles
@@ -40,26 +43,24 @@ import com.vayunmathur.maps.ui.map.NavigationCameraFollow
 import com.vayunmathur.maps.ui.map.WaypointList
 import com.vayunmathur.maps.ui.map.mapSearchLabel
 import com.vayunmathur.maps.ui.map.rememberMapChromeState
-import com.vayunmathur.maps.ui.map.style.rememberMapStyle
 import com.vayunmathur.maps.ui.theme.MapChromeMetrics
 import com.vayunmathur.maps.util.MapSettingsViewModel
 import com.vayunmathur.maps.util.MapsSearchViewModel
 import com.vayunmathur.maps.util.NavigationSessionManager
 import com.vayunmathur.maps.util.PoiIndex
 import com.vayunmathur.maps.util.SavedPlacesViewModel
+import com.vayunmathur.maps.util.toGeoPoint
 import com.vayunmathur.maps.util.SelectedFeatureViewModel
 import com.vayunmathur.maps.util.visibleBoundsOrWorld
 import kotlin.math.roundToInt
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
-import org.maplibre.compose.camera.CameraPosition
-import org.maplibre.compose.camera.rememberCameraState
 import org.maplibre.spatialk.geojson.Position
 import com.vayunmathur.maps.R as MapsR
 
 /** Cold-start camera: San Francisco at z14, where the baked POIs are dense enough to see. */
-private val INITIAL_CAMERA = CameraPosition(target = Position(-122.4194, 37.7749), zoom = 14.0)
+private val INITIAL_CAMERA = CameraPosition(target = GeoPoint(-122.4194, 37.7749), zoom = 14.0)
 
 /**
  * The map screen.
@@ -121,7 +122,6 @@ fun MapPage(
     // flips light/dark together with the rest of the chrome.
     val themeMode by settingsViewModel.themeMode.collectAsState()
     val darkMap = themeMode.darkOverride ?: isSystemInDarkTheme()
-    val mapStyle by rememberMapStyle(isDark = darkMap)
 
     val navState by NavigationSessionManager.state.collectAsState()
     // Collected, not read off a field: a recalculation swaps the route mid-session, and reading
@@ -157,7 +157,7 @@ fun MapPage(
         val request = pendingFocus ?: return@LaunchedEffect
         camera.animateTo(
             camera.position.copy(
-                target = request.position,
+                target = request.position.toGeoPoint(),
                 zoom = request.zoom ?: maxOf(camera.position.zoom, 14.0),
             )
         )
@@ -178,16 +178,12 @@ fun MapPage(
 
     NavigationCameraFollow(camera, chrome, navProgress, isNavigating)
 
-    // Poll the posted limit under the puck, off the `roads` overlay's probe layer.
-    // Null when there is no road there, or none of its tags is a speed limit.
+    // GAP (deferred, renderer has no vector-layer query API): the posted-limit probe
+    // used to hit-test the baked `roads` overlay under the puck. Until renderer query
+    // support lands the badge shows without a limit; clear any stale value instead of
+    // leaving the previous trip's limit up.
     LaunchedEffect(navProgress) {
-        val progress = navProgress
-        val projection = camera.projection
-        chrome.postedLimit = if (progress != null && projection != null) {
-            queryPostedLimit(projection, progress.snappedPosition)
-        } else {
-            null
-        }
+        if (navProgress == null) chrome.postedLimit = null
     }
 
     fun openSearch(query: String? = null, waypointIndex: Int? = null) {
@@ -261,7 +257,6 @@ fun MapPage(
         ) { innerPadding ->
             Box(Modifier.padding(innerPadding).fillMaxSize()) {
                 MapSurface(
-                    style = mapStyle,
                     camera = camera,
                     chrome = chrome,
                     viewModel = viewModel,
@@ -303,17 +298,17 @@ fun MapPage(
 
                 // Browse controls, plus the layers button, which stays out while a place is
                 // selected and rides above the sheet — see [MapFabStack].
+                // GAP (deferred, camera is target+zoom only): bearing is always 0
+                // north-up, so the compass hides itself and reset-north is a no-op.
                 MapFabStack(
                     zoom = camera.position.zoom,
                     latitude = camera.position.target.latitude,
-                    bearing = camera.position.bearing,
+                    bearing = 0.0,
                     browsing = browsing,
                     lift = { sheetState.liftPx.roundToInt() },
-                    onResetNorth = {
-                        coroutineScope.launch {
-                            camera.animateTo(camera.position.copy(bearing = 0.0, tilt = 0.0))
-                        }
-                    },
+                    // GAP (deferred, camera is target+zoom only): nothing to reset —
+                    // the map is always north-up. Kept so the control slot survives.
+                    onResetNorth = {},
                     onLayers = { chrome.show(MapOverlay.Layers) },
                     onParking = {
                         val spot = parkingSpot
@@ -326,7 +321,7 @@ fun MapPage(
                             coroutineScope.launch {
                                 camera.animateTo(
                                     camera.position.copy(
-                                        target = Position(spot.lon, spot.lat),
+                                        target = GeoPoint(spot.lon, spot.lat),
                                         zoom = maxOf(camera.position.zoom, 15.0),
                                     )
                                 )
@@ -338,7 +333,7 @@ fun MapPage(
                         coroutineScope.launch {
                             camera.animateTo(
                                 camera.position.copy(
-                                    target = userPosition,
+                                    target = userPosition.toGeoPoint(),
                                     zoom = maxOf(camera.position.zoom, 15.0),
                                 )
                             )
@@ -359,6 +354,10 @@ fun MapPage(
                     onDismissArrival = { stopNavigation(context) },
                     postedLimit = chrome.postedLimit,
                     northUp = chrome.northUp,
+                    // GAP (deferred, camera is target+zoom only): heading-up follow
+                    // is unsupported — the map is always north-up. The toggle slot is
+                    // kept so the nav chrome survives; it records the preference for
+                    // when the renderer can rotate.
                     onToggleNorthUp = { chrome.northUp = !chrome.northUp },
                     destinationName = navSession.destinationName,
                     darkBasemap = darkMap,

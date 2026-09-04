@@ -56,23 +56,35 @@ use crate::schema::Class;
 /// cost with nothing to show for it.
 const CLASS_KEY: &str = "c";
 
+/// The property key a transit line's colour travels under, as a `Uint` of `0xRRGGBB`.
+///
+/// Only `transit` features set it. Absent for everything else, so the spill pays nothing for the
+/// 200 M features that have no colour.
+const COLOR_KEY: &str = "t";
+
+/// The property key a label's display name travels under, when it has one.
+///
+/// `places` and `poi` are the only layers that set it. Absent (not empty) for everything else,
+/// so the spill pays nothing for the 190 M features that have no name.
+const NAME_KEY: &str = "n";
+
 /// A [`Class`] as one integer, so a feature's classification costs one property rather than seven.
 ///
 /// | field | bits | width |
 /// |---|---|---|
-/// | `layer` | 0..3 | 7 layers |
-/// | `kind` | 3..19 | `u16` |
-/// | `kind_detail` | 19..35 | `u16` |
-/// | `flags` | 35..43 | `u8` |
-/// | `area` | 43..44 | one bit |
-/// | `min_zoom` | 44..49 | 0..31 |
-/// | `min_area_px` | 49..57 | 0..255, integral |
+/// | `layer` | 0..4 | 10 layers (v2: `places`, `poi`, `transit`) |
+/// | `kind` | 4..20 | `u16` |
+/// | `kind_detail` | 20..36 | `u16` |
+/// | `flags` | 36..44 | `u8` |
+/// | `area` | 44..45 | one bit |
+/// | `min_zoom` | 45..50 | 0..31 |
+/// | `min_area_px` | 50..58 | 0..255, integral |
 ///
 /// `min_area_px` is an `f64` in [`Class`] and a byte here. Every value the schema uses is a small
 /// whole number of square pixels, and [`pack`] refuses anything else rather than rounding a
 /// threshold silently.
 fn pack(class: &Class) -> Result<u64> {
-    if class.layer > 0b111 {
+    if class.layer > 0b1111 {
         return err(format!("layer {} does not fit the packed class", class.layer));
     }
     if class.min_zoom > 0b11111 {
@@ -89,23 +101,23 @@ fn pack(class: &Class) -> Result<u64> {
         ));
     }
     Ok((class.layer as u64)
-        | ((class.kind as u64) << 3)
-        | ((class.kind_detail as u64) << 19)
-        | ((class.flags as u64) << 35)
-        | ((class.area as u64) << 43)
-        | ((class.min_zoom as u64) << 44)
-        | ((class.min_area_px as u64) << 49))
+        | ((class.kind as u64) << 4)
+        | ((class.kind_detail as u64) << 20)
+        | ((class.flags as u64) << 36)
+        | ((class.area as u64) << 44)
+        | ((class.min_zoom as u64) << 45)
+        | ((class.min_area_px as u64) << 50))
 }
 
 fn unpack(bits: u64) -> Class {
     Class {
-        layer: (bits & 0b111) as u8,
-        kind: ((bits >> 3) & 0xffff) as u16,
-        kind_detail: ((bits >> 19) & 0xffff) as u16,
-        flags: ((bits >> 35) & 0xff) as u8,
-        area: (bits >> 43) & 1 == 1,
-        min_zoom: ((bits >> 44) & 0b11111) as u8,
-        min_area_px: ((bits >> 49) & 0xff) as f64,
+        layer: (bits & 0b1111) as u8,
+        kind: ((bits >> 4) & 0xffff) as u16,
+        kind_detail: ((bits >> 20) & 0xffff) as u16,
+        flags: ((bits >> 36) & 0xff) as u8,
+        area: (bits >> 44) & 1 == 1,
+        min_zoom: ((bits >> 45) & 0b11111) as u8,
+        min_area_px: ((bits >> 50) & 0xff) as f64,
     }
 }
 
@@ -143,7 +155,41 @@ impl Sink {
     }
 
     pub fn push(&mut self, class: &Class, geometry: &Geometry) -> Result<()> {
+        self.push_named(class, geometry, None)
+    }
+
+    /// Push a transit line: like [`Sink::push`], plus the route colour that becomes the body's
+    /// `transit_color`. A zero colour is refused, not written as absent — zero means "no colour"
+    /// on the wire, and a transit line without one is a caller bug, not a pale line.
+    pub fn push_transit(&mut self, class: &Class, geometry: &Geometry, color: u32) -> Result<()> {
+        if color == 0 {
+            return err("a transit line with no colour".to_string());
+        }
         self.props[0].1 = Value::Uint(pack(class)?);
+        self.props.truncate(1);
+        self.props.push((COLOR_KEY.to_string(), Value::Uint(color as u64)));
+        self.write_record(class, geometry)
+    }
+
+    /// Push a feature with an optional display name (labels: `places` and `poi`).
+    ///
+    /// One prop on the wire for the nameless 190 M, two for the named few: the spill encodes a
+    /// per-record prop count, so variable shapes cost nothing. `feature_of` reads both back.
+    pub fn push_named(
+        &mut self,
+        class: &Class,
+        geometry: &Geometry,
+        name: Option<&str>,
+    ) -> Result<()> {
+        self.props[0].1 = Value::Uint(pack(class)?);
+        self.props.truncate(1);
+        if let Some(name) = name.filter(|n| !n.is_empty()) {
+            self.props.push((NAME_KEY.to_string(), Value::String(name.to_string())));
+        }
+        self.write_record(class, geometry)
+    }
+
+    fn write_record(&mut self, class: &Class, geometry: &Geometry) -> Result<()> {
         self.writer
             .push(geometry, &self.props)
             .map_err(|e| osm_ingest::proto::Error(e.to_string()))?;
@@ -240,7 +286,7 @@ pub struct Store {
 /// What a spill was built from, so reusing one cannot silently build the wrong archive.
 ///
 /// A store is only valid for the input and layer selection that produced it. Reusing one built from
-/// a different `.pbf`, or with `--layers water` when this run wants all seven, would produce an
+/// a different `.pbf`, or with `--layers water` when this run wants all ten, would produce an
 /// archive that looks fine and is missing most of the world. Cheap to record, impossible to diagnose
 /// from the symptom.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -250,7 +296,8 @@ pub struct Provenance {
     pub source_len: u64,
     pub source_mtime: u64,
     /// The layer selection, one bit each, in [`crate::schema::Layers`] declaration order.
-    pub layers: u8,
+    /// `u16`: ten layers do not fit a byte.
+    pub layers: u16,
     /// Whether a coastline product was folded in, which adds features nothing else would.
     pub coastline: bool,
 }
@@ -269,13 +316,16 @@ impl Provenance {
         Ok(Provenance {
             source_len: meta.len(),
             source_mtime: mtime,
-            layers: u8::from(layers.earth)
-                | u8::from(layers.water) << 1
-                | u8::from(layers.buildings) << 2
-                | u8::from(layers.roads) << 3
-                | u8::from(layers.boundaries) << 4
-                | u8::from(layers.landcover) << 5
-                | u8::from(layers.landuse) << 6,
+            layers: u16::from(layers.earth)
+                | u16::from(layers.water) << 1
+                | u16::from(layers.buildings) << 2
+                | u16::from(layers.roads) << 3
+                | u16::from(layers.boundaries) << 4
+                | u16::from(layers.landcover) << 5
+                | u16::from(layers.landuse) << 6
+                | u16::from(layers.places) << 7
+                | u16::from(layers.poi) << 8
+                | u16::from(layers.transit) << 9,
             coastline,
         })
     }
@@ -283,8 +333,11 @@ impl Provenance {
 
 /// Magic and version of the sidecar index. Bumped whenever the layout below changes, so an index
 /// written by an older build is refused rather than misread.
+///
+/// v2: `layers` widened to `u16` (ten layers) and the spill's packed class widened its layer
+/// field to 4 bits, so a v1 spill would misdecode every feature. Refused here, not there.
 const INDEX_MAGIC: &[u8; 8] = b"MAMASTOR";
-const INDEX_VERSION: u32 = 1;
+const INDEX_VERSION: u32 = 2;
 
 impl Store {
     /// Write the sidecar that lets [`Store::open`] skip stage A.
@@ -304,7 +357,7 @@ impl Store {
         out.extend_from_slice(&INDEX_VERSION.to_le_bytes());
         out.extend_from_slice(&provenance.source_len.to_le_bytes());
         out.extend_from_slice(&provenance.source_mtime.to_le_bytes());
-        out.push(provenance.layers);
+        out.extend_from_slice(&provenance.layers.to_le_bytes());
         out.push(u8::from(provenance.coastline));
         out.extend_from_slice(&features.to_le_bytes());
         out.extend_from_slice(&self.count.to_le_bytes());
@@ -362,14 +415,14 @@ impl Store {
         let got = Provenance {
             source_len: u64::from_le_bytes(take(8)?.try_into().expect("eight bytes")),
             source_mtime: u64::from_le_bytes(take(8)?.try_into().expect("eight bytes")),
-            layers: take(1)?[0],
+            layers: u16::from_le_bytes(take(2)?.try_into().expect("two bytes")),
             coastline: take(1)?[0] != 0,
         };
         if got != want {
             return err(format!(
                 "{} was built from a different input or layer set (source {} bytes at mtime {}, \
-                 layers {:#04x}, coastline {}) than this run wants (source {} bytes at mtime {}, \
-                 layers {:#04x}, coastline {}) -- delete it or drop --reuse-store",
+                 layers {:#06x}, coastline {}) than this run wants (source {} bytes at mtime {}, \
+                 layers {:#06x}, coastline {}) -- delete it or drop --reuse-store",
                 path.display(),
                 got.source_len,
                 got.source_mtime,
@@ -523,7 +576,11 @@ impl Store {
         ));
         let mut sink = Sink::create(&path)?;
         for feature in features {
-            sink.push(&feature.class, &feature.geometry)?;
+            if feature.transit_color != 0 {
+                sink.push_transit(&feature.class, &feature.geometry, feature.transit_color)?;
+            } else {
+                sink.push_named(&feature.class, &feature.geometry, feature.name.as_deref())?;
+            }
         }
         sink.finish(&path)
     }
@@ -533,13 +590,36 @@ impl Store {
 ///
 /// A record whose class property is missing or is not an integer is a corrupt file rather than a
 /// feature to skip: everything in here was written by [`Sink::push`] one run ago, so anything else
-/// means the file is not the one we wrote.
+/// means the file is not the one we wrote. A `n` string property rides along as the display
+/// name, a `t` integer as the transit colour; anything else in there is corruption for the same
+/// reason.
 fn feature_of(record: tile_build::spill::NormalizedFeature) -> Result<Feature> {
     let bits = match record.props.iter().find(|(key, _)| key == CLASS_KEY) {
         Some((_, Value::Uint(bits))) => *bits,
         _ => return err("a spilled feature carries no packed class".to_string()),
     };
-    Ok(Feature { class: unpack(bits), geometry: record.geometry })
+    let mut name: Option<String> = None;
+    let mut transit_color: u32 = 0;
+    for (key, value) in &record.props {
+        if key == CLASS_KEY {
+            continue;
+        }
+        match (key.as_str(), value) {
+            (NAME_KEY, Value::String(text)) if !text.is_empty() => {
+                if name.replace(text.clone()).is_some() {
+                    return err("a spilled feature carries two names".to_string());
+                }
+            }
+            (COLOR_KEY, Value::Uint(color)) => {
+                transit_color = u32::try_from(*color)
+                    .map_err(|_| Error("a spilled transit colour does not fit u32".to_string()))?;
+            }
+            _ => {
+                return err(format!("a spilled feature carries an unknown property `{key}`"));
+            }
+        }
+    }
+    Ok(Feature { class: unpack(bits), geometry: record.geometry, name, transit_color })
 }
 
 /// Chunks of features as the lanes hand them over, or the error that stopped one.
@@ -842,6 +922,7 @@ impl Reader {
 /// | class | unsigned varint of [`pack`]'s integer |
 /// | ref count | unsigned varint |
 /// | refs | zigzag varint of each ref's gap from the one before it, the first from zero |
+/// | name | unsigned varint byte length, then that many UTF-8 bytes (zero when nameless) |
 ///
 /// Delta coding earns its keep rather than being a flourish. The refs are ~150 M ids on California
 /// and the file is read twice — once to collect the node ids pass 3 must resolve, once to build
@@ -877,7 +958,11 @@ impl WaySink {
     }
 
     /// Append one classified way. `id` must be greater than the previous call's.
-    pub fn push(&mut self, id: i64, class: &Class, refs: &[i64]) -> Result<()> {
+    ///
+    /// `name` is the display label for `places`/`poi` ways, `None` for every other layer. Written
+    /// as a length-prefixed string per record — zero bytes for the nameless, which is nearly all
+    /// of them.
+    pub fn push(&mut self, id: i64, class: &Class, refs: &[i64], name: Option<&str>) -> Result<()> {
         if self.count > 0 && id <= self.last_id {
             return err(format!(
                 "way {id} arrived after way {}, so this PBF is not sorted by way id and the \
@@ -894,6 +979,13 @@ impl WaySink {
             put_svarint(&mut self.record, node.wrapping_sub(previous));
             previous = node;
             self.max_ref = self.max_ref.max(node);
+        }
+        match name.filter(|n| !n.is_empty()) {
+            Some(name) => {
+                put_uvarint(&mut self.record, name.len() as u64);
+                self.record.extend_from_slice(name.as_bytes());
+            }
+            None => put_uvarint(&mut self.record, 0),
         }
         self.out
             .write_all(&self.record)
@@ -947,17 +1039,18 @@ impl WayReader {
         })
     }
 
-    /// The next way's id and class, with its node refs written into `refs`.
+    /// The next way's id, class and display name, with its node refs written into `refs`.
     ///
     /// `refs` belongs to the caller and is cleared here, so one allocation serves the whole file.
     /// Returning a fresh `Vec` instead would be one allocation per classified way, several million
     /// of them, for a buffer whose contents are dead by the next call — the same reasoning as
-    /// [`WaySink::record`].
+    /// [`WaySink::record`]. The name is returned owned: only label ways have one, so cloning a
+    /// `String` per named way costs nothing next to the geometry.
     ///
     /// A record that ends mid-varint or claims more refs than the file holds is a corrupt spill
     /// rather than a way to skip: this file was written by [`WaySink`] moments ago in the same
     /// process, so anything unreadable means it is not the file we wrote.
-    pub fn next(&mut self, refs: &mut Vec<i64>) -> Result<Option<(i64, Class)>> {
+    pub fn next(&mut self, refs: &mut Vec<i64>) -> Result<Option<(i64, Class, Option<String>)>> {
         refs.clear();
         let Some(delta) = self.uvarint_or_end()? else {
             return Ok(None);
@@ -976,7 +1069,28 @@ impl WayReader {
             previous = previous.wrapping_add(zigzag(self.uvarint()?));
             refs.push(previous);
         }
-        Ok(Some((id, class)))
+        // The name: a byte length, then that many UTF-8 bytes. Zero length is nameless, which is
+        // nearly every way; a corrupt length is the same error as a corrupt ref count.
+        let name_len = self.uvarint()? as usize;
+        let name = if name_len == 0 {
+            None
+        } else {
+            if name_len > 1 << 20 {
+                return err(format!(
+                    "a ways spill way claims a {name_len}-byte name, which is corruption"
+                ));
+            }
+            let mut bytes = vec![0u8; name_len];
+            use std::io::Read;
+            self.inner
+                .read_exact(&mut bytes)
+                .map_err(|e| Error(format!("cannot read the ways spill: {e}")))?;
+            Some(
+                String::from_utf8(bytes)
+                    .map_err(|_| Error("a ways spill way name is not UTF-8".to_string()))?,
+            )
+        };
+        Ok(Some((id, class, name)))
     }
 
     /// One varint, or `None` if the file ended cleanly on a record boundary.
@@ -1272,7 +1386,7 @@ mod tests {
         ];
         let mut sink = WaySink::create(&path).expect("create");
         for (id, class, refs) in &cases {
-            sink.push(*id, class, refs).expect("push");
+            sink.push(*id, class, refs, None).expect("push");
         }
         let counts = sink.finish().expect("finish");
         assert_eq!(counts.ways, 3, "one record per push");
@@ -1281,9 +1395,11 @@ mod tests {
         let mut reader = WayReader::open(&path).expect("open");
         let mut refs: Vec<i64> = Vec::new();
         for (id, class, expected) in &cases {
-            let (got_id, got_class) = reader.next(&mut refs).expect("read").expect("a way");
+            let (got_id, got_class, got_name) =
+                reader.next(&mut refs).expect("read").expect("a way");
             assert_eq!(got_id, *id);
             assert_eq!(got_class, *class);
+            assert_eq!(got_name, None, "these ways are nameless");
             assert_eq!(&refs, expected);
         }
         assert!(reader.next(&mut refs).expect("read").is_none(), "and then the end");
@@ -1300,10 +1416,10 @@ mod tests {
         let path = temp("ways_unsorted");
         let class = Class::line(dict::LAYER_ROADS, schema::kind("highway"), 3);
         let mut sink = WaySink::create(&path).expect("create");
-        sink.push(100, &class, &[1, 2]).expect("push");
-        assert!(sink.push(99, &class, &[3]).is_err(), "an id going backwards");
-        assert!(sink.push(100, &class, &[3]).is_err(), "and the same id twice");
-        sink.push(101, &class, &[3]).expect("but forwards is fine");
+        sink.push(100, &class, &[1, 2], None).expect("push");
+        assert!(sink.push(99, &class, &[3], None).is_err(), "an id going backwards");
+        assert!(sink.push(100, &class, &[3], None).is_err(), "and the same id twice");
+        sink.push(101, &class, &[3], None).expect("but forwards is fine");
         let _ = std::fs::remove_file(&path);
     }
 
@@ -1314,8 +1430,8 @@ mod tests {
         let path = temp("ways_truncated");
         let class = Class::area(dict::LAYER_WATER, schema::kind("lake"), 6);
         let mut sink = WaySink::create(&path).expect("create");
-        sink.push(1, &class, &[7, 8, 9]).expect("push");
-        sink.push(2, &class, &[11, 12, 13]).expect("push");
+        sink.push(1, &class, &[7, 8, 9], None).expect("push");
+        sink.push(2, &class, &[11, 12, 13], Some("named")).expect("push");
         sink.finish().expect("finish");
 
         let whole = std::fs::read(&path).expect("read");
@@ -1336,11 +1452,29 @@ mod tests {
         let class = Class::line(dict::LAYER_ROADS, schema::kind("highway"), 3);
         let refs: Vec<i64> = (0..1000).map(|i| 10_000_000_000 + i).collect();
         let mut sink = WaySink::create(&path).expect("create");
-        sink.push(1, &class, &refs).expect("push");
+        sink.push(1, &class, &refs, None).expect("push");
         sink.finish().expect("finish");
         let bytes = std::fs::metadata(&path).expect("metadata").len();
         // The first ref is a full-width id; every one after it is a delta of 1, one byte.
         assert!(bytes < 1100, "{bytes} bytes for 1000 refs, against 8000 fixed-width");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// A named way round-trips its label; a truncated name errors like a truncated ref.
+    #[test]
+    fn a_named_way_keeps_its_name() {
+        let path = temp("ways_named");
+        let class = Class::line(dict::LAYER_POI, schema::kind("cafe"), 15);
+        let mut sink = WaySink::create(&path).expect("create");
+        sink.push(1, &class, &[7, 8], Some("Café")).expect("push");
+        sink.push(2, &class, &[9], None).expect("push");
+        sink.finish().expect("finish");
+        let mut reader = WayReader::open(&path).expect("open");
+        let mut refs: Vec<i64> = Vec::new();
+        let (_, _, name) = reader.next(&mut refs).expect("read").expect("a way");
+        assert_eq!(name.as_deref(), Some("Café"), "UTF-8 survives the spill");
+        let (_, _, name) = reader.next(&mut refs).expect("read").expect("a way");
+        assert_eq!(name, None);
         let _ = std::fs::remove_file(&path);
     }
 }

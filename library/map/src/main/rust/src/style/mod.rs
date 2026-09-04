@@ -42,6 +42,7 @@
 pub mod paint;
 
 use paint::{Ramp, Stroke};
+use tilecodec::mamaps::body::Feature;
 use tilecodec::mamaps::dict;
 
 /// What pipeline a layer draws with.
@@ -49,6 +50,9 @@ use tilecodec::mamaps::dict;
 pub enum LayerKind {
     Fill,
     Line,
+    /// Text labels (M1: places). Tessellated as textured quads from the SDF glyph
+    /// atlas; drawn by the symbol pipeline with per-frame size/color/halo.
+    Symbol,
 }
 
 /// Light or dark basemap. The layer set is the same; only the paint differs.
@@ -122,6 +126,27 @@ pub struct Layer {
     /// this, and reading a `kind` used to mean a `String` allocation per feature per tile. A name
     /// the schema cannot emit fails the load rather than silently drawing nothing.
     pub kind_ids: Vec<u16>,
+    /// Which of the tiler's road flags a feature must (not) carry to be drawn here.
+    ///
+    /// The authored style filters every road layer on `is_bridge`/`is_tunnel`/`is_link`
+    /// (surface layers exclude them, link layers require `is_link`), but a flat entry only
+    /// names `kind`s — so without this the surface layers would also draw every ramp, bridge
+    /// and tunnel at full class width with casing, which is exactly the too-wide roads the
+    /// comparator showed at super-zoom. Stored as require/forbid bitmasks over the feature
+    /// flag bits so the render path stays two integer ops per feature.
+    pub require_flags: u8,
+    pub forbid_flags: u8,
+    /// Which interned `kind_detail` values to draw, or empty for every detail.
+    ///
+    /// The authored style splits `minor_road` into `service` and non-`service` layers with
+    /// different widths; `service` is an interned detail id, so this is a second sorted
+    /// whitelist beside [`kind_ids`](Self::kind_ids).
+    pub detail_ids: Vec<u16>,
+    /// Interned `kind_detail` values explicitly excluded even when `detail_ids` is empty.
+    ///
+    /// `roads-minor` draws every minor road *except* `service`; an exclusion list states
+    /// that without enumerating all thirty details.
+    pub forbid_details: Vec<u16>,
     /// ARGB in light mode.
     pub light: u32,
     /// ARGB in dark mode.
@@ -143,6 +168,23 @@ pub struct Layer {
     pub gap_width: Ramp,
     /// Dash and gap lengths in line widths, as `line-dasharray` defines them.
     pub dash: (f32, f32),
+    /// Halo color (ARGB), light and dark. The authored `text-halo-color` per layer;
+    /// M1 transcribes it as a flat color like the fill color (no data-driven halos).
+    pub halo_light: u32,
+    pub halo_dark: u32,
+    /// Halo width in screen px (authored `text-halo-width`, 1 everywhere in the
+    /// authored style). Pushed per frame like the text size; making it style
+    /// data rather than a constant keeps width and color agreeing in one place.
+    pub halo_width: f32,
+    /// Text size in px, as a zoom ramp. Zero/empty for non-symbol layers.
+    ///
+    /// The authored `text-size` is a *pixel* size at the camera zoom (unlike a road
+    /// width in Dp it is not density-scaled — MapLibre sizes text in screen px).
+    pub text_size: Ramp,
+    /// Uppercase the label (`text-transform: uppercase` in the authored style).
+    pub uppercase: bool,
+    /// Glyph weight: the authored `text-font` reduced to Regular/Medium.
+    pub medium: bool,
     pub min_zoom: u8,
     pub max_zoom: u8,
     /// The `style/basemap.json` layer this was transcribed from.
@@ -154,8 +196,37 @@ pub struct Layer {
 }
 
 impl Layer {
+    /// Does this layer draw `feature`?
+    ///
+    /// The kind whitelist plus the road flag/detail filters, in one test so the render path
+    /// calls a single function per feature per layer. Flag bits are require/forbid masks;
+    /// details are whitelist-or-exclusion over the interned `kind_detail` id.
+    pub fn matches_feature(&self, feature: &Feature) -> bool {
+        if !self.matches_id(feature.kind) {
+            return false;
+        }
+        if feature.flags & self.require_flags != self.require_flags {
+            return false;
+        }
+        if feature.flags & self.forbid_flags != 0 {
+            return false;
+        }
+        if !self.detail_ids.is_empty() && self.detail_ids.binary_search(&feature.kind_detail).is_err()
+        {
+            return false;
+        }
+        if !self.forbid_details.is_empty()
+            && self.forbid_details.binary_search(&feature.kind_detail).is_ok()
+        {
+            return false;
+        }
+        true
+    }
+
     /// Does this layer draw a feature whose interned `kind` is `kind`?
     ///
+    /// The kind half of [`matches_feature`](Self::matches_feature): kept because tests and
+    /// diagnostics name kinds without a feature to hand.
     /// The whole of the attribute filtering the renderer does, and all the style asks for.
     pub fn matches_id(&self, kind: u16) -> bool {
         self.kind_ids.is_empty() || self.kind_ids.binary_search(&kind).is_ok()
@@ -220,6 +291,15 @@ impl Layer {
         }
     }
 
+    /// The halo color for a symbol layer, by palette. Non-symbol layers return
+    /// transparent (their shaders never read it).
+    pub fn halo_color(&self, palette: Palette) -> u32 {
+        match palette.variant {
+            Variant::Light => self.halo_light,
+            Variant::Dark => self.halo_dark,
+        }
+    }
+
     /// Is this the land/sea base rather than detail drawn on it?
     ///
     /// The base is **never muted**. Muting blends toward the background, which is the water
@@ -237,6 +317,20 @@ impl Layer {
 /// A `kind` name's interned id, or `None` when the schema has no counterpart.
 fn kind_id(name: &str) -> Option<u16> {
     dict::KINDS.iter().position(|k| *k == name).map(|i| i as u16 + 1)
+}
+
+/// Test-only access to [`kind_id`]: symbol tests build layers by hand.
+#[cfg(test)]
+pub fn kind_id_for_test(name: &str) -> u16 {
+    kind_id(name).expect("a schema kind")
+}
+
+/// A `kind_detail` name's interned id, or `None` when the schema has no counterpart.
+///
+/// Details share the archive-wide [`dict::DETAILS`] table, so `service` here is the same id
+/// the tiler wrote on the feature.
+fn detail_id(name: &str) -> Option<u16> {
+    dict::DETAILS.iter().position(|k| *k == name).map(|i| i as u16 + 1)
 }
 
 /// Behind everything, before any tile has loaded.
@@ -497,13 +591,145 @@ mod tests {
         assert_eq!(count, ids.len(), "layer ids are used as identities");
     }
 
+    // --- the road flag/detail filters (issue #3) -------------------------------
+
+    fn feature(kind: &str, flags: u8, detail: &str) -> tilecodec::mamaps::body::Feature {
+        use tilecodec::mamaps::body::{GEOM_LINE, NAME_NONE};
+        tilecodec::mamaps::body::Feature {
+            kind: kind_id(kind).expect(kind),
+            kind_detail: detail_id(detail).expect(detail),
+            geom_type: GEOM_LINE,
+            flags,
+            name_idx: NAME_NONE,
+            parts_offset: 0,
+            part_count: 0,
+            transit_color: 0,
+        }
+    }
+
+    /// Surface class layers draw plain surface roads only: no ramps, no bridges, no
+    /// tunnels, and (for minor) no service streets. Before these filters a motorway_link
+    /// drew as a full highway with casing at super-zoom — the thick cream band.
+    #[test]
+    fn surface_road_layers_draw_only_plain_surface_roads() {
+        use tilecodec::mamaps::body::{FLAG_IS_BRIDGE, FLAG_IS_LINK, FLAG_IS_TUNNEL};
+        let highway = find("roads-highway");
+        assert!(highway.matches_feature(&feature("highway", 0, "motorway")));
+        assert!(!highway.matches_feature(&feature("highway", FLAG_IS_LINK, "motorway_link")));
+        assert!(!highway.matches_feature(&feature("highway", FLAG_IS_BRIDGE, "motorway")));
+        assert!(!highway.matches_feature(&feature("highway", FLAG_IS_TUNNEL, "motorway")));
+        assert!(!highway.matches_feature(&feature("major_road", 0, "primary")));
+
+        let major = find("roads-major");
+        assert!(major.matches_feature(&feature("major_road", 0, "primary")));
+        assert!(!major.matches_feature(&feature("major_road", FLAG_IS_LINK, "primary_link")));
+        assert!(!major.matches_feature(&feature("major_road", FLAG_IS_BRIDGE, "primary")));
+
+        let minor = find("roads-minor");
+        assert!(minor.matches_feature(&feature("minor_road", 0, "residential")));
+        assert!(!minor.matches_feature(&feature("minor_road", 0, "service")));
+        assert!(!minor.matches_feature(&feature("minor_road", FLAG_IS_TUNNEL, "residential")));
+
+        // Casings agree with their fills: the same feature is outlined and filled, or
+        // neither, so a fill can never sit uncased nor a casing unfilled.
+        for (casing, fill) in
+            [("roads-highway-casing", "roads-highway"), ("roads-major-casing", "roads-major")]
+        {
+            let (c, f) = (find(casing), find(fill));
+            assert_eq!(c.forbid_flags, f.forbid_flags, "{casing} filters what {fill} fills");
+            assert_eq!(c.require_flags, f.require_flags);
+        }
+        assert_eq!(find("roads-minor-casing").forbid_details, find("roads-minor").forbid_details);
+    }
+
+    /// Task-8 regression: bridge spans must draw. Every surface class layer
+    /// forbids `bridge`, so without the roads-bridges-* pass a motorway
+    /// bridge (Bay Bridge, Golden Gate) matched NO layer and vanished. Each
+    /// bridge layer requires `bridge` and mirrors its surface class's paint.
+    #[test]
+    fn bridge_spans_draw_in_their_own_pass() {
+        use tilecodec::mamaps::body::{FLAG_IS_BRIDGE, FLAG_IS_LINK, FLAG_IS_TUNNEL};
+        let highway = find("roads-bridges-highway");
+        assert!(highway.matches_feature(&feature("highway", FLAG_IS_BRIDGE, "motorway")));
+        assert!(!highway.matches_feature(&feature("highway", 0, "motorway")));
+        assert!(!highway.matches_feature(&feature(
+            "highway",
+            FLAG_IS_BRIDGE | FLAG_IS_LINK,
+            "motorway_link"
+        )));
+        assert!(!highway.matches_feature(&feature("highway", FLAG_IS_TUNNEL, "motorway")));
+        let major = find("roads-bridges-major");
+        assert!(major.matches_feature(&feature("major_road", FLAG_IS_BRIDGE, "primary")));
+        assert!(!major.matches_feature(&feature("major_road", 0, "primary")));
+        let minor = find("roads-bridges-minor");
+        assert!(minor.matches_feature(&feature("minor_road", FLAG_IS_BRIDGE, "residential")));
+        assert!(!minor.matches_feature(&feature("minor_road", 0, "residential")));
+        let link = find("roads-bridges-link");
+        assert!(link.matches_feature(&feature(
+            "highway",
+            FLAG_IS_BRIDGE | FLAG_IS_LINK,
+            "motorway_link"
+        )));
+        assert!(!link.matches_feature(&feature("highway", FLAG_IS_BRIDGE, "motorway")));
+        let other = find("roads-bridges-other");
+        assert!(other.matches_feature(&feature("other", FLAG_IS_BRIDGE, "unclassified")));
+        assert!(!other.matches_feature(&feature("other", 0, "unclassified")));
+        // Casings agree with their fills, like the surface pairs.
+        for (casing, fill) in [
+            ("roads-bridges-highway-casing", "roads-bridges-highway"),
+            ("roads-bridges-major-casing", "roads-bridges-major"),
+            ("roads-bridges-minor-casing", "roads-bridges-minor"),
+            ("roads-bridges-link-casing", "roads-bridges-link"),
+        ] {
+            let (c, f) = (find(casing), find(fill));
+            assert_eq!(c.require_flags, f.require_flags, "{casing} filters what {fill} fills");
+            assert_eq!(c.forbid_flags, f.forbid_flags);
+        }
+    }
+
+    /// The link layers catch exactly the `is_link` features the surface layers refuse.
+    #[test]
+    fn link_layers_draw_only_slip_roads() {
+        use tilecodec::mamaps::body::{FLAG_IS_BRIDGE, FLAG_IS_LINK};
+        let link = find("roads-link");
+        assert!(link.matches_feature(&feature("highway", FLAG_IS_LINK, "motorway_link")));
+        assert!(link.matches_feature(&feature("major_road", FLAG_IS_LINK, "primary_link")));
+        assert!(!link.matches_feature(&feature("highway", 0, "motorway")));
+        assert!(!link.matches_feature(&feature("minor_road", 0, "residential")));
+        // A bridge that is also a link still draws as a link: the authored link layers
+        // filter on `is_link` alone, and bridges keep their own roads-bridges-*
+        // layers (task 8) alongside the surface + link passes.
+        assert!(link.matches_feature(&feature(
+            "highway",
+            FLAG_IS_LINK | FLAG_IS_BRIDGE,
+            "motorway_link"
+        )));
+        let casing = find("roads-link-casing");
+        assert!(casing.matches_feature(&feature("highway", FLAG_IS_LINK, "motorway_link")));
+        assert!(!casing.matches_feature(&feature("highway", 0, "motorway")));
+    }
+
+    /// Service streets have their own layer at their own width.
+    #[test]
+    fn service_streets_draw_only_in_the_service_layer() {
+        let service = find("roads-minor-service");
+        assert!(service.matches_feature(&feature("minor_road", 0, "service")));
+        assert!(!service.matches_feature(&feature("minor_road", 0, "residential")));
+        assert!(!find("roads-minor").matches_feature(&feature("minor_road", 0, "service")));
+    }
+
     // --- light and dark ----------------------------------------------------
 
     #[test]
     fn every_layer_defines_both_variants_and_they_differ() {
         // A layer that forgot its dark colour would render its light one on a dark
         // background, which is the single most visible way to get this wrong.
+        // Symbol layers are exempt (see the dark-palette test): one mid-grey column
+        // until the dark label palette lands in M5.
         for l in layers() {
+            if l.kind == LayerKind::Symbol {
+                continue;
+            }
             assert_ne!(l.light, l.dark, "{} has the same colour in both variants", l.id);
             // Translucency is legitimate — buildings draw at 0.5 — but that lives in the
             // opacity ramp, so a fully transparent colour is a layer that silently does
@@ -557,6 +783,13 @@ mod tests {
         assert!(luminance(background(Variant::Dark)) < 0.2, "the dark backdrop must be dark");
         assert!(luminance(background(Variant::Light)) > 0.7, "the light backdrop must be light");
         for l in layers() {
+            // Symbol layers are exempt: the authored style is light-only and label
+            // colours are mid-grey by design (country #a3a3a3, region #b3b3b3), so
+            // they read as labels on a dark basemap too. M1 keeps one column; the
+            // dark label palette is M5 with the dark restyle.
+            if l.kind == LayerKind::Symbol {
+                continue;
+            }
             assert!(
                 luminance(l.dark) < 0.45,
                 "{} is too bright for a dark basemap: {:.2}",

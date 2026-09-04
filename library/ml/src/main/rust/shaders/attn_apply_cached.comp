@@ -49,14 +49,17 @@ void main() {
     // The output is `[d_model, 1, 1]`, so the index *is* the channel.
     uint channel = index;
     uint stride = p.in_w;
-    uint keys = attended_keys(stride);
     uint head_dim = p.out_c / p.group;
+    uint head = channel / head_dim;
     // `S[head][*]`, contiguous in the key index because there is one query.
-    uint row = p.in0 + (channel / head_dim) * stride;
+    uint row = p.in0 + head * stride;
+    // V's channel for this query head, which under multi-query attention is shared.
+    uint value = p.in1 + kv_head_of(head) * head_dim + (channel % head_dim);
+    uint vstride = kv_stride(head_dim);
 
     float total = 0.0;
-    for (uint j = 0u; j < keys; j++) {
-        total += float(arena[row + j]) * float(arena[p.in1 + j * p.in_c + channel]);
+    for (uint j = attn_first(); j <= attn_last(stride); j++) {
+        total += float(arena[row + j]) * float(arena[value + j * vstride]);
     }
     arena[p.out_at + channel] = float16_t(total);
 }

@@ -77,3 +77,7 @@ wtfps/
 planet_out/
 waterh_analysis
 renpho_analysis
+
+# Map comparator emulator screenshots (local only, not committed)
+mapcompare/screenshots/
+.aider*

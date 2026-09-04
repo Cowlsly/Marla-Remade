@@ -58,7 +58,7 @@ import com.vayunmathur.maps.util.formatEta
 import com.vayunmathur.library.ui.R as UiR
 
 /**
- * Full-screen overlay drawn on top of [MaplibreMap] while navigation is
+ * Full-screen overlay drawn on top of [VectorMap][com.vayunmathur.library.map.VectorMap] while navigation is
  * active. Renders the Vela-style rich driving UI on top of MA's existing nav
  * session: a maneuver banner (with lane guidance + route shields), a
  * speedometer with posted-limit badge, an expandable step list, the bottom ETA

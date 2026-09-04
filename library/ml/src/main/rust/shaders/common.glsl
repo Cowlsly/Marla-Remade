@@ -98,18 +98,46 @@ layout(push_constant) uniform Push {
     uint param0_bits;
     uint param1_bits;
     uint count;
-    // Non-zero when the key count comes from `step_params.prefix + 1` rather than from
-    // `in_w`/`out_w`, which then carry only the stride. See `Push::dyn_keys` in `nets/mod.rs`.
+    // Non-zero when the key range comes from `step_params` rather than from `in_w`/`out_w`,
+    // which then carry only the stride. See `Push::dyn_keys` in `nets/mod.rs`.
     uint dyn_keys;
+    // Key/value heads, when fewer than `group`. Zero means "as many as `group`", which is
+    // ordinary multi-head attention. See `kv_head_of`.
+    uint kv_heads;
 } p;
 
-// Keys a cached-attention op attends over, and the stride between rows of its score map.
+// Keys a cached-attention op attends over, as an inclusive `[first, last]` range.
 //
-// The two are equal for a plan built at a fixed length, and differ once the plan is built once at
-// a maximum and the step supplies the length. Kept here so the three cached shaders cannot
-// disagree about which of `p.in_w` / `p.out_w` is which.
-uint attended_keys(uint stride) {
-    return p.dyn_keys != 0u ? step_params.prefix + 1u : stride;
+// A plain decoder attends `0 ..= prefix`. A sliding-window layer attends
+// `window_start ..= prefix`, which is why this is a range and not a count: Gemma 4 alternates
+// four sliding layers to one global one, and the sliding ones must not see the whole cache.
+//
+// When `p.dyn_keys` is zero the op was built at a fixed length and the range is the whole row,
+// which is every net that does not decode.
+uint attn_first() {
+    return p.dyn_keys != 0u ? step_params.window_start : 0u;
+}
+
+uint attn_last(uint stride) {
+    return p.dyn_keys != 0u ? min(step_params.prefix, stride - 1u) : stride - 1u;
+}
+
+// The KV head a query head reads from.
+//
+// `p.group` query heads share `p.kv_heads` key/value heads, so head `h` reads KV head
+// `h / (group / kv_heads)`. Gemma 4's text decoder is the extreme case at one KV head for eight
+// query heads; multi-head attention is the other, where the two counts are equal and this is the
+// identity. Zero `kv_heads` means "same as `group`", so every net built before this existed is
+// unaffected.
+uint kv_head_of(uint head) {
+    uint kv = p.kv_heads == 0u ? p.group : p.kv_heads;
+    return head / max(p.group / max(kv, 1u), 1u);
+}
+
+// Channels one position of a KV cache occupies: `kv_heads * head_dim`, not `group * head_dim`.
+uint kv_stride(uint head_dim) {
+    uint kv = p.kv_heads == 0u ? p.group : p.kv_heads;
+    return kv * head_dim;
 }
 
 // `nets::Act`.
@@ -144,6 +172,27 @@ uint global_index() {
 // `channel` is the output channel, needed only by PReLU, whose slope is one value per
 // channel at `p.act_weight` in the weights buffer. Passing it unconditionally costs a
 // register and keeps one signature.
+/// One signed 4-bit value of an int4 tensor, by element index.
+///
+/// Eight nibbles to a 32-bit word, low nibble first, so element `i` is at bit `4 * (i % 8)` of
+/// word `i / 8`. `base` is the tensor's start as a 32-bit word index, as for `int8_at`.
+///
+/// `bitfieldExtract` on a **signed** int sign-extends, which is what makes the stored range
+/// -8..7 rather than 0..15. Reading it unsigned and subtracting would be a different
+/// quantisation and would silently bias every weight.
+int int4_at(uint base, uint index) {
+    uint word = weights32[base + (index >> 3u)];
+    return bitfieldExtract(int(word), int((index & 7u) << 2u), 4);
+}
+
+/// Taps one int4 scale covers. Mirrors `weights::I4_BLOCK`.
+#define I4_BLOCK 32u
+
+/// The per-block scale for output `channel`, block `block`, of a rank-2 `(out, blocks)` table.
+float int4_scale(uint channel, uint block, uint blocks) {
+    return float(weights[p.act_weight + channel * blocks + block]);
+}
+
 /// One signed byte of an int8 tensor, by element index.
 ///
 /// `base` is the tensor's start as a 32-bit word index; `index` is the element within it.

@@ -12,8 +12,9 @@
 
 use crate::style::{Layer, LayerKind};
 use crate::tess::{fill, stroke};
+use crate::tile::symbol;
 use crate::tile::select::ANCESTOR_DEPTH;
-use tilecodec::mamaps::body::{Body, GEOM_LINE, GEOM_POLYGON};
+use tilecodec::mamaps::body::{Body, GEOM_LINE, GEOM_POINT, GEOM_POLYGON};
 
 /// Tessellated geometry for one layer of one tile.
 pub struct LayerMesh {
@@ -24,12 +25,40 @@ pub struct LayerMesh {
     pub indices: Vec<u32>,
 }
 
+/// One shaped label candidate for per-frame symbol emission.
+#[derive(Clone)]
+pub struct ShapedLabel {
+    /// Index into the style's layer list (the symbol layer that owns it).
+    pub layer_index: usize,
+    /// Anchor in tile-local 0..1.
+    pub anchor: (f32, f32),
+    /// Display name as shaped (for the task-17 pick path).
+    pub name: String,
+    /// Shaped glyphs (font-unit advances, atlas UVs via `tile::glyph`).
+    pub glyphs: Vec<crate::tess::text::ShapedGlyph>,
+    /// Total advance in font units, for centring.
+    pub total_advance: f32,
+    /// Glyph weight (the layer's `medium` flag).
+    pub weight: crate::tile::glyph::Weight,
+    /// Uppercase transform (the layer's `uppercase` flag).
+    pub uppercase: bool,
+    /// Placement rank: 0 country … 3 subplace (from the layer id), 255 unknown.
+    /// Decided at shape time so the per-frame path only sorts.
+    pub rank: u8,
+    /// Population weight within the rank (the feature's numeric `kind_detail`,
+    /// 0–3 from the tiler, 0 unknown). Placement prefers higher weight on ties,
+    /// so a big city beats a town at the same collision.
+    pub pop: u16,
+}
+
 /// Every layer's geometry for one tile, ready to upload.
 pub struct TileMesh {
     pub z: u8,
     pub x: u32,
     pub y: u32,
     pub meshes: Vec<LayerMesh>,
+    /// Symbol candidates: shaped once at tessellation time, sized per frame.
+    pub labels: Vec<ShapedLabel>,
 }
 
 /// Tessellate every layer of `tile` that could be drawn while this tile is on screen.
@@ -45,6 +74,10 @@ pub struct TileMesh {
 /// So the gate here is the *widest* it could need to be, and the renderer decides what is
 /// actually visible against the camera's own zoom every frame. Layers outside the window
 /// are still skipped, which keeps this bounded: a z5 tile does not tessellate buildings.
+///
+/// Symbol layers shape here zoom-independently (string → advances); per-frame sizing
+/// happens in the renderer from `labels`, which carries the shaped candidates while
+/// `meshes` carries no symbol vertices (they would be stale the next frame).
 pub fn build(
     tile: &Body,
     layers: &[Layer],
@@ -53,7 +86,27 @@ pub fn build(
     y: u32,
     rings_validated: bool,
 ) -> TileMesh {
+    build_at(tile, layers, z, x, y, rings_validated, z as f64, 256.0)
+}
+
+/// [`build`] at an explicit camera zoom and tile span.
+///
+/// Production calls [`build`] (camera == tile zoom, 256px span — the tessellation-time
+/// default). Accepted for API symmetry with the per-frame path; symbols shape
+/// zoom-independently, so both are currently unused at tessellation time.
+pub fn build_at(
+    tile: &Body,
+    layers: &[Layer],
+    z: u8,
+    x: u32,
+    y: u32,
+    rings_validated: bool,
+    camera_zoom: f64,
+    tile_span_px: f32,
+) -> TileMesh {
+    let _ = (camera_zoom, tile_span_px);
     let mut meshes = Vec::with_capacity(layers.len());
+    let mut labels = Vec::new();
     let deepest = z.saturating_add(ANCESTOR_DEPTH);
     let extent = tile.extent as u32;
 
@@ -67,9 +120,11 @@ pub fn build(
         let mut indices: Vec<u32> = Vec::new();
 
         for feature in &source.features {
-            // Two `u16` compares against a sorted slice. This used to be a `String` allocation and
-            // a property-map lookup per feature per tile.
-            if !layer.matches_id(feature.kind) {
+            // Kind, then the road flag/detail filters: one call, so a surface layer never
+            // draws the ramps, bridges, tunnels and service streets its `kind` alone would
+            // admit. This used to be a `String` allocation and a property-map lookup per
+            // feature per tile; now it is integer compares against sorted slices.
+            if !layer.matches_feature(feature) {
                 continue;
             }
             let parts = source.parts_of(feature);
@@ -97,6 +152,23 @@ pub fn build(
                         stroke::stroke(&flat, extent, gapped, &mut vertices, &mut indices);
                     }
                 }
+                LayerKind::Symbol => {
+                    // Points only: a place is one labelled point even when mapped as an
+                    // area (extract centroids it). Shape here (zoom-independent);
+                    // the renderer emits quads per frame at the frame's text size.
+                    if feature.geom_type != GEOM_POINT {
+                        continue;
+                    }
+                    let Some(name) = tile.name(feature.name_idx) else { continue };
+                    if name.is_empty() {
+                        continue;
+                    }
+                    if let Some(label) =
+                        symbol::shape_label(layer, tile, feature, name, extent, index)
+                    {
+                        labels.push(label);
+                    }
+                }
             }
         }
 
@@ -106,7 +178,7 @@ pub fn build(
         meshes.push(LayerMesh { layer_index: index, kind: layer.kind, vertices, indices });
     }
 
-    TileMesh { z, x, y, meshes }
+    TileMesh { z, x, y, meshes, labels }
 }
 
 /// `[(i16, i16)]` to the `[(i32, i32)]` the fill tessellator takes.
@@ -210,6 +282,7 @@ mod tests {
             let stride = match m.kind {
                 LayerKind::Fill => fill::FLOATS_PER_VERTEX,
                 LayerKind::Line => stroke::FLOATS_PER_VERTEX,
+                LayerKind::Symbol => crate::tile::symbol::FLOATS_PER_VERTEX,
             };
             assert_eq!(m.vertices.len() % stride, 0, "{id} vertices are whole");
             assert_eq!(m.indices.len() % 3, 0, "{id} indices come in threes");
@@ -258,6 +331,13 @@ mod tests {
                         worst_distance = worst_distance.max(chunk[6].abs());
                     }
                 }
+                LayerKind::Symbol => {
+                    // Symbol quads carry (x, y, u, v): positions are tile-local like
+                    // fills, UVs are atlas 0..1 — checked by tess::text's own tests.
+                    for chunk in m.vertices.chunks(crate::tile::symbol::FLOATS_PER_VERTEX) {
+                        worst_pos = worst_pos.max(chunk[0].abs()).max(chunk[1].abs());
+                    }
+                }
             }
         }
 
@@ -292,6 +372,7 @@ mod tests {
             let stride = match m.kind {
                 LayerKind::Fill => fill::FLOATS_PER_VERTEX,
                 LayerKind::Line => stroke::FLOATS_PER_VERTEX,
+                LayerKind::Symbol => crate::tile::symbol::FLOATS_PER_VERTEX,
             };
             for chunk in m.vertices.chunks(stride) {
                 assert!(chunk[0] > -3.0 && chunk[0] < 4.0, "x {} is not tile-normalised", chunk[0]);
@@ -341,12 +422,22 @@ mod tests {
             kind: LayerKind::Line,
             kinds: Vec::new(),
             kind_ids: Vec::new(),
+            require_flags: 0,
+            forbid_flags: 0,
+            detail_ids: Vec::new(),
+            forbid_details: Vec::new(),
             light: 0xFF000000,
             dark: 0xFF000000,
             opacity: Ramp::constant(1.0),
             width: Ramp::constant(1.0),
             gap_width: Ramp::constant(0.0),
             dash: (0.0, 0.0),
+            text_size: Ramp::constant(1.0),
+            uppercase: false,
+            medium: false,
+            halo_light: 0x00000000,
+            halo_dark: 0x00000000,
+            halo_width: 1.0,
             min_zoom: 0,
             max_zoom: 22,
             authored: "water".to_string(),
