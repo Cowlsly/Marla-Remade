@@ -31,4 +31,6 @@
     <string name="units_widget_label">Convertitore unità</string>
     <string name="units_widget_description">Converti le unità in un attimo - tocca per aprire il convertitore</string>
     <string name="units_widget_choose_category">Scegli una categoria di unità</string>
+    <string name="calculator_widget_transparent">Sfondo trasparente</string>
+    <string name="calculator_widget_transparent_summary">Mostra lo sfondo dietro il tastierino. I tasti rimangono riempiti in modo da rimanere leggibili.</string>
 </resources>
