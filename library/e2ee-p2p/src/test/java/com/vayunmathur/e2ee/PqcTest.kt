@@ -28,7 +28,7 @@ class PqcTest {
         val (kemPub, kemPriv) = Pqc.generateKem()
         val (dsaPub, _) = Pqc.generateDsa()
         val bundle = Pqc.bundle(kemPub, dsaPub)
-        val msg = "post-quantum hello — a longer payload than RSA-OAEP could ever hold in one shot".encodeToByteArray()
+        val msg = "post-quantum hello — a payload comfortably longer than one KEM ciphertext".encodeToByteArray()
         val ct = Pqc.encryptTo(bundle, msg)
         assertContentEquals(msg, Pqc.decrypt(kemPriv, ct))
     }

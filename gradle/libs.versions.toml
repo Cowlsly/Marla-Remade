@@ -77,8 +77,6 @@ protobufJavalite = "4.35.0"
 # protobufJavalite above and are the most likely first build-friction point.
 grpc = "1.69.0"
 grpcKotlin = "1.4.1"
-# BouncyCastle: ed25519 verification of Accrescent's signify-signed repodata (:appstore).
-bouncycastle = "1.79"
 # @javax.annotation.Generated referenced by grpc-java generated stubs.
 javaxAnnotation = "1.3.2"
 jsr305 = "3.0.2"
@@ -107,7 +105,6 @@ quickjs = "1.0.5"
 jgit = "6.10.1.202505221210-r"
 
 # Crypto, security & credential storage
-cryptographyCore = "0.6.0"
 sqlcipherAndroid = "4.18.0"
 # Pinned at 0.101.0, not Maven Central's newest (0.86.5): the CDSI enclave identity is compiled into the
 # native library, and 0.86.5/0.92.0 carry a retired MRENCLAVE, so contact discovery requests
@@ -258,7 +255,6 @@ grpc-stub = { module = "io.grpc:grpc-stub", version.ref = "grpc" }
 grpc-kotlin-stub = { module = "io.grpc:grpc-kotlin-stub", version.ref = "grpcKotlin" }
 grpc-protoc-gen-java = { module = "io.grpc:protoc-gen-grpc-java", version.ref = "grpc" }
 grpc-protoc-gen-kotlin = { module = "io.grpc:protoc-gen-grpc-kotlin", version.ref = "grpcKotlin" }
-bouncycastle-bcprov = { module = "org.bouncycastle:bcprov-jdk18on", version.ref = "bouncycastle" }
 javax-annotation-api = { module = "javax.annotation:javax.annotation-api", version.ref = "javaxAnnotation" }
 google-jsr305 = { module = "com.google.code.findbugs:jsr305", version.ref = "jsr305" }
 zxing-core = { module = "com.google.zxing:core", version.ref = "zxing" }
@@ -283,8 +279,6 @@ quickjs-kt = { module = "io.github.dokar3:quickjs-kt", version.ref = "quickjs" }
 jgit = { module = "org.eclipse.jgit:org.eclipse.jgit", version.ref = "jgit" }
 
 # Crypto, security & credential storage
-cryptography-core = { module = "dev.whyoleg.cryptography:cryptography-core", version.ref = "cryptographyCore" }
-cryptography-provider-jdk = { module = "dev.whyoleg.cryptography:cryptography-provider-jdk", version.ref = "cryptographyCore" }
 sqlcipher-android = { module = "net.zetetic:sqlcipher-android", version.ref = "sqlcipherAndroid" }
 libsignal-android = { module = "org.signal:libsignal-android", version.ref = "libsignalAndroid" }
 ringrtc-android = { module = "org.signal:ringrtc-android", version.ref = "ringrtcAndroid" }

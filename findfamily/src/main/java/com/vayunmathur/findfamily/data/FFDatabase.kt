@@ -119,9 +119,6 @@ interface UserDao {
     @Query("UPDATE User SET locationName = :locationName, lastWaypointId = :lastWaypointId, lastLocationChangeTime = :lastLocationChangeTime WHERE id = :id")
     suspend fun updateLocationMeta(id: Long, locationName: String, lastWaypointId: Long?, lastLocationChangeTime: Long)
 
-    @Query("UPDATE User SET encryptionKey = :encryptionKey WHERE id = :id")
-    suspend fun setEncryptionKey(id: Long, encryptionKey: String)
-
     @Query("UPDATE User SET pqcEncryptionKey = :pqcEncryptionKey WHERE id = :id")
     suspend fun setPqcEncryptionKey(id: Long, pqcEncryptionKey: String)
 

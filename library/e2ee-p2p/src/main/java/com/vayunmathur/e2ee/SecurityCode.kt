@@ -9,8 +9,9 @@ import java.security.MessageDigest
  * each other's genuine keys — i.e. no one (not the server) substituted a key to intercept the
  * end-to-end-encrypted channel.
  *
- * Inputs are the **canonical DER** encodings of the public keys (see [E2ee.canonicalDer]) so the
- * result is independent of incidental PEM formatting differences.
+ * Inputs are each side's public key material exactly as it is held and exchanged — [Pqc.securityCode]
+ * passes the raw public bundles, with no re-encoding. It is the canonical *ordering* of the two
+ * fingerprints, not any canonical encoding, that makes both devices arrive at the same code.
  */
 object SecurityCode {
 

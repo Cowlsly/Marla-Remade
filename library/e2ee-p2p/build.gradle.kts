@@ -22,9 +22,3 @@ androidComponents {
 // armeabi-v7a as well as arm64: :cast:tv runs on 32-bit-userspace Google TV hardware
 // and links this .so. Phone apps filter it back out via their arm64-only abiFilters.
 rustNativeLib("e2ee_pqc", "e2ee-pqc", extraAbis = listOf(ABI_ARMV7))
-
-dependencies {
-    implementation(libs.cryptography.core)
-    implementation(libs.cryptography.provider.jdk)
-
-}
