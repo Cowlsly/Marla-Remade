@@ -7,6 +7,7 @@ import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.animateIntAsState
 import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.lazy.LazyItemScope
+import androidx.compose.foundation.lazy.grid.LazyGridItemScope
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -106,6 +107,18 @@ fun pressedShape(pressed: Boolean, restingPercent: Int = 50, pressedPercent: Int
  */
 @Composable
 fun LazyItemScope.itemMotion(placementSpec: FiniteAnimationSpec<IntOffset>? = null): Modifier {
+    val scheme = MaterialTheme.motionScheme
+    val fade: FiniteAnimationSpec<Float> = scheme.defaultEffectsSpec()
+    return Modifier.animateItem(
+        fadeInSpec = fade,
+        placementSpec = placementSpec ?: scheme.defaultSpatialSpec(),
+        fadeOutSpec = fade,
+    )
+}
+
+/** [itemMotion] for a grid: a tile removed from a grid reflows every tile after it. */
+@Composable
+fun LazyGridItemScope.itemMotion(placementSpec: FiniteAnimationSpec<IntOffset>? = null): Modifier {
     val scheme = MaterialTheme.motionScheme
     val fade: FiniteAnimationSpec<Float> = scheme.defaultEffectsSpec()
     return Modifier.animateItem(

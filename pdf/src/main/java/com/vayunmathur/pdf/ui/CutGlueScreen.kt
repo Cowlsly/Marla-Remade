@@ -48,10 +48,12 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.nativeCanvas
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.zIndex
 import com.vayunmathur.library.ui.IconAdd
 import com.vayunmathur.library.ui.IconDelete
 import com.vayunmathur.library.ui.IconSave
@@ -62,9 +64,10 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.ByteArrayOutputStream
-import com.vayunmathur.library.ui.ReorderableItem
-import com.vayunmathur.library.ui.longPressDraggableHandle
+import com.vayunmathur.library.ui.Motion
+import com.vayunmathur.library.ui.itemMotion
 import com.vayunmathur.library.ui.rememberReorderableLazyGridState
+import com.vayunmathur.library.ui.reorderGridDragHandle
 import com.vayunmathur.library.ui.appBarScrollBehavior
 import androidx.compose.ui.res.stringResource
 
@@ -217,21 +220,35 @@ fun CutGlueContent(
                 ) {
                     items(pageKeys, key = { it }) { key ->
                         val index = pageKeys.indexOf(key)
-                        ReorderableItem(reorderState, key = key) { _ ->
-                            ComposePageThumb(
-                                renderPage = renderPage,
-                                pageKey = key,
-                                index = index,
-                                cache = pageCache,
-                                onDelete = {
-                                    if (index in pageKeys.indices) {
-                                        pageCache.remove(key)
-                                        onDelete(index)
-                                    }
-                                },
-                                modifier = Modifier.longPressDraggableHandle(reorderState, key = key, index = index),
-                            )
+                        val motion = itemMotion(Motion.reorder())
+                        // The page being dragged follows the finger, so it cannot also be placed by
+                        // the grid's own animation; the rest slide aside on the reorder spec.
+                        val itemModifier = if (reorderState.draggingKey == key) {
+                            Modifier.zIndex(1f).graphicsLayer {
+                                val translation = reorderState.draggingItemTranslation
+                                translationX = translation.x
+                                translationY = translation.y
+                            }
+                        } else {
+                            motion
                         }
+                        ComposePageThumb(
+                            renderPage = renderPage,
+                            pageKey = key,
+                            index = index,
+                            cache = pageCache,
+                            onDelete = {
+                                if (index in pageKeys.indices) {
+                                    pageCache.remove(key)
+                                    onDelete(index)
+                                }
+                            },
+                            modifier = itemModifier.reorderGridDragHandle(
+                                reorderState = reorderState,
+                                key = key,
+                                itemCount = pageKeys.size,
+                            ),
+                        )
                     }
                 }
             }
