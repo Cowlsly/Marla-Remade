@@ -5,8 +5,10 @@ package com.vayunmathur.web.platform
 import kotlin.uuid.Uuid
 import android.content.Context
 import android.content.pm.PackageManager
+import android.graphics.Bitmap
 import android.net.Uri
 import android.util.Log
+import android.webkit.WebView
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateMapOf
@@ -17,9 +19,11 @@ import androidx.lifecycle.viewModelScope
 import com.vayunmathur.web.data.Bookmark
 import com.vayunmathur.web.data.BookmarkFolder
 import com.vayunmathur.web.data.DownloadEntry
+import com.vayunmathur.web.data.FaviconStore
 import com.vayunmathur.web.data.HistoryEntry
 import com.vayunmathur.web.data.InstalledSite
 import com.vayunmathur.web.data.SitePermission
+import com.vayunmathur.web.data.TabThumbnailStore
 import com.vayunmathur.web.data.WebRepository
 import com.vayunmathur.web.data.ShieldSetting
 import com.vayunmathur.web.data.StorageInfo
@@ -185,6 +189,12 @@ class WebViewModel(
     val pwaInfos = mutableStateMapOf<String, PwaInfo>()
 
     private val json = Json { ignoreUnknownKeys = true }
+
+    /**
+     * Resolves a tab's live WebView. `BrowserPage` owns the pool, so tab-lifecycle code here
+     * has no other way to reach the view it needs to draw before a tab stops being active.
+     */
+    private var liveWebViews: ((String) -> WebView?)? = null
 
     init {
         viewModelScope.launch {
@@ -380,6 +390,31 @@ class WebViewModel(
 
     fun blockedCount(tabId: String): Int = blockedCounts[tabId] ?: 0
 
+    // ---- Thumbnails and favicons ----
+
+    fun setWebViewLookup(lookup: ((String) -> WebView?)?) { liveWebViews = lookup }
+
+    /** The tab's page thumbnail, or null when there isn't one yet. Compose-observable. */
+    fun thumbnailFor(tabId: String): Bitmap? = TabThumbnailStore.get(tabId)
+
+    /** The site icon for [url]'s host, or null if that host has never been visited. */
+    fun faviconFor(url: String): Bitmap? = FaviconStore.forUrl(url)
+
+    fun captureThumbnail(tabId: String, webView: WebView) {
+        val tab = tabs.find { it.id == tabId } ?: return
+        // A blank new tab would store a white rectangle, which reads worse than the
+        // placeholder the grid draws when there is no thumbnail at all.
+        if (tab.isNewTab) return
+        TabThumbnailStore.capture(tabId, webView, incognito || tab.isPrivate)
+    }
+
+    /** Draws the tab that is about to stop being active, so its tile is not left stale. */
+    private fun captureActiveTab() {
+        val id = activeTabId ?: return
+        val webView = liveWebViews?.invoke(id) ?: return
+        captureThumbnail(id, webView)
+    }
+
     val activeTab: BrowserTab? get() = tabs.find { it.id == activeTabId }
 
     fun onTabUrlChange(tabId: String, url: String) {
@@ -431,6 +466,7 @@ class WebViewModel(
     }
 
     fun newTab(url: String = "", makeActive: Boolean = true, isPrivate: Boolean = false) {
+        if (makeActive) captureActiveTab()
         // Every tab in an incognito window is private, regardless of the caller's request.
         val tab = BrowserTab(id = Uuid.random().toString(), url = url, isPrivate = isPrivate || incognito)
         tabs.add(tab)
@@ -455,6 +491,7 @@ class WebViewModel(
         blockedCounts.remove(tabId)
         blockedTotals.remove(tabId)
         pwaInfos.remove(tabId)
+        TabThumbnailStore.remove(tabId)
         if (activeTabId == tabId) {
             activeTabId = when {
                 tabs.isEmpty() -> {
@@ -472,7 +509,18 @@ class WebViewModel(
         persistTabs()
     }
 
+    /**
+     * Tab order is the persisted order — [persistTabsSync] writes the list as it stands — so a
+     * reorder needs nothing beyond moving the entry and saving.
+     */
+    fun moveTab(from: Int, to: Int) {
+        if (from == to || from !in tabs.indices || to !in tabs.indices) return
+        tabs.add(to, tabs.removeAt(from))
+        persistTabs()
+    }
+
     fun switchToTab(tabId: String) {
+        if (tabId != activeTabId) captureActiveTab()
         activeTabId = tabId
         val cur = activeTab
         omniboxText = if (cur == null || cur.url.isBlank() || cur.url == "about:blank") "" else cur.url

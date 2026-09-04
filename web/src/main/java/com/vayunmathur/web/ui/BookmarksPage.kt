@@ -82,7 +82,7 @@ fun BookmarksPage(
  */
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalFoundationApi::class)
 @Composable
-private fun BookmarksScreen(
+internal fun BookmarksScreen(
     bookmarks: List<Bookmark>,
     folders: List<BookmarkFolder>,
     navigationIcon: @Composable () -> Unit = {},

@@ -19,7 +19,10 @@ import com.vayunmathur.library.network.NetworkClient
 import com.vayunmathur.library.network.TrustBundle
 import com.vayunmathur.library.ui.DynamicTheme
 import com.vayunmathur.library.util.OfflineAware
+import com.vayunmathur.web.data.FaviconStore
+import com.vayunmathur.web.data.TabThumbnailStore
 import com.vayunmathur.web.data.WebRepository
+import com.vayunmathur.web.platform.BrowserTab
 import com.vayunmathur.web.platform.shields.ShieldsEngine
 import com.vayunmathur.web.platform.shields.ShieldsServiceWorkerClient
 import com.vayunmathur.web.platform.WebViewModel
@@ -27,6 +30,7 @@ import com.vayunmathur.web.platform.WebViewModelFactory
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import kotlinx.serialization.json.Json
 
 class MainActivity : ComponentActivity() {
 
@@ -43,6 +47,9 @@ class MainActivity : ComponentActivity() {
         lifecycleScope.launch { ShieldsEngine.load(applicationContext) }
         // Before any WebView exists: service-worker fetches bypass the WebViewClient entirely.
         ShieldsServiceWorkerClient.registerOnce(applicationContext)
+
+        TabThumbnailStore.init(applicationContext)
+        FaviconStore.init(applicationContext)
 
         // Each task (window) carries its own window id + incognito flag so it keeps an independent tab set.
         val windowId = intent?.getStringExtra(EXTRA_WINDOW_ID) ?: WebViewModel.DEFAULT_WINDOW_ID
@@ -147,7 +154,7 @@ class MainActivity : ComponentActivity() {
 
                 val sp = getSharedPreferences("web_prefs", MODE_PRIVATE)
                 val editor = sp.edit()
-                var changed = false
+                val removedKeys = mutableSetOf<String>()
                 for (key in sp.all.keys) {
                     val windowId = when {
                         key.startsWith(savedTabsPrefix) -> key.removePrefix(savedTabsPrefix)
@@ -156,10 +163,26 @@ class MainActivity : ComponentActivity() {
                     } ?: continue
                     if (windowId !in liveWindowIds) {
                         editor.remove(key)
-                        changed = true
+                        removedKeys.add(key)
                     }
                 }
-                if (changed) editor.apply()
+                if (removedKeys.isNotEmpty()) editor.apply()
+
+                // Whatever tab sets survived the prune are the only tabs that can still be
+                // shown, so every other thumbnail file is unreachable.
+                val json = Json { ignoreUnknownKeys = true }
+                val liveTabIds = sp.all
+                    .filterKeys { it == "web_saved_tabs" || it.startsWith(savedTabsPrefix) }
+                    .filterKeys { it !in removedKeys }
+                    .values
+                    .filterIsInstance<String>()
+                    .flatMap { saved ->
+                        runCatching { json.decodeFromString<List<BrowserTab>>(saved) }
+                            .getOrDefault(emptyList())
+                            .map { it.id }
+                    }
+                    .toSet()
+                TabThumbnailStore.retainOnly(liveTabIds)
             } catch (e: Exception) {
                 android.util.Log.e("MainActivity", "pruneClosedWindowTabs failed", e)
             }

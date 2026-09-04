@@ -37,6 +37,7 @@ import com.vayunmathur.library.ui.findActivity
 import com.vayunmathur.library.ui.openAppSettings
 import com.vayunmathur.library.ui.rememberMultiplePermissionRequest
 import com.vayunmathur.library.ui.rememberPermissionRequest
+import com.vayunmathur.web.data.FaviconStore
 import com.vayunmathur.web.platform.shields.FarblingConfig
 import com.vayunmathur.web.platform.shields.ShieldsWebViewClient
 import com.vayunmathur.web.platform.BrowserUtils
@@ -211,7 +212,8 @@ fun WebViewBrowser(
 
                 // The tab a WebView belongs to never changes, so capture privacy once instead
                 // of reading the Compose tab list from the render thread.
-                val isPrivateTab = viewModel.tabs.find { it.id == tabId }?.isPrivate == true
+                val isPrivateTab = viewModel.incognito ||
+                    viewModel.tabs.find { it.id == tabId }?.isPrivate == true
 
                 webViewClient = object : ShieldsWebViewClient(
                     context = ctx,
@@ -277,6 +279,7 @@ fun WebViewBrowser(
                                 }
                             }
                         }
+                        viewModel.captureThumbnail(tabId, view)
                     }
 
                     override fun doUpdateVisitedHistory(view: WebView, url: String?, isReload: Boolean) {
@@ -293,6 +296,11 @@ fun WebViewBrowser(
 
                     override fun onReceivedTitle(view: WebView, title: String?) {
                         if (!title.isNullOrBlank()) viewModel.onTabTitleChange(tabId, title)
+                    }
+
+                    override fun onReceivedIcon(view: WebView, icon: Bitmap?) {
+                        val url = view.url ?: return
+                        if (icon != null) FaviconStore.put(url, icon, isPrivateTab)
                     }
 
                     override fun onGeolocationPermissionsShowPrompt(

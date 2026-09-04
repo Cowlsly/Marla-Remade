@@ -1,6 +1,5 @@
 package com.vayunmathur.web.ui
 
-import androidx.compose.ui.res.pluralStringResource
 import androidx.compose.ui.res.stringResource
 import com.vayunmathur.web.R
 import android.webkit.WebView
@@ -27,11 +26,11 @@ import androidx.compose.foundation.layout.statusBars
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
-import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.key
@@ -67,7 +66,6 @@ import com.vayunmathur.library.ui.IconButton
 import com.vayunmathur.library.ui.LinearProgressIndicator
 import com.vayunmathur.library.ui.ListItem
 import com.vayunmathur.library.ui.MaterialTheme
-import com.vayunmathur.library.ui.OutlinedButton
 import com.vayunmathur.library.ui.OutlinedTextField
 import com.vayunmathur.library.ui.Scaffold
 import com.vayunmathur.library.ui.Surface
@@ -75,7 +73,6 @@ import com.vayunmathur.library.ui.Text
 import com.vayunmathur.library.ui.TextButton
 import com.vayunmathur.library.ui.TopAppBar
 import com.vayunmathur.library.ui.TopAppBarDefaults
-import com.vayunmathur.library.ui.IconAdd
 import com.vayunmathur.library.ui.IconArrowForward
 import com.vayunmathur.library.ui.IconBack
 import com.vayunmathur.library.ui.IconClose
@@ -92,6 +89,7 @@ import com.vayunmathur.web.platform.PwaInfo
 import com.vayunmathur.web.platform.WebPermissions
 import com.vayunmathur.web.platform.WebViewModel
 import com.vayunmathur.web.platform.isNewTab
+import com.vayunmathur.web.ui.components.SiteIcon
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -103,6 +101,14 @@ fun BrowserPage(
     val focusManager = LocalFocusManager.current
     val keyboardController = LocalSoftwareKeyboardController.current
     val webViewPool = remember { mutableStateMapOf<String, WebView>() }
+
+    // The view model captures a thumbnail of a tab as it stops being active, and the live
+    // WebViews only exist here. Cleared on dispose so the pool's WebViews are not kept alive
+    // by the longer-lived view model.
+    DisposableEffect(Unit) {
+        viewModel.setWebViewLookup { tabId -> webViewPool[tabId] }
+        onDispose { viewModel.setWebViewLookup(null) }
+    }
 
     LaunchedEffect(viewModel.tabs.size) {
         if (viewModel.tabs.isEmpty()) viewModel.newTab()
@@ -368,7 +374,12 @@ fun BrowserPage(
                     viewModel.searchDraft = full
                     viewModel.omniboxFocused = true
                 },
-                onTabSwitcherClick = { viewModel.showTabSwitcher = true },
+                onTabSwitcherClick = {
+                    // Before the switcher opens, so the active tile shows the page as the user
+                    // left it rather than wherever it was when it last finished loading.
+                    activeTab?.let { tab -> webViewPool[tab.id]?.let { viewModel.captureThumbnail(tab.id, it) } }
+                    viewModel.showTabSwitcher = true
+                },
                 shieldHost = shieldHost,
                 blockedCount = activeTab?.let { viewModel.blockedCount(it.id) } ?: 0,
                 onShieldClick = { viewModel.showShieldsPanel = true },
@@ -439,6 +450,7 @@ fun BrowserPage(
                             bookmarks = bookmarks.take(12),
                             history = history.take(8),
                             onOpenUrl = { url -> activeTab?.let { viewModel.onTabUrlChange(it.id, url) } },
+                            faviconFor = viewModel::faviconFor,
                             modifier = Modifier.fillMaxSize()
                         )
                     } else if (activeTab != null) {
@@ -471,6 +483,7 @@ fun BrowserPage(
                 activeTabId = viewModel.activeTabId,
                 onSwitch = { viewModel.switchToTab(it) },
                 onClose = { viewModel.closeTab(it) },
+                onReorder = { from, to -> viewModel.moveTab(from, to) },
                 onNewTab = { viewModel.newTab(isPrivate = viewModel.incognito || viewModel.activeTab?.isPrivate == true) },
                 onNewIncognitoTab = { viewModel.newTab(isPrivate = true) },
                 onNewWindow = {
@@ -483,7 +496,9 @@ fun BrowserPage(
                 },
                 isIncognitoWindow = viewModel.incognito || viewModel.activeTab?.isPrivate == true,
                 onDismiss = { viewModel.showTabSwitcher = false },
-                modifier = Modifier.fillMaxSize()
+                modifier = Modifier.fillMaxSize(),
+                thumbnailFor = viewModel::thumbnailFor,
+                faviconFor = viewModel::faviconFor,
             )
         }
 
@@ -656,7 +671,7 @@ fun BrowserPage(
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-private fun BrowserChrome(
+internal fun BrowserChrome(
     omniboxText: String,
     tabCount: Int,
     canGoBack: Boolean = false,
@@ -810,11 +825,12 @@ private fun DisplayOnlyAddressPill(
 }
 
 @Composable
-private fun QuickAccess(
+internal fun QuickAccess(
     bookmarks: List<com.vayunmathur.web.data.Bookmark>,
     history: List<com.vayunmathur.web.data.HistoryEntry>,
     onOpenUrl: (String) -> Unit,
     modifier: Modifier = Modifier,
+    faviconFor: (String) -> android.graphics.Bitmap? = { null },
 ) {
     LazyColumn(
         modifier = modifier.fillMaxSize().background(MaterialTheme.colorScheme.background).padding(16.dp),
@@ -830,9 +846,12 @@ private fun QuickAccess(
                             colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.secondaryContainer)
                         ) {
                             Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                                Box(Modifier.size(28.dp).clip(CircleShape).background(MaterialTheme.colorScheme.surface), contentAlignment = Alignment.Center) {
-                                    Text(bm.title.take(1).uppercase().ifBlank { "B" }, style = MaterialTheme.typography.titleSmall)
-                                }
+                                SiteIcon(
+                                    icon = faviconFor(bm.url),
+                                    label = bm.title.ifBlank { BrowserUtils.hostFromUrl(bm.url) },
+                                    modifier = Modifier.size(28.dp),
+                                    containerColor = MaterialTheme.colorScheme.surface,
+                                )
                                 Text(bm.title.ifBlank { BrowserUtils.hostFromUrl(bm.url) }, maxLines = 2, overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.bodySmall)
                             }
                         }
@@ -847,11 +866,11 @@ private fun QuickAccess(
                     modifier = Modifier.fillMaxWidth().clip(RoundedCornerShape(12.dp)).clickable { onOpenUrl(entry.url) }.padding(12.dp),
                     verticalAlignment = Alignment.CenterVertically
                 ) {
-                    Surface(shape = CircleShape, color = MaterialTheme.colorScheme.surfaceVariant, modifier = Modifier.size(36.dp)) {
-                        Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                            Text(entry.title.take(1).uppercase().ifBlank { "H" }, style = MaterialTheme.typography.titleSmall)
-                        }
-                    }
+                    SiteIcon(
+                        icon = faviconFor(entry.url),
+                        label = entry.title.ifBlank { BrowserUtils.hostFromUrl(entry.url) },
+                        modifier = Modifier.size(36.dp),
+                    )
                     Spacer(Modifier.width(12.dp))
                     Column(Modifier.weight(1f)) {
                         Text(entry.title.ifBlank { entry.url }, maxLines = 1, overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.bodyMedium)
@@ -867,81 +886,6 @@ private fun QuickAccess(
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 modifier = Modifier.padding(top = 16.dp)
             )
-        }
-    }
-}
-
-/** Already stateless — public only so the store-listing previews can render it. */
-@Composable
-private fun TabSwitcher(
-    tabs: List<com.vayunmathur.web.platform.BrowserTab>,
-    activeTabId: String?,
-    onSwitch: (String) -> Unit,
-    onClose: (String) -> Unit,
-    onNewTab: () -> Unit,
-    onNewIncognitoTab: () -> Unit = {},
-    onNewWindow: () -> Unit = onNewTab,
-    onNewIncognitoWindow: () -> Unit = onNewIncognitoTab,
-    onDismiss: () -> Unit,
-    modifier: Modifier = Modifier,
-    isIncognitoWindow: Boolean = tabs.find { it.id == activeTabId }?.isPrivate == true,
-) {
-    Box(modifier = modifier.fillMaxSize().background(MaterialTheme.colorScheme.background.copy(alpha = 0.98f))) {
-        Column(Modifier.fillMaxSize()) {
-            TopAppBar(
-                title = { Text(pluralStringResource(R.plurals.tabs, tabs.size, tabs.size)) },
-                navigationIcon = { com.vayunmathur.library.ui.IconButton(onClick = onDismiss) { IconClose() } },
-                actions = { com.vayunmathur.library.ui.IconButton(onClick = onNewTab) { IconAdd() } }
-            )
-            LazyColumn(Modifier.fillMaxSize().padding(8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                items(tabs, key = { it.id }) { tab ->
-                    val isActive = tab.id == activeTabId
-                    val displayTitle = when {
-                        tab.isNewTab -> "New Tab"
-                        tab.title.isNotBlank() -> tab.title
-                        else -> BrowserUtils.prettyUrl(tab.url).ifBlank { "New Tab" }
-                    }
-                    val displayUrl = if (tab.isNewTab) "" else tab.url
-                    Card(
-                        modifier = Modifier.fillMaxWidth().clickable { onSwitch(tab.id) },
-                        colors = CardDefaults.cardColors(containerColor = if (isActive) MaterialTheme.colorScheme.secondaryContainer else MaterialTheme.colorScheme.surfaceVariant),
-                        shape = RoundedCornerShape(16.dp)
-                    ) {
-                        Row(Modifier.fillMaxWidth().padding(12.dp), verticalAlignment = Alignment.CenterVertically) {
-                            Column(Modifier.weight(1f)) {
-                                Row(verticalAlignment = Alignment.CenterVertically) {
-                                    if (tab.isPrivate) Text(stringResource(R.string.private_prefix), style = MaterialTheme.typography.labelSmall)
-                                    Text(displayTitle, maxLines = 1, overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.titleSmall)
-                                }
-                                if (displayUrl.isNotBlank()) {
-                                    Text(displayUrl, maxLines = 1, overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                                }
-                            }
-                            com.vayunmathur.library.ui.IconButton(onClick = { onClose(tab.id) }) { IconClose() }
-                        }
-                    }
-                }
-                item {
-                    Column(Modifier.fillMaxWidth().padding(top = 8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                        OutlinedButton(
-                            onClick = {
-                                if (isIncognitoWindow) onNewIncognitoTab() else onNewTab()
-                            },
-                            modifier = Modifier.fillMaxWidth()
-                        ) {
-                            Text(
-                                stringResource(
-                                    if (isIncognitoWindow) R.string.new_incognito_tab else R.string.new_tab
-                                )
-                            )
-                        }
-                        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                            OutlinedButton(onClick = onNewWindow, modifier = Modifier.weight(1f)) { Text(stringResource(R.string.new_window)) }
-                            OutlinedButton(onClick = onNewIncognitoWindow, modifier = Modifier.weight(1f)) { Text(stringResource(R.string.new_incognito_window)) }
-                        }
-                    }
-                }
-            }
         }
     }
 }
