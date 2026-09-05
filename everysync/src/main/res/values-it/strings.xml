@@ -1,3 +1,33 @@
 <?xml version="1.0" encoding="utf-8"?>
-<resources>
-    </resources>
+<resources xmlns:xliff="urn:oasis:names:tc:xliff:document:1.2">
+    <string name="accounts_title">EverySync</string>
+    <string name="no_accounts">Nessun account presente. Tocca + per aggiungerne uno.</string>
+    <string name="sync_now">Sincronizza ora</string>
+    <string name="syncing">Sincronizzazione…</string>
+    <string name="last_synced">Ultima sincronizzazione: <xliff:g id="date" example="Today 10:30 AM">%1$s</xliff:g></string>
+    <string name="never_synced">Mai sincronizzato</string>
+    <string name="add_account_title">Aggiungi account</string>
+    <string name="provider_via_health_connect">tramite Healt Connect</string>
+    <string name="dav_login_title">Accesso tramite <xliff:g id="provider" example="iCloud">%1$s</xliff:g></string>
+    <string name="dav_base_url">URL server</string>
+    <string name="dav_username">Nome utente / email</string>
+    <string name="dav_password">Password (specifica per app)</string>
+    <string name="login">Accedi</string>
+    <string name="icloud_app_password_steps">iCloud richiede una password specifica per l\'app (non la password del tuo ID Apple):\n\n1. Accedi su account.apple.com\n2. Apri Accedi e sicurezza → Password specifiche per le app\n3. Creane una e nominala \"EverySync\"\n4. Inserisci qui sotto l\'email del tuo ID Apple e quella password</string>
+    <string name="icloud_create_password">Crea password specifica per l\'app</string>
+    <string name="apple_id_email">Email ID Apple</string>
+    <string name="app_specific_password">Password specifica per l\'app</string>
+    <string name="sync_contacts">Sincronizza contatti</string>
+    <string name="sync_calendar">Sincronizza calendari</string>
+    <string name="sync_health">Sincronizza salute</string>
+    <string name="remove_account">Rimuovi account</string>
+    <string name="settings_title">Impostazioni</string>
+    <string name="global_interval">Intervallo di sincronizzazione (minuti)</string>
+    <string name="wifi_only">Sincronizza solo su Wi-Fi</string>
+    <string name="conflict_policy">Risoluzione dei conflitti</string>
+    <string name="conflict_lww">Vince l\'ultima scrittura</string>
+    <string name="conflict_remote">Preferisci server</string>
+    <string name="conflict_local">Preferisci dispositivo</string>
+    <string name="need_permissions">EverySync richiede l\'accesso ai contatti e al calendario per sincronizzare i tuoi account.</string>
+    <string name="everysync_privacy_policy">EverySync sincronizza contatti, calendari e dati sulla salute tra i tuoi account cloud e questo dispositivo. I dati vengono memorizzati esclusivamente su questo dispositivo e sui server da te configurati.</string>
+</resources>
