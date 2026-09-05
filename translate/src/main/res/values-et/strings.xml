@@ -10,4 +10,10 @@
     <string name="grant_camera_access">Tõlkimaks seda, mida näed, luba kasutada kaamerat</string>
     <string name="no_voice_installed">Häälemudel on paigaldamata: %1$s</string>
     <string name="install_voice">Paigalda</string>
+    <string name="select_source_language">Lähtekeel</string>
+    <string name="select_target_language">Sihtkeel</string>
+    <string name="search_languages">Otsi keeli</string>
+    <string name="recent_languages">Hiljutised keeled</string>
+    <string name="all_languages">Kõik keeled</string>
+    <string name="no_languages_match">Ükski keel ei vasta otsingule „%1$s“</string>
 </resources>
