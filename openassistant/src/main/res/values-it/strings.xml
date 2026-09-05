@@ -13,4 +13,5 @@
     <string name="error_inference_timeout">Tempo scaduto per l\'inferenza</string>
     <string name="error_ai_engine_failed">Errore del motore IA</string>
     <string name="error_ai_json_schema_mismatch">L\'IA non è riuscita a restituire un JSON valido corrispondente allo schema.</string>
+    <string name="settings_title">Impostazioni</string>
 </resources>
