@@ -73,4 +73,5 @@
     <string name="theme_dark">Scuro</string>
     <string name="on_label">Il</string>
     <string name="month_option_nth_weekday">Il <xliff:g id="ordinal" example="secondo">%1$s</xliff:g> <xliff:g id="weekday" example="Lunedì">%2$s</xliff:g></string>
+    <string name="theme">Tema</string>
 </resources>
