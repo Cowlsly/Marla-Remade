@@ -127,4 +127,8 @@
     <string name="source_accrescent">Accrescent</string>
     <string name="source_accrescent_pin">Kinnitatud kasutama Accrescenti tarkvarahoidla allkirjastamisvõtit (ed25519)</string>
     <string name="home_empty_message">Et siin leiduks on teavet, sünkrooni rakendustehoidlaid või otsi rakendust nime alusel.</string>
+    <string name="updates_notification_body">Ava ülevaatamiseks rakendustepood ja paigalda nad.</string>
+    <string name="library_empty_message">Siin on kirjas sinu paigaldatavad rakendused, grupeeritud tarkvarahoidla alusel, kust nad on leitud.</string>
+    <string name="library_empty_title">Mite midagi ei vasta sellele filtrile</string>
+    <string name="setting_auto_install_updates_title">Paigalda uuendused automaatselt</string>
 </resources>
