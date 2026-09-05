@@ -49,4 +49,7 @@
     <string name="grade_again">Di nuovo</string>
     <string name="grade_hard">Difficile</string>
     <string name="grade_easy">Facile</string>
+    <string name="theme_system">Sistema</string>
+    <string name="theme_light">Chiaro</string>
+    <string name="theme_dark">Scuro</string>
 </resources>
