@@ -15,4 +15,7 @@
     <string name="general">Generali</string>
     <string name="all">Tutti</string>
     <string name="name">Nome</string>
+    <string name="line">Riga</string>
+    <string name="go">Vai</string>
+    <string name="discard">Scarta</string>
 </resources>
