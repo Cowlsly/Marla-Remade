@@ -2,5 +2,6 @@
 <resources>
     <string name="recent">الأحدث</string>
     <string name="apply">تطبيق</string>
-    <string name="reset">إعادة تعيين</string>
+    <string name="reset">إعادة الضبط</string>
+    <string name="rotate_90">تدوير ٩٠°</string>
 </resources>
