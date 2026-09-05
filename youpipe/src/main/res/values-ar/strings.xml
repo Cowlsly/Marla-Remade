@@ -2,4 +2,5 @@
 <resources>
     <string name="clear_history">مسح السجل</string>
     <string name="language">اللغة</string>
+    <string name="action_update">تحديث</string>
 </resources>
