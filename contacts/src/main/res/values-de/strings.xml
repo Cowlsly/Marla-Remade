@@ -2,7 +2,6 @@
 <resources xmlns:xliff="urn:oasis:names:tc:xliff:document:1.2">
     <!-- App name displayed in launcher -->
     <string name="app_name">Kontakte</string>
-
     <!-- ContactDetailsPage: details screen -->
     <!-- Error/empty state when contact id not found in provider -->
     <string name="contact_not_found">Kontakt nicht gefunden</string>
@@ -42,8 +41,6 @@
     <string name="name_prefix">Namenspräfix</string>
     <!-- Dropdown next to the last name field, for generational titles placed after a name -->
     <string name="name_suffix">Namenssuffix</string>
-    <!-- Option in the name prefix/suffix dropdowns that clears the chosen title -->
-    <string name="name_affix_none"> </string>
     <!-- Name prefixes offered in the dropdown. Translate to the honorifics used locally. -->
     <string-array name="name_prefixes">
         <item>Dr.</item>
@@ -100,7 +97,6 @@
     <string name="change_picture">Ändern</string>
     <!-- Button to remove contact photo -->
     <string name="remove_picture">Entfernen</string>
-
     <!-- SettingsPage -->
     <!-- Settings section header: which accounts are visible in list -->
     <string name="visible_accounts">Angezeigte Accounts</string>
@@ -118,7 +114,6 @@
     <string name="delete_local_account_confirm">Diesen Account und alle seine Kontakte löschen? Dies kann nicht rückgängig gemacht werden.</string>
     <!-- Error toast when the new account name is already used -->
     <string name="account_name_exists">Ein Account mit diesen Namen existiert bereits</string>
-
     <!-- Delete contact flow -->
     <!-- Dialog title for delete single contact confirmation -->
     <string name="delete_contact_title">Kontakt löschen</string>
@@ -126,13 +121,11 @@
     <string name="delete_contact_confirm">Sind Sie sicher, dass Sie diesen Kontakt löschen möchten? Dies kann nicht rückgängig gemacht werden.</string>
     <!-- Confirmation message with contact name quoted. %1$s = contact display name -->
     <string name="delete_contact_name_confirm">Sind Sie sicher, dass Sie \"%1$s\" löschen möchten? Dies kann nicht rückgängig gemacht werden.</string>
-
     <!-- MainActivity permissions and hints -->
     <!-- Permission screen message when contacts permission not granted -->
     <string name="grant_contacts_permission">Bitte erlaube die Kontaktberechtigung</string>
     <!-- Two-pane layout hint on tablets: prompt to select contact from list -->
     <string name="select_contact_hint">Wähle einen Kontakt aus um Details zu sehen</string>
-
     <!-- Import / Export VCF -->
     <!-- Settings and screen title for importing contacts from VCF -->
     <string name="import_contacts">Kontakte importieren</string>
@@ -181,15 +174,13 @@
     <string name="telegram">Telegram</string>
     <!-- App label: Google Meet video calling -->
     <string name="google_meet">Google Meet</string>
-
     <!-- Bottom navigation -->
     <!-- Bottom nav label: contacts list tab -->
     <string name="contacts">Kontakte</string>
-    !-- Bottom nav label: groups tab -->
+    !-- Bottom nav label: groups tab --&gt;
     <string name="groups">Gruppen</string>
     <!-- Two-pane hint for groups screen on tablets -->
     <string name="select_group_hint">Gruppe auswählen um Kontakte anzuschauen</string>
-
     <!-- Groups management -->
     <!-- Dialog title and action to add selected contacts to a group -->
     <string name="add_to_group">Zur Gruppe hinzufügen</string>
@@ -201,7 +192,6 @@
     <string name="delete_group_title">Gruppe löschen</string>
     <!-- Confirmation message for deleting group, contacts not deleted -->
     <string name="delete_group_confirm">Sind Sie sich sicher, dass sie diese Gruppe löschen wollen? Die Kontakte werden nicht gelöscht.</string>
-
     <!-- Import VCF screen and common toasts -->
     <!-- Empty state for groups screen when no groups exist -->
     <string name="no_groups_found">Keine Gruppe gefunden. Erstelle eine Gruppe im Gruppen-Tab.</string>
@@ -231,24 +221,20 @@
     <string name="add_number_to_contact">Telefonnummer zum Kontakt hinzufügen</string>
     <!-- Action when incoming call from unknown number: create brand new contact -->
     <string name="create_new_contact">Neuen Kontakt erstellen</string>
-
     <!-- CropPhotoScreen -->
     <!-- TopAppBar title for cropping contact photo -->
     <string name="crop_photo">Foto zuschneiden</string>
     <!-- Settings: row label for importing contacts from VCF files -->
     <string name="import_contacts_from_vcf_files">Kontakte von einer vCard-Datei (VCF) importieren</string>
-
     <!-- Custom label support -->
     <!-- Label for custom label text field -->
     <string name="custom_label">Benutzerdefiniertes Label</string>
     <!-- Placeholder / description for entering custom label -->
     <string name="enter_custom_label">Labelname</string>
-
     <!-- SIM contacts (now virtual accounts) -->
     <string name="sim_limited_fields_hint">SIM-Kontakte speichern nur Name, Telefon und E-Mail.</string>
     <string name="save_failed">Speichern fehlgeschlagen</string>
     <string name="importing">Importiert…</string>
-
     <!-- Empty states -->
     <!-- Contacts tab, shown on a first run or when every account is hidden -->
     <string name="no_contacts_yet">Noch keine Kontakte</string>
