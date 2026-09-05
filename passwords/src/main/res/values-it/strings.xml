@@ -43,4 +43,5 @@
     <string name="cable_prompt_title">Vuoi accedere sull\'altro dispositivo?</string>
     <string name="cable_prompt_subtitle">Verifica per approvare questo accesso con passkey</string>
     <string name="name_required">Il nome non può essere vuoto</string>
+    <string name="sync_now">Sincronizza ora</string>
 </resources>
