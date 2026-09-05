@@ -136,4 +136,10 @@
     <string name="label_player">Player</string>
     <string name="label_keep_controls_visible">Mantieni i controlli del player visibili</string>
     <string name="label_keep_controls_visible_description">I controlli rimangono visibili invece di nascondersi dopo 2 secondi. Utile per l\'accessibilità.</string>
+    <string name="cast_to_tv">Trasmetti ad una televisione</string>
+    <string name="cast_playing_on">In riproduzione su %1$s</string>
+    <string name="cast_stop">Interrompi trasmissione</string>
+    <string name="cast_install_prompt">MA Cast non è installato. Apertura della pagina dello store per consentirne l\'installazione.</string>
+    <string name="cast_update_prompt">MA Cast è una versione troppo vecchia per riprodurre video sulla TV. Apertura della pagina dello store per consentirne l\'aggiornamento.</string>
+    <string name="cast_failed">Impossibile avviare la trasmissione alla TV</string>
 </resources>
