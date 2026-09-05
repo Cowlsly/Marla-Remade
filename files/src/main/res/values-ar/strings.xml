@@ -1,5 +1,5 @@
 <?xml version="1.0" encoding="utf-8"?>
-<resources>
+<resources xmlns:xliff="urn:oasis:names:tc:xliff:document:1.2">
     <string name="app_name">الملفات</string>
     <string name="bookmarks">الإشارات المرجعية</string>
     <string name="new_folder">مجلد جديد</string>
@@ -9,4 +9,70 @@
     <string name="close">إغلاق</string>
     <string name="enable">تفعيل</string>
     <string name="copy">نسخ</string>
+    <string name="enable_notifications">تفعيل الإشعارات؟</string>
+    <string name="notification_permission_rationale">سيتيح لك تشغيل الإشعارات رؤية التقدم المحرز في الإجراءات التي تتم في الخلفية مثل ضغط الملفات وفك ضغطها.</string>
+    <string name="skip">تخطي</string>
+    <string name="grant_all_files_access">منح الوصول إلى كل الملفات</string>
+    <string name="archive_selection">أرشيف المحدد</string>
+    <string name="zip_file_name_label">اسم ملف Zip</string>
+    <string name="archiving_started">بدأت الأرشفة…</string>
+    <string name="archive">أرشف</string>
+    <string name="unzipping_started_to">بدأ فك الضغط لـ <xliff:g id="dest_name" example="Downloads">%1$s</xliff:g></string>
+    <string name="move_failed">فشل النقل: <xliff:g id="error" example="Permission denied">%1$s</xliff:g></string>
+    <string name="could_not_open_zip">تعذّر فتح zip: <xliff:g id="error" example="Invalid format">%1$s</xliff:g></string>
+    <string name="zip_too_large_to_extract">كبير جدًا للاستخراج: يحتاج <xliff:g id="needed" example="4.2 GB">%1$s</xliff:g>، فقط <xliff:g id="available" example="1.1 GB">%2$s</xliff:g> قابل للاستخدام</string>
+    <string name="no_app_found_to_open_file">لم يتم العثور على تطبيق لفتح هذا الملف</string>
+    <string name="zip_browse_only">عرض الملفات داخل zip محدود لتصفح</string>
+    <string name="install_permission_needed">اسمح لـ الملفات بتثبيت التطبيقات غير المعروفة، ثم اضغط على الـ APK مرة أخرى</string>
+    <string name="install_permission_denied">إذن تثبيت التطبيقات غير ممنوح</string>
+    <string name="file_fallback">ملف</string>
+    <string name="unzip_channel_name">عمليات فك الضغط</string>
+    <string name="unzipping">جارٍ فك الضغط…</string>
+    <string name="zip_channel_name">عمليات الضغط</string>
+    <string name="archiving">جارٍ الأرشفة…</string>
+    <string name="files_saved">تم حفظ الملفات بنجاح</string>
+    <string name="search_files">البحث في الملفات…</string>
+    <string name="sort_name">الاسم</string>
+    <string name="sort_date">التاريخ</string>
+    <string name="sort_size">الحجم</string>
+    <string name="sort_type">النوع</string>
+    <string name="sort_ascending">تصاعدي</string>
+    <string name="sort_descending">تنازلي</string>
+    <string name="home">الصفحة الرئيسية</string>
+    <string name="grid_view">عرض الشبكة</string>
+    <string name="list_view">عرض القائمة</string>
+    <string name="select_all">تحديد الكل</string>
+    <string name="cut">قص</string>
+    <string name="paste">لصق</string>
+    <string name="share">مشاركة</string>
+    <string name="new_name_label">الاسم الجديد</string>
+    <string name="copied_n">تم نسخ <xliff:g id="count" example="3">%1$d</xliff:g> عنـ(ا)صر</string>
+    <string name="cut_n">قص <xliff:g id="count" example="3">%1$d</xliff:g> عنـ(ا)صر</string>
+    <string name="ready_to_paste"><xliff:g id="count" example="3">%1$d</xliff:g> عنـ(ا)صر جاهزة للنسخ</string>
+    <string name="create_failed">تعذّر إنشاء العنصر</string>
+    <string name="bookmark_added">تمت إضافة الإشارة المرجعية</string>
+    <string name="cat_images">الصور</string>
+    <string name="cat_videos">الفيديوهات</string>
+    <string name="cat_audio">الصوت</string>
+    <string name="cat_documents">المستندات</string>
+    <string name="cat_downloads">التنزيلات</string>
+    <string name="internal_storage">التخزين الداخلي</string>
+    <string name="categories">الفئات</string>
+    <string name="recent_files">الملفات الأخيرة</string>
+    <string name="storage_usage">تم استخدام <xliff:g id="used" example="12 GB"> %1$s</xliff:g> من <xliff:g id="total" example="128 GB">%2$s</xliff:g></string>
+    <string name="folder_name_label">اسم المجلد</string>
+    <string name="file_name_label">اسم الملف</string>
+    <string name="open_with">فتح باستخدام</string>
+    <string name="properties">الخصائص</string>
+    <string name="add_bookmark">إضافة إشارة مرجعية</string>
+    <string name="show_hidden">إظهار الملفات المخفية</string>
+    <string name="hide_hidden">إخفاء الملفات المخفية</string>
+    <string name="no_files">لا شيء هنا</string>
+    <string name="prop_path">المسار</string>
+    <string name="prop_type">النوع</string>
+    <string name="prop_size">الحجم</string>
+    <string name="prop_modified">تم التعديل</string>
+    <string name="prop_items">المحتويات</string>
+    <string name="type_folder">مجلد</string>
+    <string name="type_file">ملف</string>
 </resources>
