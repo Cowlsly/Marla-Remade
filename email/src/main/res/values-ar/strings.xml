@@ -145,4 +145,7 @@
         <item quantity="many"><xliff:g id="count" example="2">%1$s</xliff:g> محاولة</item>
         <item quantity="other"><xliff:g id="count" example="2">%1$s</xliff:g> محاولة</item>
     </plurals>
+    <string name="heading_2">العنوان ٢</string>
+    <string name="heading_3">العنوان ٣</string>
+    <string name="heading_1">العنوان ١</string>
 </resources>
