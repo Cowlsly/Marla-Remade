@@ -3,4 +3,7 @@
     <string name="bookmarks">Segnalibri</string>
     <string name="new_folder">Nuova cartella</string>
     <string name="create">Crea</string>
+    <string name="new_file">Nuovo file</string>
+    <string name="rename">Rinomina</string>
+    <string name="close">Chiudi</string>
 </resources>
