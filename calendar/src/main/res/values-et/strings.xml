@@ -164,4 +164,9 @@
     <string name="default_reminders">Vaikimisi meeldetuletused</string>
     <string name="default_reminders_description">Meeldetuletused lisatakse automaatselt <xliff:g id="calendar_name" example="Töö">%1$s</xliff:g> kalendri sündmustele.</string>
     <string name="apply_to_existing_events">Rakenda olemasolevatele sündmustele</string>
+    <string name="calendar_month_widget_description">Kuu ülevaade ruutustikuvaatena - kalendri avamiseks klõpsa</string>
+    <plurals name="month_widget_more_events">
+        <item quantity="one">veel <xliff:g id="count" example="1">%1$d</xliff:g></item>
+        <item quantity="other">veel <xliff:g id="count" example="3">%1$d</xliff:g></item>
+    </plurals>
 </resources>
