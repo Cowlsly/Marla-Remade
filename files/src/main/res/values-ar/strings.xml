@@ -75,4 +75,5 @@
     <string name="prop_items">المحتويات</string>
     <string name="type_folder">مجلد</string>
     <string name="type_file">ملف</string>
+    <string name="items_count"><xliff:g id="count" example="12">%1$d</xliff:g> عنـ(ا)صر</string>
 </resources>
