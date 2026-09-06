@@ -68,6 +68,12 @@ class BleManager {
         // finalizes and replies "registration successful / clear data successful".
         private const val CMD_CLEAR_OFFLINE_DATA = "50540003021c05"
 
+        // The official app never writes back-to-back: BottleConnection.sendBleRequest delays every
+        // command, 1s for the request/sync ones and 500ms for the rest. The bottle ignores writes
+        // issued too soon after the CCCD write, so these spacings are load-bearing.
+        private const val COMMAND_DELAY_MS = 500L
+        private const val REQUEST_DELAY_MS = 1000L
+
         // The official app scans in a bounded 20s window (ConnectionViewModel.scanFor20Seconds)
         // rather than leaving the radio running until something is found.
         private const val SCAN_TIMEOUT_MS = 20_000L
@@ -93,7 +99,8 @@ class BleManager {
     private var registrationClearSent = false
 
     // Command queue: one outstanding write at a time, drained on onCharacteristicWrite.
-    private val commandQueue = ArrayDeque<String>()
+    private class Command(val hex: String, val delayMs: Long)
+    private val commandQueue = ArrayDeque<Command>()
     private var writing = false
 
     // Live sensor state, merged across partial RT updates and emitted as a BottleStatus.
@@ -207,17 +214,26 @@ class BleManager {
         collected.clear()
     }
 
-    private fun enqueueCommand(hex: String) {
+    private fun enqueueCommand(hex: String, delayMs: Long = COMMAND_DELAY_MS) {
         DeviceController.runOnMain {
-            commandQueue.addLast(hex)
+            commandQueue.addLast(Command(hex, delayMs))
             if (!writing) writeNext()
         }
     }
 
-    @Suppress("DEPRECATION")
     private fun writeNext() {
-        val g = gatt ?: return
-        val hex = commandQueue.removeFirstOrNull() ?: return
+        val cmd = commandQueue.removeFirstOrNull()
+        if (cmd == null) {
+            writing = false
+            return
+        }
+        writing = true
+        handler.postDelayed({ performWrite(cmd.hex) }, cmd.delayMs)
+    }
+
+    @Suppress("DEPRECATION")
+    private fun performWrite(hex: String) {
+        val g = gatt ?: run { writing = false; return }
         val service = g.getService(WRITE_SERVICE_UUID)
         if (service == null) {
             Log.w(TAG, "writeNext: WRITE service $WRITE_SERVICE_UUID not found; dropping $hex")
@@ -231,7 +247,6 @@ class BleManager {
             return
         }
         val bytes = hexToByteArray(hex)
-        writing = true
         // FFE9 on this bottle is write-without-response (properties=0x4). Match the write type to
         // the characteristic's actual properties: on Android 13+ a write-with-response issued to a
         // no-response-only characteristic is silently dropped at the ATT layer (it never leaves the
@@ -241,13 +256,18 @@ class BleManager {
         } else {
             BluetoothGattCharacteristic.WRITE_TYPE_NO_RESPONSE
         }
-        Log.d(TAG, "-> write $hex")
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+        Log.d(TAG, "-> write $hex (props=0x${char.properties.toString(16)} type=$writeType)")
+        val result = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
             g.writeCharacteristic(char, bytes, writeType)
         } else {
             char.setValue(bytes)
             char.writeType = writeType
-            g.writeCharacteristic(char)
+            if (g.writeCharacteristic(char)) 0 else 1
+        }
+        if (result != 0) {
+            Log.w(TAG, "write of $hex rejected by the stack (code $result)")
+            writing = false
+            writeNext()
         }
     }
 
@@ -318,16 +338,17 @@ class BleManager {
             if (pendingRegistration) {
                 // First-time setup: exit factory mode + start registration (blue LED, button press).
                 Log.d(TAG, "onDescriptorWrite status=$status; starting registration")
-                enqueueCommand(CMD_EXIT_FACTORY_MODE)
-                enqueueCommand(CMD_REQUEST_REGISTRATION)
+                enqueueCommand(CMD_EXIT_FACTORY_MODE, REQUEST_DELAY_MS)
+                enqueueCommand(CMD_REQUEST_REGISTRATION, REQUEST_DELAY_MS)
             } else {
                 // Notifications are on; kick off the handshake by asking for full bottle data.
                 Log.d(TAG, "onDescriptorWrite status=$status; requesting bottle data")
-                enqueueCommand(CMD_REQUEST_DATA)
+                enqueueCommand(CMD_REQUEST_DATA, REQUEST_DELAY_MS)
             }
         }
 
         override fun onCharacteristicWrite(g: BluetoothGatt, char: BluetoothGattCharacteristic, status: Int) {
+            Log.d(TAG, "onCharacteristicWrite ${char.uuid} status=$status queued=${commandQueue.size}")
             DeviceController.runOnMain {
                 writing = false
                 if (commandQueue.isNotEmpty()) writeNext()
@@ -406,7 +427,7 @@ class BleManager {
         if (b2 == 0x00 && b3 == 0x0F) {
             // Sync setting acknowledged; now request the water logs.
             Log.d(TAG, "RP: sync ack → request logs")
-            enqueueCommand(CMD_REQUEST_LOGS)
+            enqueueCommand(CMD_REQUEST_LOGS, REQUEST_DELAY_MS)
             return
         }
         // Water-log availability flag: value[6]==1 means PT packets follow, 0 means nothing to
@@ -434,7 +455,7 @@ class BleManager {
                     Log.d(TAG, "RP: registration successful → requesting bottle data")
                     pendingRegistration = false
                     DeviceController.connectionState.value = "Connected"
-                    enqueueCommand(CMD_REQUEST_DATA)
+                    enqueueCommand(CMD_REQUEST_DATA, REQUEST_DELAY_MS)
                 }
             }
         }
@@ -469,7 +490,7 @@ class BleManager {
                         // which then proceeds to the normal data flow. Send once (it repeats 03).
                         if (!registrationClearSent) {
                             registrationClearSent = true
-                            enqueueCommand(CMD_CLEAR_OFFLINE_DATA)
+                            enqueueCommand(CMD_CLEAR_OFFLINE_DATA, REQUEST_DELAY_MS)
                         }
                     }
                     0x04 -> DeviceController.connectionState.value = "Registration failed"
@@ -525,7 +546,7 @@ class BleManager {
     }
 
     private fun enqueueSyncAndLanguage() {
-        enqueueCommand(buildSyncCommand())
+        enqueueCommand(buildSyncCommand(), REQUEST_DELAY_MS)
         enqueueCommand(CMD_SET_LANGUAGE)
     }
 

@@ -93,8 +93,57 @@ object DeviceController {
         bleManager = BleManager()
         scaleBleManager = ScaleBleManager()
         loadScaleProfile()
+        loadBottleTelemetry()
         refreshPaired()
         initialized = true
+    }
+
+    /**
+     * The bottle only reports while connected, and it is out of range most of the time, so its
+     * last readings are kept across process restarts rather than resetting the card to empty.
+     */
+    private fun persistBottleTelemetry() {
+        try {
+            prefs.edit {
+                waterTempC.value?.let { putInt(BOTTLE_TEMP_KEY, it) }
+                tds.value?.let { putInt(BOTTLE_TDS_KEY, it) }
+                batteryPct.value?.let { putInt(BOTTLE_BATTERY_KEY, it) }
+                bottleVolumePct.value?.let { putInt(BOTTLE_VOLUME_KEY, it) }
+                putBoolean(BOTTLE_CHARGING_KEY, charging.value)
+                bottleLastUpdated.value?.let { putLong(BOTTLE_UPDATED_KEY, it) }
+            }
+        } catch (_: Exception) {}
+    }
+
+    private fun loadBottleTelemetry() {
+        try {
+            if (prefs.contains(BOTTLE_TEMP_KEY)) waterTempC.value = prefs.getInt(BOTTLE_TEMP_KEY, 0)
+            if (prefs.contains(BOTTLE_TDS_KEY)) tds.value = prefs.getInt(BOTTLE_TDS_KEY, 0)
+            if (prefs.contains(BOTTLE_BATTERY_KEY)) batteryPct.value = prefs.getInt(BOTTLE_BATTERY_KEY, 0)
+            if (prefs.contains(BOTTLE_VOLUME_KEY)) bottleVolumePct.value = prefs.getInt(BOTTLE_VOLUME_KEY, 0)
+            charging.value = prefs.getBoolean(BOTTLE_CHARGING_KEY, false)
+            if (prefs.contains(BOTTLE_UPDATED_KEY)) bottleLastUpdated.value = prefs.getLong(BOTTLE_UPDATED_KEY, 0)
+        } catch (_: Exception) {}
+    }
+
+    /** Drop cached readings so a newly paired bottle doesn't inherit the old one's numbers. */
+    private fun clearBottleTelemetry() {
+        waterTempC.value = null
+        tds.value = null
+        batteryPct.value = null
+        bottleVolumePct.value = null
+        charging.value = false
+        bottleLastUpdated.value = null
+        try {
+            prefs.edit {
+                remove(BOTTLE_TEMP_KEY)
+                remove(BOTTLE_TDS_KEY)
+                remove(BOTTLE_BATTERY_KEY)
+                remove(BOTTLE_VOLUME_KEY)
+                remove(BOTTLE_CHARGING_KEY)
+                remove(BOTTLE_UPDATED_KEY)
+            }
+        } catch (_: Exception) {}
     }
 
     private fun refreshPaired() {
@@ -116,12 +165,16 @@ object DeviceController {
     }
 
     fun onBottleStatus(status: BottleStatus) {
-        waterTempC.value = status.tempC
-        tds.value = status.tds
-        batteryPct.value = status.batteryPct
+        // Merge rather than replace: the bottle sends single-field RT updates, and its cache is
+        // cleared on every reconnect, so assigning all five would blank whatever this particular
+        // packet happened not to carry.
+        status.tempC?.let { waterTempC.value = it }
+        status.tds?.let { tds.value = it }
+        status.batteryPct?.let { batteryPct.value = it }
+        status.volumePct?.let { bottleVolumePct.value = it }
         charging.value = status.charging
-        bottleVolumePct.value = status.volumePct
         bottleLastUpdated.value = System.currentTimeMillis()
+        persistBottleTelemetry()
     }
 
     fun onScaleRealtimeWeight(weight: Double) {
@@ -195,6 +248,7 @@ object DeviceController {
 
     fun disconnectBottle() {
         clearDeviceAddress(BOTTLE_ADDRESS_KEY)
+        clearBottleTelemetry()
         bleManager.disconnect()
     }
 
@@ -328,7 +382,12 @@ object DeviceController {
             try {
                 val client = HealthConnectClient.getOrCreate(appContext)
                 if (!HealthConnectHelper.hasAllPermissions(client)) return@launch
-                val instant = java.time.Instant.ofEpochMilli(reading.epochMillis)
+                // The bottle's clock runs a little ahead of the phone's, and Health Connect
+                // rejects any future-dated record outright, so a few seconds of skew would
+                // otherwise silently discard every drink log.
+                val now = System.currentTimeMillis()
+                val stamp = if (reading.epochMillis > now) now else reading.epochMillis
+                val instant = java.time.Instant.ofEpochMilli(stamp)
                 HealthConnectHelper.writeHydration(client, instant, reading.amountMl / 1000.0)
             } catch (_: Exception) {}
         }
@@ -371,6 +430,12 @@ object DeviceController {
     }
 
     private const val BOTTLE_ADDRESS_KEY = "bottle_address"
+    private const val BOTTLE_TEMP_KEY = "bottle_temp"
+    private const val BOTTLE_TDS_KEY = "bottle_tds"
+    private const val BOTTLE_BATTERY_KEY = "bottle_battery"
+    private const val BOTTLE_VOLUME_KEY = "bottle_volume"
+    private const val BOTTLE_CHARGING_KEY = "bottle_charging"
+    private const val BOTTLE_UPDATED_KEY = "bottle_updated"
     private const val SCALE_ADDRESS_KEY = "scale_address"
     private const val SCALE_CATEGORY_KEY = "scale_category"
     private const val SCALE_ENCRYPT_RES_KEY = "scale_encrypt_resistance"
