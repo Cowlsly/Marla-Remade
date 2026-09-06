@@ -43,4 +43,5 @@
     <string name="sticky_note">便签</string>
     <string name="aa">Aa</string>
     <string name="safe_pdf_not_a_pdf">此文件不是 PDF</string>
+    <string name="pdf_page_failed">此页无法显示</string>
 </resources>
