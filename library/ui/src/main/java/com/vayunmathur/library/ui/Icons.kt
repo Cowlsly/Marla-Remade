@@ -6,6 +6,7 @@ import androidx.compose.material.icons.filled.CallEnd
 import androidx.compose.material.icons.filled.Dialpad
 import androidx.compose.material.icons.filled.Poll
 import androidx.compose.material.icons.filled.PersonAdd
+import androidx.compose.material.icons.filled.Bluetooth
 import androidx.compose.material.icons.filled.HealthAndSafety
 import androidx.compose.material.icons.filled.Medication
 import androidx.compose.material.icons.filled.MonitorHeart
@@ -1165,6 +1166,10 @@ fun IconApps(modifier: Modifier = Modifier, tint: Color = LocalContentColor.curr
 @Composable
 fun IconWidgets(modifier: Modifier = Modifier, tint: Color = LocalContentColor.current) =
     AppIcon(Icons.Filled.Widgets, "Widgets", modifier, tint)
+
+@Composable
+fun IconBluetooth(modifier: Modifier = Modifier, tint: Color = LocalContentColor.current) =
+    AppIcon(Icons.Filled.Bluetooth, "Bluetooth", modifier, tint)
 
 /** Removing the app itself, as opposed to [IconDelete], which only takes it off a screen. */
 @Composable

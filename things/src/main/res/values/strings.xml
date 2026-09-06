@@ -75,6 +75,28 @@
     <!-- Button to grant Health Connect permissions. Verb phrase -->
     <string name="health_connect">Health Connect</string>
 
+    <!-- First-run permission screen -->
+    <!-- Headline on the first-run permission screen. Sentence -->
+    <string name="permissions_title">Permissions needed</string>
+    <!-- Explains why the app cannot start without both permissions. Sentence -->
+    <string name="permissions_rationale">Things reads your bottle and scale over Bluetooth and saves the readings to Health Connect. It needs both to work.</string>
+    <!-- Name of the Bluetooth permission on the first-run screen. Noun -->
+    <string name="permission_bluetooth">Bluetooth</string>
+    <!-- Why the app needs Bluetooth. Sentence -->
+    <string name="permission_bluetooth_reason">To find and stay connected to your water bottle and body scale.</string>
+    <!-- Name of the Health Connect permission on the first-run screen. Noun -->
+    <string name="permission_health_connect">Health Connect</string>
+    <!-- Why the app needs Health Connect. Sentence -->
+    <string name="permission_health_connect_reason">To save your hydration and body measurements. This app stores nothing itself.</string>
+    <!-- Shown on a permission card once the permission has been granted. Adjective -->
+    <string name="permission_granted">Granted</string>
+    <!-- Button that asks the system for a permission. Verb -->
+    <string name="permission_grant">Grant</string>
+    <!-- Shown when a permission was permanently denied and can only be changed in settings -->
+    <string name="permission_blocked">This has to be turned on in system settings.</string>
+    <!-- Button that opens this app's page in system settings. Verb phrase -->
+    <string name="permission_open_settings">Open settings</string>
+
     <!-- Foreground service -->
     <!-- Notification channel name for the ongoing "keeping devices connected" notification -->
     <string name="device_channel_name">Device connection</string>
