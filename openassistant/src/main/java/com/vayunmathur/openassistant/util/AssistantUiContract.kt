@@ -53,17 +53,14 @@ interface ChatActions {
 data class SettingsUiState(
     val memories: List<Memory> = emptyList(),
     /** The chat system prompt; editable, defaults to the built-in prompt. */
-    val systemPrompt: String = "",
 )
 
 /** Settings callbacks. Same no-op-default arrangement as [ChatActions]. */
 interface SettingsActions {
     fun back() {}
     fun deleteMemory(memory: Memory) {}
-    fun setSystemPrompt(prompt: String) {}
 
     /** Restore the system prompt to the built-in default. */
-    fun resetSystemPrompt() {}
 
     companion object {
         val Noop: SettingsActions = object : SettingsActions {}

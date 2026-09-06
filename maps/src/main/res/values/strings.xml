@@ -310,8 +310,8 @@
     <string name="layer_safety_unavailable">Coming soon</string>
     <!-- LayersSheet: public-transit layer toggle. Noun. -->
     <string name="layer_transit">Transit</string>
-    <!-- LayersSheet: transit layer description. -->
-    <string name="layer_transit_desc">Show nearby stops and live departures</string>
+    <!-- LayersSheet: transit layer description. Covers both the rail/route lines the basemap renderer draws and the tappable stop pins with live departure times. -->
+    <string name="layer_transit_desc">Show rail lines, nearby stops and live departures</string>
 
     <!-- Departure board: section subtitle under the stop name. Noun. -->
     <string name="transit_departures_title">Departures</string>

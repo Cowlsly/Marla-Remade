@@ -2,8 +2,6 @@ package com.vayunmathur.library.map
 
 import android.content.Context
 import android.graphics.SurfaceTexture
-import android.net.ConnectivityManager
-import android.net.NetworkCapabilities
 import android.util.Log
 import android.view.Choreographer
 import android.view.Surface
@@ -11,13 +9,20 @@ import android.view.TextureView
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.unit.DpRect
 import androidx.compose.ui.viewinterop.AndroidView
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
+import androidx.lifecycle.compose.LocalLifecycleOwner
 import com.vayunmathur.library.map.PlacedLabel
+import com.vayunmathur.library.util.ConnectivityMonitor
 import java.io.File
 
 /**
@@ -33,7 +38,7 @@ import java.io.File
  * hierarchy, so it composites and stays interactive across the transition.
  *
  * `games/voxels/.../ui/VoxelSurfaceView.kt` is a SurfaceView, but voxels' surface is
- * never navigated away from and back. Five consumer apps' navigation is, so the
+ * never navigated away from and back. Seven consumer apps' navigation is, so the
  * known-good configuration wins over the cheaper one. The cost is one extra composite
  * per frame.
  *
@@ -47,9 +52,11 @@ internal fun VulkanMapSurface(
     cameraState: CameraState,
     darkBasemap: Boolean,
     muted: Boolean,
+    layerOptions: LayerOptions = LayerOptions(),
     archivePath: String? = null,
     modifier: Modifier = Modifier,
     onFrame: () -> Unit = {},
+    fallback: @Composable (MapRenderState.Unavailable) -> Unit = {},
 ) {
     val context = LocalContext.current
     val density = LocalDensity.current.density
@@ -68,9 +75,54 @@ internal fun VulkanMapSurface(
 
     DisposableEffect(host) { onDispose { host.dispose() } }
 
+    // Stop driving Vulkan while the host is not visible. ON_START/ON_STOP rather than
+    // resume/pause because a STARTED-but-not-RESUMED app — split-screen, PiP — is on screen
+    // and must keep drawing.
+    //
+    // This stops *rendering* only. The Rust side's in-flight tile fetches are not paused,
+    // and that is where the data cost actually is, so backgrounding does not fully quiesce
+    // the map.
+    val lifecycleOwner = LocalLifecycleOwner.current
+    DisposableEffect(lifecycleOwner, host) {
+        val observer = LifecycleEventObserver { _, event ->
+            when (event) {
+                Lifecycle.Event.ON_START -> host.onStarted()
+                Lifecycle.Event.ON_STOP -> host.onStopped()
+                else -> Unit
+            }
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose {
+            lifecycleOwner.lifecycle.removeObserver(observer)
+            host.onStopped()
+        }
+    }
+
     // Following the system theme costs nothing: the layer set is identical between
     // variants, so this re-colours in place rather than reloading a single tile.
     LaunchedEffect(darkBasemap, muted, host) { host.setPalette(darkBasemap, muted) }
+
+    // Unlike the palette, this one is not free: the optional layers are gated at
+    // tessellation time, so a change re-tessellates the resident set. `setLayers` ignores
+    // a call that changes nothing, which is what makes driving it from an effect safe.
+    LaunchedEffect(layerOptions, host) { host.setLayers(layerOptions) }
+
+    // Live connectivity, replacing a single sample taken in onSurfaceTextureAvailable.
+    // Collected here rather than inside the host so every MapNative call stays on the
+    // composition dispatcher, like setPalette and setLayers.
+    //
+    // Two deliberate behaviour changes from the probe this replaces. ConnectivityMonitor
+    // requires NET_CAPABILITY_VALIDATED, which the probe did not — an improvement for a tile
+    // fetcher, since a captive portal handing back HTML for a byte range is worse than
+    // knowing you are offline. And it reports false where there is no ConnectivityManager,
+    // where the probe optimistically returned true; that only arises under unit/Robolectric,
+    // where the effect is to pin the map to cache.
+    LaunchedEffect(host) {
+        // Seeded synchronously so the first value is not spuriously false. This also
+        // lazily starts the monitor.
+        host.setOnline(ConnectivityMonitor.isOnline(context))
+        ConnectivityMonitor.isOnline.collect { host.setOnline(it) }
+    }
 
     AndroidView(
         factory = {
@@ -83,6 +135,11 @@ internal fun VulkanMapSurface(
         },
         modifier = modifier,
     )
+
+    // Over the TextureView rather than instead of it: the listener that reports the failure
+    // only runs once the view is attached, so removing the view would remove the thing that
+    // produces the state.
+    (host.renderState as? MapRenderState.Unavailable)?.let { fallback(it) }
 }
 
 /**
@@ -105,9 +162,41 @@ private class MapSurfaceHost(
     private var surface: Surface? = null
     private var frameCallback: Choreographer.FrameCallback? = null
 
+    /**
+     * Written only from the main-thread [TextureView.SurfaceTextureListener] callbacks, so
+     * the `mutableStateOf` needs no synchronisation.
+     */
+    var renderState: MapRenderState by mutableStateOf(MapRenderState.Initialising)
+        private set
+
+    /**
+     * Whether the host is at least STARTED. Owned here rather than split across a
+     * `pause()`/`resume()` pair so there is exactly one writer per input and one reconciler
+     * ([syncFrameLoop]) deciding whether the callback should be posted. The orderings that
+     * pair gets wrong — backgrounded before the texture arrives, texture destroyed while
+     * stopped, ON_START before the handle exists — all collapse into "recompute the
+     * predicate" here.
+     */
+    private var started = false
+
     /** Remembered so a surface created after the theme was set still starts in it. */
     private var dark = false
     private var muted = false
+
+    /**
+     * Remembered for the same reason as [dark]: `MapNative.create` deliberately takes no
+     * layer arguments, so a surface created after the host chose its layers has to be told
+     * about them before its first frame — otherwise the first resident set is tessellated
+     * without them and immediately thrown away.
+     */
+    private var layers = LayerOptions()
+
+    /**
+     * Remembered for the same reason as [layers]. Previously this was sampled exactly once,
+     * inside `onSurfaceTextureAvailable`, so going offline mid-session left the renderer
+     * retrying and coming back left it pinned to cache.
+     */
+    private var online = true
 
     /**
      * Where cached byte ranges live. External files rather than the cache dir: this is
@@ -123,6 +212,7 @@ private class MapSurfaceHost(
         override fun onSurfaceTextureAvailable(texture: SurfaceTexture, width: Int, height: Int) {
             if (!MapNative.isAvailable) {
                 Log.e(TAG, "libmap_renderer.so did not load; the map will not draw")
+                renderState = MapRenderState.Unavailable(MapRenderState.Reason.RendererLibraryMissing)
                 return
             }
             val created = Surface(texture)
@@ -132,10 +222,15 @@ private class MapSurfaceHost(
                 Log.e(TAG, "the Vulkan renderer failed to start; see MapRenderer in logcat")
                 created.release()
                 surface = null
+                renderState = MapRenderState.Unavailable(MapRenderState.Reason.RendererStartFailed)
                 return
             }
-            MapNative.setOnline(handle, isOnline())
-            startFrameLoop()
+            MapNative.setOnline(handle, online)
+            // Before the first frame, so the very first resident set is tessellated with
+            // the layers the host asked for instead of being built and then invalidated.
+            MapNative.setLayers(handle, layers.poi, layers.transit)
+            renderState = MapRenderState.Rendering
+            syncFrameLoop()
         }
 
         override fun onSurfaceTextureSizeChanged(texture: SurfaceTexture, width: Int, height: Int) {
@@ -152,34 +247,55 @@ private class MapSurfaceHost(
         override fun onSurfaceTextureUpdated(texture: SurfaceTexture) = Unit
     }
 
-    private fun startFrameLoop() {
-        val callback = object : Choreographer.FrameCallback {
-            override fun doFrame(frameTimeNanos: Long) {
-                if (handle == 0L) return
-                val viewport = cameraState.viewportDp
-                if (viewport != null) {
-                    val position = cameraState.position
-                    val drawn = MapNative.render(
-                        handle,
-                        position.target.longitude.toFloat(),
-                        position.target.latitude.toFloat(),
-                        position.zoom.toFloat(),
-                        viewport.width,
-                        viewport.height,
-                        density,
-                    )
-                    if (drawn) onFrame()
+    private fun syncFrameLoop() {
+        val shouldRun = started && handle != 0L
+        if (shouldRun) {
+            if (frameCallback != null) return
+            val callback = object : Choreographer.FrameCallback {
+                override fun doFrame(frameTimeNanos: Long) {
+                    if (handle == 0L) {
+                        if (frameCallback === this) frameCallback = null
+                        return
+                    }
+                    val viewport = cameraState.viewportDp
+                    if (viewport != null) {
+                        val position = cameraState.position
+                        val drawn = MapNative.render(
+                            handle,
+                            position.target.longitude.toFloat(),
+                            position.target.latitude.toFloat(),
+                            position.zoom.toFloat(),
+                            viewport.width,
+                            viewport.height,
+                            density,
+                        )
+                        if (drawn) onFrame()
+                    }
+                    // Re-post only while still the installed callback: teardown() and
+                    // onStopped() null this out, and a callback already dispatched for this
+                    // frame cannot be un-posted by removeFrameCallback.
+                    if (frameCallback === this) Choreographer.getInstance().postFrameCallback(this)
                 }
-                Choreographer.getInstance().postFrameCallback(this)
             }
+            frameCallback = callback
+            Choreographer.getInstance().postFrameCallback(callback)
+        } else {
+            frameCallback?.let { Choreographer.getInstance().removeFrameCallback(it) }
+            frameCallback = null
         }
-        frameCallback = callback
-        Choreographer.getInstance().postFrameCallback(callback)
+    }
+
+    fun onStarted() {
+        started = true
+        syncFrameLoop()
+    }
+
+    fun onStopped() {
+        started = false
+        syncFrameLoop()
     }
 
     private fun teardown() {
-        frameCallback?.let { Choreographer.getInstance().removeFrameCallback(it) }
-        frameCallback = null
         // Destroy before releasing the Surface: the native side waits for the GPU to go
         // idle and releases the ANativeWindow that points at it.
         if (handle != 0L) {
@@ -188,6 +304,11 @@ private class MapSurfaceHost(
         }
         surface?.release()
         surface = null
+        // Back to Initialising, not sticky-Unavailable: the surface is gone, and a
+        // TextureView that is recreated (navigation, backgrounding) gets a fresh attempt.
+        renderState = MapRenderState.Initialising
+        // handle is now 0, so this is what removes the callback.
+        syncFrameLoop()
     }
 
     fun dispose() = teardown()
@@ -228,14 +349,14 @@ private class MapSurfaceHost(
         if (handle != 0L) MapNative.setPalette(handle, dark, muted)
     }
 
-    private fun isOnline(): Boolean {
-        val manager = appContext.getSystemService(Context.CONNECTIVITY_SERVICE) as? ConnectivityManager
-            // No connectivity service is not evidence of being offline, and claiming
-            // offline would pin the map to whatever is cached.
-            ?: return true
-        val network = manager.activeNetwork ?: return false
-        val capabilities = manager.getNetworkCapabilities(network) ?: return false
-        return capabilities.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
+    fun setLayers(options: LayerOptions) {
+        this.layers = options
+        if (handle != 0L) MapNative.setLayers(handle, options.poi, options.transit)
+    }
+
+    fun setOnline(online: Boolean) {
+        this.online = online
+        if (handle != 0L) MapNative.setOnline(handle, online)
     }
 
     private companion object {

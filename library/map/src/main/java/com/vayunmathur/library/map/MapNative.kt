@@ -82,6 +82,21 @@ internal object MapNative {
     external fun setPalette(handle: Long, dark: Boolean, muted: Boolean)
 
     /**
+     * Turn the optional layers (POI, transit) on or off.
+     *
+     * Not free, unlike [setPalette]. Both layers are gated at tessellation time so that
+     * leaving them off costs nothing, which means changing either invalidates every mesh
+     * already on the GPU. The native side bumps a generation counter; the render loop then
+     * sees the resident tiles are stale and re-tessellates them on the existing worker
+     * pool, reading the archive it already has. Nothing is refetched or evicted, and the
+     * old meshes keep drawing until the new ones land.
+     *
+     * A call that changes nothing does nothing, so this is safe to drive from a
+     * `LaunchedEffect` that may re-run for unrelated reasons.
+     */
+    external fun setLayers(handle: Long, poi: Boolean, transit: Boolean)
+
+    /**
      * Tell the renderer whether the device is online. When offline it serves stale cached
      * ranges instead of attempting a request, so a previously-viewed area keeps drawing.
      */

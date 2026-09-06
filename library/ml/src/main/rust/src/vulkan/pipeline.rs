@@ -48,11 +48,17 @@ const SOFTMAX_PREFIX: &[u8] =
 const CACHE_WRITE: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/cache_write.comp.spv"));
 const SOFTCAP: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/softcap.comp.spv"));
 const ACTIVATE: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/activate.comp.spv"));
+const MUL_SCALAR: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/mul_scalar.comp.spv"));
+const CLAMP: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/clamp.comp.spv"));
 const ATTN_APPLY: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/attn_apply.comp.spv"));
 const ATTN_SCORES_RELATIVE: &[u8] =
     include_bytes!(concat!(env!("OUT_DIR"), "/attn_scores_relative.comp.spv"));
 const ATTN_APPLY_RELATIVE: &[u8] =
     include_bytes!(concat!(env!("OUT_DIR"), "/attn_apply_relative.comp.spv"));
+const ATTN_SCORES_BANDED: &[u8] =
+    include_bytes!(concat!(env!("OUT_DIR"), "/attn_scores_banded.comp.spv"));
+const ATTN_APPLY_BANDED: &[u8] =
+    include_bytes!(concat!(env!("OUT_DIR"), "/attn_apply_banded.comp.spv"));
 const EMBED: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/embed.comp.spv"));
 const MUL: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/mul.comp.spv"));
 const CONV_POINT: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/conv_point.comp.spv"));
@@ -74,7 +80,7 @@ const CONV_POINT_INT4: &[u8] =
     include_bytes!(concat!(env!("OUT_DIR"), "/conv_point_int4.comp.spv"));
 
 /// Every shader, in the order [`Pipelines::create`] destructures them.
-const SPIRV: [&[u8]; 35] = [
+const SPIRV: [&[u8]; 39] = [
     CONV,
     CONV_TRANSPOSE,
     MAXPOOL,
@@ -91,6 +97,8 @@ const SPIRV: [&[u8]; 35] = [
     ATTN_APPLY,
     ATTN_SCORES_RELATIVE,
     ATTN_APPLY_RELATIVE,
+    ATTN_SCORES_BANDED,
+    ATTN_APPLY_BANDED,
     EMBED,
     CONV_INT8,
     CONV_POINT,
@@ -110,6 +118,8 @@ const SPIRV: [&[u8]; 35] = [
     ACTIVATE,
     CONV_VEC_INT4,
     CONV_POINT_INT4,
+    MUL_SCALAR,
+    CLAMP,
 ];
 
 /// Descriptors in one set: the arena, the weights as fp16, the weights as words, the step params.
@@ -159,6 +169,8 @@ pub struct Pipelines {
     attn_apply: vk::Pipeline,
     attn_scores_relative: vk::Pipeline,
     attn_apply_relative: vk::Pipeline,
+    attn_scores_banded: vk::Pipeline,
+    attn_apply_banded: vk::Pipeline,
     embed: vk::Pipeline,
     conv_int8: vk::Pipeline,
     conv_point: vk::Pipeline,
@@ -177,6 +189,8 @@ pub struct Pipelines {
     activate: vk::Pipeline,
     conv_vec_int4: vk::Pipeline,
     conv_point_int4: vk::Pipeline,
+    mul_scalar: vk::Pipeline,
+    clamp: vk::Pipeline,
     rmsnorm: vk::Pipeline,
 }
 
@@ -412,6 +426,8 @@ impl Pipelines {
             attn_apply,
             attn_scores_relative,
             attn_apply_relative,
+            attn_scores_banded,
+            attn_apply_banded,
             embed,
             conv_int8,
             conv_point,
@@ -431,6 +447,8 @@ impl Pipelines {
             activate,
             conv_vec_int4,
             conv_point_int4,
+            mul_scalar,
+            clamp,
         ] = match <[vk::Pipeline; SPIRV.len()]>::try_from(built) {
             Ok(all) => all,
             Err(built) => {
@@ -463,6 +481,8 @@ impl Pipelines {
             attn_apply,
             attn_scores_relative,
             attn_apply_relative,
+            attn_scores_banded,
+            attn_apply_banded,
             embed,
             conv_int8,
             conv_point,
@@ -482,6 +502,8 @@ impl Pipelines {
             activate,
             conv_vec_int4,
             conv_point_int4,
+            mul_scalar,
+            clamp,
         })
     }
 
@@ -509,9 +531,13 @@ impl Pipelines {
             Kind::Activate => self.activate,
             Kind::ConvVecInt4 => self.conv_vec_int4,
             Kind::ConvPointInt4 => self.conv_point_int4,
+            Kind::MulScalar => self.mul_scalar,
+            Kind::Clamp => self.clamp,
             Kind::AttnApply => self.attn_apply,
             Kind::AttnScoresRelative => self.attn_scores_relative,
             Kind::AttnApplyRelative => self.attn_apply_relative,
+            Kind::AttnScoresBanded => self.attn_scores_banded,
+            Kind::AttnApplyBanded => self.attn_apply_banded,
             Kind::AttnScoresCached => self.attn_scores_cached,
             Kind::AttnApplyCached => self.attn_apply_cached,
             Kind::Embed => self.embed,
@@ -547,6 +573,8 @@ impl Pipelines {
             self.attn_apply,
             self.attn_scores_relative,
             self.attn_apply_relative,
+            self.attn_scores_banded,
+            self.attn_apply_banded,
             self.embed,
             self.conv_int8,
             self.conv_point,
@@ -566,6 +594,8 @@ impl Pipelines {
             self.activate,
             self.conv_vec_int4,
             self.conv_point_int4,
+            self.mul_scalar,
+            self.clamp,
         ] {
             device.destroy_pipeline(pipeline, None);
         }

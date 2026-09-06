@@ -35,6 +35,7 @@ body:
         - music
         - musicbrainz
         - notes
+        - nowplaying
         - office
         - openassistant
         - passwords
@@ -46,6 +47,7 @@ body:
         - things
         - translate
         - travel
+        - tuner
         - unblockjam
         - vpn
         - voxels

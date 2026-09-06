@@ -52,7 +52,8 @@ pub const BODY_HEADER_LEN: usize = 16;
 pub const LAYER_INDEX_LEN: usize = 12;
 /// v1 records: kind, kind_detail, geom_type, flags, 2 reserved, parts_offset, part_count.
 pub const FEATURE_RECORD_LEN_V1: usize = 16;
-/// v2 records: v1's 16 plus name_idx (u16) and transit_color (u32) — 22, padded to 24.
+/// v2 records: v1's 16 plus name_idx (u16), transit_color (u32) and the three transit lane
+/// bytes (ordinal, lanes, taper) — 24, with the last byte still reserved zero.
 pub const FEATURE_RECORD_LEN: usize = 24;
 pub const PART_ENTRY_LEN: usize = 12;
 pub const BODY_FLAG_EXTENDED_COUNTS: u8 = 0x01;
@@ -90,10 +91,11 @@ pub const DEFAULT_EXTENT: u16 = 4096;
 
 /// One feature.
 ///
-/// `name_idx` and `transit_color` are v2 fields. A v1 body carries neither: parsing one leaves
-/// `name_idx` at [`NAME_NONE`] and `transit_color` at zero, so old code that never reads them
-/// behaves exactly as before. Adding fields here is safe for `library/map`: it never constructs
-/// a `Feature` literally, it only reads `kind` and `geom_type`.
+/// `name_idx`, `transit_color` and the three transit lane fields are v2 fields. A v1 body
+/// carries none of them: parsing one leaves `name_idx` at [`NAME_NONE`] and every transit field
+/// at zero, so old code that never reads them behaves exactly as before. Adding fields here is
+/// safe for `library/map`: it never constructs a `Feature` literally, it only reads `kind` and
+/// `geom_type`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Feature {
     /// An id into [`dict::KINDS`](super::dict::KINDS), or
@@ -115,6 +117,21 @@ pub struct Feature {
     ///
     /// Carried per feature rather than interned because colours are data, not vocabulary.
     pub transit_color: u32,
+    /// This colour's index among the distinct colours of the corridor it shares, from zero.
+    ///
+    /// The feature carries the *inputs* to the lane choice rather than a baked offset, because
+    /// how many lanes a corridor draws depends on the camera zoom and so cannot be decided at
+    /// export time. Zero for a line in no corridor, and for every other layer.
+    pub transit_ordinal: u8,
+    /// How many distinct colours the corridor carries, unclamped — the style bounds the lane
+    /// count, not the archive. One for a line in no corridor; zero for every other layer.
+    pub transit_lanes: u8,
+    /// How far into its lane this piece sits, as a fraction of the full offset over 255.
+    ///
+    /// A route eases into its lane over a short taper at a corridor's ends instead of stepping
+    /// sideways onto it. With the offset now computed downstream, the fraction has to travel
+    /// separately from the lane index. 255 is fully in lane; zero for every other layer.
+    pub transit_taper: u8,
 }
 
 impl Feature {
@@ -240,7 +257,7 @@ impl Body {
     /// `11` flags, `12..16` reserved. Flag `0x01` means extended feature counts follow the layer index.
     ///
     /// v1 (`buf[3] == 1`) parses with 16-byte feature records, no [`GEOM_POINT`] and no name
-    /// table: every feature yields [`NAME_NONE`] and zero `transit_color`. Rejected: a v1 body
+    /// table: every feature yields [`NAME_NONE`] and zero transit fields. Rejected: a v1 body
     /// claiming point geometry or a nonzero v2 field (bytes that version never wrote).
     pub fn parse(buf: &[u8]) -> Result<Body> {
         if buf.len() < BODY_HEADER_LEN {
@@ -394,15 +411,15 @@ fn parse_layer(
         if flags & !KNOWN_FEATURE_FLAGS != 0 {
             return err("a .mamaps feature sets unknown flags");
         }
-        let (name_idx, transit_color) = if v1 {
+        let (name_idx, transit_color, transit_ordinal, transit_lanes, transit_taper) = if v1 {
             // v1 records are 16 bytes with bytes 6..8 reserved zero; nonzero means the bytes are
             // not what that version wrote.
             if u16_at(6) != 0 {
                 return err("a v1 .mamaps feature has a nonzero reserved half-word");
             }
-            (NAME_NONE, 0)
+            (NAME_NONE, 0, 0, 0, 0)
         } else {
-            (u16_at(6), u32_at(16))
+            (u16_at(6), u32_at(16), buf[at + 20], buf[at + 21], buf[at + 22])
         };
         let feature = Feature {
             kind: u16_at(0),
@@ -413,6 +430,9 @@ fn parse_layer(
             parts_offset: u32_at(8),
             part_count: u32_at(12),
             transit_color,
+            transit_ordinal,
+            transit_lanes,
+            transit_taper,
         };
         if feature.part_count == 0 {
             return err("a .mamaps feature has no geometry");
@@ -735,8 +755,14 @@ pub fn serialize_into<'s>(body: &Body, scratch: &'s mut Scratch) -> Result<&'s [
             out.extend_from_slice(&feature.part_count.to_le_bytes());
             // Bytes 16..20 are the v2 transit colour (zero until transit lands).
             out.extend_from_slice(&feature.transit_color.to_le_bytes());
-            // To 24: the record stays 4-byte aligned, like every other fixed record.
-            out.extend_from_slice(&0u32.to_le_bytes());
+            // Bytes 20..23 are the transit lane inputs, which the v2 record reserved and its
+            // decoder never validated — so they drop in with no version bump and an older reader
+            // ignores them. 23 stays reserved zero, and the record stays 4-byte aligned like
+            // every other fixed record.
+            out.push(feature.transit_ordinal);
+            out.push(feature.transit_lanes);
+            out.push(feature.transit_taper);
+            out.push(0);
         }
         for part in &layer.parts {
             out.extend_from_slice(&part.coord_start.to_le_bytes());
@@ -854,6 +880,9 @@ mod tests {
             parts_offset: 0,
             part_count: 2,
             transit_color: 0,
+            transit_ordinal: 0,
+            transit_lanes: 0,
+            transit_taper: 0,
         });
         water.parts.push(Part { coord_start: 0, point_count: 4, winding: WINDING_OUTER });
         water.parts.push(Part { coord_start: 4, point_count: 4, winding: WINDING_HOLE });
@@ -878,6 +907,9 @@ mod tests {
             parts_offset: 0,
             part_count: 1,
             transit_color: 0,
+            transit_ordinal: 0,
+            transit_lanes: 0,
+            transit_taper: 0,
         });
         roads.parts.push(Part { coord_start: 0, point_count: 3, winding: WINDING_OUTER });
         roads.coords = vec![(-64, 10), (2048, 2048), (4160, 4000)];
@@ -954,6 +986,9 @@ mod tests {
             parts_offset: 0,
             part_count: 1,
             transit_color: 0,
+            transit_ordinal: 0,
+            transit_lanes: 0,
+            transit_taper: 0,
         });
         let points: Vec<(i16, i16)> = (0..1000).map(|i| (i * 3, i * 2)).collect();
         roads.parts.push(Part { coord_start: 0, point_count: 1000, winding: WINDING_OUTER });
@@ -984,6 +1019,9 @@ mod tests {
             parts_offset: 0,
             part_count: 2,
             transit_color: 0,
+            transit_ordinal: 0,
+            transit_lanes: 0,
+            transit_taper: 0,
         });
         layer.parts.push(Part { coord_start: 0, point_count: 2, winding: WINDING_OUTER });
         layer.parts.push(Part { coord_start: 2, point_count: 2, winding: WINDING_OUTER });
@@ -1010,6 +1048,9 @@ mod tests {
             parts_offset: 0,
             part_count: 1,
             transit_color: 0,
+            transit_ordinal: 0,
+            transit_lanes: 0,
+            transit_taper: 0,
         });
         layer.parts.push(Part { coord_start: 1, point_count: 2, winding: WINDING_OUTER });
         layer.coords = vec![(0, 0), (1, 1), (2, 2)];
@@ -1036,6 +1077,9 @@ mod tests {
             parts_offset: 0,
             part_count: 3,
             transit_color: 0,
+            transit_ordinal: 0,
+            transit_lanes: 0,
+            transit_taper: 0,
         });
         layer.parts.push(Part { coord_start: 0, point_count: 2, winding: WINDING_OUTER });
         layer.coords = vec![(0, 0), (1, 1)];
@@ -1077,6 +1121,9 @@ mod tests {
             parts_offset: 0,
             part_count: 1,
             transit_color: 0,
+            transit_ordinal: 0,
+            transit_lanes: 0,
+            transit_taper: 0,
         });
         boundaries.parts.push(Part { coord_start: 0, point_count: 2, winding: WINDING_OUTER });
         boundaries.coords = vec![(0, 0), (100, 100)];
@@ -1166,6 +1213,9 @@ mod tests {
             parts_offset: 0,
             part_count: 1,
             transit_color: 0,
+            transit_ordinal: 0,
+            transit_lanes: 0,
+            transit_taper: 0,
         });
         poi.parts.push(Part { coord_start: 0, point_count: 1, winding: WINDING_OUTER });
         poi.coords = vec![(100, 200)];
@@ -1236,8 +1286,64 @@ mod tests {
         let feature = &layer.features[0];
         assert_eq!(feature.name_idx, NAME_NONE);
         assert_eq!(feature.transit_color, 0);
+        assert_eq!(feature.transit_ordinal, 0, "a v1 record has no lane bytes to read");
+        assert_eq!(feature.transit_lanes, 0, "a v1 record has no lane bytes to read");
+        assert_eq!(feature.transit_taper, 0, "a v1 record has no lane bytes to read");
         assert_eq!(feature.name(&parsed), None);
         assert_eq!(layer.coords, vec![(0, 0), (10, 10)]);
+    }
+
+    /// The lane inputs ride in bytes the v2 record already reserved, so they round-trip with no
+    /// version bump. The last byte of the record stays reserved zero.
+    #[test]
+    fn the_transit_lane_inputs_round_trip_through_the_v2_record() {
+        let mut layer = Layer::new(dict::LAYER_TRANSIT);
+        for (i, (ordinal, lanes, taper)) in [(0u8, 3u8, 255u8), (1, 3, 128), (2, 3, 0)]
+            .iter()
+            .enumerate()
+        {
+            layer.parts.push(Part {
+                coord_start: (i * 2) as u32,
+                point_count: 2,
+                winding: WINDING_OUTER,
+            });
+            layer.coords.extend_from_slice(&[(0, i as i16), (10, i as i16)]);
+            layer.features.push(Feature {
+                kind: 1,
+                kind_detail: 0,
+                geom_type: GEOM_LINE,
+                flags: 0,
+                name_idx: NAME_NONE,
+                parts_offset: i as u32,
+                part_count: 1,
+                transit_color: 0x00_54_A5,
+                transit_ordinal: *ordinal,
+                transit_lanes: *lanes,
+                transit_taper: *taper,
+            });
+        }
+        let mut body = Body::new(DEFAULT_EXTENT);
+        body.layers.push(layer);
+        let bytes = serialize(&body).expect("serialize");
+        let parsed = Body::parse(&bytes).expect("parse");
+        let read = parsed.layer(dict::LAYER_TRANSIT).expect("transit");
+        assert_eq!(
+            read.features
+                .iter()
+                .map(|f| (f.transit_ordinal, f.transit_lanes, f.transit_taper))
+                .collect::<Vec<(u8, u8, u8)>>(),
+            vec![(0, 3, 255), (1, 3, 128), (2, 3, 0)],
+        );
+        assert!(read.features.iter().all(|f| f.transit_color == 0x00_54_A5));
+        // One layer, so the payload — and its feature records — start right after the index.
+        let records_at = BODY_HEADER_LEN + LAYER_INDEX_LEN;
+        for i in 0..3 {
+            assert_eq!(
+                bytes[records_at + i * FEATURE_RECORD_LEN + 23],
+                0,
+                "byte 23 of a v2 record is still reserved",
+            );
+        }
     }
 
     #[test]
@@ -1310,6 +1416,9 @@ mod tests {
                 parts_offset: i as u32,
                 part_count: 1,
                 transit_color: 0,
+                transit_ordinal: 0,
+                transit_lanes: 0,
+                transit_taper: 0,
             });
             layer.parts.push(Part { coord_start: (i * 2) as u32, point_count: 2, winding: WINDING_OUTER });
             layer.coords.push((0, 0));
@@ -1326,7 +1435,7 @@ mod tests {
             extent: DEFAULT_EXTENT,
             layers: vec![{
             let mut l = Layer::new(10);
-            l.features.push(Feature { kind: 1, kind_detail: 0, geom_type: GEOM_LINE, flags: 0, name_idx: NAME_NONE, parts_offset: 0, part_count: 1, transit_color: 0 });
+            l.features.push(Feature { kind: 1, kind_detail: 0, geom_type: GEOM_LINE, flags: 0, name_idx: NAME_NONE, parts_offset: 0, part_count: 1, transit_color: 0, transit_ordinal: 0, transit_lanes: 0, transit_taper: 0 });
             l.parts.push(Part { coord_start: 0, point_count: 2, winding: WINDING_OUTER });
             l.coords.extend_from_slice(&[(0, 0), (1, 1)]);
             l

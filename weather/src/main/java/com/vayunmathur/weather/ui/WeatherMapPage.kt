@@ -299,10 +299,11 @@ fun WeatherMapPage(
             options = MapOptions(
                 // Lock rotation/tilt so the north-up image quad stays aligned.
                 gestureOptions = GestureOptions.RotationLocked,
-                // Ornaments off. Note attribution is NOT an ornament any more: the map
-                // renders it unconditionally, because it is a licence condition of the
-                // OpenStreetMap data rather than a preference. Weather's own copy in the
-                // bottom panel was removed rather than duplicated.
+                // Ornaments off. Attribution is not an ornament any more — the overlay that
+                // drew it was removed, and nothing renders it in its place, so this app
+                // ships without the ODbL credit the OpenStreetMap data requires. Weather's
+                // own copy in the bottom panel was removed rather than duplicated; adding
+                // the credit back somewhere visible is a separate, still-open call.
                 ornamentOptions = OrnamentOptions.AllDisabled,
             ),
             imageOverlay = overlay?.let { bmp ->

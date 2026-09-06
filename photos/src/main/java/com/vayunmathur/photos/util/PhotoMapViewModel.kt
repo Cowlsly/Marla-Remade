@@ -11,6 +11,7 @@ import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
 import androidx.lifecycle.viewmodel.initializer
 import androidx.lifecycle.viewmodel.viewModelFactory
+import com.vayunmathur.library.map.GeoPoint
 import com.vayunmathur.photos.data.Photo
 import com.vayunmathur.photos.ui.MapCluster
 import kotlinx.coroutines.Dispatchers
@@ -54,10 +55,16 @@ class PhotoMapViewModel(application: Application) : AndroidViewModel(application
     private val geocoder by lazy { Geocoder(application) }
 
     /**
-     * Run greedy clustering on the projected positions. The composable passes
-     * already-projected DpOffsets so the VM only does CPU work.
+     * Run greedy clustering on the projected positions. The composable passes each photo's
+     * already-projected screen offset *and* its geographic position: grouping is a
+     * screen-space question ("do these two chips overlap?") but [MapCluster.position] is a
+     * geographic anchor, since the marker layer places itself from the live camera rather
+     * than from a position baked in at clustering time.
      */
-    fun regenerateClusters(items: List<Pair<DpOffset, Photo>>, threshold: Dp = 50.dp) {
+    fun regenerateClusters(
+        items: List<Triple<DpOffset, GeoPoint, Photo>>,
+        threshold: Dp = 50.dp,
+    ) {
         viewModelScope.launch(Dispatchers.Default) {
             val result = clusterPhotos(items, threshold)
             _generatedClusters.value = result
@@ -111,14 +118,18 @@ class PhotoMapViewModel(application: Application) : AndroidViewModel(application
          * cluster within [threshold], otherwise it starts a new cluster.
          */
         fun clusterPhotos(
-            items: List<Pair<DpOffset, Photo>>,
+            items: List<Triple<DpOffset, GeoPoint, Photo>>,
             threshold: Dp,
         ): List<MapCluster> {
             val result = ArrayList<MapCluster>()
+            // Each cluster's seed photo's screen offset, parallel to [result]. Grouping is
+            // still measured in screen space — the threshold is a chip radius — while
+            // MapCluster.position is now geographic, so the two can no longer be one field.
+            val anchors = ArrayList<DpOffset>()
             val thresholdVal = threshold.value
-            for ((pos, photo) in items) {
-                val existingIndex = result.indexOfFirst { cluster ->
-                    calculateDistance(cluster.position, pos) < thresholdVal
+            for ((screen, position, photo) in items) {
+                val existingIndex = anchors.indexOfFirst { seed ->
+                    calculateDistance(seed, screen) < thresholdVal
                 }
                 if (existingIndex >= 0) {
                     val existing = result[existingIndex]
@@ -127,7 +138,8 @@ class PhotoMapViewModel(application: Application) : AndroidViewModel(application
                         allPhotos = existing.allPhotos + photo,
                     )
                 } else {
-                    result.add(MapCluster(pos, photo, listOf(photo), 1))
+                    result.add(MapCluster(position, photo, listOf(photo), 1))
+                    anchors.add(screen)
                 }
             }
             return result.map { it.copy(allPhotos = it.allPhotos.sortedByDescending(Photo::date)) }

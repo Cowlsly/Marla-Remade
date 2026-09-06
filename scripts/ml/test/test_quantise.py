@@ -28,6 +28,7 @@ Exit code 0 = all assertions passed.
 from __future__ import annotations
 
 import os
+import struct
 import sys
 
 import numpy as np
@@ -194,6 +195,113 @@ def test_a_shape_the_shaders_cannot_serve_is_refused() -> None:
             check(f"{what} is refused", True)
 
 
+def test_int4_round_trip_is_within_half_a_block_code():
+    """As the int8 round trip, but the bound is that block's scale, not that row's.
+
+    A quantiser that used one scale per row - the int8 behaviour - would still produce codes in
+    range and a file of exactly the right size, and would blow this bound on any row whose blocks
+    differ in magnitude. So the fixture makes them differ by 100x on purpose.
+    """
+    rng = np.random.RandomState(11)
+    rows, taps = 6, maml_convert.I4_BLOCK * 3 + 7
+    kernel = rng.randn(rows, taps).astype(np.float32)
+    # Every third block is a hundred times louder, which one row-wide scale cannot serve.
+    for block in range(0, taps, maml_convert.I4_BLOCK * 3):
+        kernel[:, block : block + maml_convert.I4_BLOCK] *= 100.0
+    codes, scale = maml_convert.quantise_per_block(kernel)
+    blocks = scale.shape[1]
+    check("the scale table is (rows, blocks)", scale.shape == (rows, blocks))
+    check("blocks cover the taps", blocks == -(-taps // maml_convert.I4_BLOCK))
+    worst = 0.0
+    for r in range(rows):
+        for t in range(taps):
+            block = t // maml_convert.I4_BLOCK
+            rebuilt = float(codes[r, t]) * float(scale[r, block])
+            worst = max(worst, abs(rebuilt - float(kernel[r, t])) / float(scale[r, block]))
+    check(f"every weight is within half a code of its block ({worst:.4f})", worst <= 0.5001)
+
+
+def test_int4_codes_stay_inside_the_signed_nibble():
+    """-8..7 is what `int4_at`'s `bitfieldExtract` sign-extends to, and 7 is the divisor.
+
+    A quantiser dividing by 8 would put `+absmax` on code 8, which reads back as -8: the largest
+    positive weight in the tensor becomes the largest negative one.
+    """
+    kernel = np.array([[-4.0, 4.0, 0.0, 1.0]], dtype=np.float32)
+    codes, scale = maml_convert.quantise_per_block(kernel)
+    check("no code exceeds the nibble", int(codes.min()) >= -8 and int(codes.max()) <= 7)
+    check("the extreme lands on 7", int(np.abs(codes).max()) == 7)
+    check("zero stays zero", int(codes[0, 2]) == 0)
+    check("the scale is absmax/7", abs(float(scale[0, 0]) - np.float16(4.0 / 7.0)) < 1e-6)
+
+
+def test_int4_packing_is_low_nibble_first_and_rounds_odd_lengths_up():
+    """The one place the converter and `weights.rs` can disagree without either looking wrong.
+
+    Five elements are two and a half bytes. Writing two would produce a file that parses - the
+    reader's bounds check would pass - whose last element read as whatever followed it.
+    """
+    packed = maml_convert.pack_int4(np.array([-8, -1, 0, 1, 7], dtype=np.int8))
+    check("five elements occupy three bytes", len(packed) == 3)
+    check("low nibble first, sign kept", packed[0] == 0xF8)
+    check("second pair", packed[1] == 0x10)
+    check("the odd tail pads its high nibble", packed[2] == 0x07)
+    even = maml_convert.pack_int4(np.zeros(64, dtype=np.int8))
+    check("an even length is exactly half", len(even) == 32)
+    try:
+        maml_convert.pack_int4(np.array([8], dtype=np.int8))
+        check("a code past the nibble is refused", False)
+    except SystemExit:
+        check("a code past the nibble is refused", True)
+
+
+def test_an_int4_tensor_reaches_the_file_as_dtype_two():
+    """End to end through `build`, since `Int4` is what tells it the dtype."""
+    codes, scale = maml_convert.quantise_per_block(
+        np.random.RandomState(3).randn(4, 70).astype(np.float32)
+    )
+    blob, _ = maml_convert.build(
+        ["one"],
+        [maml_convert.Int4(codes), scale.astype(np.float32), np.zeros(4, np.float32)],
+        maml_convert.GRAPHS["supertonic_ve"],
+        bytes(32),
+    )
+    # Tensor 0's dtype word sits at offset 20 of its 32-byte entry, after rank and four dims.
+    entry = maml_convert.HEADER_BYTES
+    dtype = struct.unpack_from("<I", blob, entry + 20)[0]
+    length = struct.unpack_from("<I", blob, entry + 28)[0]
+    check("the table says int4", dtype == maml_convert.DTYPE_I4)
+    check("the length is elements, not bytes", length == 4 * 70)
+
+
+def test_a_block_whose_scale_underflows_fp16_is_not_nan():
+    """The failure mode: silent NaN codes and an undefined cast, not an error.
+
+    `absmax / 7` for a block of very small weights rounds to **zero** in fp16. The division that
+    follows is then `0 / 0` for every zero in the block, `numpy` produces NaN, and
+    `NaN.astype(int8)` is undefined behaviour - so the block reaches the file as arbitrary codes
+    with nothing to indicate anything went wrong.
+
+    Found by a `RuntimeWarning` while converting the vision tower, which means real weights hit
+    it. Both quantisers are guarded on the same terms.
+    """
+    tiny = np.zeros((2, maml_convert.I4_BLOCK * 2), dtype=np.float32)
+    tiny[0, 0] = 1e-8
+    tiny[1, maml_convert.I4_BLOCK] = 3e-9
+    codes, scale = maml_convert.quantise_per_block(tiny)
+    check("no code is NaN", not np.isnan(codes.astype(np.float32)).any())
+    check("no code is infinite", np.isfinite(codes.astype(np.float32)).all())
+    check("every scale is positive", bool((scale > 0).all()))
+    check("codes stay inside the nibble", int(np.abs(codes).max()) <= 7)
+
+    # And the int8 path, on the same terms.
+    row = np.zeros((1, 8), dtype=np.float32)
+    row[0, 0] = 1e-9
+    codes8, scale8 = maml_convert.quantise_per_channel(row)
+    check("int8 codes are finite", np.isfinite(codes8.astype(np.float32)).all())
+    check("int8 scale is positive", bool((scale8 > 0).all()))
+
+
 def main() -> int:
     test_round_trip_is_within_half_a_code()
     test_the_scale_is_per_output_channel_not_per_input()
@@ -203,6 +311,11 @@ def main() -> int:
     test_a_non_finite_kernel_is_refused()
     test_a_quantised_conv_reaches_the_file_as_int8()
     test_a_shape_the_shaders_cannot_serve_is_refused()
+    test_int4_round_trip_is_within_half_a_block_code()
+    test_int4_codes_stay_inside_the_signed_nibble()
+    test_int4_packing_is_low_nibble_first_and_rounds_odd_lengths_up()
+    test_an_int4_tensor_reaches_the_file_as_dtype_two()
+    test_a_block_whose_scale_underflows_fp16_is_not_nan()
     print(f"\n{passed} passed, {failed} failed")
     return 1 if failed else 0
 

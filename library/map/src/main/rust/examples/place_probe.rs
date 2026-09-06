@@ -103,7 +103,14 @@ fn main() {
                 }
                 let id = placement::candidate_id(tile.z, tile.x, tile.y, index, label_idx);
                 let rect = placement::screen_rect(label.anchor, tile_clip, extent, text_px, label.total_advance, 24.0);
-                candidates.push(placement::Candidate { id, rank: label.rank, pop: label.pop, rect });
+                candidates.push(placement::Candidate {
+                    id,
+                    rank: label.rank,
+                    pop: label.pop,
+                    rect,
+                    // Places have no `text-variable-anchor`, so there is no second box.
+                    alternate: None,
+                });
                 // Resolve the display name via anchor -> point feature coords.
                 let cx = (label.anchor.0 * tile_extent).round() as i16;
                 let cy = (label.anchor.1 * tile_extent).round() as i16;
@@ -137,7 +144,7 @@ fn main() {
         println!("entered   rank {r}: {} candidates", entered[r]);
     }
 
-    let accepted: HashSet<u64> = placement::place(&candidates).into_iter().collect();
+    let accepted: HashSet<u64> = placement::place(&candidates).into_iter().map(|(id, _)| id).collect();
     println!("placed    {} / {} candidates", accepted.len(), candidates.len());
     let mut placed_rank: HashMap<u8, usize> = HashMap::new();
     for c in &candidates {
@@ -150,7 +157,7 @@ fn main() {
     }
 
     // Acceptance order for blocker attribution: re-run place to get order.
-    let order = placement::place(&candidates);
+    let order: Vec<u64> = placement::place(&candidates).into_iter().map(|(id, _)| id).collect();
     let pos: HashMap<u64, usize> = order.iter().enumerate().map(|(i, id)| (*id, i)).collect();
     // For each culled candidate, the earliest-accepted overlapping box.
     let mut by_id: HashMap<u64, &placement::Candidate> = HashMap::new();

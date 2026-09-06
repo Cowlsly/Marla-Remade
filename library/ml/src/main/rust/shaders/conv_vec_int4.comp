@@ -48,13 +48,56 @@ void main() {
     for (uint r = 0u; r < ROWS; r++) {
         acc[r] = 0.0;
     }
-    for (uint k = lane; k < p.in_c; k += 64u) {
-        float x = float(arena[p.in0 + k]);
-        uint block = k / I4_BLOCK;
+    // A lane owns whole blocks rather than a stride-64 scatter, so each row's scale is fetched
+    // once per 32 taps instead of once per tap.
+    //
+    // The scatter was the obvious pattern and it made the scale the dominant cost: at
+    // `I4_BLOCK` 32 a stride-64 lane lands in a different block on every iteration, so nothing
+    // could be reused and the inner loop did two loads per weight - the nibble and its scale.
+    // This does 32 nibbles against one scale per row.
+    //
+    // Coalescing survives the change. A lane reads 32 consecutive nibbles, which is 16 bytes,
+    // and neighbouring lanes are 16 bytes apart - so a warp still sweeps one contiguous run.
+    for (uint base = lane * I4_BLOCK; base < p.in_c; base += 64u * I4_BLOCK) {
+        uint block = base / I4_BLOCK;
+        float scale[ROWS];
         for (uint r = 0u; r < ROWS; r++) {
-            uint channel = channel_base + r;
-            float w = float(int4_at(p.weight, channel * p.in_c + k));
-            acc[r] += w * int4_scale(channel, block, blocks) * x;
+            scale[r] = int4_scale(channel_base + r, block, blocks);
+        }
+        uint last = min(base + I4_BLOCK, p.in_c);
+        // Eight nibbles a word, unpacked once.
+        //
+        // `int4_at` loads a whole 32-bit word to extract four bits, so calling it per tap read
+        // the same word eight times. The compiler cannot hoist that - the loads are indexed by
+        // a loop variable through a storage buffer, so it must assume they may differ. On a
+        // desktop the cache hid it; on a phone this is the dominant kernel and the redundancy
+        // is eight times the weight traffic it needs.
+        //
+        // A block is 32 nibbles at a 32-aligned start, so it is exactly four whole words and
+        // no nibble straddles the boundary.
+        for (uint r = 0u; r < ROWS; r++) {
+            uint row = (channel_base + r) * p.in_c;
+            float total = 0.0;
+            uint taken = 0u;
+            uint span = last - base;
+            // A row starts wherever `channel * in_c` puts it, which is **not** a multiple of
+            // eight in general - so a block's nibbles can straddle word boundaries and the first
+            // one can sit part-way into a word. Walking word by word and taking only what this
+            // word holds is what makes that safe; assuming four aligned words per block passes
+            // for even channels and reads the wrong nibbles for odd ones.
+            while (taken < span) {
+                uint at = row + base + taken;
+                uint word = weights32[p.weight + (at >> 3u)];
+                uint offset = at & 7u;
+                uint run = min(8u - offset, span - taken);
+                for (uint n = 0u; n < run; n++) {
+                    // Sign-extended from four bits, as `int4_at` does.
+                    int code = bitfieldExtract(int(word), int((offset + n) << 2u), 4);
+                    total += float(code) * float(arena[p.in0 + base + taken + n]);
+                }
+                taken += run;
+            }
+            acc[r] += total * scale[r];
         }
     }
     for (uint r = 0u; r < ROWS; r++) {

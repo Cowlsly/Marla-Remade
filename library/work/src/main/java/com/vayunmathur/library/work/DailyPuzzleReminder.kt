@@ -1,11 +1,13 @@
 package com.vayunmathur.library.work
 
 import android.Manifest
+import android.annotation.SuppressLint
 import android.app.NotificationManager
 import android.app.PendingIntent
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.os.Build
 import androidx.core.app.NotificationCompat
 import androidx.core.app.NotificationManagerCompat
 import androidx.core.content.ContextCompat
@@ -130,10 +132,24 @@ class DailyPuzzleReminderWorker(
         return Result.success()
     }
 
+    // Lint cannot follow the guard below: it does not model an early return whose condition
+    // combines an SDK-level test with `checkSelfPermission`, so it reports the `notify` call as
+    // unguarded. Suppressed here rather than by declaring POST_NOTIFICATIONS in this library's
+    // manifest, which would merge a runtime, Play-listing-visible permission into all ten apps
+    // that depend on `:library:work` and still would not grant it - only the app can request it.
+    //
+    // The guard is four lines below. If you remove it, remove this suppression too.
+    @SuppressLint("MissingPermission")
     private fun notify(notificationId: Int) {
         val context = applicationContext
         // Re-checked at post time: the permission can be revoked after the work was scheduled.
-        if (ContextCompat.checkSelfPermission(context, Manifest.permission.POST_NOTIFICATIONS) !=
+        //
+        // Gated on the SDK level because POST_NOTIFICATIONS does not exist before 33, and
+        // `checkSelfPermission` answers DENIED for a permission the platform has never heard of.
+        // Without the version check this returns early on every device below Android 13 and the
+        // reminder silently never fires there.
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
+            ContextCompat.checkSelfPermission(context, Manifest.permission.POST_NOTIFICATIONS) !=
             PackageManager.PERMISSION_GRANTED
         ) {
             return

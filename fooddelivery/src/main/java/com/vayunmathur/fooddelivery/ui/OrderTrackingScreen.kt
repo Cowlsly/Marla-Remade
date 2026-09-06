@@ -11,7 +11,6 @@ import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
-import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -31,7 +30,6 @@ import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.unit.DpOffset
 import androidx.compose.ui.unit.dp
 import com.vayunmathur.library.ui.ExternalIntents
 import com.vayunmathur.library.image.compose.AsyncImage
@@ -218,38 +216,33 @@ private fun TrackingMap(order: Order, modifier: Modifier = Modifier) {
     }
 
     Box(modifier) {
-        VectorMap(cameraState = camera)
-        val projection = camera.projection
-        if (projection != null) {
+        VectorMap(cameraState = camera) {
             // Distinct glyph per pin: menu = restaurant, arrow = courier, home = you.
             restaurant?.let {
-                MapPin(projection.screenLocationFromPosition(it),
-                    MaterialTheme.colorScheme.tertiary) { IconRestaurant() }
+                MapMarker(it) { PinChrome(MaterialTheme.colorScheme.tertiary) { IconRestaurant() } }
             }
             destination?.let {
-                MapPin(projection.screenLocationFromPosition(it),
-                    MaterialTheme.colorScheme.primary) { IconHome() }
+                MapMarker(it) { PinChrome(MaterialTheme.colorScheme.primary) { IconHome() } }
             }
             driver?.let {
-                MapPin(projection.screenLocationFromPosition(it),
-                    MaterialTheme.colorScheme.secondary) { IconDeliveryDining() }
+                MapMarker(it) { PinChrome(MaterialTheme.colorScheme.secondary) { IconDeliveryDining() } }
             }
         }
     }
 }
 
-/** A circular marker centred on [at]. */
+/**
+ * The circular disc a pin's icon sits on. Stays app-side rather than moving into
+ * `:library:map` with the positioning: it reads `colorScheme`, and that module has no
+ * material3.
+ */
 @Composable
-private fun MapPin(
-    at: DpOffset,
+private fun PinChrome(
     color: androidx.compose.ui.graphics.Color,
     icon: @Composable () -> Unit,
 ) {
-    val size = 32.dp
-    Box(Modifier.offset(at.x - size / 2, at.y - size / 2)) {
-        Surface(color = color, shape = CircleShape, modifier = Modifier.size(size)) {
-            Box(contentAlignment = Alignment.Center) { icon() }
-        }
+    Surface(color = color, shape = CircleShape, modifier = Modifier.size(32.dp)) {
+        Box(contentAlignment = Alignment.Center) { icon() }
     }
 }
 

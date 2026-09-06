@@ -1,0 +1,98 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Tuner</string>
+
+    <!-- Tab showing one note at a time, with a tuning meter. -->
+    <string name="tab_note">Note</string>
+    <!-- Tab showing several notes at once, named as a chord. -->
+    <string name="tab_chord">Chord</string>
+
+    <!-- Shown while the microphone is open but nothing recognisable is being played. -->
+    <string name="listening">Listening</string>
+    <!-- Shown when the microphone is closed, before the user has started tuning. -->
+    <string name="not_listening">Not listening</string>
+    <!-- Button that opens the microphone and begins tuning. -->
+    <string name="start_listening">Start listening</string>
+    <!-- Button that closes the microphone. -->
+    <string name="stop_listening">Stop listening</string>
+    <!-- Title of the screen asking for microphone access. -->
+    <string name="permission_title">Microphone access needed</string>
+    <!-- Explains why the app needs the microphone. -->
+    <string name="permission_rationale">The tuner listens to your instrument through the microphone. Audio is analysed on your device and never leaves it.</string>
+    <!-- Button that opens the system microphone permission prompt. -->
+    <string name="permission_action">Allow microphone</string>
+    <!-- Button that opens this app\'s page in system settings, after a permanent denial. -->
+    <string name="permission_settings">Open settings</string>
+    <!-- Shown when the microphone exists but could not be opened. -->
+    <string name="capture_unavailable">The microphone could not be opened</string>
+
+    <!-- A measured frequency. %1$s is a number, e.g. "329.6". -->
+    <string name="frequency_value">%1$s Hz</string>
+    <!-- A deviation in cents, a hundredth of a semitone. %1$s is a signed number, e.g. "+3.2". -->
+    <string name="cents_value">%1$s cents</string>
+    <!-- Shown when the note is within a cent of its target. -->
+    <string name="in_tune">In tune</string>
+    <!-- Title of the instrument chooser. -->
+    <string name="instrument_title">Instrument</string>
+    <!-- Instrument family names. These are the only names that need a code change to add. -->
+    <string name="instrument_guitar">Guitar</string>
+    <string name="instrument_ukulele">Ukulele</string>
+    <string name="instrument_piano">Piano</string>
+
+    <!-- Shown on the Chord tab, which is not built yet. -->
+    <string name="chord_unimplemented_title">Chord detection is not implemented yet</string>
+    <!-- Explains what the Chord tab will do once it exists. -->
+    <string name="chord_unimplemented_detail">This tab will name the chord you play and show it on a keyboard and a fret diagram. Use the Note tab to tune one string at a time.</string>
+    <!-- Explains why two chord names are shown at once. Some chords are literally the same
+         notes, so only the bass note tells them apart. -->
+    <string name="chord_ambiguous_note">These are the same notes either way. Only the bass note tells them apart, and it was not clear enough to decide.</string>
+    <!-- Button that switches the diagrams to the other reading. %1$s is a chord name, e.g. "C6". -->
+    <string name="chord_show_other">Show shapes for %1$s</string>
+    <!-- Marks the shape the app recommends out of the alternatives in the pager. -->
+    <string name="shape_recommended">Recommended</string>
+    <!-- Spells out that a chord diagram is a suggestion rather than a record of what was played. -->
+    <string name="shapes_caveat">The app cannot hear which part of the neck you used, so this is one valid shape, not the one you played.</string>
+    <!-- Warns that the device would not give the app a clean, unprocessed microphone feed. -->
+    <string name="unprocessed_unavailable">This device will not provide an unprocessed microphone feed, so it filters out low frequencies. Readings on low strings may be wrong or missing.</string>
+    <!-- Prompt on the chord tab before anything has been played. -->
+    <string name="chord_prompt">Play a chord</string>
+    <!-- Heading over the list of notes the app actually heard. This is a measurement. -->
+    <string name="notes_detected">Notes detected</string>
+    <!-- Heading over the chord diagrams. Deliberately not "what you played": the app cannot tell
+         which position on the neck was fingered, so a diagram is only a suggestion. -->
+    <string name="shapes_heading">One way to play this</string>
+    <!-- Shown when no playable shape exists for the detected chord on this instrument. -->
+    <string name="shapes_none">No shape for this chord on this instrument</string>
+    <!-- Labels an open-position chord shape. -->
+    <string name="position_open">Open position</string>
+    <!-- Labels a shape further up the neck. %1$d is a fret number. -->
+    <string name="position_fret">Fret %1$d</string>
+    <!-- Shown instead of a chord name when nothing scored well enough to name. -->
+    <string name="chord_unsure">Not sure of the chord</string>
+    <!-- Offers an equally valid alternative reading. %1$s is a chord name, e.g. "Am7". -->
+    <string name="chord_alternate">or %1$s</string>
+    <!-- Warns that a chord name is a mid-confidence reading rather than a solid one. -->
+    <string name="confidence_low">Low confidence</string>
+    <!-- Warns that the reading is still settling, so the bass note is not yet trustworthy. -->
+    <string name="confidence_settling">Still settling</string>
+    <!-- Explains why some chord names carry a warning. -->
+    <string name="confidence_note">Sevenths, sixths, suspended, diminished and augmented chords are harder to tell apart than triads. The notes above are what was measured.</string>
+    <!-- Content description for the piano diagram. -->
+    <string name="piano_description">Piano keyboard with the detected notes highlighted</string>
+    <!-- Content description for a chord diagram. -->
+    <string name="diagram_description">Chord diagram showing where to place your fingers</string>
+
+    <!-- Interval names, used when exactly two notes are sounding. -->
+    <string name="interval_unison">Unison</string>
+    <string name="interval_minor_second">Minor 2nd</string>
+    <string name="interval_major_second">Major 2nd</string>
+    <string name="interval_minor_third">Minor 3rd</string>
+    <string name="interval_major_third">Major 3rd</string>
+    <string name="interval_perfect_fourth">Perfect 4th</string>
+    <string name="interval_tritone">Tritone</string>
+    <string name="interval_perfect_fifth">Perfect 5th</string>
+    <string name="interval_minor_sixth">Minor 6th</string>
+    <string name="interval_major_sixth">Major 6th</string>
+    <string name="interval_minor_seventh">Minor 7th</string>
+    <string name="interval_major_seventh">Major 7th</string>
+</resources>

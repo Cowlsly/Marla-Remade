@@ -32,9 +32,12 @@
 #[cfg(test)]
 pub mod reference;
 pub mod gemma4;
+pub mod gemma4_audio;
+pub mod gemma4_vision;
 pub mod mobilefacenet;
 pub mod maia;
 pub mod nllb;
+pub mod nnfp;
 pub mod ppocr_det;
 pub mod ppocr_rec;
 pub mod scrfd;
@@ -290,6 +293,10 @@ pub enum Kind {
     /// this exists for wants `Gelu`. Passing it here silently uses a zero slope, which is a
     /// plain `Relu` - so [`Builder::activate`] refuses it rather than letting that happen.
     Activate,
+    /// Multiply by a scalar held in the weights. See `shaders/mul_scalar.comp`.
+    MulScalar,
+    /// Clamp to a `[min, max]` pair held in the weights. See `shaders/clamp.comp`.
+    Clamp,
     /// `O[h][d][i] = sum_j S[h][i][j] * V[h][d][j]`, attention's weighted sum.
     ///
     /// `O[h][d][i] = sum_j S[h][i][j] * V[h][d][j]`, attention's weighted sum.
@@ -308,6 +315,17 @@ pub enum Kind {
     /// [`Kind::AttnApply`] plus the value-side relative term. See
     /// [`Kind::AttnScoresRelative`].
     AttnApplyRelative,
+    /// Attention scores over a **backward sliding window**, stored as a band, with the relative
+    /// term and the logit cap fused in. See `shaders/attn_scores_banded.comp`.
+    ///
+    /// `[heads, T, band]` rather than `[heads, T, T]`: Gemma 4's audio tower attends
+    /// `0 <= q - k <= 11`, so a square map computes sixty-two times what it keeps. Band width in
+    /// [`Push::kh`], relative offsets in [`Push::kw`], table at [`Push::weight`] as
+    /// `[heads, offsets, head_dim]`, cap in [`Push::param1_bits`].
+    AttnScoresBanded,
+    /// [`Kind::AttnScoresBanded`]'s value half: a band of probabilities against a
+    /// `[d_model, 1, T]` sequence. See `shaders/attn_apply_banded.comp`.
+    AttnApplyBanded,
     /// [`AttnScores`](Kind::AttnScores) for one query against a **position-major** K cache.
     ///
     /// A decoder step is one query, and its keys live in a cache that a position is appended to
@@ -485,6 +503,28 @@ pub struct Push {
     ///
     /// Zero for every net that predates this, so their caches and their pushes are unchanged.
     pub kv_heads: u32,
+
+    /// Non-zero when this op's attention **slides**, so its first key is `window_start`.
+    ///
+    /// A push constant rather than a step parameter because whether a layer slides is
+    /// structural: Gemma 4's layers 0-3 slide and layer 4 does not, for every step of every
+    /// generation. Baking it at record time is what lets one [`crate::vulkan::run::StepParams`]
+    /// serve a net that mixes both - the host computes `window_start` once and the full-attention
+    /// layers ignore it.
+    ///
+    /// Without this the two kinds share a window, which is correct only while the whole prefix
+    /// fits inside it. Past that the global layers would silently lose their long-range
+    /// attention, which is the one thing they exist for, and only on conversations long enough
+    /// that nobody tests them.
+    pub sliding: u32,
+
+    /// Independent rotary sub-blocks per head. 1 is ordinary 1-D RoPE.
+    ///
+    /// Gemma 4's vision tower uses 2: a 64-wide head is two 32-wide blocks, one rotated by the
+    /// patch's row and one by its column, each with its own sixteen frequencies. Rotating the
+    /// whole head as a single block would pair a row channel with a column channel, which is not
+    /// a shape error and produces an image encoder that is subtly position-blind.
+    pub rope_axes: u32,
 }
 
 /// Which span of a score-map row a [`Node::Softmax`] normalises.
@@ -601,6 +641,7 @@ impl Kind {
             // embedding rows. RMS norm is here too: gamma with no beta.
             Kind::AttnScoresRelative
             | Kind::AttnApplyRelative
+            | Kind::AttnScoresBanded
             | Kind::Constant
             | Kind::Embed
             | Kind::RmsNorm => {
@@ -627,8 +668,11 @@ impl Kind {
             | Kind::CacheWrite
             | Kind::Softcap
             | Kind::Activate
+            | Kind::MulScalar
+            | Kind::Clamp
             | Kind::AttnApply
             | Kind::AttnApplyCached
+            | Kind::AttnApplyBanded
             | Kind::Rotary => {}
         }
         if !reads.is_empty() && push.act == Act::PRelu(0).code() {
@@ -663,6 +707,14 @@ pub struct Plan {
     /// are not single-input: Supertonic's sampler takes seven tensors and the SMaLL-100
     /// decoder four. Every vision net declares exactly one.
     pub inputs: Vec<Binding>,
+    /// The tensors that survive between submits, in declaration order.
+    ///
+    /// A KV cache is the only kind so far. Exposed because a cache is worth **saving**: the
+    /// system block and tool declarations are the same 1,100 positions on every device and every
+    /// launch, so computing them once and shipping the result beats every device recomputing
+    /// them forever. See `Net::export_pinned` and `Net::import_pinned`.
+    pub pinned: Vec<Binding>,
+
     /// Where the results come back from, in the order [`Builder::finish`] was given.
     ///
     /// SCRFD has **nine** — score, box and keypoint maps at each of three strides —
@@ -825,6 +877,8 @@ enum Node {
         k: Id,
         out: Id,
         heads: u32,
+        /// Heads supplying the keys. Equal to `heads` for ordinary multi-head attention.
+        kv_heads: u32,
         scale: f32,
     },
     /// One query against a position-major K cache. See [`Kind::AttnScoresCached`].
@@ -838,6 +892,8 @@ enum Node {
         scale: f32,
         /// Take the key range from the step rather than the cache's shape. See [`Push::dyn_keys`].
         dynamic: bool,
+        /// Whether this layer's window applies. See [`Push::sliding`].
+        sliding: bool,
     },
     /// One query against a position-major V cache. See [`Kind::AttnApplyCached`].
     AttnApplyCached {
@@ -849,12 +905,18 @@ enum Node {
         kv_heads: u32,
         /// Take the key range from the step rather than the cache's shape. See [`Push::dyn_keys`].
         dynamic: bool,
+        /// Whether this layer's window applies. See [`Push::sliding`].
+        sliding: bool,
     },
     Softmax {
         input: Id,
         out: Id,
         /// Which of the three softmax shaders normalises the row.
         mode: SoftmaxMode,
+        /// Whether this layer's window applies. See [`Push::sliding`].
+        sliding: bool,
+        /// Keys a causal row may look back over, or 0 for the whole prefix.
+        window: u32,
     },
     /// Append `row` to `cache` at the step's prefix. See [`Kind::CacheWrite`].
     CacheWrite {
@@ -873,6 +935,18 @@ enum Node {
         out: Id,
         act: Act,
     },
+    /// Multiply by a scalar held in the weights. See [`Kind::MulScalar`].
+    MulScalar {
+        input: Id,
+        out: Id,
+        scale: u32,
+    },
+    /// Clamp to a range held in the weights. See [`Kind::Clamp`].
+    Clamp {
+        input: Id,
+        out: Id,
+        bounds: u32,
+    },
     /// Concatenation along the **width** axis, one strided run per channel row. See
     /// [`Builder::concat_positions`].
     ConcatPositions {
@@ -888,6 +962,8 @@ enum Node {
         angles: Id,
         out: Id,
         heads: u32,
+        /// Independent rotary blocks per head. See [`Push::rope_axes`].
+        axes: u32,
     },
     Embed {
         ids: Id,
@@ -920,6 +996,8 @@ enum Node {
         v: Id,
         out: Id,
         heads: u32,
+        /// Heads supplying the values. Equal to `heads` for ordinary multi-head attention.
+        kv_heads: u32,
     },
     AttnScoresRelative {
         q: Id,
@@ -937,6 +1015,26 @@ enum Node {
         heads: u32,
         table: u32,
         offsets: u32,
+    },
+    /// See [`Kind::AttnScoresBanded`].
+    AttnScoresBanded {
+        q: Id,
+        k: Id,
+        out: Id,
+        heads: u32,
+        band: u32,
+        table: u32,
+        offsets: u32,
+        scale: f32,
+        cap: f32,
+    },
+    /// See [`Kind::AttnApplyBanded`].
+    AttnApplyBanded {
+        probs: Id,
+        v: Id,
+        out: Id,
+        heads: u32,
+        band: u32,
     },
 }
 
@@ -1594,9 +1692,49 @@ impl<'a> Builder<'a> {
     /// The `1 / sqrt(head_dim)` scale is derived here rather than taken as an argument:
     /// it is a property of the head geometry, not a trained value, so there is no call
     /// site that could legitimately pass a different one.
+    /// [`Builder::attn_scores`] where `kv_heads` heads supply the keys, and the query is
+    /// **already scaled**.
+    ///
+    /// Gemma 4's prefill: eight query heads against one key head, and the `1 / sqrt(head_dim)`
+    /// already folded into `q_norm` - see `nets::gemma4`'s `Q_NORM_CARRIES_SCALE`.
+    pub fn attn_scores_grouped_prescaled(
+        &mut self,
+        q: Id,
+        k: Id,
+        heads: u32,
+        kv_heads: u32,
+    ) -> Id {
+        let (out, _) = self.score_map(q, k, heads, kv_heads);
+        self.nodes.push(Node::AttnScores {
+            q,
+            k,
+            out,
+            heads,
+            kv_heads,
+            scale: 1.0,
+        });
+        out
+    }
+
     pub fn attn_scores(&mut self, q: Id, k: Id, heads: u32) -> Id {
-        let (out, scale) = self.score_map(q, k, heads);
-        self.nodes.push(Node::AttnScores { q, k, out, heads, scale });
+        let (out, scale) = self.score_map(q, k, heads, heads);
+        self.nodes.push(Node::AttnScores { q, k, out, heads, kv_heads: heads, scale });
+        out
+    }
+
+    /// [`Builder::attn_scores`] for a query that is **already scaled**.
+    ///
+    /// The uncached counterpart of [`Builder::attn_scores_cached_prescaled`], and it exists for
+    /// the same export. Gemma 4's vision tower goes `q_proj -> Clip -> q_norm -> rotary ->
+    /// MatMul` with no `Mul` anywhere in between, so there is no `1 / sqrt(head_dim)` to
+    /// reproduce; its `q_norm` and `k_norm` gammas are uniform scalars whose product is about a
+    /// half in every layer, which is where the scaling actually lives.
+    ///
+    /// Deriving the scale here as well would divide every score by eight. That is not a shape
+    /// error and no layout test sees it - it just flattens all sixteen layers of attention.
+    pub fn attn_scores_prescaled(&mut self, q: Id, k: Id, heads: u32) -> Id {
+        let (out, _) = self.score_map(q, k, heads, heads);
+        self.nodes.push(Node::AttnScores { q, k, out, heads, kv_heads: heads, scale: 1.0 });
         out
     }
 
@@ -1609,7 +1747,7 @@ impl<'a> Builder<'a> {
     /// One query is what makes a causal mask unnecessary — a decode step attends over exactly the
     /// positions in the cache, so the prefix bound is the tensor's own length.
     pub fn attn_scores_cached(&mut self, q: Id, cache: Id, heads: u32) -> Id {
-        self.attn_scores_cached_at(q, cache, heads, heads, false, true)
+        self.attn_scores_cached_at(q, cache, heads, heads, false, true, true)
     }
 
     /// [`Builder::attn_scores_cached`] with the key count supplied by the step, not the shape.
@@ -1617,7 +1755,7 @@ impl<'a> Builder<'a> {
     /// `cache` is then sized to the **maximum** context the plan is built for, and only its
     /// leading `prefix + 1` positions are attended. See [`Push::dyn_keys`].
     pub fn attn_scores_cached_dynamic(&mut self, q: Id, cache: Id, heads: u32) -> Id {
-        self.attn_scores_cached_at(q, cache, heads, heads, true, true)
+        self.attn_scores_cached_at(q, cache, heads, heads, true, true, true)
     }
 
     /// [`Builder::attn_scores_cached_dynamic`] where `kv_heads` heads supply the keys.
@@ -1631,7 +1769,7 @@ impl<'a> Builder<'a> {
         heads: u32,
         kv_heads: u32,
     ) -> Id {
-        self.attn_scores_cached_at(q, cache, heads, kv_heads, true, true)
+        self.attn_scores_cached_at(q, cache, heads, kv_heads, true, true, true)
     }
 
     /// [`Builder::attn_scores_cached_grouped`] for a query that is **already scaled**.
@@ -1641,14 +1779,17 @@ impl<'a> Builder<'a> {
     /// scale into `q_norm`'s gamma and applies none between the projection and the score matmul,
     /// so deriving it here as well would apply it twice - which is not a shape error, does not
     /// fail any layout test, and merely flattens every attention distribution in the model.
+    ///
+    /// `sliding` says whether this layer's window applies. See [`Push::sliding`].
     pub fn attn_scores_cached_prescaled(
         &mut self,
         q: Id,
         cache: Id,
         heads: u32,
         kv_heads: u32,
+        sliding: bool,
     ) -> Id {
-        self.attn_scores_cached_at(q, cache, heads, kv_heads, true, false)
+        self.attn_scores_cached_at(q, cache, heads, kv_heads, true, false, sliding)
     }
 
     fn attn_scores_cached_at(
@@ -1659,6 +1800,7 @@ impl<'a> Builder<'a> {
         kv_heads: u32,
         dynamic: bool,
         derive_scale: bool,
+        sliding: bool,
     ) -> Id {
         let (sq, sc) = (self.shape_of(q), self.shape_of(cache));
         if sq.h != 1 || sq.w != 1 {
@@ -1689,7 +1831,7 @@ impl<'a> Builder<'a> {
         }
         let scale = if derive_scale { 1.0 / (head_dim.max(1) as f32).sqrt() } else { 1.0 };
         let out = self.tensor(Shape::new(heads, 1, sc.c));
-        self.nodes.push(Node::AttnScoresCached { q, cache, out, heads, kv_heads, scale, dynamic });
+        self.nodes.push(Node::AttnScoresCached { q, cache, out, heads, kv_heads, scale, dynamic, sliding });
         out
     }
 
@@ -1699,7 +1841,7 @@ impl<'a> Builder<'a> {
     /// `[d_model, 1, 1]` — back in the channel-major layout the next projection reads, so the
     /// cache layout is confined to the two operands that are caches.
     pub fn attn_apply_cached(&mut self, probs: Id, cache: Id, heads: u32) -> Id {
-        self.attn_apply_cached_at(probs, cache, heads, heads, false)
+        self.attn_apply_cached_at(probs, cache, heads, heads, false, true)
     }
 
     /// [`Builder::attn_apply_cached`] with the key count supplied by the step, not the shape.
@@ -1708,7 +1850,7 @@ impl<'a> Builder<'a> {
     /// [`Builder::softmax_prefix`]: all three read the same bound, and mixing a dynamic score map
     /// with a full-width sum would fold unattended positions into the result.
     pub fn attn_apply_cached_dynamic(&mut self, probs: Id, cache: Id, heads: u32) -> Id {
-        self.attn_apply_cached_at(probs, cache, heads, heads, true)
+        self.attn_apply_cached_at(probs, cache, heads, heads, true, true)
     }
 
     /// [`Builder::attn_apply_cached_dynamic`] where `kv_heads` heads supply the values.
@@ -1721,8 +1863,9 @@ impl<'a> Builder<'a> {
         cache: Id,
         heads: u32,
         kv_heads: u32,
+        sliding: bool,
     ) -> Id {
-        self.attn_apply_cached_at(probs, cache, heads, kv_heads, true)
+        self.attn_apply_cached_at(probs, cache, heads, kv_heads, true, sliding)
     }
 
     fn attn_apply_cached_at(
@@ -1732,6 +1875,7 @@ impl<'a> Builder<'a> {
         heads: u32,
         kv_heads: u32,
         dynamic: bool,
+        sliding: bool,
     ) -> Id {
         let (sp, sc) = (self.shape_of(probs), self.shape_of(cache));
         if sp.c != heads || sp.h != 1 {
@@ -1753,7 +1897,7 @@ impl<'a> Builder<'a> {
         // that, so taking the width from the cache would silently produce a shorter tensor.
         let head_dim = sc.w.checked_div(kv_heads.max(1)).unwrap_or(0);
         let out = self.tensor(Shape::new(heads * head_dim, 1, 1));
-        self.nodes.push(Node::AttnApplyCached { probs, cache, out, heads, kv_heads, dynamic });
+        self.nodes.push(Node::AttnApplyCached { probs, cache, out, heads, kv_heads, dynamic, sliding });
         out
     }
 
@@ -1781,10 +1925,15 @@ impl<'a> Builder<'a> {
     /// `q` and `k` may be different lengths: the map is `[heads, queries, keys]`, which for
     /// self-attention is the square `[heads, T, T]` and for a cross-attention is not. They must
     /// still agree on the channel count, since that is what the dot product contracts over.
-    fn score_map(&mut self, q: Id, k: Id, heads: u32) -> (Id, f32) {
+    fn score_map(&mut self, q: Id, k: Id, heads: u32, kv_heads: u32) -> (Id, f32) {
         let (sq, sk) = (self.shape_of(q), self.shape_of(k));
-        if sq.c != sk.c {
-            self.fail(format!("attention over q {sq:?} and k {sk:?}"));
+        if kv_heads == 0 || heads % kv_heads != 0 {
+            self.fail(format!("{heads} query heads do not group into {kv_heads} kv heads"));
+        }
+        // K is `kv_heads` heads wide where Q is `heads` wide, so the channel counts agree only
+        // for ordinary multi-head attention. What must always agree is the head dimension.
+        if sq.c / heads.max(1) != sk.c / kv_heads.max(1) {
+            self.fail(format!("attention over q {sq:?} and k {sk:?} at {kv_heads} kv heads"));
         }
         if sq.h != 1 || sk.h != 1 {
             self.fail(format!(
@@ -1835,10 +1984,13 @@ impl<'a> Builder<'a> {
     /// not a value: it is a region later ops read by identity.
     pub fn cache_write(&mut self, row: Id, cache: Id) {
         let (sr, sc) = (self.shape_of(row), self.shape_of(cache));
-        if sr.len() != sc.w {
+        // One position, or a whole prefill's worth. The rows are contiguous and the cache is
+        // position-major, so writing T of them is the same store with a longer count - see
+        // `shaders/cache_write.comp`, which needed no change for this.
+        if sc.w == 0 || sr.len() % sc.w != 0 {
             self.fail(format!(
                 "appending {sr:?} to a cache {sc:?}: a position is the cache's width, \
-                 {} elements",
+                 {} elements, and this is not a whole number of them",
                 sc.w
             ));
         }
@@ -1846,6 +1998,30 @@ impl<'a> Builder<'a> {
             self.fail(format!("a cache is [max_positions, 1, d_model], not {sc:?}"));
         }
         self.nodes.push(Node::CacheWrite { row, cache });
+    }
+
+    /// Clamp to the `[min, max]` pair at `weight_index`, a `[2]` fp16 tensor.
+    ///
+    /// The bounds are weights rather than arguments because Gemma 4's vision tower has 177 of
+    /// them, each calibrated separately, and `Builder` cannot read a value at build time.
+    pub fn clamp(&mut self, input: Id, weight_index: usize) -> Id {
+        let bounds = self.weight(weight_index, &[2]);
+        let shape = self.shape_of(input);
+        let out = self.tensor(shape);
+        self.nodes.push(Node::Clamp { input, out, bounds });
+        out
+    }
+
+    /// Multiply by a **scalar held in the weights**, a `[1]` tensor at `weight_index`.
+    ///
+    /// Distinct from [`Builder::affine`], whose scale is a compile-time constant. See
+    /// [`Kind::MulScalar`].
+    pub fn mul_scalar(&mut self, input: Id, weight_index: usize) -> Id {
+        let scale = self.weight(weight_index, &[1]);
+        let shape = self.shape_of(input);
+        let out = self.tensor(shape);
+        self.nodes.push(Node::MulScalar { input, out, scale });
+        out
     }
 
     /// An [`Act`] applied on its own, for a value no convolution produced.
@@ -1880,7 +2056,7 @@ impl<'a> Builder<'a> {
             self.fail(format!("a softmax over {shape:?}, whose last axis is empty"));
         }
         let out = self.tensor(shape);
-        self.nodes.push(Node::Softmax { input, out, mode: SoftmaxMode::Full });
+        self.nodes.push(Node::Softmax { input, out, mode: SoftmaxMode::Full, sliding: false, window: 0 });
         out
     }
 
@@ -1890,6 +2066,22 @@ impl<'a> Builder<'a> {
     /// which *keys* a *query* may read, so queries and keys have to be the same sequence. A
     /// cross-attention map is not square and masking one would be meaningless rather than merely
     /// wrong, which is why this is refused instead of clamped.
+    /// [`Builder::softmax_causal`] that also drops keys more than `window - 1` behind the query.
+    ///
+    /// The sliding half of a batched prefill. `window` of 0 is the plain causal mask.
+    pub fn softmax_causal_windowed(&mut self, input: Id, window: u32) -> Id {
+        let shape = self.shape_of(input);
+        let out = self.tensor(shape);
+        self.nodes.push(Node::Softmax {
+            input,
+            out,
+            mode: SoftmaxMode::Causal,
+            sliding: false,
+            window,
+        });
+        out
+    }
+
     pub fn softmax_causal(&mut self, input: Id) -> Id {
         let shape = self.shape_of(input);
         if shape.w == 0 {
@@ -1902,7 +2094,7 @@ impl<'a> Builder<'a> {
             ));
         }
         let out = self.tensor(shape);
-        self.nodes.push(Node::Softmax { input, out, mode: SoftmaxMode::Causal });
+        self.nodes.push(Node::Softmax { input, out, mode: SoftmaxMode::Causal, sliding: false, window: 0 });
         out
     }
 
@@ -1910,13 +2102,13 @@ impl<'a> Builder<'a> {
     ///
     /// For a decode plan built once at a maximum context: the row is `shape.w` wide, but the step
     /// supplies how much of it was written. See [`Kind::SoftmaxPrefix`].
-    pub fn softmax_prefix(&mut self, input: Id) -> Id {
+    pub fn softmax_prefix(&mut self, input: Id, sliding: bool) -> Id {
         let shape = self.shape_of(input);
         if shape.w == 0 {
             self.fail(format!("a prefix softmax over {shape:?}, whose last axis is empty"));
         }
         let out = self.tensor(shape);
-        self.nodes.push(Node::Softmax { input, out, mode: SoftmaxMode::Prefix });
+        self.nodes.push(Node::Softmax { input, out, mode: SoftmaxMode::Prefix, sliding, window: 0 });
         out
     }
 
@@ -1975,6 +2167,19 @@ impl<'a> Builder<'a> {
     /// `angles` is `[head_dim, 1, W]`: the cosines in its first `head_dim / 2` channels and the
     /// sines in the rest, one column per position.
     pub fn rotary(&mut self, input: Id, angles: Id, heads: u32) -> Id {
+        self.rotary_axes(input, angles, heads, 1)
+    }
+
+    /// [`Builder::rotary`] over `axes` independent blocks inside each head.
+    ///
+    /// A 2-D position needs two rotations, not one over twice the channels: Gemma 4's vision
+    /// tower rotates the first half of a 64-wide head by the patch's row and the second half by
+    /// its column. Rotating the head as a single block would pair a row channel with a column
+    /// channel - no shape error, and an encoder that is subtly position-blind.
+    ///
+    /// The angle table stays `[head_dim, 1, T]`, read as `axes` consecutive blocks of
+    /// `head_dim / axes`, each cosines-then-sines.
+    pub fn rotary_axes(&mut self, input: Id, angles: Id, heads: u32, axes: u32) -> Id {
         let (sx, sa) = (self.shape_of(input), self.shape_of(angles));
         if sx.h != 1 || sa.h != 1 {
             self.fail(format!("rotary on {sx:?}: a sequence is [d_model, 1, T]"));
@@ -1983,9 +2188,15 @@ impl<'a> Builder<'a> {
             self.fail(format!("{} channels do not split into {heads} heads", sx.c));
         }
         let head_dim = sx.c.checked_div(heads.max(1)).unwrap_or(0);
-        if head_dim == 0 || !head_dim.is_multiple_of(2) {
+        if axes == 0 || !head_dim.is_multiple_of(axes.max(1)) {
             self.fail(format!(
-                "rotary over a head of {head_dim}: it rotates 2-planes, so the head must be even"
+                "rotary over a head of {head_dim} in {axes} blocks, which does not divide"
+            ));
+        }
+        let block = head_dim.checked_div(axes.max(1)).unwrap_or(0);
+        if block == 0 || !block.is_multiple_of(2) {
+            self.fail(format!(
+                "rotary over a block of {block}: it rotates 2-planes, so the block must be even"
             ));
         }
         if sa.c != head_dim || sa.w != sx.w {
@@ -1995,7 +2206,7 @@ impl<'a> Builder<'a> {
             ));
         }
         let out = self.tensor(sx);
-        self.nodes.push(Node::Rotary { input, angles, out, heads });
+        self.nodes.push(Node::Rotary { input, angles, out, heads, axes });
         out
     }
 
@@ -2054,7 +2265,7 @@ impl<'a> Builder<'a> {
         table: usize,
         offsets: u32,
     ) -> Id {
-        let (out, scale) = self.score_map(q, k, heads);
+        let (out, scale) = self.score_map(q, k, heads, heads);
         let shape = self.shape_of(q);
         // A relative offset is `key - query`, so the two sequences have to be the same one.
         // Only the cross-attention variants take differing lengths.
@@ -2097,6 +2308,104 @@ impl<'a> Builder<'a> {
         out
     }
 
+    /// Attention scores over a backward sliding window of `band` keys, as a `[heads, T, band]`
+    /// band, with the relative-position term and the `cap` logit softcap fused in.
+    ///
+    /// `q` and `k` are `[d_model, 1, T]`. Column `j` of query `i` is key `i - (band - 1) + j`,
+    /// so only keys at or before the query are ever addressed and the columns that fall before
+    /// the sequence are filled with the most negative finite fp16. A band row is therefore an
+    /// ordinary softmax domain: follow this with [`Builder::softmax`], not a windowed mode.
+    ///
+    /// `table` is `[heads, offsets, head_dim]` — **per head**, and one-sided rather than centred
+    /// on zero displacement, so [`Builder::attn_scores_relative`]'s shared centred table is a
+    /// different tensor and `check_offsets` does not apply. Column `j` reads offset `j + 1`; see
+    /// `nets::gemma4_audio::rel_column` for why offset 0 is unreachable and correct.
+    ///
+    /// `scale` multiplies the whole sum. Pass 1.0 when the caller has already scaled `q` and `k`,
+    /// which Gemma 4's audio tower must: it scales the query by a scalar *and* a per-head_dim
+    /// vector, and the key by a different scalar, and neither of those can live here — a vector
+    /// does not factor out of a dot product, and the key's scalar applies to the content term
+    /// but not to the relative one.
+    pub fn attn_scores_banded(
+        &mut self,
+        q: Id,
+        k: Id,
+        heads: u32,
+        band: u32,
+        table: usize,
+        offsets: u32,
+        scale: f32,
+        cap: f32,
+    ) -> Id {
+        let (sq, sk) = (self.shape_of(q), self.shape_of(k));
+        if sq.c != sk.c || sq.w != sk.w {
+            self.fail(format!(
+                "banded attention over q {sq:?} and k {sk:?}: a band is a window into the same \
+                 sequence, so both are [d_model, 1, T] with the same T"
+            ));
+        }
+        if sq.h != 1 || sk.h != 1 {
+            self.fail(format!(
+                "banded attention on {sq:?}: a sequence is [d_model, 1, T], so a height above \
+                 one would silently reinterpret the layout"
+            ));
+        }
+        if heads == 0 || !sq.c.is_multiple_of(heads) {
+            self.fail(format!("{} channels do not split into {heads} heads", sq.c));
+        }
+        if band == 0 || band > sq.w {
+            self.fail(format!(
+                "a band of {band} over a sequence of {}: the window is the keys a query may see, \
+                 so it is between one and the whole sequence",
+                sq.w
+            ));
+        }
+        // Column `band - 1` reads offset `band`, so the table needs one more entry than the
+        // band is wide. The export's is exactly that: twelve attended offsets in thirteen slots.
+        if offsets <= band {
+            self.fail(format!(
+                "{offsets} relative offsets for a band of {band}: column j reads offset j + 1, \
+                 so the widest column needs offset {band}"
+            ));
+        }
+        if cap <= 0.0 {
+            self.fail(format!("a logit cap of {cap}, which must be positive"));
+        }
+        let head_dim = sq.c.checked_div(heads.max(1)).unwrap_or(0);
+        let table = self.weight(table, &[heads, offsets, head_dim]);
+        let out = self.tensor(Shape::new(heads, sq.w, band));
+        self.nodes
+            .push(Node::AttnScoresBanded { q, k, out, heads, band, table, offsets, scale, cap });
+        out
+    }
+
+    /// Apply a `[heads, T, band]` band of probabilities to `v`, a `[d_model, 1, T]` sequence.
+    ///
+    /// The value half of [`Builder::attn_scores_banded`], with the same window: column `j` of
+    /// query `i` weights key `i - (band - 1) + j`. Columns that fall before the sequence are
+    /// skipped rather than read, which is exact because the softmax already gave them zero.
+    pub fn attn_apply_banded(&mut self, probs: Id, v: Id, heads: u32, band: u32) -> Id {
+        let (sp, sv) = (self.shape_of(probs), self.shape_of(v));
+        if sp.c != heads || sp.w != band {
+            self.fail(format!(
+                "a banded value mix over probs {sp:?}: {heads} heads and a band of {band} means \
+                 [{heads}, T, {band}]"
+            ));
+        }
+        if sv.h != 1 || sp.h != sv.w {
+            self.fail(format!(
+                "a banded value mix over probs {sp:?} and v {sv:?}: one row per query and one \
+                 value per key, and a band's queries and keys are the same sequence"
+            ));
+        }
+        if heads == 0 || !sv.c.is_multiple_of(heads) {
+            self.fail(format!("{} channels do not split into {heads} heads", sv.c));
+        }
+        let out = self.tensor(Shape::new(sv.c, 1, sv.w));
+        self.nodes.push(Node::AttnApplyBanded { probs, v, out, heads, band });
+        out
+    }
+
     /// A relative table is `2 * window + 1` entries centred on zero displacement.
     ///
     /// Only the parity is checked. The table's size is deliberately *not* related to the
@@ -2112,9 +2421,21 @@ impl<'a> Builder<'a> {
     }
 
     /// Apply `probs`, a `[heads, T, T]` score map, to `v`, a `[d_model, 1, T]` sequence.
+    /// [`Builder::attn_apply`] where `kv_heads` heads supply the values.
+    pub fn attn_apply_grouped(&mut self, probs: Id, v: Id, heads: u32, kv_heads: u32) -> Id {
+        let sv = self.shape_of(v);
+        let sp = self.shape_of(probs);
+        // The output is the **query** side's width: `heads * head_dim`, where V is only
+        // `kv_heads * head_dim`. Taking it from V would silently produce a narrower tensor.
+        let head_dim = sv.c.checked_div(kv_heads.max(1)).unwrap_or(0);
+        let out = self.tensor(Shape::new(heads * head_dim, 1, sp.h));
+        self.nodes.push(Node::AttnApply { probs, v, out, heads, kv_heads });
+        out
+    }
+
     pub fn attn_apply(&mut self, probs: Id, v: Id, heads: u32) -> Id {
         let out = self.mixed(probs, v, heads);
-        self.nodes.push(Node::AttnApply { probs, v, out, heads });
+        self.nodes.push(Node::AttnApply { probs, v, out, heads, kv_heads: heads });
         out
     }
 
@@ -2224,6 +2545,7 @@ impl<'a> Builder<'a> {
             ops,
             arena_elems: arena.high_water,
             inputs: self.inputs.iter().map(|&id| binding(id)).collect::<Result<_, _>>()?,
+            pinned: self.pinned.iter().map(|&id| binding(id)).collect::<Result<_, _>>()?,
             outputs: outputs.iter().map(|&id| binding(id)).collect::<Result<_, _>>()?,
         })
     }
@@ -2623,7 +2945,7 @@ impl<'a> Builder<'a> {
                     invocations: positions,
                 });
             }
-            Node::AttnScores { q, k, out, heads, scale } => {
+            Node::AttnScores { q, k, out, heads, kv_heads, scale } => {
                 let (si, so) = (shape(*q), shape(*out));
                 ops.push(Op::Dispatch {
                     kind: Kind::AttnScores,
@@ -2638,6 +2960,7 @@ impl<'a> Builder<'a> {
                         out_h: so.h,
                         out_w: so.w,
                         group: *heads,
+                        kv_heads: *kv_heads,
                         param0_bits: scale.to_bits(),
                         count: so.len(),
                         ..Push::default()
@@ -2645,7 +2968,7 @@ impl<'a> Builder<'a> {
                     invocations: so.len(),
                 });
             }
-            Node::AttnScoresCached { q, cache, out, heads, kv_heads, scale, dynamic } => {
+            Node::AttnScoresCached { q, cache, out, heads, kv_heads, scale, dynamic, sliding } => {
                 let (sq, so) = (shape(*q), shape(*out));
                 ops.push(Op::Dispatch {
                     kind: Kind::AttnScoresCached,
@@ -2666,12 +2989,13 @@ impl<'a> Builder<'a> {
                         count: so.len(),
                         dyn_keys: u32::from(*dynamic),
                         kv_heads: *kv_heads,
+                        sliding: u32::from(*sliding),
                         ..Push::default()
                     },
                     invocations: so.len(),
                 });
             }
-            Node::AttnApplyCached { probs, cache, out, heads, kv_heads, dynamic } => {
+            Node::AttnApplyCached { probs, cache, out, heads, kv_heads, dynamic, sliding } => {
                 let (sc, so) = (shape(*cache), shape(*out));
                 ops.push(Op::Dispatch {
                     kind: Kind::AttnApplyCached,
@@ -2693,6 +3017,7 @@ impl<'a> Builder<'a> {
                         count: so.len(),
                         dyn_keys: u32::from(*dynamic),
                         kv_heads: *kv_heads,
+                        sliding: u32::from(*sliding),
                         ..Push::default()
                     },
                     invocations: so.len(),
@@ -2740,6 +3065,56 @@ impl<'a> Builder<'a> {
                         out_h: so.h,
                         out_w: so.w,
                         kw: *offsets,
+                        group: *heads,
+                        count: so.len(),
+                        ..Push::default()
+                    },
+                    invocations: so.len(),
+                });
+            }
+            Node::AttnScoresBanded { q, k, out, heads, band, table, offsets, scale, cap } => {
+                let (si, so) = (shape(*q), shape(*out));
+                ops.push(Op::Dispatch {
+                    kind: Kind::AttnScoresBanded,
+                    push: Push {
+                        in0: at(*q)?,
+                        in1: at(*k)?,
+                        out: at(*out)?,
+                        weight: *table,
+                        in_c: si.c,
+                        in_h: si.h,
+                        in_w: si.w,
+                        out_c: so.c,
+                        out_h: so.h,
+                        out_w: so.w,
+                        // The band reads as a kernel height and the offset count as its width:
+                        // a window of taps along the sequence is what both of them are.
+                        kh: *band,
+                        kw: *offsets,
+                        group: *heads,
+                        param0_bits: scale.to_bits(),
+                        param1_bits: cap.to_bits(),
+                        count: so.len(),
+                        ..Push::default()
+                    },
+                    invocations: so.len(),
+                });
+            }
+            Node::AttnApplyBanded { probs, v, out, heads, band } => {
+                let so = shape(*out);
+                ops.push(Op::Dispatch {
+                    kind: Kind::AttnApplyBanded,
+                    push: Push {
+                        in0: at(*probs)?,
+                        in1: at(*v)?,
+                        out: at(*out)?,
+                        in_c: so.c,
+                        in_h: so.h,
+                        in_w: so.w,
+                        out_c: so.c,
+                        out_h: so.h,
+                        out_w: so.w,
+                        kh: *band,
                         group: *heads,
                         count: so.len(),
                         ..Push::default()
@@ -2796,10 +3171,47 @@ impl<'a> Builder<'a> {
                         out_c: sc.c,
                         out_h: sc.h,
                         out_w: sc.w,
+                        // Positions written at once. More than one is a prefill, whose K and V
+                        // are channel-major and need transposing into the cache.
+                        group: sr.len() / sc.w.max(1),
                         count: sr.len(),
                         ..Push::default()
                     },
                     invocations: sr.len(),
+                });
+            }
+            Node::Clamp { input, out, bounds } => {
+                let so = shape(*out);
+                ops.push(Op::Dispatch {
+                    kind: Kind::Clamp,
+                    push: Push {
+                        in0: at(*input)?,
+                        out: at(*out)?,
+                        act_weight: *bounds,
+                        out_c: so.c,
+                        out_h: so.h,
+                        out_w: so.w,
+                        count: so.len(),
+                        ..Push::default()
+                    },
+                    invocations: so.len(),
+                });
+            }
+            Node::MulScalar { input, out, scale } => {
+                let so = shape(*out);
+                ops.push(Op::Dispatch {
+                    kind: Kind::MulScalar,
+                    push: Push {
+                        in0: at(*input)?,
+                        out: at(*out)?,
+                        act_weight: *scale,
+                        out_c: so.c,
+                        out_h: so.h,
+                        out_w: so.w,
+                        count: so.len(),
+                        ..Push::default()
+                    },
+                    invocations: so.len(),
                 });
             }
             Node::Activate { input, out, act } => {
@@ -2842,7 +3254,7 @@ impl<'a> Builder<'a> {
                     invocations: so.len(),
                 });
             }
-            Node::Softmax { input, out, mode } => {
+            Node::Softmax { input, out, mode, sliding, window } => {
                 let so = shape(*out);
                 // One invocation per row of the last axis, each normalising `out_w`
                 // contiguous elements, so the dispatch is rows rather than elements.
@@ -2864,6 +3276,9 @@ impl<'a> Builder<'a> {
                         out_w: so.w,
                         count: rows,
                         dyn_keys: u32::from(*mode == SoftmaxMode::Prefix),
+                        sliding: u32::from(*sliding),
+                        // Only the causal shader reads it, and only when non-zero.
+                        kh: *window,
                         ..Push::default()
                     },
                     invocations: rows,
@@ -2888,7 +3303,7 @@ impl<'a> Builder<'a> {
                     column += sp.w;
                 }
             }
-            Node::AttnApply { probs, v, out, heads } => {
+            Node::AttnApply { probs, v, out, heads, kv_heads } => {
                 let (sv, so) = (shape(*v), shape(*out));
                 ops.push(Op::Dispatch {
                     kind: Kind::AttnApply,
@@ -2905,13 +3320,14 @@ impl<'a> Builder<'a> {
                         out_h: so.h,
                         out_w: so.w,
                         group: *heads,
+                        kv_heads: *kv_heads,
                         count: so.len(),
                         ..Push::default()
                     },
                     invocations: so.len(),
                 });
             }
-            Node::Rotary { input, angles, out, heads } => {
+            Node::Rotary { input, angles, out, heads, axes } => {
                 let so = shape(*out);
                 ops.push(Op::Dispatch {
                     kind: Kind::Rotary,
@@ -2926,6 +3342,7 @@ impl<'a> Builder<'a> {
                         out_h: so.h,
                         out_w: so.w,
                         group: *heads,
+                        rope_axes: *axes,
                         count: so.len(),
                         ..Push::default()
                     },
@@ -2970,6 +3387,8 @@ impl Node {
             | Node::AttnApplyCached { out, .. }
             | Node::AttnScoresRelative { out, .. }
             | Node::AttnApplyRelative { out, .. }
+            | Node::AttnScoresBanded { out, .. }
+            | Node::AttnApplyBanded { out, .. }
             | Node::Softmax { out, .. }
             | Node::Embed { out, .. }
             | Node::SliceChannels { out, .. }
@@ -2981,6 +3400,8 @@ impl Node {
             | Node::Concat { out, .. } => *out,
             | Node::Softcap { out, .. } => *out,
             | Node::Activate { out, .. } => *out,
+            | Node::MulScalar { out, .. } => *out,
+            | Node::Clamp { out, .. } => *out,
             // The cache is the destination, and it is pinned, so `finish` finds it already
             // allocated rather than making a fresh tensor for it.
             Node::CacheWrite { cache, .. } => *cache,
@@ -2999,6 +3420,8 @@ impl Node {
             | Node::Softmax { input, .. }
             | Node::Softcap { input, .. }
             | Node::Activate { input, .. }
+            | Node::MulScalar { input, .. }
+            | Node::Clamp { input, .. }
             | Node::Embed { ids: input, .. }
             | Node::SliceChannels { input, .. }
             | Node::ConvInt8 { input, .. }
@@ -3010,6 +3433,8 @@ impl Node {
             | Node::AttnApplyCached { probs: a, cache: b, .. }
             | Node::AttnApply { probs: a, v: b, .. }
             | Node::AttnScoresRelative { q: a, k: b, .. }
+            | Node::AttnScoresBanded { q: a, k: b, .. }
+            | Node::AttnApplyBanded { probs: a, v: b, .. }
             | Node::AttnApplyRelative { probs: a, v: b, .. } => {
                 vec![*a, *b]
             }
@@ -3295,7 +3720,7 @@ pub(crate) mod tests {
     fn the_push_block_has_no_padding() {
         // The shaders read it at fixed offsets, so a gap Rust inserted would shift
         // every field after it.
-        assert_eq!(std::mem::size_of::<Push>(), 28 * 4);
+        assert_eq!(std::mem::size_of::<Push>(), 30 * 4);
         assert_eq!(std::mem::align_of::<Push>(), 4);
         // Vulkan only guarantees 128 bytes of push constants, so this is the ceiling the
         // block has to stay under however many modes get added to it.

@@ -1,27 +1,27 @@
 //! The camera: a snapshot from Kotlin to a per-tile clip-space matrix.
 //!
-//! Web Mercator with a 256-logical-px tile grid (world = 256 * 2^zoom),
-//! matching `:library:map`'s `Mercator.kt` — the Kotlin side owns the public
-//! `Projection` in `Dp`, this side has to agree with it or every overlay
-//! drifts from the basemap under it.
+//! Web Mercator on a 512-logical-px tile grid (world = 512 * 2^zoom), matching
+//! `:library:map`'s `Mercator.kt` — the Kotlin side owns the public `Projection`
+//! in `Dp`, this side has to agree with it or every overlay drifts from the
+//! basemap under it.
 //!
-//! MapLibre parity (ground scale at the same zoom float) comes from a +1 zoom
-//! offset applied once at the JNI boundary (`bridge`), NOT from a 512 tile:
-//! tile-local math (tessellation, emission, the clip matrix) stays 256-based
-//! and known-good, while the camera views the world one level deeper so
-//! ground features render at MapLibre's 512-equivalent size. A 512 TILE_SIZE
-//! was tried (task 1, P2) and reverted: positions aligned but label quads went
-//! invisible and roads cut at tile seams — too much subtle tile-local fallout
-//! for what should be an outer-scale change.
+//! 512 is also what gives MapLibre parity: the vector archives are authored on
+//! that convention, so at the same zoom float a tile covers the same ground and
+//! renders at the same size. This used to be a 256 grid with a compensating +1
+//! zoom offset applied at the JNI boundary, which produced the right ground scale
+//! by a different route but had two costs: tile addressing took the floor of the
+//! *offset* zoom, so a screenful fetched four times as many tiles as MapLibre
+//! does, and every style ramp — widths, `text_size`, opacity and the `min_zoom`
+//! layer gating — was evaluated one level away from the zoom the authored
+//! `basemap.json` those values were transcribed from meant by it.
 //!
 //! Only the camera crosses JNI, once per frame. Everything per-tile is derived here.
 
-/// Logical pixels across one tile: 256, the known-good tile-local grid.
-/// World scale is 256 * 2^zoom. MapLibre parity is the bridge's +1 zoom
-/// offset, not this constant: doubling here doubles tile-local assumptions
-/// everywhere (task 1, magenta verdict) while an outer zoom offset scales the
-/// final matrix only. Tile addressing (z/x/y) is floor(zoom) either way.
-pub const TILE_SIZE: f64 = 256.0;
+/// Logical pixels across one tile: 512, the convention the archives are authored on.
+///
+/// World scale is 512 * 2^zoom, which is MapLibre's, so tile addressing is the plain
+/// floor of the camera zoom and every ramp is evaluated at the zoom the style means.
+pub const TILE_SIZE: f64 = 512.0;
 
 /// The camera as Kotlin measured it.
 #[derive(Clone, Copy, Debug)]
@@ -142,12 +142,12 @@ mod tests {
     }
 
     #[test]
-    fn the_world_is_256_dp_per_tile() {
-        // Known-good tile-local grid: world = 256 * 2^zoom. MapLibre parity is
-        // the bridge's +1 zoom offset, not this constant.
-        assert_eq!(world_size(0.0), 256.0);
-        assert_eq!(world_size(1.0), 512.0);
-        assert_eq!(world_size(14.0), 256.0 * 16384.0);
+    fn the_world_is_512_dp_per_tile() {
+        // MapLibre's convention, and the one the archives are authored on: tile
+        // addressing is the plain floor of the camera zoom.
+        assert_eq!(world_size(0.0), 512.0);
+        assert_eq!(world_size(1.0), 1024.0);
+        assert_eq!(world_size(14.0), 512.0 * 16384.0);
     }
 
     #[test]
@@ -167,15 +167,15 @@ mod tests {
     #[test]
     fn null_island_is_the_centre_of_the_world() {
         let p = project(0.0, 0.0, 0.0);
-        assert!((p.x - 128.0).abs() < 1e-9);
-        assert!((p.y - 128.0).abs() < 1e-9);
+        assert!((p.x - TILE_SIZE / 2.0).abs() < 1e-9);
+        assert!((p.y - TILE_SIZE / 2.0).abs() < 1e-9);
     }
 
     #[test]
     fn the_tile_containing_the_camera_covers_the_viewport_centre() {
         // At z1 centred on null island, the four tiles meet exactly at the centre of a
-        // 512 Dp viewport, so tile 0/0's bottom-right corner lands at clip (0, 0).
-        let camera = camera(1.0);
+        // 1024 Dp viewport, so tile 0/0's bottom-right corner lands at clip (0, 0).
+        let camera = Camera { width_dp: 1024.0, height_dp: 1024.0, ..camera(1.0) };
         let m = camera.tile_to_clip(1, 0, 0);
         let (x, y) = transform(&m, 1.0, 1.0);
         assert!(x.abs() < 1e-5, "x {x}");
@@ -184,8 +184,7 @@ mod tests {
 
     /// Task-1 camera-scale parity: the viewport centre always maps to clip
     /// origin through the shared matrix, whatever the tile grid. Pins the
-    /// matrix half of the anchor contract at the 256 tile-local grid with the
-    /// +1 parity offset applied to the camera zoom.
+    /// matrix half of the anchor contract on the 512 grid.
     #[test]
     fn an_anchor_at_viewport_centre_projects_to_clip_origin() {
         // z10 centred on SF: the SF tile-local centre must land at clip (0,0)
@@ -225,9 +224,9 @@ mod tests {
 
     #[test]
     fn a_full_screen_tile_fills_clip_space() {
-        // At z0 with a 256 Dp viewport the single tile is exactly the screen, so its
+        // At z0 with a 512 Dp viewport the single tile is exactly the screen, so its
         // corners are the corners of clip space.
-        let camera = Camera { width_dp: 256.0, height_dp: 256.0, ..camera(0.0) };
+        let camera = Camera { width_dp: 512.0, height_dp: 512.0, ..camera(0.0) };
         let m = camera.tile_to_clip(0, 0, 0);
         let (x0, y0) = transform(&m, 0.0, 0.0);
         let (x1, y1) = transform(&m, 1.0, 1.0);
@@ -253,7 +252,7 @@ mod tests {
         // The archive stops at z16 and users keep zooming, so a z16 tile drawn at z19
         // must be 8x its normal size.
         let camera = camera(19.0);
-        assert!((camera.tile_span_dp(16) - 256.0 * 8.0).abs() < 1e-9);
+        assert!((camera.tile_span_dp(16) - 512.0 * 8.0).abs() < 1e-9);
     }
 
     #[test]

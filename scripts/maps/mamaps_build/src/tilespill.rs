@@ -78,10 +78,11 @@ use crate::tiler::ChunkEntry;
 pub const ENTRY_HEADER_BYTES: usize = 32;
 
 /// Packed width of one [`BodyFeature`] in the spill: kind, kind_detail, geom_type, flags,
-/// name_idx, parts_offset, part_count, transit_color. Twenty, wider than the body's 24-byte
-/// record only in what it omits (padding); the fields are the codec's own, so the scratch
-/// format never lags the codec by a version.
-const FEATURE_BYTES: usize = 20;
+/// name_idx, parts_offset, part_count, transit_color, transit_ordinal, transit_lanes,
+/// transit_taper. Twenty-three, narrower than the body's 24-byte record only in what it omits
+/// (padding); the fields are the codec's own, so the scratch format never lags the codec by a
+/// version.
+const FEATURE_BYTES: usize = 23;
 /// Packed width of one [`Part`] in the spill: coord_start, point_count, winding. Ten — the
 /// body's 12-byte entry carries a reserved half-word the scratch format does not need.
 const PART_BYTES: usize = 10;
@@ -468,9 +469,9 @@ fn encode_entry(tile: u64, layer_id: u8, entry: &ChunkEntry, out: &mut Vec<u8>) 
     out[base + 20] = layer_id;
     out[base + 24..base + 28].copy_from_slice(&(entry.names.len() as u32).to_le_bytes());
     for feature in &layer.features {
-        // The spill carries the v2 index, not the v1 wire: name_idx + transit_color ride the
-        // entry and are re-encoded by the body serializer, so the scratch format never lags the
-        // codec by a version.
+        // The spill carries the v2 index, not the v1 wire: name_idx, transit_color and the three
+        // transit lane bytes ride the entry and are re-encoded by the body serializer, so the
+        // scratch format never lags the codec by a version.
         out.extend_from_slice(&feature.kind.to_le_bytes());
         out.extend_from_slice(&feature.kind_detail.to_le_bytes());
         out.push(feature.geom_type);
@@ -479,6 +480,9 @@ fn encode_entry(tile: u64, layer_id: u8, entry: &ChunkEntry, out: &mut Vec<u8>) 
         out.extend_from_slice(&feature.parts_offset.to_le_bytes());
         out.extend_from_slice(&feature.part_count.to_le_bytes());
         out.extend_from_slice(&feature.transit_color.to_le_bytes());
+        out.push(feature.transit_ordinal);
+        out.push(feature.transit_lanes);
+        out.push(feature.transit_taper);
     }
     for part in &layer.parts {
         out.extend_from_slice(&part.coord_start.to_le_bytes());
@@ -551,6 +555,9 @@ fn decode_fixed(header: &EntryHeader, payload: &[u8]) -> Result<ChunkEntry> {
             parts_offset: u32_at(b, 8),
             part_count: u32_at(b, 12),
             transit_color: u32_at(b, 16),
+            transit_ordinal: b[20],
+            transit_lanes: b[21],
+            transit_taper: b[22],
         });
         at += FEATURE_BYTES;
     }
@@ -632,6 +639,9 @@ mod tests {
             parts_offset: at,
             part_count: n,
             transit_color: 0,
+            transit_ordinal: 0,
+            transit_lanes: 0,
+            transit_taper: 0,
         }
     }
 
@@ -645,6 +655,9 @@ mod tests {
             parts_offset: 0,
             part_count: 1,
             transit_color: 0,
+            transit_ordinal: 0,
+            transit_lanes: 0,
+            transit_taper: 0,
         }
     }
 
@@ -787,6 +800,9 @@ mod tests {
                 parts_offset: i as u32,
                 part_count: 1,
                 transit_color: 0,
+                transit_ordinal: 0,
+                transit_lanes: 0,
+                transit_taper: 0,
             })
             .collect();
         let mut layer = BodyLayer::new(8);
@@ -929,7 +945,15 @@ mod tests {
         big.layer.features = vec![feature(1, 1, GEOM_LINE, 0, 0, 1)];
         big.layer.parts =
             vec![Part { coord_start: 0, point_count: 40_000, winding: WINDING_OUTER }];
-        big.layer.coords = (0..40_000).map(|i| (i as i16, -(i as i16))).collect();
+        // The coordinates themselves are arbitrary; only the point count matters here. Kept
+        // inside `i16`'s range rather than cast from the index, which wraps to `i16::MIN` at
+        // 32 768 and then overflows on the negation.
+        big.layer.coords = (0..40_000)
+            .map(|i| {
+                let v = (i % 30_000) as i16;
+                (v, -v)
+            })
+            .collect();
         map.insert((6, 4), big);
         let at = spill.write_chunk(map).expect("write");
 

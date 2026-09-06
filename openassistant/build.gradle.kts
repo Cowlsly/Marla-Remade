@@ -15,11 +15,6 @@ android {
         applicationId = "com.vayunmathur.openassistant"
     }
 
-    packaging {
-        jniLibs {
-            pickFirsts.add("**/libLiteRtTopKOpenClSampler.so")
-        }
-    }
 }
 
 dependencies {
@@ -34,10 +29,15 @@ dependencies {
     // display images
     implementation(project(":library:image"))
 
-    // ai
-    implementation(libs.litertlm.android)
-    // litertlm 0.14.0 needs kotlinx-coroutines 1.11.0 (close$default on the
-    // SendChannel interface); requesting it directly wins over the transitive 1.9.0.
+    // ai: this repo's own Vulkan runtime, which replaced com.google.ai.edge.litertlm and
+    // its 19.83 MB liblitertlm_jni.so. The weights are the same Gemma 4 E2B, converted to
+    // .maml by scripts/ml/maml_convert.py.
+    implementation(project(":library:ml"))
+    // ToolRegistry reflects over AssistantToolSet's @Tool methods. This used to arrive
+    // transitively through the litertlm AAR, so removing that dependency took it away.
+    implementation(libs.kotlin.reflect)
+    // Was pinned to 1.11.0 only because litertlm 0.14.0 needed close$default on SendChannel.
+    // Kept because other code in this module now uses it directly; drop it if that changes.
     implementation(libs.kotlinx.coroutines.android)
 
     implementation(project(":library:downloadservice"))

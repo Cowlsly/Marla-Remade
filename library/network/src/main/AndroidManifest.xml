@@ -1,4 +1,12 @@
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <!--
+      ConnectivityMonitor calls registerDefaultNetworkCallback, activeNetwork and
+      getNetworkCapabilities, none of which work without this. It is a normal (install-time)
+      permission: no runtime prompt, no prominence in the Play listing. Declared here rather
+      than in each consumer because the requirement belongs to this library's code.
+    -->
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+
     <application android:networkSecurityConfig="@xml/library_network_security_config" />
 </manifest>

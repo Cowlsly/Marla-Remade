@@ -189,6 +189,9 @@ fn push_feature(
         parts_offset,
         part_count,
         transit_color: 0,
+        transit_ordinal: 0,
+        transit_lanes: 0,
+        transit_taper: 0,
     });
 }
 

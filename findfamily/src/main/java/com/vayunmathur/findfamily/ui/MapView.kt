@@ -5,7 +5,6 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
-import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.shape.CircleShape
 import com.vayunmathur.library.ui.MaterialTheme
@@ -15,7 +14,6 @@ import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
@@ -49,15 +47,12 @@ import com.vayunmathur.findfamily.util.FindFamilyViewModel
 import com.vayunmathur.library.ui.invisibleClickable
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
-import com.vayunmathur.library.map.CameraPosition
 import com.vayunmathur.library.map.CameraState
 import com.vayunmathur.library.map.GeoPoint
 import com.vayunmathur.library.map.VectorMap
 import kotlin.io.encoding.Base64
 import kotlin.math.abs
 import kotlin.math.cos
-
-val camera = CameraState(CameraPosition())
 
 data class SelectedUser(val user: User, val isShowingPresent: Boolean, val historicalPosition: GeoPoint?)
 data class SelectedWaypoint(val waypoint: Waypoint, val range: Double, val onMoveWaypoint: (Coord) -> Unit)
@@ -67,6 +62,7 @@ private fun GeoPoint.toCoord() = Coord(latitude, longitude)
 @Composable
 fun MapView(
     viewModel: FindFamilyViewModel,
+    camera: CameraState,
     onUserClick: (Long) -> Unit,
     onMapClick: () -> Unit,
     selectedUser: SelectedUser? = null,
@@ -105,23 +101,27 @@ fun MapView(
                 cameraState = camera,
                 zoomRange = 0f..20f,
                 onMapClick = { onMapClick() },
-            )
-
-            if (initialized) {
-                // The coordinate at the screen centre — i.e. the live position of
-                // the waypoint currently being placed/dragged. Computed outside the
-                // Canvas draw scope so we never invoke callbacks while drawing.
-                val draggedCoord = remember(camera.position, sizeInDp) {
-                    camera.projection?.positionFromScreenLocation(sizeInDp)?.toCoord()
-                }
-                // Report the dragged position back to the parent outside of drawing.
-                if (selectedWaypoint != null && draggedCoord != null) {
-                    LaunchedEffect(draggedCoord) {
-                        selectedWaypoint.onMoveWaypoint(draggedCoord)
+            ) {
+                if (initialized) {
+                    // The coordinate at the screen centre — i.e. the live position of
+                    // the waypoint currently being placed/dragged. Computed outside the
+                    // Canvas draw scope so we never invoke callbacks while drawing.
+                    val draggedCoord = remember(camera.position, sizeInDp) {
+                        camera.projection?.positionFromScreenLocation(sizeInDp)?.toCoord()
                     }
-                }
-                key(camera.position, sizeInDp) {
+                    // Report the dragged position back to the parent outside of drawing.
+                    if (selectedWaypoint != null && draggedCoord != null) {
+                        LaunchedEffect(draggedCoord) {
+                            selectedWaypoint.onMoveWaypoint(draggedCoord)
+                        }
+                    }
                     Canvas(Modifier.fillMaxSize()) {
+                        // Read inside the draw lambda, so a camera move re-runs drawing only.
+                        // This used to be three `camera.projection!!` reads wrapped in a
+                        // `key(camera.position, sizeInDp)` that threw the whole subtree away
+                        // every frame of a pan — and crashed outright in the frames before
+                        // the viewport was measured.
+                        val proj = projection ?: return@Canvas
                         val allWaypoints =
                             if (selectedWaypoint?.waypoint?.id == 0L) (waypoints + selectedWaypoint.waypoint) else waypoints
                         for (waypoint in allWaypoints) {
@@ -130,13 +130,12 @@ fun MapView(
                             val coord = if (selectedWaypoint?.waypoint == waypoint) {
                                 draggedCoord ?: waypoint.coord
                             } else waypoint.coord
-                            val center =
-                                camera.projection!!.screenLocationFromPosition(coord.toGeoPoint())
+                            val center = proj.screenLocationFromPosition(coord.toGeoPoint())
                             if (center !in size.toDpSize()) continue
                             val circumferenceAtLatitude =
                                 40_075_000 * cos(radians(waypoint.coord.lat))
                             val radiusInDegrees = 360 * radiusMeters / circumferenceAtLatitude
-                            val edgePoint = camera.projection!!.screenLocationFromPosition(
+                            val edgePoint = proj.screenLocationFromPosition(
                                 GeoPoint(coord.lon + radiusInDegrees, coord.lat)
                             )
                             val radiusPx = abs((center.x - edgePoint.x).toPx())
@@ -148,35 +147,23 @@ fun MapView(
                             )
                         }
                     }
-                }
-                for (user in users) {
-                    if (selectedUser != null && user.id != selectedUser.user.id) continue
-                    val position = userPositions[user.id]?.coord?.toGeoPoint() ?: continue
-                    val center =
-                        camera.projection!!.screenLocationFromPosition(position) - DpOffset(
-                            35.dp,
-                            35.dp
-                        )
-
-                    Box(Modifier.offset(center.x, center.y)) {
-                        UserPicture(
-                            user,
-                            70.dp,
-                            selectedUser != null && !selectedUser.isShowingPresent
-                        ) {
-                            onUserClick(user.id)
+                    for (user in users) {
+                        if (selectedUser != null && user.id != selectedUser.user.id) continue
+                        val position = userPositions[user.id]?.coord?.toGeoPoint() ?: continue
+                        MapMarker(position) {
+                            UserPicture(
+                                user,
+                                70.dp,
+                                selectedUser != null && !selectedUser.isShowingPresent
+                            ) {
+                                onUserClick(user.id)
+                            }
                         }
                     }
-                }
-                if (selectedUser != null && !selectedUser.isShowingPresent && selectedUser.historicalPosition != null) {
-                    val center =
-                        camera.projection!!.screenLocationFromPosition(selectedUser.historicalPosition) - DpOffset(
-                            35.dp,
-                            35.dp
-                        )
-
-                    Box(Modifier.offset(center.x, center.y)) {
-                        UserPicture(selectedUser.user, 70.dp)
+                    if (selectedUser != null && !selectedUser.isShowingPresent && selectedUser.historicalPosition != null) {
+                        MapMarker(selectedUser.historicalPosition) {
+                            UserPicture(selectedUser.user, 70.dp)
+                        }
                     }
                 }
             }

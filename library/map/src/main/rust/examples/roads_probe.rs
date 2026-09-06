@@ -25,6 +25,7 @@ fn main() {
     let reader = FileRangeReader::open(&path).expect("open archive");
     let mut archive = MamapsArchive::open(reader).expect("parse archive");
     println!("archive z{}..{}", archive.header.min_zoom, archive.header.max_zoom);
+    let schema = archive.dictionary.clone();
 
     let Some(body) = archive.tile(z, x, y).expect("read tile") else {
         println!("{z}/{x}/{y} is absent");
@@ -34,7 +35,6 @@ fn main() {
         println!("{z}/{x}/{y} has no roads layer");
         return;
     };
-    let schema = dict::schema();
 
     // (kind, detail) -> (feature count, total tile-local length)
     let mut totals: std::collections::BTreeMap<(String, String), (u32, f64)> = Default::default();
@@ -47,8 +47,7 @@ fn main() {
         };
         let mut length = 0.0f64;
         for part in layer.parts_of(feature) {
-            let points = layer.points(part);
-            for pair in points.windows(2) {
+            for pair in layer.points(part).windows(2) {
                 let dx = (pair[1].0 - pair[0].0) as f64;
                 let dy = (pair[1].1 - pair[0].1) as f64;
                 length += (dx * dx + dy * dy).sqrt();

@@ -52,6 +52,7 @@ topological walk would emit an order no one could read. See [`ARCHITECTURES`].
     ./scripts/ml/maml_convert.py model.onnx --graph u2netp -o out.maml
     ./scripts/ml/maml_convert.py model.onnx --graph u2netp --print-layers
     ./scripts/ml/maml_convert.py model.safetensors --graph small100 -o out.maml
+    ./scripts/ml/maml_convert.py music_detector.sound_model_2 --graph nnfp -o nnfp.maml
 """
 
 import argparse
@@ -102,6 +103,17 @@ DTYPE_F16 = 0
 # parameters, 660 MB at fp16 against 330 MB here, and the ncnn build of the same model shipped
 # 1.14 GB. Everything else stays fp16, where the saving would not pay for the loss.
 DTYPE_I8 = 1
+# Signed 4-bit, two per byte along the contraction axis, with a **rank-2** per-block scale in the
+# fp16 tensor that follows it: `(out_channels, ceil(taps / I4_BLOCK))`.
+#
+# Where int8 halves a download, this quarters it, and it is the only way a model whose weights
+# dominate at several gigabytes becomes shippable at all. It costs a scale table 32 times larger
+# than int8's, which at these widths is well under a percent of the tensor it scales.
+#
+# A tensor's byte length is `ceil(len / 2)`, not `len * stride` - the one dtype whose stride is
+# fractional. Reader and writer must agree on that rounding or an odd-length tensor's last
+# element reads as whatever follows it.
+DTYPE_I4 = 2
 # 16 bytes is the largest scalar/vector alignment the shaders index with, and a
 # multiple of 2, so an aligned tensor offset is also an aligned fp16 index.
 ALIGNMENT = 16
@@ -112,6 +124,18 @@ SPEC = __doc__
 # reverted to fp16 at 0.99212 while its sampler shipped at 0.99997, so this is set where a layer
 # that quantises this badly is worth looking at rather than shipping.
 MIN_INT8_COSINE = 0.999
+
+# The same floor for int4, which cannot meet the int8 one and should not be asked to.
+#
+# Four bits give seven positive codes against 127, so the quantisation error is roughly eighteen
+# times larger even with a scale per block. Measured on random gaussian weights at
+# `I4_BLOCK` 32, `quantise_per_block` reconstructs at about 0.9956 - comfortably below
+# `MIN_INT8_COSINE` and not a defect. Holding int4 to the int8 gate would either reject every
+# tensor or, worse, invite someone to lower the int8 gate to match.
+#
+# Set where a tensor that quantises *unusually* badly for four bits stands out: real weights are
+# not gaussian and the projections this is meant for measure better than the synthetic case.
+MIN_INT4_COSINE = 0.99
 
 # Graphs the generic ONNX collector reads as int8. See [`int8_eligible`] for what that
 # excludes within a graph, and `scripts/ml/maml_survey.py` for how the list was chosen.
@@ -155,6 +179,27 @@ GRAPHS = {
     # Maia3-5M human-move prediction, replacing Stockfish in `:games:chess`; see
     # [`CHECKPOINTS`]. Next free id after NLLB's 18, with 7..10 and 15 staying retired.
     "maia": 19,
+    # Gemma 4 E2B instruction-tuned, the text decoder, from `onnx-community/gemma-4-E2B-it-ONNX`.
+    # Next free id after Maia's 19. **Not 19**: the port plan originally claimed that number,
+    # which Maia already holds, and a collision would make a file parse as the wrong net.
+    "gemma4_text": 20,
+    # Gemma 4's two embedding tables, read on the host rather than by any shader. Its own file
+    # because a decode step needs one row of each and nothing binds them.
+    "gemma4_embed": 21,
+    # The vision tower, which restored image input after litertlm was removed.
+    "gemma4_vision": 22,
+    # The Now Playing audio fingerprinter, 415 ms of log-mel in and a 64-d embedding out.
+    # Next free id after Gemma 4's vision tower at 22, with 7..10 and 15 staying retired.
+    # `weights.rs` has `graph::NNFP` at the same number.
+    #
+    # The first graph read from a **TFLite** flatbuffer rather than ONNX or a checkpoint;
+    # see [`TFLITE`] for why not via ONNX.
+    "nnfp": 23,
+    # The audio tower, 12 conformer layers over log-mel frames. Next free id after the
+    # fingerprinter at 23, with 7..10 and 15 staying retired. `weights.rs` has
+    # `graph::GEMMA4_AUDIO` at the same number. Its own file at ~165 MB: bigger than the vision
+    # tower, and a device that never sends audio should not download it.
+    "gemma4_audio": 24,
 }
 
 # SHA-256 over the ordered layer table (see `layer_table_digest`). Regenerate with
@@ -178,6 +223,21 @@ EXPECTED_DIGEST = {
     "nllb600": "8b5dd248896b11bf1bb0feae6818d4b00b8ad176549df48bdc07f7b970d3480a",
     # Pinned with --print-digest after the first successful conversion; see fetch_maia.py.
     "maia": "50da3ca5ebb9a1b54338c43b2a4b798df25279ac6f74fa19b64146b3964b61aa",
+    # Gemma 4's vision tower. Mixed precision: int4 through the sixteen layers, fp16 for the
+    # patch and output projections at the ends. See `collect_gemma4_vision.dense`.
+    "gemma4_vision": "a942080007f7ca9d8fa38a0812a4f858ff1c31afb7c4e94d105428da5fa56f19",
+    # `music_detector.sound_model_2`, pinned with --print-digest against the file recovered
+    # from the APK (SHA-256 7A86281A6DEED410..., 216,320 bytes). The key records the strides,
+    # padding and depth multiplier the export stores, so a re-export that resolved the
+    # VALID-versus-SAME contradiction `nets::nnfp` works around would change this and be
+    # looked at rather than silently disagreeing with the hardcoded pass.
+    "nnfp": "c374708b973b63dad8fd37e4a25ddf584217752a747655e4fbd87899823b3f1c",
+    # Gemma 4's audio tower, pinned with --print-digest after the .maml was checked against
+    # `nets::gemma4_audio`'s `declare_shared` and `declare_layer` shape for shape over all 747
+    # tensors. Mixed precision like the vision tower: int4 through the twelve layers, fp16 for
+    # the two subsampling convolutions, the relative tables, the norms, the clips and the three
+    # end projections. See `collect_gemma4_audio.dense`.
+    "gemma4_audio": "f3c0be0ca09c5ed6882766eabaa6ebb147dc09cd45ab6d881dec12da41b9783d",
 }
 
 # Graphs that are one **module** of a larger export, keyed by the node-name prefix that
@@ -303,6 +363,80 @@ ARCHITECTURES = {
         "vocab": 49_408,
         "context": 77,
         "projection": 512,
+    },
+    "gemma4_text": {
+        # Read off `config.json`'s `text_config`, then checked against the export's own
+        # initializer shapes by `check_architecture`. Transcribed rather than derived: a
+        # constant that disagrees with the file must fail loudly, not be quietly adopted.
+        "d_model": 1536,
+        "heads": 8,
+        "kv_heads": 1,
+        "head_dim": 256,
+        "global_head_dim": 512,
+        "layers": 35,
+        # Layers 0..15 own a KV cache; 15..35 have no k/v projections and a double-wide MLP.
+        "owns_cache_layers": 15,
+        "ffn": 6144,
+        "ffn_wide": 12288,
+        "per_layer": 256,
+        "vocab": 262_144,
+        "head_splits": 4,
+        # Positions the runtime offers, and so the rows the rotary tables are cut to.
+        # `max_position_embeddings` is 131072, which no arena could hold. Mirrors
+        # `nets::gemma4::MAX_CONTEXT`.
+        "max_context": 16384,
+    },
+    "gemma4_embed": {
+        "d_model": 1536,
+        "per_layer": 256,
+        "layers": 35,
+        "vocab": 262_144,
+        # The two constants `embed_tokens.onnx` multiplies its gathers by, folded into the
+        # weights here. 39.25 is `sqrt(1536)` as fp16 rounds it; 16.0 is `sqrt(256)` exactly.
+        "embed_scale": 39.25,
+        "per_layer_scale": 16.0,
+    },
+    "gemma4_vision": {
+        # Read off config.json's vision_config, then checked against the export by
+        # check_architecture. Mirrors nets::gemma4_vision's constants.
+        "d_model": 768,
+        "heads": 12,
+        "head_dim": 64,
+        "ffn": 3072,
+        "layers": 16,
+        "patch": 16,
+        "out_dim": 1536,
+        "positions": 10240,
+    },
+    "gemma4_audio": {
+        # Read off config.json's audio_config and then measured against the export by
+        # collect_gemma4_audio, which asserts every count this walk depends on. Mirrors
+        # nets::gemma4_audio's constants.
+        "d_model": 1024,
+        "heads": 8,
+        "head_dim": 128,
+        "ffn": 4096,
+        "layers": 12,
+        "out_dim": 1536,
+        # Output channels of the two subsampling convolutions, and the mel bins surviving their
+        # two stride-2 halvings. `mel_subsampled * sscp_channels[1]` is d_model, which is why
+        # the input projection is square - arithmetic, not identity.
+        "sscp_channels": [128, 32],
+        "mel_subsampled": 32,
+        # Columns in a layer's relative-position table. NOT the attended span, which is 12: the
+        # thirteenth column exists because the export's _rel_shift skew consumes one, and the
+        # mask's strict `dist < 12` means it is computed and thrown away.
+        "rel_offsets": 13,
+        # Constants nets::gemma4_audio hardcodes, asserted against the graph's folded scalars so
+        # that a changed one fails here rather than becoming a wrong forward pass. The query
+        # scale is `(128 ** -0.5) / ln 2` and the key scale `ln(1 + e) / ln 2`; the `/ ln 2` in
+        # both is the part nobody would guess.
+        "q_scale": 0.127517431974411,
+        "k_scale": 1.8946361541748047,
+        "logit_cap": 50.0,
+        "residual_weight": 0.5,
+        # nets::gemma4_audio::TENSORS. 15 shared plus 12 layers of 61.
+        "tensors": 747,
     },
 }
 
@@ -862,7 +996,15 @@ def check_graph(model, graph_id_name):
     counts = {}
     for node in nodes:
         counts[node.op_type] = counts.get(node.op_type, 0) + 1
-    expected = EXPECTED_OPS[graph_id_name]
+    expected = EXPECTED_OPS.get(graph_id_name)
+    if expected is None:
+        # A graph checked by structure rather than by op census. The Gemma 4 exports are the
+        # ones: a decoder whose op counts move with `num_hidden_layers` and two encoders whose
+        # initializers are anonymised, so `check_architecture` and the collectors' own node
+        # numbering carry the check instead. See `ARCHITECTURES`.
+        if graph_id_name not in ARCHITECTURES:
+            raise SystemExit(f"{graph_id_name} has neither an op census nor an architecture")
+        return
     if counts != expected:
         only_got = {k: v for k, v in counts.items() if expected.get(k) != v}
         only_want = {k: v for k, v in expected.items() if counts.get(k) != v}
@@ -1032,18 +1174,48 @@ class Fidelity:
         self.seen.append((cosine, name))
         return kernel, scale
 
-    def report(self):
-        """Print the worst three, and refuse the file if any is under [`MIN_INT8_COSINE`]."""
+    def quantise4(self, name, weight):
+        """`(Int4, scale)` for `weight`, recording how well the pair reproduces it.
+
+        The int4 counterpart of [`Fidelity.quantise`]. The reconstruction differs: a block's
+        scale covers `I4_BLOCK` taps rather than a whole row, so the cosine is measured against
+        the block-wise product a shader actually computes and not against a row-wise one, which
+        would flatter it.
+        """
+        codes, scale = quantise_per_block(weight)
+        flat = np.ascontiguousarray(weight, dtype=np.float32).reshape(weight.shape[0], -1)
+        rows, taps = flat.shape
+        blocks = scale.shape[1]
+        # Expand the block scale back over the taps it covers, dropping the padding of the last
+        # short block, so the comparison is element for element.
+        wide = np.repeat(scale, I4_BLOCK, axis=1)[:, :taps]
+        back = codes.astype(np.float32).reshape(rows, taps) * wide
+        cosine = float(
+            np.dot(flat.ravel(), back.ravel())
+            / max(np.linalg.norm(flat) * np.linalg.norm(back), 1e-30)
+        )
+        self.seen.append((cosine, name))
+        del blocks
+        return Int4(codes), scale
+
+    def report(self, floor=None):
+        """Print the worst three, and refuse the file if any is under the floor.
+
+        `floor` defaults to [`MIN_INT8_COSINE`]; an int4 collector passes
+        [`MIN_INT4_COSINE`], which is looser because four bits cannot meet the int8 bar and
+        should not be asked to. See that constant for the measured numbers.
+        """
+        floor = MIN_INT8_COSINE if floor is None else floor
         self.seen.sort()
         for cosine, name in self.seen[:3]:
-            if cosine < MIN_INT8_COSINE:
+            if cosine < floor:
                 raise SystemExit(
-                    f"{name}: int8 * scale correlates {cosine:.6f} with the fp32 weight, under"
-                    f" {MIN_INT8_COSINE}.\nQuantising this layer costs too much; exclude it and"
+                    f"{name}: the quantised weight correlates {cosine:.6f} with the fp32 one,"
+                    f" under {floor}.\nQuantising this layer costs too much; exclude it and"
                     " store it fp16 instead."
                 )
         worst = ", ".join(f"{name} {cosine:.6f}" for cosine, name in self.seen[:3])
-        print(f"int8 fidelity over {len(self.seen)} tensors, worst three: {worst}")
+        print(f"fidelity over {len(self.seen)} tensors, worst three: {worst}")
 
 
 def collect_small100(get, spec):
@@ -1340,6 +1512,1024 @@ def nllb_inventory(spec):
             want[f"{at}.fc2.weight"] = [d, ffn]
             want[f"{at}.fc2.bias"] = [d]
     return want
+
+
+def collect_gemma4(model, spec):
+    """Gemma 4's decoder export as the ordered tensor table `nets::gemma4` indexes.
+
+    THE TENSOR ORDER (the contract with the Rust net - positional indexing, no names):
+
+        1. the logits head, as `head_splits` disjoint class ranges of `vocab / head_splits`.
+           Each range emits 3 tensors: int4 kernel `[rows, 1536, 1, 1]`, fp16 per-block scale
+           `[rows, blocks]`, synthesised zero bias `[rows]`. Tensors 0..11.
+        2. the shared per-layer projection (3 tensors) and its norm (1). Tensors 12..15.
+        3. the final norm (1). Tensor 16.
+        4. each layer 0..34, in the order `declare_layer` states. A layer that owns a cache
+           contributes 32 tensors; one that does not contributes 25.
+
+    # Two things the converter does that the export does not
+
+    * **Transposes** every projection. The export holds `MatMul` weights as `[in, out]`; every
+      convolution in this runtime takes an ONNX `Conv` kernel, `[out, in, kh, kw]`.
+    * **Synthesises a zero bias** for each. Gemma 4 has none - `attention_bias` is false - but a
+      convolution here always takes one, and a zero bias is `out * 2` bytes against a kernel of
+      `out * 1536`.
+
+    # And two it deliberately does not
+
+    * `layer_scalar` is emitted **unchanged**, not folded. Folding it into
+      `per_layer_projection`'s weights would be exact and would save an op, but the per-layer
+      branch is the one part of the forward pass with no reference run behind it; folding a
+      constant into a path whose shape is still unconfirmed makes the eventual comparison harder,
+      not easier. `nets::gemma4` names it as a host tensor meanwhile.
+    * The **scale folded into `q_norm`** stays folded. The export applies no `1/sqrt(head_dim)`
+      between the query projection and the score matmul, and `nets::gemma4` passes a scale of one
+      to match - see `Q_NORM_CARRIES_SCALE`. Dividing it out here would need the Rust to stop
+      doing that in the same commit.
+    """
+    graph = model.graph
+    inits = {i.name: i for i in graph.initializer}
+
+    def get(name):
+        found = inits.get(name)
+        if found is None:
+            raise SystemExit(f"the export has no tensor named {name}")
+        return numpy_helper.to_array(found).astype(np.float32)
+
+    layers = []
+    tensors = []
+    fidelity = Fidelity()
+
+    def emit(op, name, key, added):
+        layers.append(Layer(len(layers), op, name, key, len(tensors) - added, added))
+
+    def projection(name, weight=None):
+        """A `[in, out]` MatMul as an int4 `[out, in, 1, 1]` kernel, its scale, and a zero bias."""
+        matrix = get(f"{name}.weight") if weight is None else weight
+        inputs, outputs = matrix.shape
+        kernel = np.ascontiguousarray(matrix.T).reshape(outputs, inputs, 1, 1)
+        codes, scale = fidelity.quantise4(name, kernel)
+        bias = np.zeros(outputs, dtype=np.float32)
+        tensors.extend([codes, scale, bias])
+        emit(
+            "Linear4",
+            name,
+            f"Linear4 w={[outputs, inputs, 1, 1]} scale={list(scale.shape)} "
+            f"b={[outputs]} zp=0 dtype=int4 block={I4_BLOCK}",
+            3,
+        )
+
+    def projection8(name):
+        """The same at **eight** bits, whose scale is rank 1.
+
+        For the two per-layer-input projections only. They are the smallest weights in a layer
+        and the only ones that miss `MIN_INT4_COSINE`: `per_layer_input_gate` on layer 21
+        reconstructs at 0.9870 at four bits, while every large projection clears the floor.
+        Quantising them further would save about a thousandth of the file for the worst error in
+        it. `nets::gemma4::projection8` states the same split on the reader's side.
+        """
+        matrix = get(f"{name}.weight")
+        inputs, outputs = matrix.shape
+        kernel = np.ascontiguousarray(matrix.T).reshape(outputs, inputs, 1, 1)
+        codes, scale = fidelity.quantise(name, kernel)
+        bias = np.zeros(outputs, dtype=np.float32)
+        tensors.extend([codes, scale, bias])
+        emit(
+            "Linear8",
+            name,
+            f"Linear8 w={[outputs, inputs, 1, 1]} scale={[outputs]} b={[outputs]} "
+            "zp=0 dtype=int8",
+            3,
+        )
+
+    def vector(name, expect):
+        values = get(name)
+        if list(values.shape) != [expect]:
+            raise SystemExit(f"{name} is {list(values.shape)}, not [{expect}]")
+        tensors.append(values)
+        emit("RmsNorm", name, f"RmsNorm g={[expect]}", 1)
+
+    d = spec["d_model"]
+    per_layer, layer_count = spec["per_layer"], spec["layers"]
+    splits, vocab = spec["head_splits"], spec["vocab"]
+
+    # 1. The logits head, split so no one tensor exceeds a descriptor's guaranteed reach.
+    head = get("lm_head.MatMul.weight")
+    rows = vocab // splits
+    if rows * splits != vocab:
+        raise SystemExit(f"{vocab} classes do not split into {splits}")
+    for part in range(splits):
+        lo = part * rows
+        projection(f"lm_head[{lo}:{lo + rows}]", weight=head[:, lo : lo + rows])
+
+    # 2. The shared per-layer projection and its norm.
+    projection("model.per_layer_projection.MatMul")
+    vector("model.per_layer_projection_norm.weight", per_layer)
+
+    # 3. The final norm. The export files it under a phantom 36th layer rather than beside the
+    # other shared tensors, so it is read by that name and emitted here, where the net wants it.
+    vector("model.layers.35.final_norm_layernorm.weight", d)
+
+    # 4. The two rotary tables, truncated and interleaved.
+    #
+    # The export ships `cos_cache_*` and `sin_cache_*` at 131072 rows, which is
+    # `max_position_embeddings` and two orders of magnitude past any context this runtime offers:
+    # the global pair alone would be 134 MB. They are cut to `max_context` and interleaved into
+    # one table per layer type, so a position's angles are one contiguous row in the layout
+    # `Builder::rotary` reads - cosines first, then sines.
+    context = spec["max_context"]
+    for kind, dim in (("local", spec["head_dim"]), ("global", spec["global_head_dim"])):
+        cos = get(f"cos_cache_{kind}")[:context]
+        sin = get(f"sin_cache_{kind}")[:context]
+        if cos.shape != (context, dim // 2) or sin.shape != cos.shape:
+            raise SystemExit(
+                f"the {kind} rotary tables are {cos.shape} and {sin.shape}, not "
+                f"({context}, {dim // 2}) - half a head is the rotary width"
+            )
+        table = np.concatenate([cos, sin], axis=1).astype(np.float32)
+        tensors.append(table)
+        emit("Rotary", f"{kind}_rotary_table", f"Rotary t={list(table.shape)}", 1)
+
+    # 4. The layers.
+    for index in range(layer_count):
+        at = f"model.layers.{index}"
+        full = index % 5 == 4
+        owns = index < spec["owns_cache_layers"]
+        dim = spec["global_head_dim"] if full else spec["head_dim"]
+        vector(f"{at}.input_layernorm.weight", d)
+        vector(f"{at}.attn.q_norm.layernorm.weight", dim)
+        projection(f"{at}.attn.q_proj.MatMul")
+        if owns:
+            vector(f"{at}.attn.k_norm.layernorm.weight", dim)
+            projection(f"{at}.attn.k_proj.MatMul")
+            projection(f"{at}.attn.v_proj.MatMul")
+            # `v_norm`'s gamma is all ones and the export names it with slashes rather than dots,
+            # so it is read by its node path. Emitted like any other norm rather than synthesised
+            # here, so the file stays self-describing and a future export that trains it needs no
+            # converter change.
+            vector(f"/model/layers.{index}/attn/v_norm/ones_weight", dim)
+        projection(f"{at}.attn.o_proj.MatMul")
+        vector(f"{at}.post_attention_layernorm.weight", d)
+        vector(f"{at}.pre_feedforward_layernorm.weight", d)
+        projection(f"{at}.mlp.gate_up_proj.MatMul")
+        projection(f"{at}.mlp.down_proj.MatMul")
+        vector(f"{at}.post_feedforward_layernorm.weight", d)
+        projection8(f"{at}.per_layer.per_layer_input_gate.MatMul")
+        projection8(f"{at}.per_layer.per_layer_projection.MatMul")
+        vector(f"{at}.post_per_layer_input_norm.weight", d)
+        scalar = get(f"{at}.layer_scalar")
+        tensors.append(scalar.reshape(1))
+        emit("Scalar", f"{at}.layer_scalar", "Scalar g=[1]", 1)
+
+    fidelity.report(MIN_INT4_COSINE)
+    return layers, tensors
+
+
+def collect_gemma4_vision(model, spec):
+    """Gemma 4's vision tower as the ordered table `nets::gemma4_vision` indexes.
+
+    THE TENSOR ORDER (the contract with the Rust net - positional indexing, no names):
+
+        0..1    the patch projection, `[768, 768]` in the export, as an fp16 kernel and bias
+        2       the trailing norm
+        3..4    the output projection to the decoder's 1536, likewise fp16
+        5..10   the two `[10240, 768]` position tables, as int4 triples
+        then each layer 0..15, in the order `declare_layer` reads:
+            pre-attention norm, clip,
+            q/k/v (three triples), clip x3,
+            q/k/v norms,
+            clip, o_proj, clip,
+            post-attention norm, pre-feed-forward norm, clip,
+            gate, up, clip x3, down, clip,
+            post-feed-forward norm
+
+    # The export's initializers are anonymised, so this walks the graph
+
+    Unlike the decoder, whose tensors are named `model.layers.7.attn.q_proj.MatMul.weight`, the
+    vision export calls them `_to_copy_104`. Matching by name is therefore impossible and the
+    weights are taken from the **nodes** instead.
+
+    The anchor is that the nodes themselves are numbered in topological order:
+    `node_linear`, `node_linear_1` .. `node_linear_113`, and
+    `_fused_rms_norm/node_mean` .. `node_mean_112`. Seven linears and seven norms a layer, over
+    sixteen layers, plus a patch projection and an output projection at the ends - which is
+    checked below rather than assumed, because a renumbering upstream would otherwise shift every
+    tensor silently.
+
+    Clips are taken by graph position between one layer's first norm and the next's: eleven a
+    layer, and one before the first layer for the patch projection. Also checked.
+    """
+    g = model.graph
+    inits = {i.name: i for i in g.initializer}
+    position = {n.name: at for at, n in enumerate(g.node)}
+
+    def numbered(node, prefix):
+        """The index in `prefix`, `prefix_1`, `prefix_2`, ... or None."""
+        name = (node.name or "").replace("_fused_rms_norm/node_mean", "node_mean")
+        if not name.startswith(prefix):
+            return None
+        tail = name[len(prefix):]
+        if tail == "":
+            return 0
+        return int(tail[1:]) if tail.startswith("_") and tail[1:].isdigit() else None
+
+    linears, norms, clips = {}, {}, []
+    # A `Clip`'s bounds can be an initializer or a folded `Constant` node, and the vision export
+    # uses both - the patch projection's is a Constant while every layer's is an initializer.
+    constants = {}
+    for node in g.node:
+        if node.op_type == "Constant":
+            for attribute in node.attribute:
+                if attribute.name == "value":
+                    constants[node.output[0]] = attribute.t
+
+    def scalar(name):
+        held = inits.get(name) or constants.get(name)
+        if held is None:
+            return None
+        flat = numpy_helper.to_array(held).reshape(-1)
+        return float(flat[0]) if flat.size else None
+
+    for node in g.node:
+        if node.op_type in ("MatMul", "Gemm"):
+            index = numbered(node, "node_linear")
+            if index is not None:
+                held = [inits[i] for i in node.input if i in inits]
+                if held:
+                    linears[index] = held[0]
+        elif node.op_type == "SimplifiedLayerNormalization":
+            index = numbered(node, "node_mean")
+            if index is not None:
+                held = [inits[i] for i in node.input if i in inits]
+                if held:
+                    norms[index] = held[0]
+        elif node.op_type == "Clip":
+            # `Clip(x, min, max)` with either bound optional. The patch projection's is
+            # one-sided; every layer's has both. An absent bound becomes a value fp16 cannot
+            # reach, so the pair is always two numbers and the shader needs no special case.
+            low = scalar(node.input[1]) if len(node.input) > 1 else None
+            high = scalar(node.input[2]) if len(node.input) > 2 else None
+            if low is None and high is None:
+                continue
+            clips.append((
+                position[node.name],
+                [-FP16_LIMIT if low is None else low, FP16_LIMIT if high is None else high],
+            ))
+
+    layers_count = spec["layers"]
+    want_linears = layers_count * 7 + 2
+    want_norms = layers_count * 7 + 1
+    if len(linears) != want_linears or len(norms) != want_norms:
+        raise SystemExit(
+            f"the vision export has {len(linears)} linears and {len(norms)} norms, not "
+            f"{want_linears} and {want_norms} - the node numbering this relies on has changed"
+        )
+
+    clips.sort()
+    starts = [position_of_norm(g, position, 7 * i) for i in range(layers_count)]
+    starts.append(position_of_norm(g, position, layers_count * 7))
+    head_clips = [c for c in clips if c[0] < starts[0]]
+    if len(head_clips) != 1:
+        raise SystemExit(f"{len(head_clips)} clips before the first layer, not 1")
+    per_layer_clips = []
+    for i in range(layers_count):
+        got = [c for c in clips if starts[i] < c[0] < starts[i + 1]]
+        if len(got) != 11:
+            raise SystemExit(f"vision layer {i} has {len(got)} clips, not 11")
+        per_layer_clips.append([bounds for _, bounds in got])
+
+    layers, tensors = [], []
+    fidelity = Fidelity()
+
+    def emit(op, name, key, added):
+        layers.append(Layer(len(layers), op, name, key, len(tensors) - added, added))
+
+    def array(tensor):
+        return numpy_helper.to_array(tensor).astype(np.float32)
+
+    def dense(name, tensor, transposed=False):
+        """A linear's weight as an **fp16** `[out, in, 1, 1]` kernel and a zero bias.
+
+        `transposed` says the weight is **already** `[out, in]`, which a `Gemm` with `transB` is
+        and a `MatMul` is not. The tower's output projection is the one `Gemm` here, so the two
+        conventions meet exactly once - and transposing it anyway would be a `[768, 1536]` kernel
+        that is the right size and the wrong matrix.
+
+        # Why these two are not quantised
+
+        Sixteen layers of int4 turn a per-layer cosine of 0.9999 into 0.946 at the output, and a
+        disproportionate share of that enters at the patch projection - 0.9952 before layer 0 has
+        run - and leaves at the output projection, which takes the pooled state from 0.9747 to
+        0.9481. Neither has anything downstream to average it away. Together they are 1.7 M
+        parameters against the tower's 300 M, so fp16 here costs about 2.7 MB.
+
+        See `nets::gemma4_vision::PATCH_PROJECTION`.
+        """
+        matrix = array(tensor)
+        if transposed:
+            outputs, inputs = matrix.shape
+            kernel = np.ascontiguousarray(matrix).reshape(outputs, inputs, 1, 1)
+        else:
+            inputs, outputs = matrix.shape
+            kernel = np.ascontiguousarray(matrix.T).reshape(outputs, inputs, 1, 1)
+        tensors.extend([kernel, np.zeros(outputs, dtype=np.float32)])
+        emit("Linear", name, f"Linear w={[outputs, inputs, 1, 1]} dtype=fp16", 2)
+
+    def projection(name, tensor, transposed=False):
+        """A linear's weight as an int4 `[out, in, 1, 1]` kernel, its scale, and a zero bias.
+
+        Every projection inside a layer. The two at the ends go through `dense` instead.
+        """
+        matrix = array(tensor)
+        if transposed:
+            outputs, inputs = matrix.shape
+            kernel = np.ascontiguousarray(matrix).reshape(outputs, inputs, 1, 1)
+        else:
+            inputs, outputs = matrix.shape
+            kernel = np.ascontiguousarray(matrix.T).reshape(outputs, inputs, 1, 1)
+        codes, scale = fidelity.quantise4(name, kernel)
+        tensors.extend([codes, scale, np.zeros(outputs, dtype=np.float32)])
+        emit("Linear4", name, f"Linear4 w={[outputs, inputs, 1, 1]} dtype=int4", 3)
+
+    def table(name, tensor):
+        """A `[rows, width]` gather table, **not** transposed.
+
+        Unlike a projection, nothing multiplies by this - `Reader::int4_row` reads row `position`
+        - so transposing it would make every gather stride across the file instead of reading one
+        contiguous span. The same reason `collect_gemma4_embed` leaves the embedding alone.
+        """
+        values = array(tensor)
+        rows, width = values.shape
+        codes, scale = fidelity.quantise4(name, values.reshape(rows, width, 1, 1))
+        tensors.extend([codes, scale, np.zeros(rows, dtype=np.float32)])
+        emit("Table4", name, f"Table4 w={[rows, width, 1, 1]} dtype=int4", 3)
+
+    def vector(name, tensor, expect):
+        values = array(tensor)
+        if list(values.shape) != [expect]:
+            raise SystemExit(f"{name} is {list(values.shape)}, not [{expect}]")
+        tensors.append(values)
+        emit("RmsNorm", name, f"RmsNorm g={[expect]}", 1)
+
+    def clip(name, bounds):
+        low, high = bounds
+        if not low < high:
+            raise SystemExit(f"{name} clips to [{low}, {high}], which is empty")
+        tensors.append(np.array([low, high], dtype=np.float32))
+        emit("Clip", name, f"Clip [{low}, {high}]", 1)
+
+    d_model = spec["d_model"]
+    heads, head_dim, ffn = spec["heads"], spec["head_dim"], spec["ffn"]
+
+    dense("patch_projection", linears[0])
+    vector("final_norm", norms[layers_count * 7], d_model)
+    dense("output_projection", linears[layers_count * 7 + 1], transposed=True)
+    # The two learned position tables, `[10240, 768]` each, which the host gathers a row at a
+    # time. Emitted in the same `[out, in, 1, 1]` triple form as everything else so that
+    # `Reader::int4_row` can read them, even though nothing binds them to a shader.
+    #
+    # The first is gathered by position component 0 and the second by component 1, and the
+    # reference preprocessor builds those with `indexing="xy"` - so component 0 is the COLUMN.
+    # Naming them the other way round would transpose every image without changing a shape.
+    gathers = [
+        inits[i]
+        for node in g.node
+        if node.op_type == "Gather" and (node.name or "").startswith("node_embedding")
+        for i in node.input
+        if i in inits and list(inits[i].dims) == [spec["positions"], d_model]
+    ]
+    if len(gathers) != 2:
+        raise SystemExit(f"{len(gathers)} position tables, not 2 - the head has changed")
+    table("column_positions", gathers[0])
+    table("row_positions", gathers[1])
+
+    for i in range(layers_count):
+        base = 1 + 7 * i
+        norm_base = 7 * i
+        marks = per_layer_clips[i]
+        at = f"vision.layers.{i}"
+        vector(f"{at}.pre_attention_norm", norms[norm_base], d_model)
+        clip(f"{at}.clip_in", marks[0])
+        projection(f"{at}.q_proj", linears[base])
+        projection(f"{at}.k_proj", linears[base + 1])
+        projection(f"{at}.v_proj", linears[base + 2])
+        clip(f"{at}.clip_q", marks[1])
+        clip(f"{at}.clip_k", marks[2])
+        clip(f"{at}.clip_v", marks[3])
+        vector(f"{at}.q_norm", norms[norm_base + 1], head_dim)
+        vector(f"{at}.k_norm", norms[norm_base + 2], head_dim)
+        vector(f"{at}.v_norm", norms[norm_base + 3], head_dim)
+        clip(f"{at}.clip_mixed", marks[4])
+        projection(f"{at}.o_proj", linears[base + 3])
+        clip(f"{at}.clip_o", marks[5])
+        vector(f"{at}.post_attention_norm", norms[norm_base + 4], d_model)
+        vector(f"{at}.pre_feedforward_norm", norms[norm_base + 5], d_model)
+        clip(f"{at}.clip_ff_in", marks[6])
+        projection(f"{at}.gate_proj", linears[base + 4])
+        projection(f"{at}.up_proj", linears[base + 5])
+        clip(f"{at}.clip_gate", marks[7])
+        clip(f"{at}.clip_up", marks[8])
+        clip(f"{at}.clip_gated", marks[9])
+        projection(f"{at}.down_proj", linears[base + 6])
+        clip(f"{at}.clip_down", marks[10])
+        vector(f"{at}.post_feedforward_norm", norms[norm_base + 6], d_model)
+        del heads, ffn
+        heads, ffn = spec["heads"], spec["ffn"]
+
+    fidelity.report(MIN_INT4_COSINE)
+    return layers, tensors
+
+
+def position_of_norm(graph, position, index):
+    """Where `node_mean_{index}` sits in topological order."""
+    want = "node_mean" if index == 0 else f"node_mean_{index}"
+    for node in graph.node:
+        name = (node.name or "").replace("_fused_rms_norm/node_mean", "node_mean")
+        if name == want:
+            return position[node.name]
+    raise SystemExit(f"the export has no {want}")
+
+
+def collect_gemma4_audio(model, spec):
+    """Gemma 4's audio tower as the ordered table `nets::gemma4_audio` indexes.
+
+    THE TENSOR ORDER (the contract with the Rust net - positional indexing, no names):
+
+        0..1    subsampling conv 0, `[128, 1, 3, 3]` fp16 with its spatial axes SWAPPED, and a
+                synthesised zero bias
+        2..3    its layer norm: the export's gain and a synthesised zero beta
+        4..5    subsampling conv 1, `[32, 128, 3, 3]`, spatial axes swapped, zero bias
+        6..7    its layer norm, zero beta
+        8..9    the input projection, `[1024, 1024]` fp16, ROWS PERMUTED - see `input_rows`
+        10..11  the output projection, `[1536, 1024]` fp16, with its REAL bias
+        12      the embedder's pre-projection norm, `[1536]`
+        13..14  the embedder's projection, `[1536, 1536]` fp16, zero bias
+        then each layer 0..11, in the order `declare_layer` reads:
+            ffw1 pre-norm, clip, up (triple), clip, clip, down (triple), clip, ffw1 post-norm,
+            pre-attention norm, clip, q, k, v (three triples), clip x3,
+            the folded per-channel query scale, the `[8, 128, 13]` relative table,
+            clip, post (triple), clip, post-attention norm,
+            conv pre-norm, clip, gate (triple), clip,
+            the depthwise kernel and its zero bias, conv norm, clip, exit (triple), clip,
+            ffw2 pre-norm, clip, up, clip, clip, down, clip, ffw2 post-norm,
+            the terminal norm
+
+    # The export's initializers are anonymised, so this walks the graph
+
+    Every weight is called `val_2567` or `permute_9` or `_to_copy_16`, so matching by name is
+    impossible for most of them. HOW EACH FAMILY IS FOUND, weakest tier last:
+
+        depthwise convs, SSCP convs   ATTRIBUTE: group == 1024 / group == 1, plus asserted
+                                      pads and strides. Export-independent.
+        relative tables               SHAPE [8, 128, 13] and consumed by a MatMul.
+        folded query scales           SHAPE [128] and consumed by a Mul. The first SSCP layer
+                                      norm's gain is also [128] but is consumed by a
+                                      LayerNormalization, so the op type separates them.
+        SSCP norm gains               op type LayerNormalization - the only two in the tower.
+        linears, RMS norms, clips     NODE NUMBERING, the fragile tier.
+
+    NAMES ARE THE LAST RESORT AND THE LAST TIER IS GUARDED ACCORDINGLY. Neither namespace is
+    stable across exports: the fp16 cast renumbers every `node_<Op>_<N>` and renames 44% of the
+    initializers (618 in each export, only 345 in common), so a name-based collector calibrated
+    on `audio_encoder.onnx` finds different tensors in `audio_encoder_fp16.onnx`. Counts alone
+    do not catch a reordering that preserves the count, so the numbered families additionally
+    assert the SHAPE of all ten linear slots in all twelve layers, and that every layer's
+    eighteen clips are consumed by the same sequence of op types as layer 0's. A shift that
+    survived all of that would have to preserve every shape at every slot, which the layer's
+    [1024, 4096] / [4096, 1024] / [1024, 2048] mix does not allow.
+
+    # The hole in the linear numbering
+
+    `node_linear` runs 0..134 but **thirteen indices are absent**. Twelve of them are
+    `relative_k_proj`, one per layer, which the exporter constant-folded into the `[8, 128, 13]`
+    table this collects separately: the sinusoid it projects depends on nothing but dtype, so
+    there is nothing left to compute at runtime and no `MatMul` is emitted. The thirteenth is
+    133, because `output_proj` is the one linear with a bias and the exporter split it - the
+    `MatMul` is named something else entirely and `node_linear_133` is the `Add`.
+
+    Index 0 is PRESENT and is the input projection. It is the bare `node_linear` with no
+    numeric suffix, which `numbered` maps to 0; a reader that only matches `node_linear_<N>`
+    misses it, concludes the range starts at 1, and is then off by one for the whole graph.
+
+    So the stride is **11 with a hole at +5**, not 10. A naive `1 + 10 * i` is off by one from
+    layer 0 onward and lands on plausible-looking shapes all the way down; both the hole and the
+    count are asserted below rather than assumed.
+    """
+    g = model.graph
+    inits = {i.name: i for i in g.initializer}
+    position = {n.name: at for at, n in enumerate(g.node)}
+    produced = {out: n for n in g.node for out in n.output}
+
+    def numbered(node, prefix):
+        """The index in `prefix`, `prefix_1`, `prefix_2`, ... or None."""
+        name = (node.name or "").replace("_fused_rms_norm/node_mean", "node_mean")
+        if not name.startswith(prefix):
+            return None
+        tail = name[len(prefix):]
+        if tail == "":
+            return 0
+        return int(tail[1:]) if tail.startswith("_") and tail[1:].isdigit() else None
+
+    constants = {}
+    for node in g.node:
+        if node.op_type == "Constant":
+            for attribute in node.attribute:
+                if attribute.name == "value":
+                    constants[node.output[0]] = attribute.t
+
+    def held(node, dims=None):
+        """The initializers or folded constants `node` reads, optionally of one shape."""
+        out = []
+        for name in node.input:
+            tensor = inits.get(name) or constants.get(name)
+            if tensor is not None and (dims is None or list(tensor.dims) == list(dims)):
+                out.append(tensor)
+        return out
+
+    def scalar(name):
+        tensor = inits.get(name) or constants.get(name)
+        if tensor is None:
+            return None
+        flat = numpy_helper.to_array(tensor).reshape(-1)
+        return float(flat[0]) if flat.size else None
+
+    layers_count = spec["layers"]
+    d_model, heads, head_dim = spec["d_model"], spec["heads"], spec["head_dim"]
+    ffn, out_dim = spec["ffn"], spec["out_dim"]
+    offsets, mel_sub = spec["rel_offsets"], spec["mel_subsampled"]
+    channels = spec["sscp_channels"]
+
+    linears, norms, clips = {}, {}, []
+    relative, per_dim, depthwise, subsample, gains = [], [], [], [], []
+    reads = {}
+    for node in g.node:
+        for i in node.input:
+            reads.setdefault(i, []).append(node.op_type)
+    clip_consumers = {}
+    for node in g.node:
+        if node.op_type in ("MatMul", "Gemm"):
+            index = numbered(node, "node_linear")
+            if index is not None:
+                for tensor in held(node)[:1]:
+                    linears[index] = tensor
+            for tensor in held(node, [heads, head_dim, offsets]):
+                relative.append((position[node.name], tensor))
+        elif node.op_type == "SimplifiedLayerNormalization":
+            index = numbered(node, "node_mean")
+            if index is not None:
+                for tensor in held(node)[:1]:
+                    norms[index] = tensor
+        elif node.op_type == "Mul":
+            # The folded `softplus(per_dim_scale)`. A `[128]` initializer, which the first
+            # subsampling layer norm's gain also is - but that one is read by a
+            # `LayerNormalization`, never by a `Mul`, so the op type separates them.
+            for tensor in held(node, [head_dim]):
+                per_dim.append((position[node.name], tensor))
+        elif node.op_type == "LayerNormalization":
+            gains.append((position[node.name], held(node)[0]))
+        elif node.op_type == "Conv":
+            weights = held(node)
+            if not weights:
+                raise SystemExit(f"{node.name} is a Conv with no kernel")
+            # ATTRIBUTE ANCHORS, not names and not weight rank. `group` separates the two conv
+            # families exactly and survives a re-export, where node names do not: the fp16 cast
+            # renumbers every node_<Op>_<N> and renames 44% of the initializers.
+            attrs = {a.name: list(a.ints) if a.ints else a.i for a in node.attribute}
+            group, pads = attrs.get("group", 1), attrs.get("pads", [])
+            strides = attrs.get("strides", [])
+            if group == d_model:
+                # CAUSAL: four taps left, none right. Symmetric padding here would not fail a
+                # shape check - it would shift the whole encoder two positions against the
+                # reference, in all twelve layers, cumulatively. Asserted rather than trusted.
+                if pads != [4, 0] or strides != [1]:
+                    raise SystemExit(
+                        f"{node.name} is the depthwise conv with pads={pads} strides={strides}, "
+                        "not the causal pads=[4, 0] strides=[1] nets::gemma4_audio builds. "
+                        "Symmetric padding shifts every frame with no shape error."
+                    )
+                depthwise.append((position[node.name], weights[0]))
+            elif group == 1:
+                if pads != [1, 1, 1, 1] or strides != [2, 2]:
+                    raise SystemExit(
+                        f"{node.name} is a subsampling conv with pads={pads} strides={strides}, "
+                        "not the symmetric pads=[1,1,1,1] strides=[2,2] the transposed layout "
+                        "in nets::gemma4_audio::input_shape relies on being square."
+                    )
+                subsample.append((position[node.name], weights[0]))
+            else:
+                raise SystemExit(f"{node.name} is a Conv with group={group}, neither 1 nor {d_model}")
+        elif node.op_type == "Clip":
+            low = scalar(node.input[1]) if len(node.input) > 1 else None
+            high = scalar(node.input[2]) if len(node.input) > 2 else None
+            if low is None and high is None:
+                continue
+            clip_consumers[position[node.name]] = tuple(sorted(set(reads.get(node.output[0], []))))
+            clips.append((
+                position[node.name],
+                [-FP16_LIMIT if low is None else low, FP16_LIMIT if high is None else high],
+            ))
+
+    # Every count the positional table depends on, asserted so that a re-export fails here
+    # rather than by writing a well-formed file that decodes to the wrong matrices.
+    want = {
+        "linears": (len(linears), layers_count * 10 + 2),
+        "norms": (len(norms), layers_count * 9 + 1),
+        "clips": (len(clips), layers_count * 18),
+        "relative tables": (len(relative), layers_count),
+        "per-dim scales": (len(per_dim), layers_count),
+        "depthwise kernels": (len(depthwise), layers_count),
+        "subsampling kernels": (len(subsample), 2),
+        "subsampling norm gains": (len(gains), 2),
+    }
+    wrong = [f"  {k}: {got} against {expect}" for k, (got, expect) in want.items() if got != expect]
+    if wrong:
+        raise SystemExit(
+            "the audio export's node census has changed, so the numbering this collector "
+            "relies on no longer holds:\n" + "\n".join(wrong)
+        )
+    absent = [i for i in range(max(linears) + 1) if i not in linears]
+    predicted = [6 + 11 * i for i in range(layers_count)] + [11 * layers_count + 1]
+    if absent != predicted:
+        raise SystemExit(
+            f"node_linear is missing {absent}, not {predicted}. The first twelve are the folded "
+            "relative_k_proj and the last is output_proj's bias Add; a different hole means the "
+            "stride of 11 with a gap at +5 is no longer the right walk."
+        )
+    # The eleven slots of layer 0, checked by shape before the walk is trusted for the other
+    # eleven layers. `base = 1 + 11 * i` with a hole at +5 is the whole contract, and every one
+    # of these is a plausible-looking matrix if the stride is wrong by one.
+    slots = [
+        ("ffw1.up", 0, [d_model, ffn]),
+        ("ffw1.down", 1, [ffn, d_model]),
+        ("q_proj", 2, [d_model, d_model]),
+        ("k_proj", 3, [d_model, d_model]),
+        ("v_proj", 4, [d_model, d_model]),
+        ("post", 6, [d_model, d_model]),
+        ("lconv.gate", 7, [d_model, 2 * d_model]),
+        ("lconv.exit", 8, [d_model, d_model]),
+        ("ffw2.up", 9, [d_model, ffn]),
+        ("ffw2.down", 10, [ffn, d_model]),
+    ]
+    for i in range(layers_count):
+        for label, slot, shape in slots:
+            got = list(linears[1 + 11 * i + slot].dims)
+            if got != shape:
+                raise SystemExit(
+                    f"layer {i}'s {label} is node_linear_{1 + 11 * i + slot} with shape {got}, "
+                    f"not {shape}. The stride of 11 with a hole at +5 no longer walks this graph."
+                )
+
+    for name, value, uses in (
+        ("q_scale", spec["q_scale"], layers_count),
+        ("k_scale", spec["k_scale"], layers_count),
+        ("logit_cap", spec["logit_cap"], 2 * layers_count),
+        ("residual_weight", spec["residual_weight"], 2 * layers_count),
+    ):
+        found = sum(
+            1
+            for node in g.node
+            for i in node.input
+            if scalar(i) is not None and abs(scalar(i) - value) < 1e-9
+        )
+        if found != uses:
+            raise SystemExit(
+                f"{name} = {value} appears {found} times in the graph, not {uses}. "
+                f"nets::gemma4_audio hardcodes it, so a changed constant is a wrong forward pass."
+            )
+
+    for collection in (relative, per_dim, depthwise, subsample, gains):
+        collection.sort()
+    clips.sort()
+    starts = [position_of_norm(g, position, 9 * i) for i in range(layers_count + 1)]
+    if [c for c in clips if c[0] < starts[0]] or [c for c in clips if c[0] > starts[-1]]:
+        raise SystemExit(
+            "the audio export has clips outside a layer. The input and output projections are "
+            "plain nn.Linear, unlike the vision tower's head, so there should be none."
+        )
+    per_layer_clips = []
+    signatures = []
+    for i in range(layers_count):
+        span = [(at, bounds) for at, bounds in clips if starts[i] < at < starts[i + 1]]
+        if len(span) != 18:
+            raise SystemExit(f"audio layer {i} has {len(span)} clips, not 18")
+        per_layer_clips.append([bounds for _, bounds in span])
+        signatures.append(tuple(clip_consumers[at] for at, _ in span))
+    # The eighteen bounds are assigned to ops purely by position, and they are calibrated per
+    # layer - layer 0's first is [-12.875, 12.8125] and layer 11's is [-9.25, 9.1875] - so a
+    # layer whose graph order differed would put every bound on the wrong op with no shape
+    # error and no fidelity warning. Checking that each layer's clips are consumed by the same
+    # sequence of op types as layer 0's is what turns "positional" into something asserted.
+    odd = [i for i, s in enumerate(signatures) if s != signatures[0]]
+    if odd:
+        raise SystemExit(
+            f"audio layers {odd} order their 18 clips differently from layer 0, so assigning "
+            f"the bounds by position would silently mis-apply them. Layer 0 is "
+            f"{signatures[0]}, layer {odd[0]} is {signatures[odd[0]]}."
+        )
+
+    tensors, table = [], []
+    fidelity = Fidelity()
+
+    def emit(op, name, key, added):
+        table.append(Layer(len(table), op, name, key, len(tensors) - added, added))
+
+    def array(tensor):
+        return numpy_helper.to_array(tensor).astype(np.float32)
+
+    def dense(name, tensor, bias=None, transposed=False):
+        """A linear's weight as an **fp16** `[out, in, 1, 1]` kernel and a bias.
+
+        The three end projections. They go through here rather than `projection` for the reason
+        the vision tower's two do: an error made before layer 0 has run has twelve layers left
+        to be amplified through, and one made after the last has nothing downstream to average
+        it away. Together they are 5.0 M parameters against the tower's 294 M, so fp16 here
+        costs about 8 MB on a 165 MB file.
+        """
+        matrix = array(tensor)
+        if transposed:
+            outputs, inputs = matrix.shape
+            kernel = np.ascontiguousarray(matrix).reshape(outputs, inputs, 1, 1)
+        else:
+            inputs, outputs = matrix.shape
+            kernel = np.ascontiguousarray(matrix.T).reshape(outputs, inputs, 1, 1)
+        zeros = np.zeros(outputs, dtype=np.float32)
+        tensors.extend([kernel, zeros if bias is None else array(bias)])
+        emit("Linear", name, f"Linear w={[outputs, inputs, 1, 1]} dtype=fp16", 2)
+
+    def projection(name, tensor):
+        """A linear's weight as an int4 `[out, in, 1, 1]` kernel, its scale, and a zero bias."""
+        matrix = array(tensor)
+        inputs, outputs = matrix.shape
+        kernel = np.ascontiguousarray(matrix.T).reshape(outputs, inputs, 1, 1)
+        codes, scale = fidelity.quantise4(name, kernel)
+        tensors.extend([codes, scale, np.zeros(outputs, dtype=np.float32)])
+        emit("Linear4", name, f"Linear4 w={[outputs, inputs, 1, 1]} dtype=int4", 3)
+
+    def vector(name, tensor, expect):
+        values = array(tensor)
+        if list(values.shape) != [expect]:
+            raise SystemExit(f"{name} is {list(values.shape)}, not [{expect}]")
+        tensors.append(values)
+        emit("RmsNorm", name, f"RmsNorm g={[expect]}", 1)
+
+    def clip(name, bounds):
+        low, high = bounds
+        if not low < high:
+            raise SystemExit(f"{name} clips to [{low}, {high}], which is empty")
+        tensors.append(np.array([low, high], dtype=np.float32))
+        emit("Clip", name, f"Clip [{low}, {high}]", 1)
+
+    def kernel(name, tensor, shape, act="", swap_spatial=False):
+        """A convolution kernel at fp16 and a synthesised zero bias.
+
+        None of the three convolutions in this export has a bias, and `Builder::conv` reads one
+        after every kernel, so the pair is uniform and the shader needs no special case.
+
+        `swap_spatial` transposes the last two axes, which the two subsampling kernels need and
+        the depthwise one does not. `nets::gemma4_audio` carries the mel map as
+        `[channels, mel, time]` where the export has `[channels, time, mel]` - see `input_rows`
+        for why - and swapping a convolution's input axes is only exact if its kernel's are
+        swapped with them. A 3x3 kernel is not symmetric, so feeding a transposed map through an
+        untransposed kernel is the right shape and a different convolution.
+
+        Measured rather than reasoned: running the export up to `input_proj`'s output under
+        onnxruntime against this layout in numpy gives cosine 0.99999994 with the swap and
+        0.906 without it, on the same input. See probe/audio_permute.py.
+        """
+        values = array(tensor)
+        if swap_spatial:
+            values = np.ascontiguousarray(values.transpose(0, 1, 3, 2))
+        values = values.reshape(shape)
+        tensors.extend([values, np.zeros(shape[0], dtype=np.float32)])
+        emit("Conv", name, f"Conv w={list(shape)}{act} dtype=fp16", 2)
+
+    def layer_norm(name, tensor, expect):
+        """A layer norm's gain and a synthesised zero beta.
+
+        The two subsampling norms are the only `LayerNormalization` in the tower - everything
+        else is `SimplifiedLayerNormalization`, i.e. RMS - and the export carries a gain with no
+        bias (`elementwise_affine=True, bias=False`). `Builder::layer_norm` reads the pair.
+        """
+        values = array(tensor)
+        if list(values.shape) != [expect]:
+            raise SystemExit(f"{name} is {list(values.shape)}, not [{expect}]")
+        tensors.extend([values, np.zeros(expect, dtype=np.float32)])
+        emit("LayerNorm", name, f"LayerNorm g={[expect]} b={[expect]}", 2)
+
+    def input_rows(tensor):
+        """`input_proj_linear`'s weight with its 1024 input rows reordered.
+
+        THE FLATTEN ORDER IS THE TRAP, and it is silent: the matrix is square, so both orderings
+        are the right size and only one is the right matrix.
+
+        The export flattens the second subsampling convolution's output **mel-major**. Its
+        `Transpose` is `perm=[0, 2, 3, 1]` from `[B, ch, time, mel]`, giving `[B, time, mel, ch]`
+        and an input index of `m * 32 + c`. `nets::gemma4_audio` carries the map as
+        `[ch, mel, time]` so that the flatten into a `[1024, 1, T]` sequence is a relabelling of
+        the same bytes rather than a copy of a 23 MB activation - and that ordering is
+        `c * 32 + m`.
+
+        Permuting a `[1024, 1024]` weight once here is free. Transposing the map at runtime, per
+        clip, is not. Both sides say so: see `nets::gemma4_audio::INPUT_PROJECTION`.
+        """
+        matrix = array(tensor)
+        if list(matrix.shape) != [d_model, d_model]:
+            raise SystemExit(f"the input projection is {list(matrix.shape)}, not square")
+        return matrix.reshape(mel_sub, channels[1], d_model).transpose(1, 0, 2).reshape(
+            d_model, d_model
+        )
+
+    kernel("sscp.conv0", subsample[0][1], (channels[0], 1, 3, 3), swap_spatial=True)
+    layer_norm("sscp.norm0", gains[0][1], channels[0])
+    kernel("sscp.conv1", subsample[1][1], (channels[1], channels[0], 3, 3), swap_spatial=True)
+    layer_norm("sscp.norm1", gains[1][1], channels[1])
+    dense("input_projection", numpy_helper.from_array(input_rows(linears[0])))
+
+    # `output_proj` is the one biased linear, so the exporter split it into a `MatMul` and an
+    # `Add`. Found by walking BACK from the embedder's pre-projection norm — the last
+    # SimplifiedLayerNormalization, which this collector already locates as norms[9 * layers] —
+    # rather than by naming any node. The earlier version of this started from a literal
+    # `node_linear_133`, in the very namespace this docstring calls unstable; it would have failed
+    # loudly rather than mislabelled, but the comment claimed edge-following it was not doing.
+    #
+    #   norms[108]  <- Add (output_proj.bias)  <- MatMul (output_proj.weight)  <- norm_out
+    tail_norm = [n for n in g.node
+                 if numbered(n, "node_mean") == layers_count * 9
+                 and n.op_type == "SimplifiedLayerNormalization"]
+    if len(tail_norm) != 1:
+        raise SystemExit(f"{len(tail_norm)} embedder pre-projection norms, not 1")
+    adds = [produced[i] for i in tail_norm[0].input if i in produced and produced[i].op_type == "Add"]
+    if len(adds) != 1:
+        raise SystemExit(
+            "the embedder's pre-projection norm is not fed by an Add, so output_proj is no "
+            "longer a biased linear the exporter split. Check the tail before trusting this."
+        )
+    bias = held(adds[0], [out_dim])
+    matmuls = [produced[i] for i in adds[0].input if i in produced and produced[i].op_type == "MatMul"]
+    weight = [t for n in matmuls for t in held(n, [d_model, out_dim])]
+    if len(bias) != 1 or len(weight) != 1:
+        raise SystemExit(
+            f"output_proj resolved to {len(weight)} weights and {len(bias)} biases, not one each"
+        )
+    dense("output_projection", weight[0], bias=bias[0])
+    # `with_scale=False` upstream, so the exporter materialised an all-ones gain. Emitted rather
+    # than dropped: it is 3 KB and it saves the runtime a gainless RMS norm. An RMS norm still
+    # divides by the RMS, so this is not a no-op whatever the gain is.
+    vector("embedder.pre_projection_norm", norms[layers_count * 9], out_dim)
+    dense("embedder.projection", linears[11 * layers_count + 2])
+
+    for i in range(layers_count):
+        base = 1 + 11 * i
+        norm_base = 9 * i
+        marks = per_layer_clips[i]
+        at = f"audio.layers.{i}"
+
+        vector(f"{at}.ffw1.pre_norm", norms[norm_base], d_model)
+        clip(f"{at}.ffw1.clip_in", marks[0])
+        projection(f"{at}.ffw1.up", linears[base])
+        clip(f"{at}.ffw1.clip_up_out", marks[1])
+        clip(f"{at}.ffw1.clip_act", marks[2])
+        projection(f"{at}.ffw1.down", linears[base + 1])
+        clip(f"{at}.ffw1.clip_out", marks[3])
+        vector(f"{at}.ffw1.post_norm", norms[norm_base + 1], d_model)
+
+        vector(f"{at}.pre_attention_norm", norms[norm_base + 2], d_model)
+        clip(f"{at}.clip_qkv_in", marks[4])
+        projection(f"{at}.q_proj", linears[base + 2])
+        projection(f"{at}.k_proj", linears[base + 3])
+        projection(f"{at}.v_proj", linears[base + 4])
+        clip(f"{at}.clip_q", marks[5])
+        clip(f"{at}.clip_k", marks[6])
+        clip(f"{at}.clip_v", marks[7])
+        # `softplus(per_dim_scale)`, folded by the exporter to a `[128]` fp32 vector, times the
+        # scalar `q_scale` and tiled over the eight heads. Two multiplies in the export
+        # (`node_mul_502` then `node_mul_506`) become one per-channel multiply here, and the
+        # widening from [128] to [1024] is what makes it an ordinary one rather than a per-head
+        # broadcast the runtime has no op for.
+        scale = np.tile(array(per_dim[i][1]) * spec["q_scale"], heads)
+        if scale.shape != (d_model,):
+            raise SystemExit(f"{at}'s query scale tiled to {scale.shape}, not ({d_model},)")
+        # Rank three, because `Builder::constant` copies it into the arena as a [C, 1, 1]
+        # operand for an ordinary per-channel multiply.
+        tensors.append(scale.reshape(d_model, 1, 1))
+        emit("QueryScale", f"{at}.query_scale", f"QueryScale s={[d_model, 1, 1]} folded=q_scale", 1)
+        # `relative_k_proj(sinusoid)`, folded by the exporter and already permuted to
+        # [heads, head_dim, offsets]. TRANSPOSED HERE to [heads, offsets, head_dim] so that
+        # head_dim - the axis the shader's dot product contracts over - is the contiguous one.
+        # Leaving the export's order would be the right size with transposed strides and would
+        # read wrong taps with no shape error.
+        #
+        # Column `offsets - 1` is displacement zero and column 0 is displacement 12, which the
+        # mask never admits - see `nets::gemma4_audio::rel_column`.
+        relk = array(relative[i][1])
+        if list(relk.shape) != [heads, head_dim, offsets]:
+            raise SystemExit(f"{at}'s relative table is {list(relk.shape)}")
+        relk = np.ascontiguousarray(relk.transpose(0, 2, 1))
+        tensors.append(relk)
+        emit("Relative", f"{at}.relative_k", f"Relative w={list(relk.shape)} dtype=fp16", 1)
+        clip(f"{at}.clip_attn_out", marks[8])
+        projection(f"{at}.post_proj", linears[base + 6])
+        clip(f"{at}.clip_post_out", marks[9])
+        vector(f"{at}.post_attention_norm", norms[norm_base + 3], d_model)
+
+        vector(f"{at}.lconv.pre_norm", norms[norm_base + 4], d_model)
+        clip(f"{at}.lconv.clip_in", marks[10])
+        projection(f"{at}.lconv.gate", linears[base + 7])
+        clip(f"{at}.lconv.clip_gate_out", marks[11])
+        # `[1024, 1, 5]` in the export, read here as a `1 x 5` grouped convolution over a
+        # `[1024, 1, T]` sequence, so the kernel gains a unit height. Causal: `pads=[4, 0]`.
+        kernel(f"{at}.lconv.depthwise", depthwise[i][1], (d_model, 1, 1, 5), act=" group=1024")
+        vector(f"{at}.lconv.conv_norm", norms[norm_base + 5], d_model)
+        clip(f"{at}.lconv.clip_act", marks[12])
+        projection(f"{at}.lconv.exit", linears[base + 8])
+        clip(f"{at}.lconv.clip_out", marks[13])
+
+        vector(f"{at}.ffw2.pre_norm", norms[norm_base + 6], d_model)
+        clip(f"{at}.ffw2.clip_in", marks[14])
+        projection(f"{at}.ffw2.up", linears[base + 9])
+        clip(f"{at}.ffw2.clip_up_out", marks[15])
+        clip(f"{at}.ffw2.clip_act", marks[16])
+        projection(f"{at}.ffw2.down", linears[base + 10])
+        clip(f"{at}.ffw2.clip_out", marks[17])
+        vector(f"{at}.ffw2.post_norm", norms[norm_base + 7], d_model)
+        vector(f"{at}.norm_out", norms[norm_base + 8], d_model)
+
+    if len(tensors) != spec["tensors"]:
+        raise SystemExit(
+            f"{len(tensors)} tensors, not the {spec['tensors']} nets::gemma4_audio::TENSORS "
+            "declares. The two sides index the same table positionally, so they agree or "
+            "nothing works."
+        )
+    fidelity.report(MIN_INT4_COSINE)
+    return table, tensors
+
+
+def collect_gemma4_embed(model, spec):
+    """Gemma 4's two embedding tables as the ordered table `nets::gemma4`'s host side indexes.
+
+    THE TENSOR ORDER:
+
+        0..2  `model.embed_tokens.weight`            int4 `[262144, 1536]`, scale, bias
+        3..5  `model.embed_tokens_per_layer.weight`  int4 `[262144, 8960]`, scale, bias
+
+    # The scales the export applies are folded in
+
+    `embed_tokens.onnx` is two `Gather`s and two `Mul`s: `inputs_embeds` is the row times 39.25
+    (`sqrt(1536)` rounded through fp16) and `per_layer_inputs` is its row times 16.0
+    (`sqrt(256)`). Both are constants over the whole table, so they are folded into the weights
+    here and the host gathers a row that is already scaled. Applying them at runtime would be one
+    more multiply per element per token and one more constant to keep in step.
+
+    # Not transposed
+
+    Unlike every projection in `collect_gemma4`, these stay `[rows, columns]`. Nothing indexes
+    them as a convolution kernel - `Reader::int4_row` reads row `id` - so transposing would make
+    a gather stride across the file instead of reading one contiguous span.
+
+    # The bias is still there
+
+    A zero bias per row, as for the projections, so the triple is the same shape everywhere and
+    `Reader::int4_row`'s `(kernel, scale)` pair sits at a predictable offset. 262144 rows of fp16
+    is 512 KB against a 1.2 GB table.
+    """
+    inits = {i.name: i for i in model.graph.initializer}
+
+    def get(name):
+        found = inits.get(name)
+        if found is None:
+            raise SystemExit(f"the embedding export has no tensor named {name}")
+        return numpy_helper.to_array(found).astype(np.float32)
+
+    layers = []
+    tensors = []
+    fidelity = Fidelity()
+    for name, columns, scale_by in (
+        ("model.embed_tokens.weight", spec["d_model"], spec["embed_scale"]),
+        (
+            "model.embed_tokens_per_layer.weight",
+            spec["per_layer"] * spec["layers"],
+            spec["per_layer_scale"],
+        ),
+    ):
+        table = get(name)
+        if list(table.shape) != [spec["vocab"], columns]:
+            raise SystemExit(f"{name} is {list(table.shape)}, not {[spec['vocab'], columns]}")
+        codes, scale = fidelity.quantise4(name, table * scale_by)
+        bias = np.zeros(spec["vocab"], dtype=np.float32)
+        tensors.extend([codes, scale, bias])
+        layers.append(
+            Layer(
+                len(layers),
+                "Embedding4",
+                name,
+                f"Embedding4 w={list(table.shape)} scale={list(scale.shape)} "
+                f"folded={scale_by} dtype=int4 block={I4_BLOCK}",
+                len(tensors) - 3,
+                3,
+            )
+        )
+    fidelity.report(MIN_INT4_COSINE)
+    return layers, tensors
 
 
 def collect_nllb(get, spec):
@@ -1768,6 +2958,96 @@ def tinyclip_inventory(spec):
     return parameters, projections
 
 
+def gemma4_inventory(spec):
+    """Every named parameter Gemma 4's decoder export must hold, derived from `spec`.
+
+    Derived, never transcribed as a list: a hand-written inventory of 900-odd tensors would be
+    checked against the same file it was copied from. Building it from the constants means a
+    disagreement between `config.json` and the export is what fails, which is the thing worth
+    catching.
+
+    Returns `(parameters, projections)` to match [`tinyclip_inventory`]'s shape; Gemma's
+    projections are all named initializers, so the second is empty.
+    """
+    d = spec["d_model"]
+    heads, kv_heads = spec["heads"], spec["kv_heads"]
+    per_layer = spec["per_layer"]
+    want = {
+        "lm_head.MatMul.weight": [d, spec["vocab"]],
+        "model.per_layer_projection.MatMul.weight": [d, per_layer * spec["layers"]],
+        "model.per_layer_projection_norm.weight": [per_layer],
+        # The export files the final norm under a phantom 36th layer.
+        "model.layers.35.final_norm_layernorm.weight": [d],
+        # Cut to `max_context` by the collector; asserted here at their shipped length.
+        "cos_cache_local": [131072, spec["head_dim"] // 2],
+        "sin_cache_local": [131072, spec["head_dim"] // 2],
+        "cos_cache_global": [131072, spec["global_head_dim"] // 2],
+        "sin_cache_global": [131072, spec["global_head_dim"] // 2],
+    }
+    for index in range(spec["layers"]):
+        at = f"model.layers.{index}"
+        full = index % 5 == 4
+        owns = index < spec["owns_cache_layers"]
+        dim = spec["global_head_dim"] if full else spec["head_dim"]
+        inner = spec["ffn"] if owns else spec["ffn_wide"]
+        want[f"{at}.input_layernorm.weight"] = [d]
+        want[f"{at}.attn.q_norm.layernorm.weight"] = [dim]
+        want[f"{at}.attn.q_proj.MatMul.weight"] = [d, heads * dim]
+        if owns:
+            want[f"{at}.attn.k_norm.layernorm.weight"] = [dim]
+            want[f"{at}.attn.k_proj.MatMul.weight"] = [d, kv_heads * dim]
+            want[f"{at}.attn.v_proj.MatMul.weight"] = [d, kv_heads * dim]
+            want[f"/model/layers.{index}/attn/v_norm/ones_weight"] = [dim]
+        want[f"{at}.attn.o_proj.MatMul.weight"] = [heads * dim, d]
+        want[f"{at}.post_attention_layernorm.weight"] = [d]
+        want[f"{at}.pre_feedforward_layernorm.weight"] = [d]
+        want[f"{at}.mlp.gate_up_proj.MatMul.weight"] = [d, inner * 2]
+        want[f"{at}.mlp.down_proj.MatMul.weight"] = [inner, d]
+        want[f"{at}.post_feedforward_layernorm.weight"] = [d]
+        want[f"{at}.per_layer.per_layer_input_gate.MatMul.weight"] = [d, per_layer]
+        want[f"{at}.per_layer.per_layer_projection.MatMul.weight"] = [per_layer, d]
+        want[f"{at}.post_per_layer_input_norm.weight"] = [d]
+        want[f"{at}.layer_scalar"] = [1]
+    return want, {}
+
+
+def gemma4_embed_inventory(spec):
+    """The two tables `embed_tokens.onnx` holds, and nothing else that matters."""
+    return {
+        "model.embed_tokens.weight": [spec["vocab"], spec["d_model"]],
+        "model.embed_tokens_per_layer.weight": [
+            spec["vocab"],
+            spec["per_layer"] * spec["layers"],
+        ],
+    }, {}
+
+
+# Which inventory `check_architecture` asserts against, for the ONNX-by-name graphs. The
+# checkpoint graphs register theirs beside their collectors above; this is the same registry.
+INVENTORIES.update(
+    {
+        "tinyclip": tinyclip_inventory,
+        "gemma4_text": gemma4_inventory,
+        "gemma4_embed": gemma4_embed_inventory,
+        # The vision export names every weight `_to_copy_104`, so there is no inventory to check
+        # against. `collect_gemma4_vision` asserts the node *numbering* instead, which is the
+        # only structure that export actually carries.
+        "gemma4_vision": lambda spec: ({}, {}),
+        # The audio export is anonymised the same way, with two named survivors that are worth
+        # pinning because both mark a place the structure could move: the bias proves output_proj
+        # is still the one biased linear the exporter splits, and the depthwise kernel proves the
+        # conformer convolution is still full-width and five taps.
+        "gemma4_audio": lambda spec: (
+            {
+                "audio_tower.output_proj.bias": [spec["out_dim"]],
+                "audio_tower.layers.0.lconv1d.depthwise_conv1d.weight": [spec["d_model"], 1, 5],
+            },
+            {},
+        ),
+    }
+)
+
+
 def check_architecture(model, graph_id_name, spec):
     """Refuse an ONNX export that is not the architecture `nets/<graph>.rs` hardcodes.
 
@@ -1779,7 +3059,7 @@ def check_architecture(model, graph_id_name, spec):
     `spec` is passed rather than looked up, as [`collect_tinyclip`]'s is, so the two cannot be
     given different ones.
     """
-    parameters, projections = tinyclip_inventory(spec)
+    parameters, projections = INVENTORIES[graph_id_name](spec)
     inits = {i.name: list(i.dims) for i in model.graph.initializer}
     nodes = {n.name: n for n in model.graph.node}
 
@@ -2010,7 +3290,113 @@ def quantise_per_channel(kernel):
     # uses the *rounded* scale. Rounding it here means the error reported below is the error the
     # device will have, not an optimistic one.
     scale = scale.astype(np.float16).astype(np.float32)
+    # And the rounding itself can produce a zero, for a row whose absmax is small enough that
+    # `absmax / 127` underflows fp16. A zero scale reconstructs the whole row as zero however
+    # large its codes are, so the guard belongs **after** the round-trip, not before it. As in
+    # `quantise_per_block`: such a row cannot be represented and is stored as zeros.
+    scale = np.where(scale > 0, scale, 1.0)
     return quantised, scale
+
+
+# Taps one int4 scale covers. Mirrors `weights::I4_BLOCK` and `I4_BLOCK` in `common.glsl`.
+#
+# 32 rather than 64: at 4.5 bits per weight against 4.25 the difference is 3% of a download, and
+# `MIN_INT8_COSINE` is a strict gate that the wider block is the more likely to miss.
+I4_BLOCK = 32
+
+# Stands in for an absent `Clip` bound: past fp16's largest finite value, so clamping to it is a
+# no-op for any number the tower can hold, and it still round-trips through the fp16 table the
+# bounds are stored in.
+FP16_LIMIT = 65504.0
+
+
+def quantise_per_block(kernel, block=I4_BLOCK):
+    """An fp32 kernel as `(int4, scale)`, symmetric and absmax, one scale per block of taps.
+
+    # Why four bits need a finer scale than eight
+
+    `quantise_per_channel` gives a whole output row one scale, which works at eight bits because
+    127 codes still resolve a row whose taps vary by an order of magnitude. Four bits have seven
+    positive codes. Under one row-wide scale a row containing a single large tap quantises almost
+    everything else to zero, so the scale is per block of `block` consecutive taps instead.
+
+    # The blocks run along the contraction axis
+
+    A row is flattened to `in * kh * kw` and cut into blocks of `block`, which is the axis the
+    shader's inner loop walks - so a block is contiguous in memory and the shader reads one scale
+    per block rather than gathering. The last block of a row is short whenever `taps` is not a
+    multiple of `block`, and is scaled on what it actually holds.
+
+    # 7, not 8
+
+    As `quantise_per_channel` uses 127 rather than 128: the range is made symmetric by giving up
+    the extra negative code, so `-absmax` and `+absmax` both land on a representable value.
+    `int4_at` sign-extends, so the stored range is -8..7 and only -8 is unused.
+
+    Returns the codes shaped like `kernel` and a `(rows, blocks)` fp32 scale table, already
+    rounded through fp16 so the error reported by the caller is the error the device will have.
+    """
+    kernel = np.ascontiguousarray(kernel, dtype=np.float32)
+    if kernel.ndim < 1:
+        raise SystemExit(f"rank {kernel.ndim} kernel; quantisation needs an output axis")
+    if not np.isfinite(kernel).all():
+        raise SystemExit("a kernel holding a non-finite value cannot be quantised")
+    rows = kernel.reshape(kernel.shape[0], -1)
+    count, taps = rows.shape
+    blocks = (taps + block - 1) // block
+    # Pad the tap axis so it divides into whole blocks. The padding is zero, which cannot raise a
+    # block's absmax, so the last block's scale is decided by the real taps alone.
+    padded = np.zeros((count, blocks * block), dtype=np.float32)
+    padded[:, :taps] = rows
+    grouped = padded.reshape(count, blocks, block)
+    absmax = np.abs(grouped).max(axis=2)
+    scale = np.where(absmax > 0, absmax / 7.0, 1.0).astype(np.float32)
+    scale = scale.astype(np.float16).astype(np.float32)
+    # A block whose absmax is small enough that `absmax / 7` underflows fp16 rounds to a scale of
+    # **zero**, and then `0 / 0` is NaN and `NaN.astype(int8)` is undefined - a block of garbage
+    # codes with nothing to show it. Such a block cannot be represented at all, so it is given a
+    # scale of 1 and quantises to zeros, which is what the file would reconstruct anyway.
+    scale = np.where(scale > 0, scale, 1.0)
+    codes = np.floor(np.abs(grouped) / scale[:, :, None] + 0.5) * np.sign(grouped)
+    codes = np.clip(codes, -7, 7).astype(np.int8)
+    quantised = codes.reshape(count, blocks * block)[:, :taps].reshape(kernel.shape)
+    return quantised, scale
+
+
+def pack_int4(values):
+    """Signed 4-bit codes as bytes, two per byte, **low nibble first**.
+
+    An odd length leaves the final high nibble as padding, which is what `Dtype::bytes`'s
+    `div_ceil` accounts for on the reader's side. Writing `len // 2` bytes instead would produce
+    a file that parses - the bounds check would pass - and whose last element read as whatever
+    followed it.
+    """
+    flat = np.ascontiguousarray(values, dtype=np.int8).reshape(-1)
+    if flat.size and (flat.min() < -8 or flat.max() > 7):
+        raise SystemExit(f"int4 codes out of range: {flat.min()}..{flat.max()}")
+    nibbles = (flat.astype(np.uint8) & 0x0F).astype(np.uint8)
+    if nibbles.size % 2:
+        nibbles = np.concatenate([nibbles, np.zeros(1, dtype=np.uint8)])
+    pairs = nibbles.reshape(-1, 2)
+    return (pairs[:, 0] | (pairs[:, 1] << 4)).astype(np.uint8).tobytes()
+
+
+class Int4:
+    """A tensor to serialise as [`DTYPE_I4`].
+
+    numpy has no four-bit dtype, so `build` cannot tell an int4 kernel from an int8 one by
+    `tensor.dtype` the way it tells int8 from fp32. Wrapping it says so explicitly rather than
+    inferring from a value range, which would misread an int8 kernel that happened to hold only
+    small codes.
+
+    Quacks like an array for the three attributes `build` needs.
+    """
+
+    def __init__(self, codes):
+        self.codes = np.ascontiguousarray(codes, dtype=np.int8)
+        self.shape = self.codes.shape
+        self.ndim = self.codes.ndim
+        self.size = self.codes.size
 
 
 def build(layers, tensors, graph_id, onnx_sha256):
@@ -2028,7 +3414,10 @@ def build(layers, tensors, graph_id, onnx_sha256):
         while len(data) % ALIGNMENT:
             data.append(0)
         offset = len(data)
-        if tensor.dtype == np.int8:
+        if isinstance(tensor, Int4):
+            dtype = DTYPE_I4
+            data.extend(pack_int4(tensor.codes))
+        elif tensor.dtype == np.int8:
             # Already quantised, so nothing to round: the bytes are the payload.
             dtype = DTYPE_I8
             data.extend(tensor.tobytes())
@@ -2059,9 +3448,272 @@ def build(layers, tensors, graph_id, onnx_sha256):
     return bytes(header) + bytes(table) + bytes(data), len(layers)
 
 
+# --- TFLite --------------------------------------------------------------------
+#
+# A third input kind, after ONNX graphs and the PyTorch checkpoints in [`CHECKPOINTS`].
+#
+# The Now Playing models ship as TFLite flatbuffers and there is no ONNX export of them to
+# convert through: they were recovered from an APK, and the only route to ONNX would be a
+# TFLite -> ONNX converter whose op coverage would have to be trusted for the custom
+# `CIRCULAR_BUFFER` and depthwise-with-multiplier layers this graph is mostly made of. Reading
+# the flatbuffer here is both shorter and the version whose tensor order can be read off the
+# file, which is the only thing the Rust actually depends on.
+#
+# Two differences from the ONNX path worth knowing:
+#
+# * A TFLite kernel is `[out, kh, kw, in]` and this runtime wants `[out, in / group, kh, kw]`,
+#   so unlike the ONNX path there **is** a transpose here. It is per layer kind, in
+#   [`collect_tflite`], and `nets::nnfp`'s `the_layer_table_matches_the_tflite_export` is the
+#   assertion on the other side of it.
+# * The weights arrive int8 with a scale per tensor and are **dequantised to fp16**, not
+#   carried through as [`DTYPE_I8`]. At 172,576 parameters int8 would save nine kilobytes
+#   against fp16 - 337 KB versus 346 KB - which does not pay for per-tensor int8 arithmetic
+#   or for a second thing to verify. See [`INT8_GRAPHS`] for when it would.
+TFLITE = {
+    "nnfp": {
+        # `music_detector.sound_model_2`, one subgraph. Note the file has 432 bytes of
+        # container in front of the flatbuffer; [`open_tflite`] finds the magic rather than
+        # assuming offset zero.
+        "subgraph": 0,
+        "input": [1, 1, 32, 1],
+        "output": [1, 64],
+        # The whole op census. `CIRCULAR_BUFFER` and the reshapes carry no weights and are
+        # unrolled or relabelled by the Rust, so they appear here and nowhere else.
+        "ops": {
+            "CONV_2D": 10,
+            "DEPTHWISE_CONV_2D": 2,
+            "CIRCULAR_BUFFER": 6,
+            "RESHAPE": 3,
+        },
+        # The weighted ops in graph order, which is the `.maml` tensor order and so the entire
+        # contract with `nets::nnfp`. Each entry is the layout to emit, the kernel shape
+        # **after** the transpose, and the bias length. Checked against the file, not assumed:
+        # a re-export that changed a channel count fails here rather than at inference.
+        "layers": [
+            ("conv", [8, 1, 1, 4], 8),
+            ("conv", [16, 8, 4, 1], 16),
+            ("conv", [24, 16, 1, 4], 24),
+            ("conv", [32, 24, 4, 1], 32),
+            ("conv", [48, 32, 1, 4], 48),
+            ("conv", [64, 48, 4, 1], 64),
+            ("conv", [96, 64, 1, 4], 96),
+            ("conv", [128, 96, 4, 1], 128),
+            ("conv", [96, 128, 1, 2], 96),
+            ("conv", [64, 96, 4, 1], 64),
+            # The full-width depthwise with `depth_multiplier = 8`, read as a grouped
+            # convolution: 512 outputs over 64 groups of one input channel each.
+            ("depthwise", [512, 1, 1, 50], 512),
+            # The final projection, which the Rust reads as two constants rather than as a
+            # convolution's parameters because the export's preceding reshape is a channel
+            # shuffle it cannot express. See `nets::nnfp::build`.
+            ("shuffled", [1, 8, 64], 64),
+        ],
+    },
+}
+
+# Numeric TFLite tensor types this reads. Anything else is a graph we have not seen.
+TFLITE_DTYPES = {0: "float32", 2: "int32", 7: "int16", 9: "int8"}
+
+
+def open_tflite(path):
+    """The flatbuffer at `path`, and a `{opcode index: name}` for its operator table.
+
+    The magic is located rather than assumed at offset 0: `music_detector.sound_model_2` has
+    432 bytes of container in front of it, and a reader that starts at zero sees garbage.
+    """
+    try:
+        from tflite.BuiltinOperator import BuiltinOperator
+        from tflite.Model import Model
+    except ImportError:
+        raise SystemExit("needs the TFLite schema bindings: python -m pip install tflite")
+
+    with open(path, "rb") as handle:
+        raw = handle.read()
+    offset = 0
+    if raw[4:8] != b"TFL3":
+        found = raw.find(b"TFL3")
+        if found < 4:
+            raise SystemExit(f"{path} holds no TFL3 flatbuffer")
+        offset = found - 4
+    model = Model.GetRootAsModel(raw[offset:], 0)
+
+    builtins = {v: k for k, v in vars(BuiltinOperator).items() if isinstance(v, int)}
+    names = {}
+    for index in range(model.OperatorCodesLength()):
+        code = model.OperatorCodes(index)
+        custom = code.CustomCode()
+        # A `custom_code` string wins over the numeric code, rather than the documented
+        # "builtin 32 means CUSTOM" test. Both Now Playing files get that number wrong:
+        # `sound_model_2` stores builtin 0 - which reads as `ADD` - on all six
+        # `CIRCULAR_BUFFER` entries while still carrying the name beside them, and
+        # `sound_model` does the same to an `IF`. A builtin never has a `custom_code`, so
+        # trusting the string is both safe and the only reading that survives these files.
+        if custom:
+            names[index] = custom.decode()
+            continue
+        # `builtin_code` is a later, wider field than `deprecated_builtin_code`, and an older
+        # converter leaves it zero. Fall back rather than reading every old op as `ADD`.
+        builtin = code.BuiltinCode() or code.DeprecatedBuiltinCode()
+        names[index] = builtins.get(builtin, f"op{builtin}")
+    return model, names
+
+
+def tflite_tensor(model, graph, index):
+    """Tensor `index` of `graph`, dequantised to fp32.
+
+    Refuses per-axis quantisation rather than guessing which axis survives the transpose in
+    [`collect_tflite`]. Nothing in the graphs read here uses it - every tensor in
+    `sound_model_2` is per-tensor - so a file that does is a file this has not been read
+    against, and should fail rather than be silently wrong along one axis.
+    """
+    tensor = graph.Tensors(index)
+    shape = [tensor.Shape(axis) for axis in range(tensor.ShapeLength())]
+    buffer = model.Buffers(tensor.Buffer())
+    if buffer.DataLength() == 0:
+        raise SystemExit(f"tensor {index} {shape} has no buffer, so it is not a constant")
+    dtype = TFLITE_DTYPES.get(tensor.Type())
+    if dtype is None:
+        raise SystemExit(f"tensor {index} has TFLite type {tensor.Type()}, which is not read")
+    values = np.frombuffer(buffer.DataAsNumpy().tobytes(), dtype=dtype).reshape(shape)
+
+    quant = tensor.Quantization()
+    if quant is None or quant.ScaleLength() == 0:
+        return np.ascontiguousarray(values, dtype=np.float32)
+    if quant.ScaleLength() != 1:
+        raise SystemExit(
+            f"tensor {index} is quantised per axis over {quant.ScaleLength()} scales. "
+            "This reader only does per-tensor; see its docstring."
+        )
+    scale = float(quant.ScaleAsNumpy()[0])
+    zero = float(quant.ZeroPointAsNumpy()[0]) if quant.ZeroPointLength() else 0.0
+    # In f64 and back, so a large int32 bias does not lose its low bits to f32 before scaling.
+    return ((values.astype(np.float64) - zero) * scale).astype(np.float32)
+
+
+def tflite_options(operator, depthwise):
+    """`(stride_h, stride_w, padding, depth_multiplier, activation)`, for the digest key.
+
+    Recorded rather than acted on. The Rust hardcodes its own padding, because `sound_model_2`
+    stores `Padding = VALID` on every convolution while recording output shapes that only
+    `SAME` produces on the frequency axis - see `nets::nnfp`. Putting the stored value in the
+    key means a re-export that *fixed* that inconsistency changes the digest and gets looked
+    at, instead of quietly disagreeing with the hardcoded pass.
+    """
+    from tflite.Conv2DOptions import Conv2DOptions
+    from tflite.DepthwiseConv2DOptions import DepthwiseConv2DOptions
+
+    table = operator.BuiltinOptions()
+    if table is None:
+        return (0, 0, 0, 0, 0)
+    options = DepthwiseConv2DOptions() if depthwise else Conv2DOptions()
+    options.Init(table.Bytes, table.Pos)
+    multiplier = options.DepthMultiplier() if depthwise else 1
+    return (
+        options.StrideH(),
+        options.StrideW(),
+        options.Padding(),
+        multiplier,
+        options.FusedActivationFunction(),
+    )
+
+
+def check_tflite(model, names, graph_id_name):
+    """The graph's boundary shapes and op census against [`TFLITE`]."""
+    spec = TFLITE[graph_id_name]
+    graph = model.Subgraphs(spec["subgraph"])
+
+    def shape_of(index):
+        tensor = graph.Tensors(index)
+        return [tensor.Shape(axis) for axis in range(tensor.ShapeLength())]
+
+    got_in = [shape_of(graph.Inputs(i)) for i in range(graph.InputsLength())]
+    if got_in != [spec["input"]]:
+        raise SystemExit(f"graph inputs are {got_in}, expected [{spec['input']}]")
+    got_out = [shape_of(graph.Outputs(i)) for i in range(graph.OutputsLength())]
+    if got_out != [spec["output"]]:
+        raise SystemExit(f"graph outputs are {got_out}, expected [{spec['output']}]")
+
+    counts = {}
+    for index in range(graph.OperatorsLength()):
+        name = names[graph.Operators(index).OpcodeIndex()]
+        counts[name] = counts.get(name, 0) + 1
+    if counts != spec["ops"]:
+        only_got = {k: v for k, v in counts.items() if spec["ops"].get(k) != v}
+        only_want = {k: v for k, v in spec["ops"].items() if counts.get(k) != v}
+        raise SystemExit(f"op counts differ: got {only_got}, expected {only_want}")
+
+
+def collect_tflite(model, names, spec):
+    """`(layers, tensors)` for a TFLite graph, in the order the Rust forward pass reads them.
+
+    Graph order, weighted ops only: kernel then bias, exactly as the ONNX collector emits a
+    `Conv`. The transpose from TFLite's `[out, kh, kw, in]` into this runtime's
+    `[out, in / group, kh, kw]` happens here, per layer kind.
+    """
+    graph = model.Subgraphs(spec["subgraph"])
+    weighted = []
+    for index in range(graph.OperatorsLength()):
+        operator = graph.Operators(index)
+        name = names[operator.OpcodeIndex()]
+        if name in ("CONV_2D", "DEPTHWISE_CONV_2D"):
+            weighted.append((index, operator, name))
+    if len(weighted) != len(spec["layers"]):
+        raise SystemExit(
+            f"{len(weighted)} weighted ops, expected {len(spec['layers'])}. The export's "
+            "layer count changed, so the hardcoded forward pass no longer describes it."
+        )
+
+    layers, tensors = [], []
+    for position, ((at, operator, op_name), want) in enumerate(zip(weighted, spec["layers"])):
+        kind, want_kernel, want_bias = want
+        kernel = tflite_tensor(model, graph, operator.Inputs(1))
+        bias = tflite_tensor(model, graph, operator.Inputs(2))
+        stored = list(kernel.shape)
+        options = tflite_options(operator, op_name == "DEPTHWISE_CONV_2D")
+
+        if kind == "conv":
+            # `[out, kh, kw, in]` to `[out, in, kh, kw]`.
+            kernel = kernel.transpose(0, 3, 1, 2)
+        elif kind == "depthwise":
+            # A depthwise kernel is `[1, kh, kw, out]`, where `out` is `in * depth_multiplier`
+            # indexed as `channel * multiplier + m`. Moving that axis to the front gives
+            # `[out, 1, kh, kw]`, which is what a grouped convolution with one input channel
+            # per group reads - and the `channel * multiplier + m` ordering is exactly the
+            # group ordering the shader uses, so nothing has to be reordered within it.
+            kernel = kernel.transpose(3, 0, 1, 2)
+        elif kind == "shuffled":
+            # Read as constants, not as a convolution: `[1, 1, 8, 64]` to `[1, 8, 64]` and the
+            # bias to `[64, 1, 1]`, which is the rank a constant has. Both are relabellings of
+            # the same bytes in the same order.
+            kernel = kernel.reshape(kernel.shape[1:])
+            bias = bias.reshape(bias.shape[0], 1, 1)
+        else:
+            raise SystemExit(f"layer {position} has unknown kind {kind!r}")
+        kernel = np.ascontiguousarray(kernel, dtype=np.float32)
+
+        if list(kernel.shape) != want_kernel:
+            raise SystemExit(
+                f"layer {position} ({op_name} at op {at}) is {list(kernel.shape)} after the "
+                f"transpose, expected {want_kernel}"
+            )
+        if bias.size != want_bias:
+            raise SystemExit(f"layer {position} bias is {bias.size} long, expected {want_bias}")
+
+        key = (
+            f"TFLite{op_name} w={stored} b={[want_bias]} "
+            f"s={list(options[:2])} p={options[2]} m={options[3]} a={options[4]}"
+        )
+        layers.append(Layer(position, op_name, f"op{at}", key, len(tensors), 2))
+        tensors.append(kernel)
+        tensors.append(np.ascontiguousarray(bias, dtype=np.float32))
+    return layers, tensors
+
+
 def main():
     parser = argparse.ArgumentParser(description=SPEC.splitlines()[0])
-    parser.add_argument("model", help="an ONNX export, or a .safetensors for a CHECKPOINTS graph")
+    parser.add_argument(
+        "model", help="an ONNX export, a .safetensors for a CHECKPOINTS graph, or a .tflite"
+    )
     parser.add_argument("--graph", required=True, choices=sorted(GRAPHS))
     parser.add_argument("-o", "--out", help="where to write the .maml")
     parser.add_argument("--check", action="store_true", help="validate only")
@@ -2075,7 +3727,11 @@ def main():
             source_sha256.update(block)
     source_size = os.path.getsize(args.model)
 
-    if args.graph in CHECKPOINTS:
+    if args.graph in TFLITE:
+        model, names = open_tflite(args.model)
+        check_tflite(model, names, args.graph)
+        layers, tensors = collect_tflite(model, names, TFLITE[args.graph])
+    elif args.graph in CHECKPOINTS:
         get, shapes = open_checkpoint(args.model)
         check_checkpoint(shapes, args.graph)
         layers, tensors = COLLECTORS[args.graph](get, CHECKPOINTS[args.graph])
@@ -2083,7 +3739,16 @@ def main():
         model = onnx.load(args.model)
         check_graph(model, args.graph)
         check_architecture(model, args.graph, ARCHITECTURES[args.graph])
-        layers, tensors = collect_tinyclip(model, ARCHITECTURES[args.graph])
+        if args.graph == "gemma4_text":
+            layers, tensors = collect_gemma4(model, ARCHITECTURES[args.graph])
+        elif args.graph == "gemma4_embed":
+            layers, tensors = collect_gemma4_embed(model, ARCHITECTURES[args.graph])
+        elif args.graph == "gemma4_vision":
+            layers, tensors = collect_gemma4_vision(model, ARCHITECTURES[args.graph])
+        elif args.graph == "gemma4_audio":
+            layers, tensors = collect_gemma4_audio(model, ARCHITECTURES[args.graph])
+        else:
+            layers, tensors = collect_tinyclip(model, ARCHITECTURES[args.graph])
     else:
         model = onnx.load(args.model)
         check_graph(model, args.graph)
@@ -2094,8 +3759,18 @@ def main():
     digest = layer_table_digest(layers)
     if args.print_digest:
         print(f'    "{args.graph}": "{digest}",')
-    pinned = EXPECTED_DIGEST[args.graph]
-    if digest != pinned:
+    pinned = EXPECTED_DIGEST.get(args.graph)
+    if pinned is None:
+        message = (
+            f"{args.graph} has no pinned layer table digest. Add\n"
+            f'    "{args.graph}": "{digest}",\n'
+            "to EXPECTED_DIGEST once the Rust net agrees with this table, so that a later\n"
+            "change to either side fails loudly instead of shifting every tensor."
+        )
+        if not args.print_digest:
+            raise SystemExit(message)
+        print(message, file=sys.stderr)
+    elif digest != pinned:
         message = (
             f"layer table digest {digest}\n"
             f"           pinned  {pinned}\n"

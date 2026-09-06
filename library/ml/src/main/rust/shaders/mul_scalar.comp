@@ -1,0 +1,28 @@
+#version 450
+//! Multiply a tensor by a **scalar held in the weights**.
+//!
+//! # Why this is not `Kind::Affine`
+//!
+//! `Affine` takes its scale as a push constant, decided when the plan is built. This one reads a
+//! one-element weight tensor, because the value is in the `.maml` and `Builder` sees only shapes
+//! and offsets - it cannot read a number at build time without giving every net the ability to
+//! bake weights into a recording, which is exactly what `Reshaped` exists to avoid.
+//!
+//! Gemma 4's `layer_scalar` is the caller: one trained number per layer, multiplying that layer's
+//! whole residual output. At 0.0178 on layer 0 it is not a rounding detail - leaving it out lets
+//! the residual stream grow by a factor of fifty per layer.
+//!
+//! # Push fields
+//!
+//! `p.in0`, `p.out_at` and `p.count` as usual; `p.act_weight` is the fp16 offset of the scalar.
+
+#include "common.glsl"
+
+void main() {
+    uint index = global_index();
+    if (index >= p.count) {
+        return;
+    }
+    float scale = float(weights[p.act_weight]);
+    arena[p.out_at + index] = float16_t(float(arena[p.in0 + index]) * scale);
+}

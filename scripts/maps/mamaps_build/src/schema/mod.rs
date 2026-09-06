@@ -347,9 +347,9 @@ pub fn filters(layers: Layers) -> Vec<&'static str> {
     if layers.poi {
         out.extend_from_slice(poi::FILTERS);
     }
-    if layers.transit {
-        out.extend_from_slice(transit::FILTERS);
-    }
+    // No `transit` entry: the layer's geometry comes from a GTFS export rather than the `.osm.pbf`,
+    // and the one tag it still reads — `station`, for a station POI's `kind_detail` — is screened by
+    // `poi::FILTERS`. A `--layers poi` build must keep that detail, which is why it lives there.
     if layers.landcover || layers.landuse {
         out.extend_from_slice(land::FILTERS);
     }
@@ -446,9 +446,15 @@ mod tests {
         for key in [
             "natural", "waterway", "landuse", "building", "highway", "railway", "boundary",
             "leisure", "amenity", "place", "shop", "tourism", "aeroway", "name",
-            "type", "route", "colour", "color", "station",
+            "route", "station",
         ] {
             assert!(all.contains(&key), "the screen omits `{key}`");
         }
+        // `station` is what `transit::station_detail` reads, and it has to survive a build that
+        // asks for POIs without transit -- otherwise every station silently loses its mode.
+        assert!(
+            filters(Layers { poi: true, ..Layers::none() }).contains(&"station"),
+            "a --layers poi build would drop station detail",
+        );
     }
 }

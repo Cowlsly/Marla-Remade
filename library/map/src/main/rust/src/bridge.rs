@@ -15,7 +15,7 @@
 //! critical path, and no JNI in the hot loop.
 
 use crate::camera::Camera;
-use crate::style::{self, Layer, Palette};
+use crate::style::{self, Layer, LayerToggles, Palette, SharedToggles};
 use crate::tile::cache::{RangeCache, DEFAULT_MAX_BYTES};
 use crate::tile::geometry::{self, TileMesh};
 use crate::tile::select::{self, TileId};
@@ -110,6 +110,10 @@ struct MapHandle {
     /// Light or dark, muted or not. Switching costs nothing: colour is a push constant and
     /// the layer set is identical, so no tile is re-tessellated or re-uploaded.
     palette: Palette,
+    /// Which optional layers (POI, transit) are on, plus the generation that identifies
+    /// them. Shared with the tile workers, which gate tessellation on it and stamp every
+    /// mesh they build with the generation they read.
+    toggles: Arc<SharedToggles>,
     /// Read live every frame, because the worker only learns it after fetching the header.
     zoom_range: Arc<ZoomRange>,
     /// Frames drawn, for the once-a-second diagnostic log.
@@ -196,6 +200,10 @@ pub extern "system" fn Java_com_vayunmathur_library_map_MapNative_create<'l>(
     let (finished_tx, finished_rx) = std::sync::mpsc::channel::<(u64, TileResult)>();
 
     let zoom_range = Arc::new(ZoomRange::unknown());
+    // Both optional layers start off: the five existing consumers never asked for POI
+    // icons or transit lines, and defaulting them on would make every one of them pay
+    // for shaping labels it does not draw.
+    let toggles = Arc::new(SharedToggles::new(LayerToggles::default()));
     // One `Receiver` shared by every worker, so whichever is free takes the next tile.
     let queue = Arc::new(Mutex::new(wanted_rx));
     match normalize_local_archive_path(&archive_path) {
@@ -209,6 +217,7 @@ pub extern "system" fn Java_com_vayunmathur_library_map_MapNative_create<'l>(
                     finished_tx.clone(),
                     online.clone(),
                     zoom_range.clone(),
+                    toggles.clone(),
                 );
             }
         }
@@ -223,6 +232,7 @@ pub extern "system" fn Java_com_vayunmathur_library_map_MapNative_create<'l>(
                     finished_tx.clone(),
                     online.clone(),
                     zoom_range.clone(),
+                    toggles.clone(),
                 );
             }
         }
@@ -235,6 +245,7 @@ pub extern "system" fn Java_com_vayunmathur_library_map_MapNative_create<'l>(
                     queue.clone(),
                     finished_tx.clone(),
                     zoom_range.clone(),
+                    toggles.clone(),
                 );
             }
         }
@@ -249,6 +260,7 @@ pub extern "system" fn Java_com_vayunmathur_library_map_MapNative_create<'l>(
         absent: HashSet::new(),
         online,
         palette: Palette::new(dark != 0, muted != 0),
+        toggles,
         zoom_range,
         frames: 0,
         density: 1.0,
@@ -264,6 +276,7 @@ pub extern "system" fn Java_com_vayunmathur_library_map_MapNative_create<'l>(
 /// duplicated leaf cache; the alternative — one archive behind a mutex — would serialise
 /// exactly the round trips this is meant to overlap. The on-disk range cache is shared, and
 /// is safe to share because every entry is written temp-then-renamed.
+#[allow(clippy::too_many_arguments)]
 fn spawn_worker(
     index: usize,
     archive_url: String,
@@ -272,6 +285,7 @@ fn spawn_worker(
     finished: Sender<(u64, TileResult)>,
     online: Arc<OnlineFlag>,
     zoom_range: Arc<ZoomRange>,
+    toggles: Arc<SharedToggles>,
 ) {
     let started = std::thread::Builder::new()
         .name(format!("map-tiles-{index}"))
@@ -313,14 +327,20 @@ fn spawn_worker(
                 let Ok(tile) = next else { return };
                 let key = tile.key();
 
+                // Read per tile, not once per worker: a toggle change has to reach the
+                // very next tile built, and both halves come from one atomic load so the
+                // stamp can never describe different flags than the mesh was built with.
+                let (enabled, generation) = toggles.get();
                 let result = match archive.tile(tile.z, tile.x, tile.y) {
-                    Ok(Some(body)) => TileResult::Ready(geometry::build(
+                    Ok(Some(body)) => TileResult::Ready(geometry::build_toggled(
                         &body,
                         layers,
                         tile.z,
                         tile.x,
                         tile.y,
                         rings_validated,
+                        enabled,
+                        generation,
                     )),
                     Ok(None) => TileResult::Absent,
                     Err(e) => {
@@ -346,6 +366,7 @@ fn spawn_file_worker(
     queue: Arc<Mutex<Receiver<TileId>>>,
     finished: Sender<(u64, TileResult)>,
     zoom_range: Arc<ZoomRange>,
+    toggles: Arc<SharedToggles>,
 ) {
     let Some(path) = path else {
         // Empty archive_path == remote fallback already handled by caller printing a log,
@@ -379,9 +400,11 @@ fn spawn_file_worker(
                 };
                 let Ok(tile) = next else { return };
                 let key = tile.key();
+                let (enabled, generation) = toggles.get();
                 let result = match archive.tile(tile.z, tile.x, tile.y) {
-                    Ok(Some(body)) => TileResult::Ready(geometry::build(
-                        &body, layers, tile.z, tile.x, tile.y, rings_validated,
+                    Ok(Some(body)) => TileResult::Ready(geometry::build_toggled(
+                        &body, layers, tile.z, tile.x, tile.y, rings_validated, enabled,
+                        generation,
                     )),
                     Ok(None) => TileResult::Absent,
                     Err(e) => {
@@ -454,19 +477,17 @@ pub extern "system" fn Java_com_vayunmathur_library_map_MapNative_render<'l>(
 ) -> jboolean {
     let Some(map) = handle_mut(handle) else { return 0 };
 
-    // MapLibre parity lives HERE, once, as a +1 zoom offset — not in TILE_SIZE.
-    // A 512 TILE_SIZE was tried and reverted (task 1, magenta verdict: label
-    // quads invisible, roads cut at seams) while 256 tile-local math renders
-    // both clean. Viewing the world one level deeper doubles ground-feature
-    // size on screen — matching MapLibre's 512-equivalent display at the same
-    // zoom float — while tile addressing (floor of the OFFSET zoom, so z+1
-    // tiles), tessellation, emission and the clip matrix all stay on the
-    // known-good 256 grid. Sizes, halo and gating are screen-space ramps
-    // evaluated at the offset zoom, so labels keep their MapLibre-matched px.
+    // The camera zoom crosses the boundary untouched. MapLibre parity is
+    // `camera::TILE_SIZE` being 512, the convention the archives are authored on, so
+    // tile addressing is the plain floor of this zoom and every style ramp is
+    // evaluated at the zoom the authored `basemap.json` meant by it. This was
+    // previously a 256 grid with a +1 offset applied here, which reached the same
+    // ground scale but fetched z+1 tiles — four times as many as MapLibre for the
+    // same screenful — and read every ramp one level deep.
     let camera = Camera {
         center_lon: center_lon as f64,
         center_lat: center_lat as f64,
-        zoom: zoom as f64 + 1.0,
+        zoom: zoom as f64,
         width_dp,
         height_dp,
         density,
@@ -502,11 +523,18 @@ pub extern "system" fn Java_com_vayunmathur_library_map_MapNative_render<'l>(
     // ancestors sort first it spent that latency before requesting what the user is
     // actually looking at.
     let (min_zoom, max_zoom) = map.zoom_range.get();
+    // A tile is "had" only if it was tessellated at the current toggle generation, so a
+    // toggle change re-requests the resident set through this same loop rather than
+    // needing a path of its own. The stale mesh keeps drawing until its replacement
+    // arrives.
+    let (_, generation) = map.toggles.get();
     let keep: Vec<u64> =
         select::resident_set(&camera, min_zoom, max_zoom).iter().map(|t| t.key()).collect();
     for tile in select::visible(&camera, min_zoom, max_zoom) {
         let key = tile.key();
-        if map.renderer.has_tile(key) || map.absent.contains(&key) || !map.in_flight.insert(key)
+        if map.renderer.has_tile(key, generation)
+            || map.absent.contains(&key)
+            || !map.in_flight.insert(key)
         {
             continue;
         }
@@ -527,15 +555,16 @@ pub extern "system" fn Java_com_vayunmathur_library_map_MapNative_render<'l>(
         // differ wherever the authored style ramps a layer's width to zero, so reporting only
         // the first would claim roads are being drawn at zooms where they are gated out.
         log_info(&format!(
-            "z{:.2} @{:.4},{:.4} vp {}x{}dp {}x{}px | resident {} tiles, {} meshes, {} draws, \
-             {} tris | {} in flight, {} absent | archive z{}..{}",
-            camera.zoom - 1.0,
+            "z{:.2} @{:.4},{:.4} vp {}x{}dp {}x{}px msaa {}x | resident {} tiles, {} meshes, \
+             {} draws, {} tris | {} in flight, {} absent | archive z{}..{}",
+            camera.zoom,
             camera.center_lon,
             camera.center_lat,
             camera.width_dp,
             camera.height_dp,
             width_px,
             height_px,
+            map.renderer.samples(),
             tiles,
             meshes,
             draws,
@@ -581,6 +610,33 @@ pub extern "system" fn Java_com_vayunmathur_library_map_MapNative_setPalette<'l>
 ) {
     if let Some(map) = handle_mut(handle) {
         map.palette = Palette::new(dark != 0, muted != 0);
+    }
+}
+
+/// Turn the optional layers on or off.
+///
+/// Not free, unlike [`setPalette`](Java_com_vayunmathur_library_map_MapNative_setPalette):
+/// POI and transit are gated at tessellation time so that leaving them off costs nothing,
+/// which means turning one on invalidates every resident mesh. Bumping the generation is
+/// all this does; the render loop notices the resident tiles are stale and re-requests
+/// them through the existing worker pool, reading the archive it already has. Nothing is
+/// refetched, nothing is evicted, and the old meshes keep drawing until the new ones land.
+///
+/// A call that changes nothing bumps nothing, because the host is expected to call this
+/// from a Compose effect that may re-run for unrelated reasons.
+#[no_mangle]
+pub extern "system" fn Java_com_vayunmathur_library_map_MapNative_setLayers<'l>(
+    _env: JNIEnv<'l>,
+    _class: JClass<'l>,
+    handle: jlong,
+    poi: jboolean,
+    transit: jboolean,
+) {
+    if let Some(map) = handle_mut(handle) {
+        let wanted = LayerToggles { poi: poi != 0, transit: transit != 0 };
+        if map.toggles.set(wanted) {
+            log_info(&format!("layers changed: poi={} transit={}", wanted.poi, wanted.transit));
+        }
     }
 }
 

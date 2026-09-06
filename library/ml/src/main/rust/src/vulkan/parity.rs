@@ -393,7 +393,7 @@ fn a_decode_plan_built_at_the_maximum_matches_one_built_at_the_length() {
         let q = builder.input(Shape::new(D_MODEL, 1, 1));
         let cache = builder.input(Shape::new(MAX, 1, D_MODEL));
         let scores = builder.attn_scores_cached_dynamic(q, cache, HEADS);
-        let probs = builder.softmax_prefix(scores);
+        let probs = builder.softmax_prefix(scores, true);
         let out = builder.attn_apply_cached_dynamic(probs, cache, HEADS);
         let plan = builder.finish(&[out]).expect("the maximum-length decode plan builds");
         crate::nets::tests::assert_no_aliasing(&plan);
@@ -462,7 +462,7 @@ fn a_persistent_cache_accumulates_across_submits_of_one_recording() {
     let cache = builder.persistent(Shape::new(MAX, 1, D_MODEL));
     builder.cache_write(row, cache);
     let scores = builder.attn_scores_cached_dynamic(row, cache, HEADS);
-    let probs = builder.softmax_prefix(scores);
+    let probs = builder.softmax_prefix(scores, true);
     let out = builder.attn_apply_cached_dynamic(probs, cache, HEADS);
     let plan = builder.finish(&[out]).expect("the record-once decode plan builds");
     crate::nets::tests::assert_no_aliasing(&plan);
@@ -530,8 +530,8 @@ fn multi_query_attention_reads_one_cache_head_for_every_query_head() {
         let q = builder.input(Shape::new(d_model, 1, 1));
         let cache = builder.input(Shape::new(KEYS, 1, KV_HEADS * HEAD_DIM));
         let scores = builder.attn_scores_cached_grouped(q, cache, HEADS, KV_HEADS);
-        let probs = builder.softmax_prefix(scores);
-        let out = builder.attn_apply_cached_grouped(probs, cache, HEADS, KV_HEADS);
+        let probs = builder.softmax_prefix(scores, true);
+        let out = builder.attn_apply_cached_grouped(probs, cache, HEADS, KV_HEADS, true);
         let plan = builder.finish(&[out]).expect("the grouped plan builds");
         crate::nets::tests::assert_no_aliasing(&plan);
         on_device_at(plan, source.into_data(), &[&query, &narrow], KEYS - 1)
@@ -581,7 +581,7 @@ fn a_sliding_window_ignores_everything_before_its_start() {
     let q = builder.input(Shape::new(d_model, 1, 1));
     let cache = builder.input(Shape::new(KEYS, 1, d_model));
     let scores = builder.attn_scores_cached_dynamic(q, cache, HEADS);
-    let probs = builder.softmax_prefix(scores);
+    let probs = builder.softmax_prefix(scores, true);
     let out = builder.attn_apply_cached_dynamic(probs, cache, HEADS);
     let plan = builder.finish(&[out]).expect("the windowed plan builds");
     crate::nets::tests::assert_no_aliasing(&plan);
@@ -641,6 +641,528 @@ fn a_grouped_rms_norm_normalises_each_head_on_its_own() {
 
 #[test]
 #[ignore = "needs a Vulkan device"]
+fn a_banded_score_map_matches_the_cpu_oracle() {
+    // Two heads of head_dim 4 over eight positions, band 3, so the first two queries have dead
+    // columns and the rest are full. The relative table is `[heads, offsets, head_dim]` with
+    // offsets = band + 1, because column `j` reads offset `j + 1` and the widest column needs
+    // offset `band`.
+    const HEADS: u32 = 2;
+    const HEAD_DIM: u32 = 4;
+    const T: u32 = 8;
+    const BAND: u32 = 3;
+    const OFFSETS: u32 = BAND + 1;
+    let q = spread((HEADS * HEAD_DIM * T) as usize, 0.31);
+    let k = spread((HEADS * HEAD_DIM * T) as usize, -0.23);
+    let table = spread((HEADS * OFFSETS * HEAD_DIM) as usize, 0.17);
+    // `agrees` and not `agrees_invented`: the second argument of `agrees_invented` is a tensor
+    // COUNT, and passing `table.len()` there declared 32 tensors for a plan that reads one, so
+    // `finish` refused the plan before a device was ever asked for. Handing the table over as a
+    // real fixture tensor is what the relative-attention tests do and keeps the values here.
+    // Straddle the cap, or the test would pass against no softcap at all.
+    agrees(
+        "a banded score map",
+        &[Shape::new(HEADS * HEAD_DIM, 1, T), Shape::new(HEADS * HEAD_DIM, 1, T)],
+        &[&q, &k],
+        &[(vec![HEADS, OFFSETS, HEAD_DIM], table)],
+        |b, ids| b.attn_scores_banded(ids[0], ids[1], HEADS, BAND, 0, OFFSETS, 1.0, 2.0),
+    );
+}
+
+#[test]
+#[ignore = "needs a Vulkan device"]
+fn a_banded_value_mix_matches_the_cpu_oracle() {
+    const HEADS: u32 = 2;
+    const HEAD_DIM: u32 = 4;
+    const T: u32 = 8;
+    const BAND: u32 = 3;
+    let probs = spread((HEADS * T * BAND) as usize, 0.11);
+    let v = spread((HEADS * HEAD_DIM * T) as usize, 0.29);
+    agrees_invented(
+        "a banded value mix",
+        0,
+        &[Shape::new(HEADS, T, BAND), Shape::new(HEADS * HEAD_DIM, 1, T)],
+        &[&probs, &v],
+        |b, ids| b.attn_apply_banded(ids[0], ids[1], HEADS, BAND),
+    );
+}
+
+/// Heads, head_dim, sequence and band the banded value fixtures below share.
+///
+/// The band is [`crate::nets::gemma4_audio::ATTEND_SPAN`] itself rather than a small stand-in, so
+/// that `q = 0, 1, 11` here are the same edge rows the tower actually has. `T` is two past the
+/// band, which puts three fully populated rows after the ragged ones.
+const FIXTURE_HEADS: u32 = 2;
+const FIXTURE_HEAD_DIM: u32 = 2;
+const FIXTURE_T: u32 = 14;
+
+/// The logit cap the banded fixtures use.
+///
+/// Not the production 50: with these magnitudes `tanh(x / 50) * 50` is within a percent of `x`,
+/// and a shader that dropped the cap would pass. At 8 the fixture's largest score bends by 32%,
+/// which `the_banded_cap_is_applied_to_the_sum_and_not_to_the_fill` pins directly.
+const FIXTURE_CAP: f32 = 8.0;
+
+/// Q, K and the relative table for the banded score fixtures.
+///
+/// Every value is a multiple of `1/8`, so it survives the fp16 arena exactly and the only
+/// rounding in the whole fixture is the single store of the result. That is what lets these
+/// assert *values* rather than "finite and about right" — which is the entire point, since a
+/// wrapped out-of-bounds read returns a finite plausible number from a neighbouring tensor.
+///
+/// Head 0's keys ascend and head 1's descend, and the two heads read different rows of the
+/// table, so a swapped head or a transposed key axis is visible in the answer rather than
+/// cancelling out.
+fn banded_score_fixture(offsets: u32) -> (Vec<f32>, Vec<f32>, Vec<f32>) {
+    let channels = FIXTURE_HEADS * FIXTURE_HEAD_DIM;
+    let q = vec![1.0; (channels * FIXTURE_T) as usize];
+    let mut k = vec![0.0; (channels * FIXTURE_T) as usize];
+    for t in 0..FIXTURE_T {
+        // Channel 0 is head 0's first lane, channel 2 is head 1's. The other lane of each head
+        // stays zero, so the content term is exactly one product.
+        k[t as usize] = (t + 1) as f32 * 0.5;
+        k[(2 * FIXTURE_T + t) as usize] = -((t + 1) as f32) * 0.5;
+    }
+    let mut table = vec![0.0; (FIXTURE_HEADS * offsets * FIXTURE_HEAD_DIM) as usize];
+    for o in 0..offsets {
+        // Lane 1 carries the table, so the relative term is also exactly one product. The two
+        // heads get different weights.
+        table[((o * FIXTURE_HEAD_DIM) + 1) as usize] = o as f32 * 0.25;
+        table[(((offsets + o) * FIXTURE_HEAD_DIM) + 1) as usize] = o as f32 * 0.125;
+    }
+    (q, k, table)
+}
+
+/// What `banded_score_fixture` should produce at `(head, query, column)` for a window of `band`,
+/// or `None` when the column falls before the start of the sequence.
+///
+/// Derived from the fixture's own arithmetic and `band_key_in`, not from the op: content is
+/// `+/-(k + 1) / 2` and the relative term is `(j + 1) / 4` or `(j + 1) / 8`, and the cap is
+/// applied to their sum.
+///
+/// `band` is a parameter rather than [`ATTEND_SPAN`] for the same reason the reference arms take
+/// it: the op is parameterised and reads it from `Push::kh`. Hardcoding the span here would be
+/// invisible today — every caller passes `ATTEND_SPAN` and the two agree at 12 — and would fail
+/// the moment someone writes a non-12 test, with the EXPECTATION computed at 12 and the ARM at
+/// their band. That presents as an op bug, and the shader is where they would look first.
+fn banded_score_want(band: u32, head: u32, query: u32, column: u32) -> Option<f32> {
+    let key = crate::nets::gemma4_audio::band_key_in(band, query, column)?;
+    let content = (key + 1) as f32 * 0.5;
+    let relative = (column + 1) as f32;
+    let total = if head == 0 { content + relative * 0.25 } else { -content + relative * 0.125 };
+    Some((total / FIXTURE_CAP).tanh() * FIXTURE_CAP)
+}
+
+/// Run the banded score op over `banded_score_fixture` on the host interpreter.
+fn banded_scores(band: u32, offsets: u32) -> Vec<f32> {
+    let (q, k, table) = banded_score_fixture(offsets);
+    let channels = FIXTURE_HEADS * FIXTURE_HEAD_DIM;
+    let tensors = [(vec![FIXTURE_HEADS, offsets, FIXTURE_HEAD_DIM], table)];
+    let given = Given::new(&tensors).expect("the banded fixture tensors lay out");
+    let shapes = [Shape::new(channels, 1, FIXTURE_T), Shape::new(channels, 1, FIXTURE_T)];
+    let plan = build(&given, &shapes, |b, ids| {
+        // The scale is 1.0 and not the export's 0.127517431974411: `maml_convert.py` folds that
+        // into the per-layer `QueryScale` tensor, so Q reaches this op already scaled. See
+        // `Builder::attn_scores_banded`.
+        b.attn_scores_banded(ids[0], ids[1], FIXTURE_HEADS, band, 0, offsets, 1.0, FIXTURE_CAP)
+    });
+    let outputs =
+        run_multi(&plan, given.data(), &[&q, &k]).expect("the banded score fixture runs");
+    match <[Vec<f32>; 1]>::try_from(outputs) {
+        Ok([only]) => only,
+        Err(other) => panic!("{} outputs", other.len()),
+    }
+}
+
+/// Assert `got` is `want` to within one fp16 store of the fixture's magnitude.
+fn pinned(what: &str, got: f32, want: f32) {
+    // fp16 keeps about three decimal digits and the operands here are exact, so the only error
+    // is the store of the result.
+    let tolerance = want.abs() * 1e-3 + 1e-3;
+    assert!((got - want).abs() <= tolerance, "{what}: got {got}, want {want}");
+}
+
+#[test]
+#[ignore = "needs a Vulkan device"]
+fn the_banded_ops_agree_with_the_cpu_arm_at_the_towers_own_span() {
+    // Device parity for both banded ops at the span, head count and table shape the tower
+    // actually uses, over the same fixture the host value tests pin. The band-3 pair above is
+    // the general case; this is the one that ships.
+    //
+    // The comparison is written out rather than handed to `matches`, and that is not fussiness.
+    // `matches` scales its tolerance by the largest magnitude in the tensor, and a banded score
+    // map contains MASK_FILL - so its scale is 65504 and `TOLERANCE * 65504` is about 262.
+    // Every live score here is under 8. Run through `matches`, this test would pass with every
+    // live slot on the device replaced by zero, which is exactly the "shader wrote nothing"
+    // failure it is supposed to catch. Live slots are therefore compared on their own scale and
+    // dead slots pinned to the sentinel exactly.
+    use crate::nets::gemma4_audio::{band_key_in, ATTEND_SPAN, MASK_FILL};
+    let offsets = ATTEND_SPAN + 1;
+    let (q, k, table) = banded_score_fixture(offsets);
+    let channels = FIXTURE_HEADS * FIXTURE_HEAD_DIM;
+    let tensors = [(vec![FIXTURE_HEADS, offsets, FIXTURE_HEAD_DIM], table)];
+    let given = Given::new(&tensors).expect("the banded fixture tensors lay out");
+    let shapes = [Shape::new(channels, 1, FIXTURE_T), Shape::new(channels, 1, FIXTURE_T)];
+    let plan = build(&given, &shapes, |b, ids| {
+        b.attn_scores_banded(
+            ids[0],
+            ids[1],
+            FIXTURE_HEADS,
+            ATTEND_SPAN,
+            0,
+            offsets,
+            1.0,
+            FIXTURE_CAP,
+        )
+    });
+    let data = given.data().to_vec();
+    let host = run_multi(&plan, &data, &[&q, &k]).expect("the interpreter runs the banded scores");
+    let got = on_device(plan, data, &[&q, &k]);
+    let (host, got) = (&host[0], &got[0]);
+    assert_eq!(got.len(), host.len(), "banded scores: output length");
+    let mut live = 0;
+    for head in 0..FIXTURE_HEADS {
+        for query in 0..FIXTURE_T {
+            for column in 0..ATTEND_SPAN {
+                let at = ((head * FIXTURE_T + query) * ATTEND_SPAN + column) as usize;
+                let what = format!("banded scores head {head} query {query} column {column}");
+                if band_key_in(ATTEND_SPAN, query, column).is_some() {
+                    live += 1;
+                    // On the live scale, not the tensor's.
+                    let tolerance = host[at].abs().max(1.0) * TOLERANCE;
+                    assert!(
+                        (host[at] - got[at]).abs() <= tolerance,
+                        "{what}: {} on the device, {} on the host",
+                        got[at],
+                        host[at]
+                    );
+                } else {
+                    // Both sides must have written the sentinel. A device that left the arena
+                    // alone would show up here as whatever the previous op left.
+                    for (side, value) in [("host", host[at]), ("device", got[at])] {
+                        assert!(
+                            (value - MASK_FILL).abs() < 1.0,
+                            "{what} is dead but the {side} has {value}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+    // The fixture has to contain both kinds of slot or the loop above proves only one thing.
+    // Per head: 14 queries of a 12-wide band is 168 slots, of which 11 + 10 + ... + 1 = 66 are
+    // dead, so 102 are live. Two heads doubles both.
+    assert_eq!(live, 204, "live slots over two heads of 14 queries of a 12-wide band");
+    assert_eq!(host.len() - live, 132, "66 dead slots a head, one per column off the start");
+
+    // The value half, over the band the scores op just produced. Ordinary `agrees`: nothing in a
+    // value mix is a sentinel, so the tensor's own scale is the right one.
+    let probs = spread((FIXTURE_HEADS * FIXTURE_T * ATTEND_SPAN) as usize, 0.11);
+    let v = spread((channels * FIXTURE_T) as usize, 0.29);
+    agrees_invented(
+        "a banded value mix at the tower's span",
+        0,
+        &[
+            Shape::new(FIXTURE_HEADS, FIXTURE_T, ATTEND_SPAN),
+            Shape::new(channels, 1, FIXTURE_T),
+        ],
+        &[&probs, &v],
+        |b, ids| b.attn_apply_banded(ids[0], ids[1], FIXTURE_HEADS, ATTEND_SPAN),
+    );
+}
+
+#[test]
+fn a_banded_score_map_has_the_right_values_where_the_band_hangs_off_the_start() {
+    // The test the brief calls unusual, and the reason it is unusual is the failure mode. A
+    // column whose key underflowed does not crash and does not produce a NaN: unsigned wrap
+    // gives about 4.29e9, and even where a bound catches it the *unguarded* form has already
+    // read live arena belonging to a neighbouring tensor. What comes back is finite, of a
+    // plausible magnitude, and wrong. So "it ran and the numbers look sane" is precisely the
+    // shape of the bug, and nothing short of asserting the value catches it.
+    //
+    // Every one of the 336 slots is pinned: the live ones to the key `band_key` says they read,
+    // the dead ones to `MASK_FILL` exactly. `q = 0, 1, 11` are called out afterwards because
+    // they are the rows the brief names, but they are not special-cased here - the sweep already
+    // covers them and a failure anywhere else is just as interesting.
+    use crate::nets::gemma4_audio::{ATTEND_SPAN, MASK_FILL};
+    let got = banded_scores(ATTEND_SPAN, ATTEND_SPAN + 1);
+    assert_eq!(got.len(), (FIXTURE_HEADS * FIXTURE_T * ATTEND_SPAN) as usize);
+    for head in 0..FIXTURE_HEADS {
+        for query in 0..FIXTURE_T {
+            for column in 0..ATTEND_SPAN {
+                let at = ((head * FIXTURE_T + query) * ATTEND_SPAN + column) as usize;
+                let what = format!("head {head} query {query} column {column}");
+                match banded_score_want(ATTEND_SPAN, head, query, column) {
+                    Some(want) => pinned(&what, got[at], want),
+                    // Exactly the sentinel. Not "very negative": a wrapped read that happened to
+                    // land on a large negative value would satisfy that and nothing else.
+                    None => pinned(&format!("{what} is dead"), got[at], MASK_FILL),
+                }
+            }
+        }
+    }
+
+    // The three rows the brief names, restated as the keys they must have read, so a failure
+    // reads as "query 1 column 10 took the wrong key" rather than as an index into a flat array.
+    for (query, live) in [(0u32, 1usize), (1, 2), (ATTEND_SPAN - 1, ATTEND_SPAN as usize)] {
+        let row: Vec<f32> = (0..ATTEND_SPAN)
+            .map(|column| got[((query) * ATTEND_SPAN + column) as usize])
+            .collect();
+        let dead = row.iter().filter(|v| **v < MASK_FILL / 2.0).count();
+        assert_eq!(
+            ATTEND_SPAN as usize - dead,
+            live,
+            "query {query} should have {live} live columns, row {row:?}"
+        );
+        // The last column is the diagonal in every row, including `q = 0`, which is what makes a
+        // fully masked row impossible and `0/0` unreachable in the softmax that follows.
+        pinned(
+            &format!("query {query} reads itself in the last column"),
+            row[(ATTEND_SPAN - 1) as usize],
+            banded_score_want(ATTEND_SPAN, 0, query, ATTEND_SPAN - 1)
+                .expect("the diagonal is always live"),
+        );
+    }
+
+    // The negative control, and the reason the sweep above runs past the ragged rows rather than
+    // stopping at `q = 11`.
+    //
+    // `j >= band - 1 - q` is the rearrangement that looks like the safe one. On the twelve ragged
+    // rows it is correct, so a fixture that only checked `q = 0, 1, 11` would pass under it. From
+    // `q = 12` on, `band - 1 - q` underflows to about 4.29e9, the guard is false for every column
+    // and the whole row goes dead - 738 of 750 queries in the real tower, silently.
+    //
+    // `T` is deliberately two past the band so that `q = 12` and `q = 13` exist and are fully
+    // live. Asserting that no column of them is the sentinel is what excludes that form.
+    for query in ATTEND_SPAN..FIXTURE_T {
+        for column in 0..ATTEND_SPAN {
+            let at = ((query * ATTEND_SPAN) + column) as usize;
+            assert!(
+                got[at] > MASK_FILL / 2.0,
+                "query {query} column {column} is dead, but every column past the band's width \
+                 is live - this is what `j >= band - 1 - q` does once the subtraction underflows"
+            );
+        }
+    }
+
+    // The two remaining wrong forms cannot be caught here, and pretending otherwise would be
+    // worse than saying so. Gating the write instead of the read, and keeping `k < T` as the only
+    // bound, both produce byte-identical output to the correct code *in GLSL*, where the wrap is
+    // defined and a wrapped key fails `< T` on its own. What catches those is this arm being
+    // Rust: `q - (band - 1)` on a u32 panics in a debug build, and every parity run is one.
+}
+
+#[test]
+fn the_banded_span_is_twelve_measured_from_the_op_and_not_from_the_constant() {
+    // A test that FAILS if the span is 11 or 13, measured from what the op emitted rather than
+    // from `ATTEND_SPAN` - `the_span_is_twelve_and_a_neighbouring_span_would_not_pass` already
+    // pins the constant and `band_key`, and would keep passing if the op ignored both.
+    //
+    // The discriminator is where the ragged rows stop. A query is full when the whole window
+    // fits, which is at `q = span - 1`:
+    //
+    //   span 11 -> q = 10 is the first full row
+    //   span 12 -> q = 10 has one dead column and q = 11 is the first full row
+    //   span 13 -> q = 11 still has one dead column
+    //
+    // so asserting both halves of that pair excludes each neighbour from a different side.
+    // Neither neighbour is a shape error and neither would fail a parity run, because the CPU
+    // arm reads the same `Push::kh`.
+    use crate::nets::gemma4_audio::{ATTEND_SPAN, MASK_FILL};
+    let got = banded_scores(ATTEND_SPAN, ATTEND_SPAN + 1);
+    let dead_in = |query: u32| {
+        (0..ATTEND_SPAN)
+            .filter(|column| got[((query * ATTEND_SPAN) + column) as usize] < MASK_FILL / 2.0)
+            .count()
+    };
+    assert_eq!(dead_in(ATTEND_SPAN - 2), 1, "a span of 11 would make query 10 full");
+    assert_eq!(dead_in(ATTEND_SPAN - 1), 0, "a span of 13 would leave query 11 ragged");
+    // And the width itself, which is the other thing a wrong span changes.
+    assert_eq!(got.len(), (FIXTURE_HEADS * FIXTURE_T * 12) as usize, "twelve columns a row");
+    // The oldest key a full row reaches is `q - 11`. At a span of 13 it would be `q - 12`.
+    let full = FIXTURE_T - 1;
+    pinned(
+        "the oldest key of a full row",
+        got[(full * ATTEND_SPAN) as usize],
+        banded_score_want(ATTEND_SPAN, 0, full, 0).expect("a full row has no dead columns"),
+    );
+    assert_eq!(
+        crate::nets::gemma4_audio::band_key(full, 0),
+        Some(full - (ATTEND_SPAN - 1)),
+        "the oldest key is q - 11"
+    );
+}
+
+#[test]
+fn the_banded_cap_is_applied_to_the_sum_and_not_to_the_fill() {
+    // Two things at once, because they are the same ordering question.
+    //
+    // The cap must bend the fixture, or every assertion above would pass against a shader that
+    // never applied it. And it must be applied BEFORE the sentinel goes in, not after: a
+    // separate `softcap.comp` pass over a finished band would map `-65504` to
+    // `tanh(-65504 / 50) * 50 = -50`, a perfectly finite weight the softmax would then include,
+    // and the masked keys would quietly get real attention. Fusing the cap into this op is what
+    // makes that unrepresentable, and this is the test that says so.
+    use crate::nets::gemma4_audio::{ATTEND_SPAN, MASK_FILL};
+    let got = banded_scores(ATTEND_SPAN, ATTEND_SPAN + 1);
+    // A full row of head 0, whose scores are the largest the fixture makes.
+    let full = FIXTURE_T - 1;
+    let uncapped = {
+        let key = crate::nets::gemma4_audio::band_key(full, ATTEND_SPAN - 1).expect("live");
+        (key + 1) as f32 * 0.5 + ATTEND_SPAN as f32 * 0.25
+    };
+    let capped = got[((full * ATTEND_SPAN) + ATTEND_SPAN - 1) as usize];
+    assert!(
+        (uncapped - capped).abs() > 1.0,
+        "the fixture must straddle the cap or it proves nothing: uncapped {uncapped}, got {capped}"
+    );
+    pinned("the capped diagonal", capped, (uncapped / FIXTURE_CAP).tanh() * FIXTURE_CAP);
+    // The sentinel survived the op uncapped. `tanh(-65504 / 8) * 8` would be -8.
+    let dead = got[0];
+    pinned("a dead slot is the raw sentinel", dead, MASK_FILL);
+    assert!(dead < -1000.0, "a capped sentinel would be {}", -FIXTURE_CAP);
+}
+
+#[test]
+fn a_banded_value_mix_reads_the_key_its_column_names() {
+    // The value half's version of the same hazard. `attn_apply_banded` indexes V by a key it
+    // derives from the column, so an underflowed column reads a live value from somewhere else
+    // in the arena and mixes it in with a perfectly ordinary weight. The output stays finite and
+    // the sequence stays fluent.
+    //
+    // V is distinct per (channel, key) and the weights are distinct per (head, column), so every
+    // term of every sum is uniquely identifiable: no two wrong pairings produce the same total.
+    use crate::nets::gemma4_audio::{band_key, ATTEND_SPAN};
+    let channels = FIXTURE_HEADS * FIXTURE_HEAD_DIM;
+    // Multiples of 1/4 and 1/128, both exact in fp16.
+    let value = |c: u32, k: u32| (c + 1) as f32 + (k + 1) as f32 * 0.25;
+    let weight = |h: u32, j: u32| (h + 1) as f32 * (j + 1) as f32 * 0.0078125;
+    let mut probs = vec![0.0; (FIXTURE_HEADS * FIXTURE_T * ATTEND_SPAN) as usize];
+    for head in 0..FIXTURE_HEADS {
+        for query in 0..FIXTURE_T {
+            for column in 0..ATTEND_SPAN {
+                probs[((head * FIXTURE_T + query) * ATTEND_SPAN + column) as usize] =
+                    weight(head, column);
+            }
+        }
+    }
+    let mut v = vec![0.0; (channels * FIXTURE_T) as usize];
+    for c in 0..channels {
+        for t in 0..FIXTURE_T {
+            v[(c * FIXTURE_T + t) as usize] = value(c, t);
+        }
+    }
+
+    let given = Given::new(&[]).expect("no tensors");
+    let shapes =
+        [Shape::new(FIXTURE_HEADS, FIXTURE_T, ATTEND_SPAN), Shape::new(channels, 1, FIXTURE_T)];
+    let plan = build(&given, &shapes, |b, ids| {
+        b.attn_apply_banded(ids[0], ids[1], FIXTURE_HEADS, ATTEND_SPAN)
+    });
+    let outputs = run_multi(&plan, given.data(), &[&probs, &v]).expect("the banded mix runs");
+    let got = outputs.first().expect("one output");
+    assert_eq!(got.len(), (channels * FIXTURE_T) as usize);
+
+    for c in 0..channels {
+        for query in 0..FIXTURE_T {
+            // The head that owns this channel, which is what picks the row of `probs`.
+            let head = c / FIXTURE_HEAD_DIM;
+            let want: f32 = (0..ATTEND_SPAN)
+                .filter_map(|column| {
+                    // Dead columns contribute nothing because they are never read - not because
+                    // their weight happens to be zero. Here it is emphatically not zero.
+                    band_key(query, column).map(|key| weight(head, column) * value(c, key))
+                })
+                .sum();
+            pinned(&format!("channel {c} query {query}"), got[(c * FIXTURE_T + query) as usize], want);
+        }
+    }
+
+    // Query 0 has exactly one live column, so its output is one product and nothing else. This
+    // is the strongest single statement in the file: if the eleven dead columns had been read,
+    // their weights are 1/128 upward and the answer could not still be this.
+    for c in 0..channels {
+        let head = c / FIXTURE_HEAD_DIM;
+        pinned(
+            &format!("channel {c} at query 0 is a single term"),
+            got[(c * FIXTURE_T) as usize],
+            weight(head, ATTEND_SPAN - 1) * value(c, 0),
+        );
+    }
+}
+
+#[test]
+fn the_band_edge_is_dead_only_where_the_window_hangs_off_the_start() {
+    // The property the whole layout rests on, checked against `gemma4_audio::band_key` at the
+    // three queries that matter: q = 0 has one live column, q = 1 two, and q = band - 1 is the
+    // first fully populated row. Asserting the KEYS rather than merely that something is live,
+    // because a wrapped read returns a finite plausible index rather than an error.
+    use crate::nets::gemma4_audio::{band_key, ATTEND_SPAN};
+    let live = |q: u32| (0..ATTEND_SPAN).filter(|j| band_key(q, *j).is_some()).count();
+    assert_eq!(live(0), 1, "query 0 sees only itself");
+    assert_eq!(live(1), 2);
+    assert_eq!(live(ATTEND_SPAN - 1), ATTEND_SPAN as usize, "the first full row");
+    assert_eq!(band_key(0, ATTEND_SPAN - 1), Some(0), "the diagonal is always live");
+    for q in [0, 1, ATTEND_SPAN - 1, 100] {
+        assert_eq!(band_key(q, ATTEND_SPAN - 1), Some(q), "the last column is the diagonal");
+        for j in 0..ATTEND_SPAN {
+            if let Some(k) = band_key(q, j) {
+                assert!(k <= q, "q {q} column {j} reached forward to {k}");
+                assert!(q - k < ATTEND_SPAN, "q {q} column {j} reached back past the span");
+            }
+        }
+    }
+}
+
+#[test]
+fn the_span_is_twelve_and_a_neighbouring_span_would_not_pass() {
+    // A test that fails if the span is 11 or 13. The measured mask is `0 <= q - k <= 11`, so the
+    // window is twelve wide; both neighbours were live hypotheses during the trace and neither
+    // produces a shape error. `ATTEND_SPAN` is what the shader reads through `Push::kh`.
+    use crate::nets::gemma4_audio::{band_key, ATTEND_SPAN, REL_OFFSETS};
+    assert_eq!(ATTEND_SPAN, 12, "the export's mask admits twelve keys per query");
+    assert_eq!(REL_OFFSETS, 13, "thirteen offsets, of which the mask reaches twelve");
+    // At a query well clear of the start the window is exactly `ATTEND_SPAN` keys wide, so a
+    // span of 11 or 13 changes this count and the assertion catches it.
+    let keys: Vec<u32> = (0..ATTEND_SPAN).filter_map(|j| band_key(64, j)).collect();
+    assert_eq!(keys.len(), 12, "a span of 11 or 13 would give 11 or 13 here");
+    assert_eq!(keys.first(), Some(&53), "oldest key is q - 11");
+    assert_eq!(keys.last(), Some(&64), "newest key is q itself");
+}
+
+#[test]
+fn the_oracle_honours_the_ops_band_rather_than_the_constant() {
+    // shader-smith caught this on the real ops: the reference arms looped over `Push::kh` but
+    // computed their keys with the `ATTEND_SPAN` form, so they agreed with the shaders only at
+    // band 12 and diverged silently everywhere else. At band 3 query 0 came back entirely dead
+    // and query 13 read keys 2, 3, 4 instead of 11, 12, 13.
+    //
+    // The band is a parameter of the op, so anything deriving a key must take it as one.
+    use crate::nets::gemma4_audio::{band_key, band_key_in, ATTEND_SPAN};
+    // At the tower's own span the two spellings must be the same function.
+    for q in [0, 1, 11, 12, 100] {
+        for j in 0..ATTEND_SPAN {
+            assert_eq!(band_key_in(ATTEND_SPAN, q, j), band_key(q, j), "q {q} column {j}");
+        }
+    }
+    // At any other band they must not be, and the fixed form is the wrong one.
+    assert_eq!(band_key_in(3, 0, 2), Some(0), "at band 3 query 0's last column is key 0");
+    assert_eq!(band_key(0, 2), None, "the ATTEND_SPAN form calls that dead - the old bug");
+    assert_eq!(
+        (0..3).filter_map(|j| band_key_in(3, 13, j)).collect::<Vec<_>>(),
+        vec![11, 12, 13],
+        "at band 3 query 13 reads keys 11, 12, 13"
+    );
+    // The window is `band` wide once clear of the start, whatever the band is.
+    for band in [1, 2, 3, 5, 12, 24] {
+        let keys: Vec<u32> = (0..band).filter_map(|j| band_key_in(band, 100, j)).collect();
+        assert_eq!(keys.len(), band as usize, "band {band} should give {band} keys");
+        assert_eq!(keys.last(), Some(&100), "the last column is always the diagonal");
+        assert_eq!(keys.first(), Some(&(100 - (band - 1))), "the first is q - (band - 1)");
+    }
+}
+
+#[test]
+#[ignore = "needs a Vulkan device"]
 fn a_softcap_saturates_the_logits_it_is_given() {
     // `final_logit_softcapping = 30`. The values below deliberately straddle the cap, because
     // the op is nearly the identity well inside it - a fixture that stayed in the linear region
@@ -665,6 +1187,109 @@ fn a_standalone_activation_matches_a_folded_one() {
     agrees_invented("a standalone gelu", 0, &[Shape::new(48, 1, 1)], &[&input], |b, ids| {
         b.activate(ids[0], Act::Gelu)
     });
+}
+
+#[test]
+#[ignore = "needs a Vulkan device"]
+fn a_two_axis_rotary_rotates_each_half_by_its_own_position() {
+    // Gemma 4's vision tower rotates the first half of a 64-wide head by the patch's row and the
+    // second half by its column. The failure this guards is not a shape error: rotating the head
+    // as one block pairs a row channel with a column channel, and produces an encoder that is
+    // subtly position-blind rather than one that crashes.
+    //
+    // The two halves are given deliberately different angles, so a shader that used one block's
+    // table for both cannot pass.
+    let heads = 3u32;
+    let head_dim = 64u32;
+    let positions = 5u32;
+    let input = spread((heads * head_dim * positions) as usize, 0.31);
+    // `[head_dim, 1, W]`: block 0 is cos(row) then sin(row), block 1 cos(col) then sin(col).
+    let mut angles = vec![0f32; (head_dim * positions) as usize];
+    for position in 0..positions {
+        for frequency in 0..16u32 {
+            let row = 0.11 * (position + 1) as f32 * (frequency + 1) as f32;
+            let column = 0.37 * (position + 2) as f32 * (frequency + 1) as f32;
+            let at = |channel: u32| (channel * positions + position) as usize;
+            angles[at(frequency)] = row.cos();
+            angles[at(16 + frequency)] = row.sin();
+            angles[at(32 + frequency)] = column.cos();
+            angles[at(48 + frequency)] = column.sin();
+        }
+    }
+    agrees_invented(
+        "a two-axis rotary",
+        0,
+        &[Shape::new(heads * head_dim, 1, positions), Shape::new(head_dim, 1, positions)],
+        &[&input, &angles],
+        |b, ids| b.rotary_axes(ids[0], ids[1], heads, 2),
+    );
+}
+
+#[test]
+#[ignore = "needs a Vulkan device"]
+fn a_clamp_bounds_a_tensor_by_a_pair_from_the_weights() {
+    // The vision tower's `use_clipped_linears`. Values are spread well past both bounds so a
+    // shader that read only one of them, or read them in the wrong order, cannot pass.
+    let values: Vec<f32> = (0..48).map(|i| (i as f32 - 24.0) * 1.7).collect();
+    let blob = write_mixed(
+        graph::SUPERTONIC_VE,
+        &[Fixture::F16(vec![2], vec![-9.5, 6.25])],
+    );
+    let weights = Weights::parse(&blob, graph::SUPERTONIC_VE).expect("the bounds parse");
+    let mut builder = Builder::new(&weights);
+    let first = builder.input(Shape::new(48, 1, 1));
+    let last = builder.clamp(first, 0);
+    let plan = builder.finish(&[last]).expect("the clamp fixture plan builds");
+    compare("a clamp", plan, weights.data().to_vec(), &[&values]);
+}
+
+#[test]
+#[ignore = "needs a Vulkan device"]
+fn a_batched_prefill_attention_agrees_with_the_reference() {
+    // The uncached attention path at multi-query, which is what a batched prefill runs. K and V
+    // are an eighth of Q's width, so a shader that indexed them by query head would read past
+    // its own head and produce plausible nonsense - the same trap the cached path had.
+    const HEAD_DIM: u32 = 16;
+    const HEADS: u32 = 8;
+    const KV_HEADS: u32 = 1;
+    const T: u32 = 12;
+    let q = spread((HEADS * HEAD_DIM * T) as usize, 0.4);
+    let k = spread((KV_HEADS * HEAD_DIM * T) as usize, 0.9);
+    let v = spread((KV_HEADS * HEAD_DIM * T) as usize, 1.3);
+    agrees_invented(
+        "a multi-query prefill attention",
+        0,
+        &[
+            Shape::new(HEADS * HEAD_DIM, 1, T),
+            Shape::new(KV_HEADS * HEAD_DIM, 1, T),
+            Shape::new(KV_HEADS * HEAD_DIM, 1, T),
+        ],
+        &[&q, &k, &v],
+        |b, ids| {
+            let scores = b.attn_scores_grouped_prescaled(ids[0], ids[1], HEADS, KV_HEADS);
+            let probs = b.softmax_causal(scores);
+            b.attn_apply_grouped(probs, ids[2], HEADS, KV_HEADS)
+        },
+    );
+}
+
+#[test]
+#[ignore = "needs a Vulkan device"]
+fn a_windowed_causal_softmax_drops_what_is_behind_the_window() {
+    // The sliding half of a prefill. The window is deliberately shorter than the sequence, so a
+    // shader that ignored it would keep keys it must drop - and the rows would still sum to one,
+    // which is why this compares against the interpreter rather than checking a sum.
+    const HEADS: u32 = 2;
+    const T: u32 = 16;
+    const WINDOW: u32 = 5;
+    let scores = spread((HEADS * T * T) as usize, 0.6);
+    agrees_invented(
+        "a windowed causal softmax",
+        0,
+        &[Shape::new(HEADS, T, T)],
+        &[&scores],
+        |b, ids| b.softmax_causal_windowed(ids[0], WINDOW),
+    );
 }
 
 #[test]

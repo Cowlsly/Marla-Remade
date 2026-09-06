@@ -1232,6 +1232,9 @@ fn push(entry: &mut ChunkEntry, feature: &Feature, geometry: &IntGeometry) -> (u
                     parts_offset,
                     part_count: keep.len() as u32,
                     transit_color: feature.transit_color,
+                    transit_ordinal: feature.transit_ordinal,
+                    transit_lanes: feature.transit_lanes,
+                    transit_taper: feature.transit_taper,
                 });
                 added.0 += 1;
             }
@@ -1255,6 +1258,9 @@ fn push(entry: &mut ChunkEntry, feature: &Feature, geometry: &IntGeometry) -> (u
                     parts_offset,
                     part_count,
                     transit_color: feature.transit_color,
+                    transit_ordinal: feature.transit_ordinal,
+                    transit_lanes: feature.transit_lanes,
+                    transit_taper: feature.transit_taper,
                 });
                 added.0 += 1;
             }
@@ -1277,6 +1283,9 @@ fn push(entry: &mut ChunkEntry, feature: &Feature, geometry: &IntGeometry) -> (u
                     parts_offset,
                     part_count: 1,
                     transit_color: feature.transit_color,
+                    transit_ordinal: feature.transit_ordinal,
+                    transit_lanes: feature.transit_lanes,
+                    transit_taper: feature.transit_taper,
                 });
                 added.0 += 1;
             }
@@ -1363,7 +1372,7 @@ mod tests {
         Feature {
             class: Class::area(dict::LAYER_WATER, crate::schema::kind("lake"), min_zoom),
             geometry: square(lon, lat, size),
-            name: None, transit_color: 0,
+            name: None, transit_color: 0, transit_ordinal: 0, transit_lanes: 0, transit_taper: 0,
         }
     }
 
@@ -1455,7 +1464,7 @@ mod tests {
             Feature {
                 class: Class::area(dict::LAYER_BUILDINGS, crate::schema::kind("building"), 0),
                 geometry: square(-120.1, 35.1, 0.02),
-                name: None, transit_color: 0,
+                name: None, transit_color: 0, transit_ordinal: 0, transit_lanes: 0, transit_taper: 0,
             },
         ];
         let first = build(&spilled(&features), &settings(0, 8)).expect("first").0;
@@ -1480,7 +1489,7 @@ mod tests {
             Feature {
                 class: Class::area(dict::LAYER_BUILDINGS, crate::schema::kind("building"), 0),
                 geometry: square(-120.005, 35.005, 0.002),
-                name: None, transit_color: 0,
+                name: None, transit_color: 0, transit_ordinal: 0, transit_lanes: 0, transit_taper: 0,
             },
         ];
         let (bytes, _) = build(&spilled(&features), &settings(14, 14)).expect("build");
@@ -1510,7 +1519,7 @@ mod tests {
         let features = vec![Feature {
             class: Class::line(dict::LAYER_WATER, crate::schema::kind("river"), 0),
             geometry: Geometry::Lines(vec![points]),
-            name: None, transit_color: 0,
+            name: None, transit_color: 0, transit_ordinal: 0, transit_lanes: 0, transit_taper: 0,
         }];
         let (_, stats) = build(&spilled(&features), &settings(6, 14)).expect("build");
         let at = |z: u8| stats.iter().find(|s| s.zoom == z).expect("zoom").points;
@@ -1528,7 +1537,7 @@ mod tests {
             features.push(Feature {
                 class: Class::area(dict::LAYER_BUILDINGS, crate::schema::kind("building"), 0),
                 geometry: square(lon + 0.004, lat + 0.004, 0.004),
-                name: None, transit_color: 0,
+                name: None, transit_color: 0, transit_ordinal: 0, transit_lanes: 0, transit_taper: 0,
             });
             // A line as well, so the merge has to rebase a `GEOM_LINE` feature's parts too, and a
             // long one so it crosses tiles rather than sitting inside one.
@@ -1537,7 +1546,7 @@ mod tests {
                 geometry: Geometry::Lines(vec![(0..40)
                     .map(|k| (lon + k as f64 * 0.002, lat + (k % 5) as f64 * 0.001))
                     .collect()]),
-                name: None, transit_color: 0,
+                name: None, transit_color: 0, transit_ordinal: 0, transit_lanes: 0, transit_taper: 0,
             });
         }
         features
@@ -1623,7 +1632,7 @@ mod tests {
                     ..Class::area(dict::LAYER_WATER, crate::schema::kind("lake"), 0)
                 },
                 geometry: square(-120.0 + i as f64 * 0.00005, 35.0, 0.004),
-                name: None, transit_color: 0,
+                name: None, transit_color: 0, transit_ordinal: 0, transit_lanes: 0, transit_taper: 0,
             })
             .collect();
         let store = spilled(&features);
@@ -1654,7 +1663,7 @@ mod tests {
     #[test]
     fn concatenating_two_chunks_of_a_layer_is_one_layer() {
         let class = Class::area(dict::LAYER_WATER, crate::schema::kind("lake"), 0);
-        let feature = Feature { class, geometry: square(0.0, 0.0, 1.0), name: None, transit_color: 0 };
+        let feature = Feature { class, geometry: square(0.0, 0.0, 1.0), name: None, transit_color: 0, transit_ordinal: 0, transit_lanes: 0, transit_taper: 0 };
         // Tile-local already, so the fixture is about the arenas rather than about projection, and
         // big enough that no minimum-area floor can drop it.
         let box_at = |x: i32| {
@@ -1769,7 +1778,7 @@ mod tests {
                 features.push(Feature {
                     class: Class::area(dict::LAYER_BUILDINGS, crate::schema::kind("building"), 14),
                     geometry: square(lon, lat, 0.0003),
-                    name: None, transit_color: 0,
+                    name: None, transit_color: 0, transit_ordinal: 0, transit_lanes: 0, transit_taper: 0,
                 });
             }
             let store = spilled(&features);

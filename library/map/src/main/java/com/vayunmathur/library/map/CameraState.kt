@@ -3,9 +3,11 @@ package com.vayunmathur.library.map
 import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.tween
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.listSaver
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.geometry.Offset
@@ -63,11 +65,18 @@ class CameraState(initial: CameraPosition = CameraPosition()) {
         return log2(dim / Mercator.TILE_SIZE).coerceAtLeast(0.0)
     }
 
-    /** Current projection, or null before the viewport has been measured. */
-    val projection: Projection?
-        get() = viewportDp?.let { vp ->
+    /**
+     * Current projection, or null before the viewport has been measured.
+     *
+     * [derivedStateOf], not a plain getter: [MapMarker] reads this once per marker per frame
+     * during a pan, and the previous getter allocated a fresh [Projection] on every read.
+     * With photos' cluster count that is real GC pressure.
+     */
+    val projection: Projection? by derivedStateOf {
+        viewportDp?.let { vp ->
             Projection(position.target, position.zoom, vp.width, vp.height, labelQueryProvider)
         }
+    }
 
     /** Suspends until the viewport is measured, then returns the projection. */
     suspend fun awaitProjection(): Projection =
@@ -196,7 +205,28 @@ private fun anchoredZoom(
 
 private fun lerp(start: Double, end: Double, t: Double): Double = start + (end - start) * t
 
-/** Remembers a [CameraState] seeded with [initial]. */
+/**
+ * Saves the camera across configuration change and process death.
+ *
+ * Only `(lon, lat, zoom)`: [CameraState.viewportDp] is re-measured by the next layout pass
+ * and [CameraState.labelQueryProvider] is re-registered by the surface, so persisting either
+ * would restore a value that is immediately overwritten — and a stale viewport would produce
+ * a wrong projection for one frame.
+ */
+private val CameraStateSaver = listSaver<CameraState, Double>(
+    save = {
+        listOf(it.position.target.longitude, it.position.target.latitude, it.position.zoom)
+    },
+    restore = { CameraState(CameraPosition(GeoPoint(it[0], it[1]), it[2])) },
+)
+
+/**
+ * Remembers a [CameraState] seeded with [initial], surviving rotation and process death.
+ *
+ * [initial] applies only on first composition; a restored camera wins over it. Hosts that
+ * refit the camera from a `LaunchedEffect` — `taxi` and `fooddelivery` do — overwrite the
+ * restored position anyway, so restoration is inert for them.
+ */
 @Composable
 fun rememberCameraState(initial: CameraPosition = CameraPosition()): CameraState =
-    remember { CameraState(initial) }
+    rememberSaveable(saver = CameraStateSaver) { CameraState(initial) }

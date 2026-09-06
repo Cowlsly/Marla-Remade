@@ -35,6 +35,55 @@ const MAGIC: &[u8; 4] = b"SPM1";
 /// SentencePiece's word-start marker, `U+2581 LOWER ONE EIGHTH BLOCK`.
 pub const METASPACE: char = '\u{2581}';
 
+/// The ids a table reserves and how it normalises text, which differ between the models this
+/// reads.
+///
+/// fairseq puts `<s> <pad> </s> <unk>` at 0..3; Gemma puts `<pad> <eos> <bos> <unk>` there. Both
+/// are checked against the table rather than assumed, because a table loaded with the wrong
+/// convention decodes every sentence off by one special and looks almost right.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Flavour {
+    /// Beginning of sequence.
+    pub bos: u32,
+    /// Padding.
+    pub pad: u32,
+    /// End of sequence, which a decode loop stops on.
+    pub eos: u32,
+    /// The id for text no piece covers, used only when the table has no byte fallback.
+    pub unk: u32,
+    /// The four pieces, in id order from 0, that [`Table::parse`] asserts.
+    pub names: [&'static str; 4],
+    /// Whether to collapse whitespace runs, trim, and prefix a metaspace before encoding.
+    ///
+    /// sentencepiece's `remove_extra_whitespaces` plus `add_dummy_prefix`, which fairseq's models
+    /// were trained with. **Gemma was not**: its `tokenizer.json` normaliser is a bare
+    /// `Replace(" ", "\u{2581}")` with no trimming and no prefix, so leading and repeated spaces
+    /// are significant to it. Collapsing them would silently retokenise indented text, code
+    /// blocks and anything else where runs of spaces carry meaning - which for a chat model is
+    /// most of what it is asked to write.
+    pub tidy_whitespace: bool,
+}
+
+/// fairseq's layout, which NLLB and SMaLL-100 use.
+pub const FAIRSEQ: Flavour = Flavour {
+    bos: 0,
+    pad: 1,
+    eos: 2,
+    unk: 3,
+    names: ["<s>", "<pad>", "</s>", "<unk>"],
+    tidy_whitespace: true,
+};
+
+/// Gemma's layout. Note `eos` at 1 and `bos` at 2, the reverse of fairseq's ordering.
+pub const GEMMA: Flavour = Flavour {
+    bos: 2,
+    pad: 0,
+    eos: 1,
+    unk: 3,
+    names: ["<pad>", "<eos>", "<bos>", "<unk>"],
+    tidy_whitespace: false,
+};
+
 /// fairseq's specials, which the table is checked against rather than assumed to hold.
 pub const BOS: u32 = 0;
 /// The padding id.
@@ -51,11 +100,26 @@ pub struct Table<'a> {
     blob: &'a [u8],
     /// Piece bytes to `(id, score)`. Empty pieces are absent, and the lowest id wins a duplicate.
     by_piece: HashMap<&'a [u8], (u32, i32)>,
+    /// Which ids are reserved, and how [`Table::encode`] spells an unrepresentable byte.
+    specials: Flavour,
+    /// `<0x00>`..`<0xFF>` as ids, when the table carries byte fallback.
+    ///
+    /// `None` for a table without it, where an uncoverable piece becomes [`Flavour::unk`] and
+    /// the text is simply lost. With it, any byte round-trips - which is what lets Gemma emit
+    /// text its vocabulary never saw.
+    byte_fallback: Option<Box<[u32; 256]>>,
 }
 
 impl<'a> Table<'a> {
     /// Parse the converter's output. Borrows `bytes`, so nothing is copied.
+    ///
+    /// [`FAIRSEQ`] specials, for the tables that predate a second convention.
     pub fn parse(bytes: &'a [u8]) -> Result<Table<'a>, String> {
+        Table::parse_with(bytes, FAIRSEQ)
+    }
+
+    /// [`Table::parse`] for a table whose reserved ids are not fairseq's.
+    pub fn parse_with(bytes: &'a [u8], specials: Flavour) -> Result<Table<'a>, String> {
         if bytes.len() < 8 || &bytes[0..4] != MAGIC {
             return Err("not a SPM1 tokenizer table".into());
         }
@@ -84,9 +148,9 @@ impl<'a> Table<'a> {
         if at != bytes.len() {
             return Err(format!("{} bytes left after {count} pieces", bytes.len() - at));
         }
-        let table = Table { pieces, blob: bytes, by_piece };
-        for (id, name) in [(BOS, "<s>"), (PAD, "<pad>"), (EOS, "</s>"), (UNK, "<unk>")] {
-            match table.piece(id) {
+        let table = Table { pieces, blob: bytes, by_piece, specials, byte_fallback: None };
+        for (id, name) in specials.names.iter().enumerate() {
+            match table.piece(id as u32) {
                 Some(found) if found == name.as_bytes() => {}
                 other => {
                     return Err(format!(
@@ -96,7 +160,32 @@ impl<'a> Table<'a> {
                 }
             }
         }
-        Ok(table)
+        // Byte fallback, if the table has all 256 `<0xNN>` pieces. All or nothing: a partial set
+        // would cover some bytes and silently drop the rest, which is worse than covering none.
+        let mut bytes_ids = [0u32; 256];
+        let mut complete = true;
+        for (byte, slot) in bytes_ids.iter_mut().enumerate() {
+            let name = format!("<0x{byte:02X}>");
+            match table.by_piece.get(name.as_bytes()) {
+                Some(&(id, _)) => *slot = id,
+                None => {
+                    complete = false;
+                    break;
+                }
+            }
+        }
+        let byte_fallback = complete.then(|| Box::new(bytes_ids));
+        Ok(Table { byte_fallback, ..table })
+    }
+
+    /// Whether this table can spell any byte, rather than losing it to `unk`.
+    pub fn has_byte_fallback(&self) -> bool {
+        self.byte_fallback.is_some()
+    }
+
+    /// The reserved ids this table was parsed with.
+    pub fn specials(&self) -> Flavour {
+        self.specials
     }
 
     /// Entries the table holds, which is also one past the highest id.
@@ -148,14 +237,75 @@ impl<'a> Table<'a> {
             symbols[index].1 = symbols[index + 1].1;
             symbols.remove(index + 1);
         }
-        symbols
-            .iter()
-            .map(|&(from, to)| {
-                self.by_piece
-                    .get(&prepared.as_bytes()[from..to])
-                    .map_or(UNK, |&(id, _)| id)
-            })
-            .collect()
+        let mut out = Vec::with_capacity(symbols.len());
+        for &(from, to) in &symbols {
+            let piece = &prepared.as_bytes()[from..to];
+            match self.by_piece.get(piece) {
+                Some(&(id, _)) => out.push(id),
+                // No piece covers this symbol. With byte fallback it becomes one token per
+                // **byte**, so the text survives a round trip; without, it is one `unk` and the
+                // text is lost.
+                None => match &self.byte_fallback {
+                    Some(table) => out.extend(piece.iter().map(|&b| table[b as usize])),
+                    None => out.push(self.specials.unk),
+                },
+            }
+        }
+        out
+    }
+
+    /// The id whose piece is exactly `piece`, if the table holds it.
+    ///
+    /// For looking up the markers a chat template inserts - `<bos>`, `<start_of_turn>`, the tool
+    /// tags - so a caller can name them rather than hardcode ids that differ between models.
+    pub fn id_of(&self, piece: &str) -> Option<u32> {
+        self.by_piece.get(piece.as_bytes()).map(|&(id, _)| id)
+    }
+
+    /// [`Table::encode`], with `specials` matched literally and never merged into.
+    ///
+    /// # Why this is separate from `encode`
+    ///
+    /// HuggingFace matches its `added_tokens` against the raw text *before* the BPE loop runs, so
+    /// the literal text `<bos>` becomes id 2 rather than the four or five pieces that spell it.
+    /// A chat template is exactly that: markers interleaved with user text, all in one string. An
+    /// encoder that merged them would feed the model a description of a turn boundary instead of
+    /// a turn boundary.
+    ///
+    /// It is not folded into [`Table::encode`] because the set is a property of the *caller* -
+    /// which markers a prompt is allowed to contain is a policy question, and a model that let a
+    /// user's text spell `<start_of_turn>` would let them forge a turn.
+    ///
+    /// Longest match wins, so `<tool_call|>` is preferred over any shorter marker that prefixes
+    /// it. Unknown entries in `specials` are skipped rather than failing the encode.
+    pub fn encode_with_specials(&self, normalised: &str, specials: &[&str]) -> Vec<u32> {
+        let mut markers: Vec<(&str, u32)> =
+            specials.iter().filter_map(|s| self.id_of(s).map(|id| (*s, id))).collect();
+        markers.sort_by_key(|(text, _)| std::cmp::Reverse(text.len()));
+
+        let mut out = Vec::new();
+        let mut rest = normalised;
+        'outer: while !rest.is_empty() {
+            for (marker, id) in &markers {
+                if let Some(at) = rest.find(marker) {
+                    if at == 0 {
+                        out.push(*id);
+                        rest = &rest[marker.len()..];
+                        continue 'outer;
+                    }
+                }
+            }
+            // No marker starts here. Take everything up to the earliest one, or the rest.
+            let next = markers
+                .iter()
+                .filter_map(|(marker, _)| rest.find(marker))
+                .filter(|&at| at > 0)
+                .min()
+                .unwrap_or(rest.len());
+            out.extend(self.encode(&rest[..next]));
+            rest = &rest[next..];
+        }
+        out
     }
 
     /// NFKC-normalised text as sentencepiece feeds it to the merge loop.
@@ -165,6 +315,11 @@ impl<'a> Table<'a> {
     /// (`add_dummy_prefix`) so a word at the start of a sentence tokenises like the same word in
     /// the middle of one.
     fn prepare(&self, normalised: &str) -> String {
+        if !self.specials.tidy_whitespace {
+            // Gemma: every space becomes the metaspace and nothing else changes. Runs of spaces
+            // survive as runs of metaspaces, which is what it was trained on.
+            return normalised.replace(' ', &METASPACE.to_string());
+        }
         let mut out = String::with_capacity(normalised.len() + METASPACE.len_utf8());
         for word in normalised.split_whitespace() {
             out.push(METASPACE);
@@ -177,15 +332,39 @@ impl<'a> Table<'a> {
     ///
     /// Ids past the table are skipped rather than replacing the whole string: a decode loop that
     /// produced one bad token should lose a word, not the translation.
+    ///
+    /// # Byte pieces are fused before they are decoded
+    ///
+    /// A `<0xNN>` piece is one byte of a character, not a character. Decoding each on its own
+    /// would turn every multi-byte sequence into a run of replacement characters, so consecutive
+    /// byte pieces are collected and converted as one string - `ByteFallback` then `Fuse` in
+    /// HuggingFace's decoder, and the same thing here.
     pub fn decode(&self, ids: &[u32]) -> String {
-        let mut out = String::new();
+        let mut out: Vec<u8> = Vec::new();
         for &id in ids {
-            if let Some(piece) = self.piece(id) {
-                out.push_str(&String::from_utf8_lossy(piece));
+            let Some(piece) = self.piece(id) else { continue };
+            match byte_piece(piece) {
+                Some(byte) => out.push(byte),
+                None => out.extend_from_slice(piece),
             }
         }
-        out.replace(METASPACE, " ").trim().to_string()
+        String::from_utf8_lossy(&out).replace(METASPACE, " ").trim().to_string()
     }
+}
+
+/// The byte a `<0xNN>` piece stands for, or `None` for an ordinary piece.
+///
+/// Matched on the literal spelling rather than by id so that [`Table::decode`] works the same
+/// whether or not the table happened to hold all 256.
+fn byte_piece(piece: &[u8]) -> Option<u8> {
+    let [b'<', b'0', b'x', hi, lo, b'>'] = piece else { return None };
+    let digit = |c: &u8| match c {
+        b'0'..=b'9' => Some(c - b'0'),
+        b'A'..=b'F' => Some(c - b'A' + 10),
+        b'a'..=b'f' => Some(c - b'a' + 10),
+        _ => None,
+    };
+    Some(digit(hi)? * 16 + digit(lo)?)
 }
 
 #[cfg(test)]

@@ -41,7 +41,7 @@ pub struct FittedShape {
 /// least `t_min`. Returns `(t, distance in metres)`. Local equirectangular
 /// metres about the segment's own mean latitude, which is exact enough at
 /// shape-segment scale.
-fn project(p: (i32, i32), a: (i32, i32), b: (i32, i32), t_min: f64) -> (f64, f64) {
+pub fn project(p: (i32, i32), a: (i32, i32), b: (i32, i32), t_min: f64) -> (f64, f64) {
     let cos_lat = ((a.0 as f64 + b.0 as f64) * 0.5 * 1e-7).to_radians().cos();
     let m = |q: (i32, i32)| {
         (q.1 as f64 * 1e-7 * 111_320.0 * cos_lat, q.0 as f64 * 1e-7 * 111_320.0)
@@ -58,6 +58,51 @@ fn project(p: (i32, i32), a: (i32, i32), b: (i32, i32), t_min: f64) -> (f64, f64
     };
     let (cx, cy) = (ax + t * dx, ay + t * dy);
     (t, ((px - cx).powi(2) + (py - cy).powi(2)).sqrt())
+}
+
+/// Ground distance between two e7 points in metres, in the same local
+/// equirectangular frame [`project`] measures in.
+pub fn distance_m(a: (i32, i32), b: (i32, i32)) -> f64 {
+    let cos_lat = ((a.0 as f64 + b.0 as f64) * 0.5 * 1e-7).to_radians().cos();
+    let dy = (b.0 as f64 - a.0 as f64) * 1e-7 * 111_320.0;
+    let dx = (b.1 as f64 - a.1 as f64) * 1e-7 * 111_320.0 * cos_lat;
+    (dx * dx + dy * dy).sqrt()
+}
+
+/// Walk `points` emitting a point every `step_m` metres along it.
+///
+/// The first and last points are always kept, so the walk covers the whole
+/// polyline and a short one still yields both ends. The other half of
+/// [`project`]: that measures across a polyline, this measures along one, and
+/// together they are enough to ask whether two polylines are the same line.
+pub fn resample(points: &[(i32, i32)], step_m: f64) -> Vec<(i32, i32)> {
+    if points.len() < 2 || !(step_m > 0.0) {
+        return points.to_vec();
+    }
+    let lerp = |a: i32, b: i32, t: f64| (a as f64 + (b as f64 - a as f64) * t).round() as i32;
+    let mut out = vec![points[0]];
+    // Distance already walked since the last emitted sample, carried across the
+    // segment boundary so the spacing is along the polyline and not per segment.
+    let mut carry = 0.0f64;
+    for pair in points.windows(2) {
+        let (a, b) = (pair[0], pair[1]);
+        let length = distance_m(a, b);
+        if length <= 0.0 {
+            continue;
+        }
+        let mut at = step_m - carry;
+        while at < length {
+            let t = at / length;
+            out.push((lerp(a.0, b.0, t), lerp(a.1, b.1, t)));
+            at += step_m;
+        }
+        carry = length - (at - step_m);
+    }
+    let last = points[points.len() - 1];
+    if out[out.len() - 1] != last {
+        out.push(last);
+    }
+    out
 }
 
 /// Douglas-Peucker over `pts[lo..=hi]`, pushing the *interior* indices to keep.
@@ -366,6 +411,57 @@ mod tests {
         let f = fit(&s, &stops, None).expect("fits");
         assert_eq!(f.points.len(), 2, "a straight run collapses to its endpoints");
         assert_eq!(f.stop_vertices, vec![0, 1]);
+    }
+
+    #[test]
+    fn resampling_walks_the_polyline_at_a_fixed_spacing() {
+        // 0.1 degrees of latitude: 11,132 m due north.
+        let line = [(37_700_000, -122_400_000), (38_700_000, -122_400_000)];
+        let walked = resample(&line, 1000.0);
+        // Eleven interior samples plus both ends.
+        assert_eq!(walked.len(), 13, "{walked:?}");
+        assert_eq!(walked[0], line[0], "the first point is always kept");
+        assert_eq!(walked[walked.len() - 1], line[1], "and so is the last");
+        for pair in walked[..walked.len() - 1].windows(2) {
+            let step = distance_m(pair[0], pair[1]);
+            assert!((step - 1000.0).abs() < 1.0, "uneven step {step}");
+        }
+    }
+
+    /// The spacing is along the whole polyline, not restarted per segment: a
+    /// chain of short segments must not emit a sample at every joint.
+    #[test]
+    fn resampling_carries_the_spacing_across_segments() {
+        let mut pts = Vec::new();
+        for i in 0..101 {
+            pts.push((37_700_000 + i * 1_000, -122_400_000));
+        }
+        // 100 segments of ~11 m each, so ~1113 m in total.
+        let walked = resample(&pts, 100.0);
+        assert!(walked.len() >= 12 && walked.len() <= 13, "{}", walked.len());
+    }
+
+    #[test]
+    fn resampling_leaves_something_it_cannot_walk_alone() {
+        assert_eq!(resample(&[], 10.0), Vec::new());
+        let one = [(37_700_000, -122_400_000)];
+        assert_eq!(resample(&one, 10.0), one.to_vec());
+        // A step of zero would loop forever rather than divide by it.
+        let two = [(37_700_000, -122_400_000), (37_700_100, -122_400_000)];
+        assert_eq!(resample(&two, 0.0), two.to_vec());
+        // A duplicated point is a zero-length segment, not a division by zero.
+        let doubled = [(37_700_000, -122_400_000), (37_700_000, -122_400_000)];
+        assert_eq!(resample(&doubled, 10.0), vec![doubled[0]]);
+    }
+
+    #[test]
+    fn a_metre_is_a_metre_in_both_axes() {
+        // 0.001 degrees of latitude is 111.3 m anywhere.
+        let north = distance_m((377_000_000, -1_224_000_000), (377_010_000, -1_224_000_000));
+        assert!((north - 111.32).abs() < 0.1, "{north}");
+        // The same longitude span is shorter, by cos(37.7).
+        let east = distance_m((377_000_000, -1_224_000_000), (377_000_000, -1_223_990_000));
+        assert!((east - 111.32 * 37.7f64.to_radians().cos()).abs() < 0.1, "{east}");
     }
 
     #[test]

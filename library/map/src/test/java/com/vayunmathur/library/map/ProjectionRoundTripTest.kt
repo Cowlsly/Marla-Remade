@@ -171,11 +171,12 @@ class ProjectionRoundTripTest {
 
     @Test
     fun `the world-fill floor keeps the map covering the viewport`() {
-        // fillZoom's floor: at zoom 0 the world is 256 Dp across, so a taller
+        // fillZoom's floor: at zoom 0 the world is one tile across, so a taller
         // viewport would otherwise show blank margins.
         val camera = CameraState(CameraPosition(GeoPoint(0.0, 0.0), 0.0))
         camera.setViewport(androidx.compose.ui.geometry.Size(411f, 891f))
-        assertTrue(camera.position.zoom > 1.0, "zoom was raised to fill 891 Dp: ${camera.position.zoom}")
+        val world = Mercator.worldSize(camera.position.zoom)
+        assertTrue(world >= 891.0 - 1e-6, "891 Dp must be covered; world was $world Dp")
         val projection = camera.projection!!
         val box = projection.queryVisibleBoundingBox()
         assertTrue(box.north < 85.06 && box.south > -85.06, "the viewport stays inside the world")

@@ -40,23 +40,29 @@ void main() {
     // whatever the head count is.
     uint query = row % p.out_h;
     uint keys = min(query + 1u, p.out_w);
+    // A sliding layer also drops everything more than `p.kh - 1` behind the query. Zero is no
+    // window, which is the ordinary causal mask and every net that predates batched prefill.
+    uint first = (p.kh != 0u && query + 1u > p.kh) ? query + 1u - p.kh : 0u;
     uint at = p.in0 + row * p.out_w;
 
     // The most negative fp16 rather than -inf, as `softmax.comp` does. `keys` is at least
     // one, so the seed is never the answer.
     float peak = -65504.0;
-    for (uint i = 0u; i < keys; i++) {
+    for (uint i = first; i < keys; i++) {
         peak = max(peak, float(arena[at + i]));
     }
 
     float total = 0.0;
-    for (uint i = 0u; i < keys; i++) {
+    for (uint i = first; i < keys; i++) {
         total += exp(float(arena[at + i]) - peak);
     }
     float inverse = 1.0 / total;
 
     uint out_row = p.out_at + row * p.out_w;
-    for (uint i = 0u; i < keys; i++) {
+    for (uint i = 0u; i < first; i++) {
+        arena[out_row + i] = float16_t(0.0);
+    }
+    for (uint i = first; i < keys; i++) {
         arena[out_row + i] = float16_t(exp(float(arena[at + i]) - peak) * inverse);
     }
     for (uint i = keys; i < p.out_w; i++) {

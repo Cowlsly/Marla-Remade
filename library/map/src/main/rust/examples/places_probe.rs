@@ -199,7 +199,15 @@ fn main() {
             let text_px = layer.text_size.at(z as f64);
             if text_px > 0.0 {
                 let (mut v, mut idx) = (Vec::new(), Vec::new());
-                map_renderer::tile::symbol::emit_label(label, text_px, 256.0, &mut v, &mut idx);
+                map_renderer::tile::symbol::emit_label(
+                    label,
+                    map_renderer::style::Anchor::Center,
+                    (0.0, 0.0),
+                    text_px,
+                    256.0,
+                    &mut v,
+                    &mut idx,
+                );
                 let xs: Vec<f32> =
                     v.chunks(4).map(|c| c[0]).collect();
                 let (lo, hi) = (
@@ -231,9 +239,20 @@ fn main() {
 
     // Shape a synthetic label to isolate emit from tile data (placement bypass).
     let (shaped, total) =
-        map_renderer::tess::text::shape(&atlas, glyph::Weight::Regular, "San Francisco");
+        map_renderer::tess::text::shape(&atlas, glyph::Weight::Regular, "San Francisco", false);
     let (mut v, mut idx) = (Vec::new(), Vec::new());
-    map_renderer::tess::text::emit(&atlas, glyph::Weight::Regular, &shaped, total, (0.5, 0.5), 14.0, 256.0, false, &mut v, &mut idx);
+    map_renderer::tess::text::emit(
+        &atlas,
+        glyph::Weight::Regular,
+        &[map_renderer::tess::text::ShapedLine { glyphs: shaped.clone(), advance: total }],
+        (0.5, 0.5),
+        map_renderer::style::Anchor::Center,
+        (0.0, 0.0),
+        14.0,
+        256.0,
+        &mut v,
+        &mut idx,
+    );
     println!(
         "synthetic 'San Francisco' @14px/256px: {} glyphs -> {} verts, {} idx",
         shaped.len(),
@@ -263,6 +282,9 @@ fn main() {
                     parts_offset: 0,
                     part_count: 1,
                     transit_color: 0,
+                    transit_ordinal: 0,
+                    transit_lanes: 0,
+                    transit_taper: 0,
                 }],
                 parts: vec![Part { coord_start: 0, point_count: 1, winding: WINDING_OUTER }],
                 coords: vec![(2048, 2048)],
@@ -279,7 +301,15 @@ fn main() {
             let layer = &layers[label.layer_index];
             let text_px = layer.text_size.at(6.0);
             let (mut v, mut idx) = (Vec::new(), Vec::new());
-            map_renderer::tile::symbol::emit_label(label, text_px, 256.0, &mut v, &mut idx);
+            map_renderer::tile::symbol::emit_label(
+                    label,
+                    map_renderer::style::Anchor::Center,
+                    (0.0, 0.0),
+                    text_px,
+                    256.0,
+                    &mut v,
+                    &mut idx,
+                );
             let (mut x0, mut x1, mut y0, mut y1) =
                 (f32::INFINITY, f32::NEG_INFINITY, f32::INFINITY, f32::NEG_INFINITY);
             for c in v.chunks(4) {

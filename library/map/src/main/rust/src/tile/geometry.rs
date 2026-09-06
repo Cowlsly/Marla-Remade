@@ -10,7 +10,7 @@
 //! geometry-command walk. Nothing downstream of here changed — fills are still 2 floats a vertex,
 //! strokes 7, and the shaders never saw any of it.
 
-use crate::style::{Layer, LayerKind};
+use crate::style::{Layer, LayerKind, LayerToggles};
 use crate::tess::{fill, stroke};
 use crate::tile::symbol;
 use crate::tile::select::ANCESTOR_DEPTH;
@@ -23,6 +23,28 @@ pub struct LayerMesh {
     pub kind: LayerKind,
     pub vertices: Vec<f32>,
     pub indices: Vec<u32>,
+    /// An ARGB colour that replaces the layer's own, when the **feature** carries one.
+    ///
+    /// Only transit lines do: a subway line's colour is the operator's, tagged per route
+    /// in OSM and carried per feature in `transit_color`, so one style layer draws many
+    /// colours. A layer whose features disagree therefore emits one mesh per distinct
+    /// value rather than one mesh.
+    ///
+    /// A sub-mesh split rather than a per-vertex colour attribute: the alternative would
+    /// change the vertex format and the pipeline that **every road** shares, to serve one
+    /// layer. `record_symbol` already batches by resolved text size for the same reason.
+    pub color_override: Option<u32>,
+    /// The lane inputs every feature in this mesh shares: the colour's ordinal within its
+    /// corridor, the corridor's colour count, and how far into the lane the piece sits
+    /// (over 255).
+    ///
+    /// Splits the sub-meshes alongside [`color_override`], because two routes of one colour
+    /// on different ordinals are two parallel lines. Zero for every layer but transit.
+    ///
+    /// Inputs rather than an offset, so the mesh is zoom-independent: the lane count is a
+    /// property of the camera, and re-tessellating a tile whenever it changed is the cost
+    /// this avoids.
+    pub lane: (u8, u8, u8),
 }
 
 /// One shaped label candidate for per-frame symbol emission.
@@ -34,21 +56,25 @@ pub struct ShapedLabel {
     pub anchor: (f32, f32),
     /// Display name as shaped (for the task-17 pick path).
     pub name: String,
-    /// Shaped glyphs (font-unit advances, atlas UVs via `tile::glyph`).
-    pub glyphs: Vec<crate::tess::text::ShapedGlyph>,
-    /// Total advance in font units, for centring.
+    /// The shaped run, one entry per line. A place label is always one line; a POI label
+    /// wraps at its layer's `text_max_width`.
+    pub lines: Vec<crate::tess::text::ShapedLine>,
+    /// The widest line's advance in font units — the block's width, for centring and for
+    /// the collision box.
     pub total_advance: f32,
     /// Glyph weight (the layer's `medium` flag).
     pub weight: crate::tile::glyph::Weight,
-    /// Uppercase transform (the layer's `uppercase` flag).
-    pub uppercase: bool,
-    /// Placement rank: 0 country … 3 subplace (from the layer id), 255 unknown.
+    /// Placement rank from the symbol layer id: country 0, subplace 3.
     /// Decided at shape time so the per-frame path only sorts.
     pub rank: u8,
     /// Population weight within the rank (the feature's numeric `kind_detail`,
     /// 0–3 from the tiler, 0 unknown). Placement prefers higher weight on ties,
     /// so a big city beats a town at the same collision.
     pub pop: u16,
+    /// The icon to draw beside the label, for a POI layer whose kind the sprite sheet
+    /// carries. `None` for every place label, and for the one POI kind (`townhall`) the
+    /// sheet has no picture of.
+    pub sprite: Option<crate::tile::sprite::Sprite>,
 }
 
 /// Every layer's geometry for one tile, ready to upload.
@@ -59,6 +85,13 @@ pub struct TileMesh {
     pub meshes: Vec<LayerMesh>,
     /// Symbol candidates: shaped once at tessellation time, sized per frame.
     pub labels: Vec<ShapedLabel>,
+    /// The [`crate::style::SharedToggles`] generation this was built at.
+    ///
+    /// Optional layers are gated here, not at draw time, so a mesh is only valid for the
+    /// toggles it saw. The renderer re-requests anything whose generation has fallen
+    /// behind; without the tag it could not tell a tile built with POI off from one whose
+    /// tile simply has no POI in it.
+    pub generation: u32,
 }
 
 /// Tessellate every layer of `tile` that could be drawn while this tile is on screen.
@@ -86,31 +119,40 @@ pub fn build(
     y: u32,
     rings_validated: bool,
 ) -> TileMesh {
-    build_at(tile, layers, z, x, y, rings_validated, z as f64, 256.0)
+    build_toggled(tile, layers, z, x, y, rings_validated, LayerToggles::default(), 0)
 }
 
-/// [`build`] at an explicit camera zoom and tile span.
+/// [`build`] with the optional layers the host has turned on.
 ///
-/// Production calls [`build`] (camera == tile zoom, 256px span — the tessellation-time
-/// default). Accepted for API symmetry with the per-frame path; symbols shape
-/// zoom-independently, so both are currently unused at tessellation time.
-pub fn build_at(
+/// The production entry point. [`build`] is the basemap-only shorthand the probes and
+/// tests use, so adding an optional layer does not touch a dozen call sites that have no
+/// opinion about POI.
+///
+/// `generation` is stamped onto the result unchanged; the caller reads it and the toggles
+/// from the same [`crate::style::SharedToggles`] snapshot so the two cannot disagree.
+#[allow(clippy::too_many_arguments)]
+pub fn build_toggled(
     tile: &Body,
     layers: &[Layer],
     z: u8,
     x: u32,
     y: u32,
     rings_validated: bool,
-    camera_zoom: f64,
-    tile_span_px: f32,
+    toggles: LayerToggles,
+    generation: u32,
 ) -> TileMesh {
-    let _ = (camera_zoom, tile_span_px);
     let mut meshes = Vec::with_capacity(layers.len());
     let mut labels = Vec::new();
     let deepest = z.saturating_add(ANCESTOR_DEPTH);
     let extent = tile.extent as u32;
 
     for (index, layer) in layers.iter().enumerate() {
+        // Before the zoom window and before the layer lookup: an optional layer that is
+        // off must cost nothing at all. This is the whole reason the gate is here rather
+        // than in the renderer — with POI off, no label is shaped for any resident tile.
+        if !toggles.enabled(layer.toggle) {
+            continue;
+        }
         if layer.min_zoom > deepest || layer.max_zoom < z {
             continue;
         }
@@ -118,6 +160,12 @@ pub fn build_at(
 
         let mut vertices: Vec<f32> = Vec::new();
         let mut indices: Vec<u32> = Vec::new();
+        // Sub-meshes for features that carry their own colour and lane inputs, in
+        // first-seen feature order so the archive's determinism carries through to draw
+        // order. Stays empty for every layer but transit, and the `transit_color == 0` fast
+        // path below keeps it off the hot road path entirely.
+        #[allow(clippy::type_complexity)]
+        let mut coloured: Vec<((u32, u8, u8, u8), Vec<f32>, Vec<u32>)> = Vec::new();
 
         for feature in &source.features {
             // Kind, then the road flag/detail filters: one call, so a surface layer never
@@ -147,9 +195,35 @@ pub fn build_at(
                         continue;
                     }
                     let gapped = layer.gapped();
+                    // A feature with no colour of its own goes in the layer's single mesh,
+                    // which is every road ever tessellated; only a transit line takes the
+                    // scan. A tile holds a handful of distinct route colours, so the
+                    // linear search is shorter than hashing would be.
+                    let (vertices, indices) = if feature.transit_color == 0 {
+                        (&mut vertices, &mut indices)
+                    } else {
+                        // The lane inputs as well as the colour: two routes of one colour on
+                        // different ordinals draw as two parallel lines, and one mesh can
+                        // only take one lateral offset.
+                        let key = (
+                            feature.transit_color,
+                            feature.transit_ordinal,
+                            feature.transit_lanes,
+                            feature.transit_taper,
+                        );
+                        let at = match coloured.iter().position(|(k, _, _)| *k == key) {
+                            Some(at) => at,
+                            None => {
+                                coloured.push((key, Vec::new(), Vec::new()));
+                                coloured.len() - 1
+                            }
+                        };
+                        let Some((_, v, i)) = coloured.get_mut(at) else { continue };
+                        (v, i)
+                    };
                     for part in parts {
                         let flat = flatten(source.points(part));
-                        stroke::stroke(&flat, extent, gapped, &mut vertices, &mut indices);
+                        stroke::stroke(&flat, extent, gapped, vertices, indices);
                     }
                 }
                 LayerKind::Symbol => {
@@ -172,13 +246,34 @@ pub fn build_at(
             }
         }
 
-        if indices.is_empty() {
-            continue;
+        if !indices.is_empty() {
+            meshes.push(LayerMesh {
+                layer_index: index,
+                kind: layer.kind,
+                vertices,
+                indices,
+                color_override: None,
+                lane: (0, 0, 0),
+            });
         }
-        meshes.push(LayerMesh { layer_index: index, kind: layer.kind, vertices, indices });
+        for ((color, ordinal, lanes, taper), vertices, indices) in coloured {
+            if indices.is_empty() {
+                continue;
+            }
+            // `transit_color` is `0xRRGGBB`; the renderer's colours are ARGB, and a
+            // transit line is never translucent.
+            meshes.push(LayerMesh {
+                layer_index: index,
+                kind: layer.kind,
+                vertices,
+                indices,
+                color_override: Some(0xFF00_0000 | color),
+                lane: (ordinal, lanes, taper),
+            });
+        }
     }
 
-    TileMesh { z, x, y, meshes, labels }
+    TileMesh { z, x, y, meshes, labels, generation }
 }
 
 /// `[(i16, i16)]` to the `[(i32, i32)]` the fill tessellator takes.
@@ -249,11 +344,10 @@ mod tests {
         // zoom instead means an ancestor holds no geometry for any layer whose `min_zoom` is
         // deeper than it, and those layers appear only once the exact-zoom tiles arrive.
         //
-        // `roads-major` has min_zoom 9 and the published tile really does carry a
-        // `major_road`, so this is decided by data rather than by the layer table alone.
-        let layers = style::layers();
-        let major = layers.iter().find(|l| l.id == "roads-major").expect("roads-major");
-        assert_eq!(major.min_zoom, 9, "this test is calibrated to roads-major's min_zoom");
+        // The layer is synthetic so the test states its own `min_zoom` of 9. It used to
+        // borrow `roads-major`'s, which quietly tied this to the style table — and road
+        // layers are gated by their width ramp now, so that number is gone.
+        let layers = vec![major_road_at_min_zoom(9)];
 
         // z6 is within reach of z9 (6 + 4 = 10), so the road is tessellated ready for the
         // camera to descend onto it. The old tile-zoom gate dropped it here.
@@ -270,6 +364,47 @@ mod tests {
             mesh_for(&out_of_reach, &layers, "roads-major").is_none(),
             "the window must stay bounded, or every tile pays for every layer",
         );
+    }
+
+    /// A line layer matching the published fixture's `major_road`, gated at `min_zoom`.
+    fn major_road_at_min_zoom(min_zoom: u8) -> Layer {
+        use crate::style::paint::Ramp;
+        Layer {
+            id: "roads-major".to_string(),
+            source_layer: "roads".to_string(),
+            source_layer_id: tilecodec::mamaps::dict::LAYER_ROADS,
+            kind: crate::style::LayerKind::Line,
+            kinds: vec!["major_road".to_string()],
+            kind_ids: vec![crate::style::kind_id_for_test("major_road")],
+            require_flags: 0,
+            forbid_flags: 0,
+            detail_ids: Vec::new(),
+            forbid_details: Vec::new(),
+            light: 0xFFFFFFFF,
+            dark: 0xFF000000,
+            opacity: Ramp::constant(1.0),
+            width: Ramp::constant(1.0),
+            gap_width: Ramp::constant(0.0),
+            spread: Ramp::constant(0.0),
+            lanes: Ramp::constant(1.0),
+            dash: (0.0, 0.0),
+            text_size: Ramp::constant(0.0),
+            text_size_large: None,
+            rank_threshold: None,
+            uppercase: false,
+            medium: false,
+            toggle: None,
+            icon: false,
+            text_offset: (0.0, 0.0),
+            text_max_width: 0.0,
+            variable_anchor: Vec::new(),
+            halo_light: 0xFFFFFFFF,
+            halo_dark: 0xFF000000,
+            halo_width: 0.0,
+            min_zoom,
+            max_zoom: 22,
+            authored: "roads_major".to_string(),
+        }
     }
 
     #[test]
@@ -412,6 +547,140 @@ mod tests {
         assert!(mesh.meshes.is_empty());
     }
 
+    /// Three transit lines, two colours: the layer emits one mesh per distinct colour, in
+    /// first-seen feature order, and the two lines that share a colour share a mesh.
+    ///
+    /// Without the split a `find` in the renderer would draw only the first mesh, so the
+    /// second operator's line would vanish rather than merely be miscoloured.
+    #[test]
+    fn transit_lines_split_into_one_mesh_per_colour() {
+        use tilecodec::mamaps::body::{Feature, Layer as BodyLayer, Part, NAME_NONE, WINDING_OUTER};
+        use tilecodec::mamaps::dict;
+
+        let mut body = Body::new(4096);
+        let mut source = BodyLayer::new(dict::LAYER_TRANSIT);
+        // Blue, red, blue again — so the test also proves equal colours coalesce into one
+        // mesh rather than one mesh per feature.
+        for (color, y) in [(0x00_54_A5u32, 100i16), (0xE3_1E_24, 200), (0x00_54_A5, 300)] {
+            let parts_offset = source.parts.len() as u32;
+            source.parts.push(Part {
+                coord_start: source.coords.len() as u32,
+                point_count: 2,
+                winding: WINDING_OUTER,
+            });
+            source.coords.extend_from_slice(&[(0, y), (1000, y)]);
+            source.features.push(Feature {
+                kind: crate::style::kind_id_for_test("rail"),
+                kind_detail: 0,
+                geom_type: GEOM_LINE,
+                flags: 0,
+                name_idx: NAME_NONE,
+                parts_offset,
+                part_count: 1,
+                transit_color: color,
+                transit_ordinal: 0,
+                transit_lanes: 0,
+                transit_taper: 0,
+            });
+        }
+        body.layers.push(source);
+
+        let all = style::layers();
+        let at = all.iter().position(|l| l.id == "transit-rail").expect("the transit layer");
+        let Some(only) = all.get(at..=at) else { panic!("a one-layer slice") };
+
+        // Off by default, and the gate is before any tessellation: nothing at all.
+        assert!(
+            build(&body, only, 14, 0, 0, false).meshes.is_empty(),
+            "an optional layer that is off must tessellate nothing",
+        );
+
+        let on = LayerToggles { poi: false, transit: true };
+        let mesh = build_toggled(&body, only, 14, 0, 0, false, on, 7);
+        assert_eq!(mesh.generation, 7, "the mesh records the generation it was built at");
+        let colours: Vec<Option<u32>> = mesh.meshes.iter().map(|m| m.color_override).collect();
+        assert_eq!(
+            colours,
+            vec![Some(0xFF00_54A5), Some(0xFFE3_1E24)],
+            "one opaque ARGB mesh per distinct colour, in first-seen order",
+        );
+        // The two blue lines really did share a mesh rather than each getting one.
+        let (blue, red) = (&mesh.meshes[0], &mesh.meshes[1]);
+        assert_eq!(blue.indices.len(), red.indices.len() * 2, "two lines against one");
+        for m in &mesh.meshes {
+            assert_eq!(m.kind, LayerKind::Line);
+            assert!(!m.indices.is_empty());
+        }
+    }
+
+    /// Two routes of one colour on different corridor ordinals are two parallel lines, and a
+    /// mesh can only carry one lateral offset — so the split is on the lane inputs too, not
+    /// the colour alone.
+    #[test]
+    fn transit_lines_of_one_colour_split_again_on_their_corridor_ordinal() {
+        use tilecodec::mamaps::body::{Feature, Layer as BodyLayer, Part, NAME_NONE, WINDING_OUTER};
+        use tilecodec::mamaps::dict;
+        let mut body = Body::new(4096);
+        let mut source = BodyLayer::new(dict::LAYER_TRANSIT);
+        for (ordinal, y) in [(0u8, 100i16), (1, 200), (0, 300)] {
+            let parts_offset = source.parts.len() as u32;
+            source.parts.push(Part {
+                coord_start: source.coords.len() as u32,
+                point_count: 2,
+                winding: WINDING_OUTER,
+            });
+            source.coords.extend_from_slice(&[(0, y), (1000, y)]);
+            source.features.push(Feature {
+                kind: crate::style::kind_id_for_test("rail"),
+                kind_detail: 0,
+                geom_type: GEOM_LINE,
+                flags: 0,
+                name_idx: NAME_NONE,
+                parts_offset,
+                part_count: 1,
+                transit_color: 0x00_54_A5,
+                transit_ordinal: ordinal,
+                transit_lanes: 2,
+                transit_taper: 255,
+            });
+        }
+        body.layers.push(source);
+        let all = style::layers();
+        let at = all.iter().position(|l| l.id == "transit-rail").expect("the transit layer");
+        let Some(only) = all.get(at..=at) else { panic!("a one-layer slice") };
+        let on = LayerToggles { poi: false, transit: true };
+        let mesh = build_toggled(&body, only, 14, 0, 0, false, on, 0);
+        assert_eq!(
+            mesh.meshes.iter().map(|m| m.lane).collect::<Vec<(u8, u8, u8)>>(),
+            vec![(0, 2, 255), (1, 2, 255)],
+            "one mesh per ordinal, in first-seen order",
+        );
+        assert!(mesh.meshes.iter().all(|m| m.color_override == Some(0xFF00_54A5)));
+        // The two lines on the same ordinal really did share a mesh.
+        assert_eq!(mesh.meshes[0].indices.len(), mesh.meshes[1].indices.len() * 2);
+    }
+
+    /// The counterpart: a feature with no colour of its own stays in the layer's single
+    /// mesh, so the road path is untouched by the split.
+    #[test]
+    fn a_layer_whose_features_carry_no_colour_still_emits_one_mesh() {
+        let layers = style::layers();
+        let mesh = build(&real(), &layers, 11, 339, 770, false);
+        for m in &mesh.meshes {
+            assert_eq!(
+                m.color_override, None,
+                "`{}` gained a colour override from a road feature",
+                layers[m.layer_index].id,
+            );
+        }
+        let roads: Vec<&LayerMesh> = mesh
+            .meshes
+            .iter()
+            .filter(|m| layers[m.layer_index].id == "roads-major")
+            .collect();
+        assert_eq!(roads.len(), 1, "one mesh per layer where no feature carries a colour");
+    }
+
     #[test]
     fn a_line_layer_also_strokes_polygon_outlines() {
         // A lake shoreline and an administrative boundary are lines over area features.
@@ -431,10 +700,19 @@ mod tests {
             opacity: Ramp::constant(1.0),
             width: Ramp::constant(1.0),
             gap_width: Ramp::constant(0.0),
+            spread: Ramp::constant(0.0),
+            lanes: Ramp::constant(1.0),
             dash: (0.0, 0.0),
             text_size: Ramp::constant(1.0),
+            text_size_large: None,
+            rank_threshold: None,
             uppercase: false,
             medium: false,
+            toggle: None,
+            icon: false,
+            text_offset: (0.0, 0.0),
+            text_max_width: 0.0,
+            variable_anchor: Vec::new(),
             halo_light: 0x00000000,
             halo_dark: 0x00000000,
             halo_width: 1.0,

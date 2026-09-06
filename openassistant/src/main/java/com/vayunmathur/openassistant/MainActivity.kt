@@ -20,7 +20,7 @@ import com.vayunmathur.library.util.MainNavigation
 import com.vayunmathur.library.util.rememberNavBackStack
 import kotlinx.serialization.Serializable
 import com.vayunmathur.openassistant.data.OpenAssistantRepository
-import com.vayunmathur.openassistant.ui.LiteRTChatUi
+import com.vayunmathur.openassistant.ui.AssistantChatUi
 import com.vayunmathur.openassistant.ui.SettingsPage
 import com.vayunmathur.openassistant.util.AssistantViewModel
 
@@ -90,7 +90,7 @@ fun Navigation(assistantViewModel: AssistantViewModel) {
     val backStack = rememberNavBackStack<Route>(Route.ConversationPage(0))
     MainNavigation(backStack) {
         entry<Route.ConversationPage> {
-            LiteRTChatUi(backStack, it.id, assistantViewModel)
+            AssistantChatUi(backStack, it.id, assistantViewModel)
         }
         entry<Route.SettingsPage> {
             SettingsPage(backStack, assistantViewModel)

@@ -391,7 +391,7 @@ fn decode_step(weights: &dyn WeightSource) -> Result<Plan, String> {
         b.cache_write(k_row, cache_k);
         b.cache_write(v_row, cache_v);
         let scores = b.attn_scores_cached_dynamic(q, cache_k, HEADS);
-        let probs = b.softmax_prefix(scores);
+        let probs = b.softmax_prefix(scores, true);
         let mixed = b.attn_apply_cached_dynamic(probs, cache_v, HEADS);
         let projected = point(b, l, mixed, D_MODEL, Act::None);
         x = b.add(x, projected);

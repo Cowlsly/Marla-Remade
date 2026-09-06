@@ -1,0 +1,69 @@
+#version 450
+//! `O[h][d][q] = sum_j S[h][q][j] * V[h][d][k]`, the value half of banded attention.
+//!
+//! `k = q - (band - 1) + j`, the same mapping `attn_scores_banded.comp` used to build the band.
+//! Twelve uses, one per conformer layer of Gemma 4's audio tower.
+//!
+//! # What differs from `attn_apply.comp`
+//!
+//! Only the inner loop's bound and its indirection. `S` is `[heads, T, band]` rather than
+//! `[heads, T, T]`, so a row is `band` wide and column `j` refers to key `k` rather than to
+//! itself. `V` and the output are `[d_model, 1, T]`, exactly as before, so the head
+//! concatenation that follows attention is still not an op: output channel `c` belongs to head
+//! `c / head_dim` and is written where the concatenated result wants it.
+//!
+//! `p.out_w` is the sequence length, `p.kh` the band width. The row stride is the band and the
+//! value stride is the sequence, and those being different numbers is the whole difference.
+//!
+//! # The guard, again
+//!
+//! `j + q + 1 >= band`, subtraction after. It **mirrors `band_key_in` in
+//! `nets/gemma4_audio.rs`**, identically to `attn_scores_banded.comp`; the reasoning is written
+//! out there and in that function's own docs, and the CPU arm calls `band_key_in(p.kh, ..)`
+//! directly rather than restating it.
+//!
+//! A dead column is skipped rather than accumulated. That is exact rather than approximate: the
+//! softmax gave it `exp(-65504 - peak) = 0`, so it would contribute nothing anyway. Skipping it
+//! is not about the arithmetic - it is that `V[channel * T + k]` for a wrapped `k` reads live
+//! arena belonging to another tensor. Multiplying that by a zero weight is fine; reading it at
+//! all is what the guard prevents, and a wrapped read that happens to land on a denormal or a
+//! NaN would poison the sum through `0 * NaN`.
+//!
+//! # Precision
+//!
+//! `S` is a distribution over the band, so every product is bounded by the corresponding `V` and
+//! the sum of a convex combination cannot exceed `V`'s range. `float` accumulation is ample; the
+//! fp16 store is the only rounding.
+
+#include "common.glsl"
+
+void main() {
+    uint index = global_index();
+    if (index >= p.count) {
+        return;
+    }
+    // The output is `[d_model, 1, T]`, so this is (channel, 0, query).
+    uint channel, unused_row, query;
+    unpack(index, channel, unused_row, query);
+    uint keys = p.out_w;
+    uint band = p.kh;
+    uint head_dim = p.out_c / p.group;
+    // `S[head][query][*]`, contiguous across the band.
+    uint row = p.in0 + ((channel / head_dim) * keys + query) * band;
+    // `V[channel][*]`, contiguous across the sequence, because V's height is one.
+    uint values = p.in1 + channel * keys;
+
+    float total = 0.0;
+    for (uint j = 0u; j < band; j++) {
+        // Mirrors `band_key_in` in `nets/gemma4_audio.rs`. Guard strictly before the subtraction,
+        // so nothing can wrap; see `attn_scores_banded.comp` for the rearrangements that are
+        // wrong. This gates the read of `V`, not the accumulation.
+        if (j + query + 1u >= band) {
+            uint key = query + j + 1u - band;
+            if (key < keys) {
+                total += float(arena[row + j]) * float(arena[values + key]);
+            }
+        }
+    }
+    arena[p.out_at + index] = float16_t(total);
+}

@@ -32,9 +32,9 @@
 //!
 //! Two steps, and the first is the one that matters for the `u16`:
 //!
-//! 1. **Group by class.** Line features drawn identically -- same `kind`, `kind_detail` and `flags`
-//!    -- become one multi-part feature. Nothing about the geometry changes; a `.mamaps` line feature
-//!    has always been able to hold many parts, and `boundaries` already did.
+//! 1. **Group by class.** Line features drawn identically -- same `kind`, `kind_detail`, `flags`
+//!    and `transit_color` -- become one multi-part feature. Nothing about the geometry changes; a
+//!    `.mamaps` line feature has always been able to hold many parts, and `boundaries` already did.
 //! 2. **Join what continues.** Within a group, a part whose last point is another's first point is
 //!    the same line cut in half, so they are spliced into one part. That removes the part entry and
 //!    lets the delta run through the joint instead of restarting.
@@ -42,10 +42,19 @@
 //! # Why it is safe
 //!
 //! A `.mamaps` feature carries no identity of its own: [`Feature`] is `kind`, `kind_detail`,
-//! `geom_type`, `flags` and a part range, and nothing else. Two line features with the same first
-//! three fields are indistinguishable to a renderer, so merging them cannot change a pixel. There
-//! are no names or ids on a feature to lose, and `winding` is meaningless on an open path -- which
-//! [`crate::rings::normalise`] states outright.
+//! `geom_type`, `flags`, `transit_color`, the three transit lane fields and a part range, and
+//! nothing else.
+//! Two line features that
+//! agree on all of those are indistinguishable to a renderer, so merging them cannot change a pixel.
+//! There are no names or ids on a feature to lose, and `winding` is meaningless on an open path --
+//! which [`crate::rings::normalise`] states outright.
+//!
+//! `transit_color` is part of the key rather than dropped from it because it is the one per-feature
+//! field a renderer reads directly. Two subway lines of different operator colours crossing a tile
+//! are the same `kind` and would otherwise collapse into one feature wearing whichever colour came
+//! first. The lane fields join it for the same reason one step on: two routes of *one* colour on
+//! different corridor ordinals are drawn as two parallel lines, and merging them would put both
+//! on whichever ordinal came first.
 //!
 //! Direction is not preserved through a join and does not need to be: nothing in
 //! [`tilecodec::mamaps::body`]'s flag set reads a line's direction, so `A -> B` and `B -> A` draw
@@ -82,7 +91,7 @@ impl Stats {
 }
 
 /// What makes two line features interchangeable to a renderer.
-type Class = (u16, u16, u8);
+type Class = (u16, u16, u8, u32, u8, u8, u8);
 
 /// One line part, as `(coord_start, point_count)` into a layer's existing arena.
 ///
@@ -120,7 +129,7 @@ pub fn coalesce_lines(layer: &mut Layer) -> Stats {
         if feature.geom_type != GEOM_LINE {
             continue;
         }
-        let class = (feature.kind, feature.kind_detail, feature.flags);
+        let class = class_of(feature);
         let at = *group_of.entry(class).or_insert_with(|| {
             order.push(class);
             groups.push(Vec::new());
@@ -160,7 +169,7 @@ pub fn coalesce_lines(layer: &mut Layer) -> Stats {
             features.push(copy);
             continue;
         }
-        let class = (feature.kind, feature.kind_detail, feature.flags);
+        let class = class_of(feature);
         let at = group_of[&class];
         if emitted[at] {
             continue;
@@ -197,6 +206,18 @@ pub fn coalesce_lines(layer: &mut Layer) -> Stats {
     stats.features_after = layer.features.len() as u64;
     stats.parts_after = layer.parts.len() as u64;
     stats
+}
+
+fn class_of(feature: &tilecodec::mamaps::body::Feature) -> Class {
+    (
+        feature.kind,
+        feature.kind_detail,
+        feature.flags,
+        feature.transit_color,
+        feature.transit_ordinal,
+        feature.transit_lanes,
+        feature.transit_taper,
+    )
 }
 
 fn points_of(coords: &[(i16, i16)], part: Part) -> &[(i16, i16)] {
@@ -299,6 +320,9 @@ mod tests {
                 parts_offset,
                 part_count: parts.len() as u32,
                 transit_color: 0,
+                transit_ordinal: 0,
+                transit_lanes: 0,
+                transit_taper: 0,
             });
         }
         layer
@@ -452,6 +476,64 @@ mod tests {
             assert_eq!(stats.features_before, stats.features_after);
             assert_eq!(stats.parts_before, stats.parts_after);
         }
+    }
+
+    /// Two transit lines of one mode crossing a tile: same `kind`, different operator colour. They
+    /// must stay apart, or the merged feature wears whichever colour happened to come first.
+    #[test]
+    fn transit_colour_separates_otherwise_identical_features() {
+        let mut layer = layer_of(&[
+            (7, GEOM_LINE, vec![vec![(0, 0), (1, 0)]]),
+            (7, GEOM_LINE, vec![vec![(1, 0), (2, 0)]]),
+        ]);
+        layer.features[0].transit_color = 0x00_54_A5;
+        layer.features[1].transit_color = 0xE3_1E_24;
+        coalesce_lines(&mut layer);
+        assert_arena_is_tiled(&layer);
+        assert_eq!(layer.features.len(), 2, "two colours, two features");
+        assert_eq!(layer.features[0].transit_color, 0x00_54_A5);
+        assert_eq!(layer.features[1].transit_color, 0xE3_1E_24);
+        // They touch end to end, so without the colour in the key they would also be spliced.
+        assert_eq!(all_parts(&layer), vec![vec![(0, 0), (1, 0)], vec![(1, 0), (2, 0)]]);
+    }
+
+    /// The counterpart: equal colours still merge, so the key is not simply always-distinct.
+    #[test]
+    fn equal_transit_colours_still_merge() {
+        let mut layer = layer_of(&[
+            (7, GEOM_LINE, vec![vec![(0, 0), (1, 0)]]),
+            (7, GEOM_LINE, vec![vec![(1, 0), (2, 0)]]),
+        ]);
+        layer.features[0].transit_color = 0x00_54_A5;
+        layer.features[1].transit_color = 0x00_54_A5;
+        coalesce_lines(&mut layer);
+        assert_arena_is_tiled(&layer);
+        assert_eq!(layer.features.len(), 1);
+        assert_eq!(all_parts(&layer), vec![vec![(0, 0), (1, 0), (2, 0)]]);
+    }
+
+    /// Two routes of one colour on different corridor ordinals draw as two parallel lines.
+    /// Merging them would put both on whichever ordinal came first, which is the whole defect the
+    /// ordinal exists to fix.
+    #[test]
+    fn a_transit_ordinal_separates_two_features_of_one_colour() {
+        let mut layer = layer_of(&[
+            (7, GEOM_LINE, vec![vec![(0, 0), (1, 0)]]),
+            (7, GEOM_LINE, vec![vec![(1, 0), (2, 0)]]),
+        ]);
+        for feature in &mut layer.features {
+            feature.transit_color = 0x00_54_A5;
+            feature.transit_lanes = 2;
+            feature.transit_taper = 255;
+        }
+        layer.features[0].transit_ordinal = 0;
+        layer.features[1].transit_ordinal = 1;
+        coalesce_lines(&mut layer);
+        assert_arena_is_tiled(&layer);
+        assert_eq!(layer.features.len(), 2, "two ordinals, two features");
+        assert_eq!(layer.features[0].transit_ordinal, 0);
+        assert_eq!(layer.features[1].transit_ordinal, 1);
+        assert_eq!(all_parts(&layer), vec![vec![(0, 0), (1, 0)], vec![(1, 0), (2, 0)]]);
     }
 
     /// The point of the whole module, in the shape the real data has: thousands of two-point

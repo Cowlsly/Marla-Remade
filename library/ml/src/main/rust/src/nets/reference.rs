@@ -231,9 +231,13 @@ impl Reference {
                     Kind::CacheWrite => self.cache_write(push),
                     Kind::Softcap => self.softcap(push),
                     Kind::Activate => self.activate(push),
+                    Kind::MulScalar => self.mul_scalar(push),
+                    Kind::Clamp => self.clamp(push),
                     Kind::AttnApply => self.attn_apply(push),
                     Kind::AttnScoresRelative => self.attn_scores_relative(push),
                     Kind::AttnApplyRelative => self.attn_apply_relative(push),
+                    Kind::AttnScoresBanded => self.attn_scores_banded(push),
+                    Kind::AttnApplyBanded => self.attn_apply_banded(push),
                     Kind::AttnScoresCached => self.attn_scores_cached(push),
                     Kind::AttnApplyCached => self.attn_apply_cached(push),
                     Kind::Embed => self.embed(push),
@@ -716,18 +720,28 @@ impl Reference {
     /// Rotary position embedding, the half-split convention. See [`Kind::Rotary`].
     fn rotary(&mut self, p: &Push) -> Result<(), String> {
         let head_dim = p.in_c;
-        if head_dim == 0 || !head_dim.is_multiple_of(2) {
-            return Err(format!("a rotary head of {head_dim} channels"));
+        // Independent rotary blocks inside one head; 1 is ordinary RoPE. See `Push::rope_axes`.
+        let axes = p.rope_axes.max(1);
+        if head_dim == 0 || !head_dim.is_multiple_of(axes) {
+            return Err(format!("a rotary head of {head_dim} channels in {axes} blocks"));
         }
-        let half = head_dim / 2;
+        let block = head_dim / axes;
+        if block == 0 || !block.is_multiple_of(2) {
+            return Err(format!("a rotary block of {block} channels"));
+        }
+        let half = block / 2;
         for channel in 0..p.out_c {
             let within = channel % head_dim;
-            let frequency = within % half;
-            let lower = within < half;
+            let sub = within / block;
+            let local = within % block;
+            let frequency = local % half;
+            let lower = local < half;
             let partner = if lower { channel + half } else { channel - half };
+            let base = sub * block;
             for position in 0..p.out_w {
-                let angle_cos = self.load(p.in1, frequency * p.out_w + position)?;
-                let angle_sin = self.load(p.in1, (half + frequency) * p.out_w + position)?;
+                let angle_cos = self.load(p.in1, (base + frequency) * p.out_w + position)?;
+                let angle_sin =
+                    self.load(p.in1, (base + half + frequency) * p.out_w + position)?;
                 let self_value = self.load(p.in0, channel * p.out_w + position)?;
                 let other = self.load(p.in0, partner * p.out_w + position)?;
                 let rotated = if lower { -other } else { other } * angle_sin;
@@ -845,7 +859,9 @@ impl Reference {
         let scale = f32::from_bits(p.param0_bits);
         for head in 0..p.group {
             let query_base = head * head_dim * query_stride;
-            let key_base = head * head_dim * key_stride;
+            // K is `kv_heads` wide, so several query heads share a key head. The identity when
+            // the two counts match, which is every net that is not Gemma's.
+            let key_base = Self::kv_head_of(p, head) * head_dim * key_stride;
             for query in 0..p.out_h {
                 for key in 0..p.out_w {
                     let mut total = 0.0;
@@ -906,17 +922,28 @@ impl Reference {
                 }
                 SoftmaxMode::Full => p.out_w,
             };
+            // A sliding layer's causal row also drops everything more than `p.kh - 1` behind
+            // the query. Zero is no window, which is the plain causal mask.
+            let query = row % p.out_h.max(1);
+            let first = if mode == SoftmaxMode::Causal && p.kh != 0 {
+                (query + 1).saturating_sub(p.kh)
+            } else {
+                0
+            };
             let mut peak = -65504.0f32;
-            for i in 0..keys {
+            for i in first..keys {
                 peak = peak.max(self.load(p.in0, at + i)?);
             }
             let mut total = 0.0;
-            for i in 0..keys {
+            for i in first..keys {
                 total += (self.load(p.in0, at + i)? - peak).exp();
             }
             // The peak's own term is `exp(0)`, so this is at least 1.
             let inverse = 1.0 / total;
-            for i in 0..keys {
+            for i in 0..first {
+                self.store(p.out, at + i, 0.0)?;
+            }
+            for i in first..keys {
                 let value = (self.load(p.in0, at + i)? - peak).exp() * inverse;
                 self.store(p.out, at + i, value)?;
             }
@@ -935,9 +962,14 @@ impl Reference {
     /// Keys an op attends over, as an inclusive `[first, last]` range.
     ///
     /// The host mirror of `attn_first` / `attn_last` in `shaders/common.glsl`.
+    /// The inclusive key range an attention op may read. Mirrors `attn_first` / `attn_last`.
+    ///
+    /// A dynamic op that does **not** slide attends the whole prefix: it shares a submit with
+    /// sliding layers, so `window_start` is set for them and it must ignore it.
     fn attended(&self, p: &Push, stride: u32) -> (u32, u32) {
         if p.dyn_keys != 0 {
-            (self.window_start, self.prefix.min(stride.saturating_sub(1)))
+            let first = if p.sliding != 0 { self.window_start } else { 0 };
+            (first, self.prefix.min(stride.saturating_sub(1)))
         } else {
             (0, stride.saturating_sub(1))
         }
@@ -953,6 +985,27 @@ impl Reference {
     fn kv_stride(p: &Push, head_dim: u32) -> u32 {
         let kv = if p.kv_heads == 0 { p.group } else { p.kv_heads };
         kv * head_dim
+    }
+
+    /// Clamp to a range held in the weights. See `shaders/clamp.comp`.
+    fn clamp(&mut self, p: &Push) -> Result<(), String> {
+        let low = self.weight(p.act_weight, 0)?;
+        let high = self.weight(p.act_weight, 1)?;
+        for index in 0..p.count {
+            let value = self.load(p.in0, index)?;
+            self.store(p.out, index, value.clamp(low, high))?;
+        }
+        Ok(())
+    }
+
+    /// Multiply by a scalar held in the weights. See `shaders/mul_scalar.comp`.
+    fn mul_scalar(&mut self, p: &Push) -> Result<(), String> {
+        let scale = self.weight(p.act_weight, 0)?;
+        for index in 0..p.count {
+            let value = self.load(p.in0, index)?;
+            self.store(p.out, index, value * scale)?;
+        }
+        Ok(())
     }
 
     /// An activation on its own. See `shaders/activate.comp`.
@@ -986,6 +1039,20 @@ impl Reference {
     /// The one op whose destination depends on the step rather than the recording, which is why
     /// the interpreter has to know the prefix at all.
     fn cache_write(&mut self, p: &Push) -> Result<(), String> {
+        // Mirrors the transpose in `shaders/cache_write.comp`. See there for why it is here.
+        let positions = p.group.max(1);
+        if positions > 1 {
+            for index in 0..p.count {
+                let channel = index / positions;
+                let position = index % positions;
+                if self.prefix + position >= p.in_h {
+                    continue;
+                }
+                let value = self.load(p.in0, index)?;
+                self.store(p.out, (self.prefix + position) * p.in_c + channel, value)?;
+            }
+            return Ok(());
+        }
         // Past the end writes nothing, matching the shader. The caller stops before this; a
         // silent drop is a better failure than a store outside the cache.
         if self.prefix >= p.in_h {
@@ -1009,12 +1076,15 @@ impl Reference {
         // `out_w` is the query count and `in_w` the key count; equal for self-attention.
         let (queries, keys) = (p.out_w, p.in_w);
         for channel in 0..p.out_c {
-            let row = (channel / head_dim) * queries * keys;
+            let head = channel / head_dim;
+            let row = head * queries * keys;
+            // V's channel for this query head, shared under multi-query attention.
+            let value = Self::kv_head_of(p, head) * head_dim + (channel % head_dim);
             for query in 0..queries {
                 let mut total = 0.0;
                 for key in 0..keys {
                     total += self.load(p.in0, row + query * keys + key)?
-                        * self.load(p.in1, channel * keys + key)?;
+                        * self.load(p.in1, value * keys + key)?;
                 }
                 self.store(p.out, nchw(p, channel, 0, query), total)?;
             }
@@ -1134,6 +1204,79 @@ impl Reference {
                     let entry = (offset + window) as u32 * head_dim + depth;
                     total += self.load(p.in0, row + query * keys + key as u32)?
                         * self.weight(p.weight, entry)?;
+                }
+                self.store(p.out, nchw(p, channel, 0, query), total)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// [`Kind::AttnScoresBanded`]. The guard mirrors `nets::gemma4_audio::band_key` and this
+    /// arm calls it rather than restating it — four rearrangements of that condition have been
+    /// proposed and been wrong, so the oracle and the shader share one definition on purpose.
+    fn attn_scores_banded(&mut self, p: &Push) -> Result<(), String> {
+        let head_dim = heads(p, p.in_c)?;
+        let stride = p.in_h * p.in_w;
+        let scale = f32::from_bits(p.param0_bits);
+        let cap = f32::from_bits(p.param1_bits);
+        if cap <= 0.0 {
+            return Err(format!("a banded score map with a logit cap of {cap}"));
+        }
+        let band = p.kh;
+        for head in 0..p.group {
+            let base = head * head_dim * stride;
+            for query in 0..p.out_h {
+                for column in 0..band {
+                    let slot = nchw(p, head, query, column);
+                    // `None` gates the LOAD, not just the stored value. Parameterised by the op's
+                    // own band, which the shader reads from `Push::kh` - calling the
+                    // `ATTEND_SPAN` form here would agree only at band 12.
+                    let Some(key) = crate::nets::gemma4_audio::band_key_in(band, query, column)
+                    else {
+                        self.store(p.out, slot, crate::nets::gemma4_audio::MASK_FILL)?;
+                        continue;
+                    };
+                    if key >= p.in_w {
+                        return Err(format!(
+                            "banded score at query {query} column {column} reads key {key} of \
+                             {} - right context is zero, so this cannot happen",
+                            p.in_w
+                        ));
+                    }
+                    // Column `j` reads relative offset `j + 1`; see `gemma4_audio::rel_column`.
+                    let row = (head * p.kw + column + 1) * head_dim;
+                    let mut total = 0.0;
+                    for d in 0..head_dim {
+                        let channel = base + d * stride;
+                        let q = self.load(p.in0, channel + query)?;
+                        total += q * self.load(p.in1, channel + key)?;
+                        total += q * self.weight(p.weight, row + d)?;
+                    }
+                    total *= scale;
+                    self.store(p.out, slot, (total / cap).tanh() * cap)?;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// [`Kind::AttnApplyBanded`]. Columns before the sequence are skipped rather than read,
+    /// which is exact because the softmax has already given them zero weight.
+    fn attn_apply_banded(&mut self, p: &Push) -> Result<(), String> {
+        let head_dim = heads(p, p.out_c)?;
+        let keys = p.out_w;
+        let band = p.kh;
+        for channel in 0..p.out_c {
+            let row = (channel / head_dim) * keys * band;
+            for query in 0..keys {
+                let mut total = 0.0;
+                for column in 0..band {
+                    let Some(key) = crate::nets::gemma4_audio::band_key_in(band, query, column)
+                    else {
+                        continue;
+                    };
+                    total += self.load(p.in0, row + query * band + column)?
+                        * self.load(p.in1, channel * keys + key)?;
                 }
                 self.store(p.out, nchw(p, channel, 0, query), total)?;
             }

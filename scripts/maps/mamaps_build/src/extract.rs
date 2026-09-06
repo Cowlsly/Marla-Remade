@@ -62,12 +62,16 @@ use crate::store::{Sink, Store, WayCounts, WayReader, WaySink};
 /// `name` is the coalesced display label for `places` and `poi` points, `None` for every other
 /// layer. Carried here (not in [`Class`]) because it is a string and `Class` is `Copy`.
 /// `transit_color` is the aggregated route colour for `transit` lines (`0xRRGGBB`), zero for
-/// every other layer.
+/// every other layer, and `transit_ordinal`/`transit_lanes`/`transit_taper` are the inputs the
+/// renderer needs to place such a line in a lane of the corridor it shares.
 pub struct Feature {
     pub class: Class,
     pub geometry: Geometry,
     pub name: Option<String>,
     pub transit_color: u32,
+    pub transit_ordinal: u8,
+    pub transit_lanes: u8,
+    pub transit_taper: u8,
 }
 
 /// What a run of stage A did, for the build report.
@@ -84,10 +88,10 @@ pub struct Stats {
     pub land_polygons: u64,
     /// Nodes classified as `places`/`poi` labels.
     pub nodes_classified: u64,
-    /// Route relations captured for the `transit` layer.
-    pub transit_relations: u64,
-    /// Member ways emitted as coloured `transit` lines.
-    pub transit_way_features: u64,
+    /// Coloured rail lines read from a prepared GTFS transit-routes export, if one was given.
+    pub transit_routes: u64,
+    /// Road ways whose `min_zoom` was pulled shallower to match their corridor.
+    pub corridor_promotions: u64,
     pub rings: RingStats,
 }
 
@@ -113,19 +117,6 @@ struct Relation {
     name: Option<String>,
 }
 
-/// A transit route relation, held between passes alongside [`Relation`].
-///
-/// The colour (explicit, or `None` for a per-mode fallback) and the member way ids. Geometry
-/// comes later from the `members` table — a route's ways are usually classified already (they
-/// are railways), but an untagged member is still drawable track, so the transit phase reads
-/// refs rather than reusing the ways spill.
-struct RouteRel {
-    id: i64,
-    mode: &'static str,
-    color: Option<u32>,
-    members: Vec<i64>,
-}
-
 /// Read `input` and spill every feature the schema classifies to `spill_path`.
 ///
 /// Features go to disk rather than into a `Vec`, because holding them was 4.9 GB of a measured
@@ -135,6 +126,7 @@ pub fn extract(
     input: &Path,
     layers: Layers,
     coastline: Option<&Path>,
+    transit_routes: Option<&Path>,
     spill_path: &Path,
 ) -> Result<(Store, Stats)> {
     // Stage A's boundaries are printed with their elapsed time so an external RSS sampler can say
@@ -164,14 +156,22 @@ pub fn extract(
     // planet extract is most of the file.
     let mut ways = WaySink::create(&ways_path)?;
     let mut relations: Vec<Relation> = Vec::new();
-    let mut routes: Vec<RouteRel> = Vec::new();
+    // Road ways carrying a `ref`, for the corridor pass below. A small minority of ways,
+    // and the only thing pass 1 keeps in memory besides the relations.
+    let mut corridors: Vec<crate::corridor::Segment> = Vec::new();
     let blob_kinds = pbf::run_pass_sink(
         input,
         &blobs,
         None,
         KIND_WAYS | KIND_RELATIONS,
         "Pass 1: ways and relations",
-        || (Vec::<(i64, Way)>::new(), Vec::<Relation>::new(), Vec::<RouteRel>::new()),
+        || {
+            (
+                Vec::<(i64, Way)>::new(),
+                Vec::<Relation>::new(),
+                Vec::<crate::corridor::Segment>::new(),
+            )
+        },
         |state, block| {
             let mut kinds = 0u8;
             visit_block(block, KIND_WAYS | KIND_RELATIONS, &mut kinds, &mut |el| {
@@ -181,30 +181,29 @@ pub fn extract(
                             return Ok(());
                         }
                         if let Some(class) = schema::classify(&way.tags, true, layers) {
+                            // A numbered road's `min_zoom` is decided per corridor, not per
+                            // way, so that a route does not vanish where its class changes.
+                            // Slip roads are left out: they carry the parent's `ref` and
+                            // would be promoted into junction stubs at world zoom.
+                            if class.layer == tilecodec::mamaps::dict::LAYER_ROADS
+                                && class.flags & tilecodec::mamaps::body::FLAG_IS_LINK == 0
+                                && way.refs.len() >= 2
+                            {
+                                if let Some(route) = crate::corridor::route_key(&way.tags) {
+                                    state.2.push(crate::corridor::Segment {
+                                        way_id: way.id,
+                                        route,
+                                        first_node: way.refs[0],
+                                        last_node: way.refs[way.refs.len() - 1],
+                                        min_zoom: class.min_zoom,
+                                    });
+                                }
+                            }
                             let name = schema::display_name(&way.tags, class.layer);
                             state.0.push((way.id, Way { class, refs: way.refs.to_vec(), name }));
                         }
                     }
                     Element::Relation(relation) => {
-                        // Transit routes ride along with the shapes: their colour is aggregated
-                        // onto member ways later, so only the membership is kept here.
-                        if layers.transit && schema::transit::is_transit_route(&relation.tags) {
-                            let mode = schema::transit::route_mode(&relation.tags)
-                                .expect("checked by is_transit_route");
-                            let color = schema::transit::parse_color(&relation.tags);
-                            let members: Vec<i64> = relation
-                                .members
-                                .iter()
-                                .filter(|m| m.kind == MEMBER_WAY)
-                                .map(|m| m.id)
-                                .collect();
-                            state.2.push(RouteRel {
-                                id: relation.id,
-                                mode,
-                                color,
-                                members,
-                            });
-                        }
                         // Two relation types carry a shape. Anything else — a site, a
                         // public_transport — does not.
                         if !matches!(
@@ -238,7 +237,7 @@ pub fn extract(
             })?;
             Ok(kinds)
         },
-        |(chunk_ways, chunk_relations, chunk_routes)| {
+        |(chunk_ways, chunk_relations, chunk_corridors)| {
             // Chunks arrive in file order and a PBF's ways are sorted by id, so appending here
             // leaves the file in ascending id order. `WaySink::push` refuses an id that does not
             // advance rather than letting an unsorted file reorder the archive silently.
@@ -246,14 +245,22 @@ pub fn extract(
                 ways.push(id, &way.class, &way.refs, way.name.as_deref())?;
             }
             relations.extend(chunk_relations);
-            routes.extend(chunk_routes);
+            corridors.extend(chunk_corridors);
             Ok(())
         },
     )?;
     let WayCounts { ways: ways_classified, refs: way_refs, max_ref: way_max_ref } = ways.finish()?;
     stats.ways_classified = ways_classified;
     stats.relations_classified = relations.len() as u64;
-    stats.transit_relations = routes.len() as u64;
+
+    // A numbered road changes class along its length, so deciding `min_zoom` per way chops
+    // a corridor into stubs at the zooms where only its motorway parts survive. Promote
+    // each connected same-`ref` run to the shallowest zoom any of its ways asks for, then
+    // drop the segments: only the (way id, zoom) overrides are needed from here.
+    let promoted = crate::corridor::promote(&corridors);
+    stats.corridor_promotions = promoted.len() as u64;
+    drop(corridors);
+    mark("corridors promoted");
 
     // --- pass 2: the refs of every relation member way ------------------------------------
     //
@@ -266,9 +273,6 @@ pub fn extract(
         let mut wanted: Vec<i64> = relations
             .iter()
             .flat_map(|r| r.members.iter().map(|(id, _)| *id))
-            // Route members too: a transit way's geometry is read from the member table even
-            // when the way itself was never classified (untagged track in a route relation).
-            .chain(routes.iter().flat_map(|r| r.members.iter().copied()))
             .collect();
         wanted.sort_unstable();
         wanted.dedup();
@@ -416,8 +420,13 @@ pub fn extract(
     let mut built: Vec<Option<Geometry<(f64, f64)>>> = Vec::with_capacity(MATERIALISE_BATCH);
     loop {
         let more = reader.next(&mut refs)?;
-        if let Some((_, class, name)) = more.as_ref() {
-            batch.push((*class, name.clone(), std::mem::take(&mut refs)));
+        if let Some((id, class, name)) = more.as_ref() {
+            let mut class = *class;
+            // The corridor's zoom, where it is shallower than this way's own.
+            if let Ok(at) = promoted.binary_search_by_key(id, |(id, _)| *id) {
+                class.min_zoom = promoted[at].1;
+            }
+            batch.push((class, name.clone(), std::mem::take(&mut refs)));
         }
         // Flushed when full, and once more at the end with whatever is left.
         if batch.len() >= MATERIALISE_BATCH || (more.is_none() && !batch.is_empty()) {
@@ -525,62 +534,6 @@ pub fn extract(
     }
     bar.finish("relation(s)");
 
-    // --- transit: colours onto member ways ------------------------------------------------
-    //
-    // After relations (which own the `members` table) and before the coastline (which only needs
-    // the bbox). Each route colours its member ways; a way shared by two routes keeps the first
-    // colour under [`schema::transit::assign_colors`]' explicit-first, lowest-id order. Geometry
-    // reads straight from the member refs — the same lines the ways loop would build — because a
-    // member way is drawable track whether or not it was classified as one.
-    if layers.transit && !routes.is_empty() {
-        let assignments = schema::transit::assign_colors(
-            &routes
-                .iter()
-                .map(|r| (r.id, r.mode, r.color, r.members.clone()))
-                .collect::<Vec<_>>(),
-        );
-        let mut bar = Progress::new(
-            "Materialise: transit".to_string(),
-            assignments.len(),
-            "way(s)",
-            true,
-        );
-        // Per-mode classes up front: one `Class` per mode, not per way.
-        let mut classes: HashMap<&'static str, Class> = HashMap::new();
-        for route in &routes {
-            classes.entry(route.mode).or_insert_with(|| {
-                schema::transit::transit_class(route.mode).expect("a carried mode has a class")
-            });
-        }
-        let mut fallback_ways = 0u64;
-        for route in &routes {
-            if route.color.is_none() {
-                fallback_ways += route.members.len() as u64;
-            }
-        }
-        for (way_id, color, mode) in assignments {
-            bar.tick("way(s)");
-            let Some(refs) = members.get(&way_id) else {
-                stats.geometry_failed += 1;
-                continue;
-            };
-            let line = table.line(refs);
-            if line.len() < 2 {
-                stats.geometry_failed += 1;
-                continue;
-            }
-            let class = classes[mode];
-            sink.push_transit(&class, &Geometry::Lines(vec![line]), color)?;
-            stats.features += 1;
-            stats.transit_way_features += 1;
-        }
-        bar.finish("way(s)");
-        if fallback_ways > 0 {
-            println!(
-                "  {fallback_ways} transit member way(s) fell back to per-mode colours (no official colour on their relations)"
-            );
-        }
-    }
     // The mainland, last, because clipping it needs the extract's own bounding box and that is
     // only known once every OSM feature has been through the sink. Order in the file does not
     // matter: the tiler groups by layer id, so `earth` is the first layer of every body whenever it
@@ -598,6 +551,25 @@ pub fn extract(
             // Nothing to clip against. Land alone would be an archive of one layer, and the caller
             // almost certainly pointed at the wrong extract.
             None => return err("the extract produced no features to place land against".to_string()),
+        }
+    }
+    // The `transit` layer, for the same reason and against the same bounding box: its geometry is
+    // GTFS rather than OSM (see [`schema::transit`]), so it is read here rather than classified in
+    // any of the passes above.
+    if let Some(path) = transit_routes {
+        match sink.bbox_degrees() {
+            Some(bbox) => {
+                println!(
+                    "reading transit routes within {:.3},{:.3} .. {:.3},{:.3}",
+                    bbox.0, bbox.1, bbox.2, bbox.3,
+                );
+                stats.transit_routes = schema::transit::stream_routes(path, bbox, &mut sink)?;
+                stats.features += stats.transit_routes;
+            }
+            None => {
+                return err("the extract produced no features to place transit routes against"
+                    .to_string())
+            }
         }
     }
     let store = sink.finish(spill_path)?;

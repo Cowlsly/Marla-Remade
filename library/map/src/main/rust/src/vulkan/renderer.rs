@@ -2,7 +2,7 @@
 
 use crate::camera::Camera;
 use crate::style::paint::Stroke;
-use crate::style::{Layer, LayerKind, Palette};
+use crate::style::{Anchor, Layer, LayerKind, Palette};
 use crate::tile::geometry::{self, TileMesh};
 use crate::vulkan::buffers::Buffer;
 use crate::vulkan::context::{ANativeWindow, Context};
@@ -11,7 +11,7 @@ use crate::vulkan::pipeline::{Pipelines, Push};
 use crate::vulkan::swapchain::Swapchain;
 use ash::vk;
 use std::cell::Cell;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 
 /// How many frames may be in flight. Two is enough to keep the GPU fed behind vsync
 /// without adding latency the user can feel when panning.
@@ -24,6 +24,11 @@ struct LayerBuffers {
     vertices: Buffer,
     indices: Buffer,
     index_count: u32,
+    /// Set when the mesh carries its own colour — see
+    /// [`geometry::LayerMesh::color_override`].
+    color_override: Option<u32>,
+    /// The lane inputs this mesh draws with — see [`geometry::LayerMesh::lane`].
+    lane: (u8, u8, u8),
 }
 
 /// One tile's geometry, resident on the GPU.
@@ -35,6 +40,9 @@ struct ResidentTile {
     z: u8,
     x: u32,
     y: u32,
+    /// The toggle generation this was tessellated at — see
+    /// [`crate::style::SharedToggles`].
+    generation: u32,
 }
 
 /// A transient per-frame buffer pair (one symbol draw's vertices + indices),
@@ -63,12 +71,17 @@ pub struct Renderer {
     context: Context,
     swapchain: Swapchain,
     pipelines: Pipelines,
-    /// Sampled-image infra shared by the glyph atlas (M1) and the sprite atlas
-    /// (M2): one pool/layout, one set per atlas. Uploaded once at startup from
-    /// the CPU-built atlas bytes.
+    /// Sampled-image infra shared by the glyph atlas and the sprite atlas: one
+    /// pool/layout, one set per atlas. Uploaded once at startup from the
+    /// CPU-built atlas bytes.
     atlas_set: AtlasSet,
     glyph_atlas: Option<SampledImage>,
     glyph_set: Option<vk::DescriptorSet>,
+    /// The POI icon sheet, uploaded beside the glyphs. `None` when the sheet would
+    /// not decode, which leaves POI labels drawing without icons rather than not at
+    /// all.
+    sprite_atlas: Option<SampledImage>,
+    sprite_set: Option<vk::DescriptorSet>,
     command_pool: vk::CommandPool,
     frames: Vec<Frame>,
     frame_index: usize,
@@ -130,8 +143,12 @@ impl Renderer {
         let context = Context::new(window)?;
         let swapchain = Swapchain::new(&context, width, height)?;
         let atlas_set = AtlasSet::new(&context.device)?;
-        let pipelines =
-            Pipelines::new(&context.device, swapchain.render_pass, Some(atlas_set.layout))?;
+        let pipelines = Pipelines::new(
+            &context.device,
+            swapchain.render_pass,
+            swapchain.samples,
+            Some(atlas_set.layout),
+        )?;
 
         let pool_info = vk::CommandPoolCreateInfo::default()
             .queue_family_index(context.queue_family_index)
@@ -152,6 +169,17 @@ impl Renderer {
                 Ok((image, set)) => (Some(image), Some(set)),
                 Err(e) => {
                     eprintln!("glyph atlas upload skipped: {e}");
+                    (None, None)
+                }
+            }
+        };
+        // The POI sprite sheet, on the same terms: a failure costs icons, not the map.
+        // It takes the second of the two sets `AtlasSet` sizes its pool for.
+        let (sprite_atlas, sprite_set) = unsafe {
+            match try_upload_sprite_atlas(&context, &atlas_set, command_pool) {
+                Ok((image, set)) => (Some(image), Some(set)),
+                Err(e) => {
+                    eprintln!("sprite atlas upload skipped: {e}");
                     (None, None)
                 }
             }
@@ -202,6 +230,8 @@ impl Renderer {
             atlas_set,
             glyph_atlas,
             glyph_set,
+            sprite_atlas,
+            sprite_set,
             command_pool,
             frames,
             frame_index: 0,
@@ -249,8 +279,23 @@ impl Renderer {
         (self.swapchain.extent.width, self.swapchain.extent.height)
     }
 
-    pub fn has_tile(&self, key: u64) -> bool {
-        self.tiles.contains_key(&key)
+    /// Samples per pixel actually in use, for the frame log.
+    ///
+    /// Worth reporting because it is negotiated with the device rather than chosen: a
+    /// driver that offers no multisampled colour attachment silently drops to 1, and
+    /// aliased edges on one device but not another is otherwise a hard thing to explain.
+    pub fn samples(&self) -> u32 {
+        self.swapchain.samples.as_raw()
+    }
+
+    /// Is this tile resident **and** tessellated at the current toggle generation?
+    ///
+    /// A stale tile answers `false`, so the caller re-requests it exactly the way it
+    /// requests one it has never seen. That is the whole re-tessellation mechanism: the
+    /// old mesh keeps drawing until the new one lands, so a toggle change never blanks
+    /// the map, and nothing is evicted or refetched.
+    pub fn has_tile(&self, key: u64, generation: u32) -> bool {
+        self.tiles.get(&key).is_some_and(|tile| tile.generation == generation)
     }
 
     /// Upload a tile's geometry, replacing anything already resident for it.
@@ -281,6 +326,8 @@ impl Renderer {
                     vertices,
                     indices,
                     index_count: layer_mesh.indices.len() as u32,
+                    color_override: layer_mesh.color_override,
+                    lane: layer_mesh.lane,
                 });
             }
         }
@@ -290,6 +337,7 @@ impl Renderer {
             z: mesh.z,
             x: mesh.x,
             y: mesh.y,
+            generation: mesh.generation,
         };
         if let Some(previous) = self.tiles.insert(key, tile) {
             self.retire(previous);
@@ -526,6 +574,26 @@ impl Renderer {
 
         let mut bound: Option<LayerKind> = None;
         let mut submitted = 0usize;
+        // One tile-layer's draws, reused across the whole frame.
+        //
+        // A layer used to have at most one mesh per tile, so the draw could be a single
+        // `find`. Transit breaks that: a tile holding two route colours emits two meshes
+        // for one layer, and a `find` would silently draw only the first line. Copying the
+        // handles out (rather than iterating `self.tiles` in place) is what keeps
+        // `record_symbol`'s `&mut self` call legal in the sibling arm below; hoisting the
+        // `Vec` out of the loop and clearing it keeps that free of allocation.
+        #[allow(clippy::type_complexity)]
+        let mut draws: Vec<(
+            u8,
+            u32,
+            u32,
+            LayerKind,
+            vk::Buffer,
+            vk::Buffer,
+            u32,
+            Option<u32>,
+            (u8, u8, u8),
+        )> = Vec::new();
         // Coarsest tiles first, so an ancestor standing in for a tile that has not arrived
         // is drawn *under* its descendants and gets covered as they load. A HashMap's
         // iteration order is arbitrary, so without this a stale parent can land on top of
@@ -584,7 +652,7 @@ impl Renderer {
                     (stroke, layer.opacity_at(camera.zoom))
                 }
                 LayerKind::Symbol => {
-                    if layer.text_size.at(camera.zoom) <= 0.0 {
+                    if !layer.text_visible_at(camera.zoom) {
                         continue;
                     }
                     (Stroke::NONE, layer.opacity_at(camera.zoom))
@@ -608,55 +676,95 @@ impl Renderer {
                     );
                     continue;
                 }
-                // Copy the draw's inputs out, then issue it through the owned
-                // `device` clone: `record_symbol` above takes `&mut self`, so this
-                // path must not hold a `self.tiles` borrow either. (Uniform shape
-                // for both arms keeps the borrow rules obvious.)
-                let draw = self.tiles.get(key).and_then(|tile| {
-                    tile.layers
-                        .iter()
-                        .find(|l| l.layer_index == index)
-                        .map(|l| (tile.z, tile.x, tile.y, l.kind, l.vertices.buffer, l.indices.buffer, l.index_count))
-                });
-                let Some((tz, tx, ty, kind, vbuf, ibuf, count)) = draw else { continue };
-                if bound != Some(kind) {
-                    let pipeline = match kind {
-                        LayerKind::Fill => self.pipelines.fill,
-                        LayerKind::Line => self.pipelines.line,
-                        // Symbols never take this path (drawn above); this arm is
-                        // unreachable but the match must stay exhaustive.
-                        LayerKind::Symbol => continue,
-                    };
-                    device.cmd_bind_pipeline(
-                        command_buffer,
-                        vk::PipelineBindPoint::GRAPHICS,
-                        pipeline,
-                    );
-                    bound = Some(kind);
+                // Copy the draw's inputs out, then issue them through the owned `device`
+                // clone: `record_symbol` above takes `&mut self`, so this path must not
+                // hold a `self.tiles` borrow either.
+                draws.clear();
+                if let Some(tile) = self.tiles.get(key) {
+                    for mesh in tile.layers.iter().filter(|l| l.layer_index == index) {
+                        draws.push((
+                            tile.z,
+                            tile.x,
+                            tile.y,
+                            mesh.kind,
+                            mesh.vertices.buffer,
+                            mesh.indices.buffer,
+                            mesh.index_count,
+                            mesh.color_override,
+                            mesh.lane,
+                        ));
+                    }
                 }
+                for &(tz, tx, ty, kind, vbuf, ibuf, count, color_override, lane) in &draws
+                {
+                    if bound != Some(kind) {
+                        let pipeline = match kind {
+                            LayerKind::Fill => self.pipelines.fill,
+                            LayerKind::Line => self.pipelines.line,
+                            // Symbols never take this path (drawn above); this arm is
+                            // unreachable but the match must stay exhaustive.
+                            LayerKind::Symbol => continue,
+                        };
+                        device.cmd_bind_pipeline(
+                            command_buffer,
+                            vk::PipelineBindPoint::GRAPHICS,
+                            pipeline,
+                        );
+                        bound = Some(kind);
+                    }
 
-                let (half_width_px, half_gap_px) = stroke.half_px(camera.density);
-                let push = Push {
-                    tile_to_clip: camera.tile_to_clip(tz, tx, ty),
-                    color: argb_to_rgba(scale_alpha(layer.color(palette), opacity)),
-                    line: [half_width_px, half_gap_px, layer.dash.0, layer.dash.1],
-                    misc: [camera.tile_span_px(tz), 0.0, 0.0, 0.0],
-                };
-                let layout = self.pipelines.layout;
-                device.cmd_push_constants(
-                    command_buffer,
-                    layout,
-                    vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT,
-                    0,
-                    push.as_bytes(),
-                );
-                device.cmd_bind_vertex_buffers(command_buffer, 0, &[vbuf], &[0]);
-                // Uint32 rather than Uint16: a dense z14 tile can exceed 65535 vertices in
-                // one layer, and overflowing folds geometry back on itself rather than
-                // failing loudly.
-                device.cmd_bind_index_buffer(command_buffer, ibuf, 0, vk::IndexType::UINT32);
-                device.cmd_draw_indexed(command_buffer, count, 1, 0, 0, 0);
-                submitted += 1;
+                    let (half_width_px, half_gap_px) = stroke.half_px(camera.density);
+                    // `misc.y` tells the fragment shader whether it has to antialias the edge
+                    // itself. With MSAA the rasteriser already resolves partial coverage, and
+                    // applying a second coverage term on top fades a diagonal road twice — at
+                    // z6 a 2.9px highway crossing the screen at an angle lost all but one
+                    // pixel of its strength, while the near-vertical stretches of the same
+                    // road kept three.
+                    let edge_aa = f32::from(self.swapchain.samples == vk::SampleCountFlags::TYPE_1);
+                    // A mesh that carries its own colour keeps it **unshifted**: transit
+                    // colours are operator brand colours, and the reference draws them
+                    // literally. Every other layer goes through `color(palette)`, which
+                    // swaps in the dark column and blends toward the background when muted;
+                    // doing that to a route colour would turn a network's own red into
+                    // whatever the dark basemap thinks red should be. The opacity ramp still
+                    // applies, because that is per-frame paint rather than palette.
+                    let base = color_override.unwrap_or_else(|| layer.color(palette));
+                    // How far this mesh's whole band shifts sideways, in device pixels. The
+                    // feature carries its colour's ordinal and its corridor's colour count,
+                    // not an offset: how many lanes the corridor actually draws is a step
+                    // function of the camera zoom, so the lane is chosen here rather than
+                    // baked into the mesh. Zero for every layer but transit, where the count
+                    // is absent and reads one.
+                    let (ordinal, count_of_colours, taper) = lane;
+                    let lateral_px = layer.lane_offset_px(
+                        camera.zoom,
+                        camera.density,
+                        ordinal,
+                        count_of_colours,
+                        taper,
+                    );
+                    let push = Push {
+                        tile_to_clip: camera.tile_to_clip(tz, tx, ty),
+                        color: argb_to_rgba(scale_alpha(base, opacity)),
+                        line: [half_width_px, half_gap_px, layer.dash.0, layer.dash.1],
+                        misc: [camera.tile_span_px(tz), edge_aa, lateral_px, 0.0],
+                    };
+                    let layout = self.pipelines.layout;
+                    device.cmd_push_constants(
+                        command_buffer,
+                        layout,
+                        vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT,
+                        0,
+                        push.as_bytes(),
+                    );
+                    device.cmd_bind_vertex_buffers(command_buffer, 0, &[vbuf], &[0]);
+                    // Uint32 rather than Uint16: a dense z14 tile can exceed 65535 vertices in
+                    // one layer, and overflowing folds geometry back on itself rather than
+                    // failing loudly.
+                    device.cmd_bind_index_buffer(command_buffer, ibuf, 0, vk::IndexType::UINT32);
+                    device.cmd_draw_indexed(command_buffer, count, 1, 0, 0, 0);
+                    submitted += 1;
+                }
             }
         }
 
@@ -680,7 +788,7 @@ impl Renderer {
         layer: &Layer,
         camera: &Camera,
         palette: Palette,
-        accepted: &HashSet<u64>,
+        accepted: &HashMap<u64, bool>,
         submitted: &mut usize,
         bound: &mut Option<LayerKind>,
     ) {
@@ -691,8 +799,10 @@ impl Renderer {
         // label renders at 1/density size (≈2px tall cap-height at 17px Dp on
         // a density-3 screen, exactly the reported symptom). Lines already do
         // this (`half_px(density)`); symbols must too.
-        let text_px = layer.text_size.at(camera.zoom) * camera.density;
-        if text_px <= 0.0 {
+        //
+        // Resolved per label rather than per layer, because the authored size depends on
+        // the place's population rank as well as the zoom.
+        if !layer.text_visible_at(camera.zoom) {
             return;
         }
         let Some(tile) = self.tiles.get(&key) else { return };
@@ -702,8 +812,18 @@ impl Renderer {
         // takes `&mut self`.
         let tile_clip = camera.tile_to_clip(tile.z, tile.x, tile.y);
         let tile_labels = tile.labels.clone();
-        let mut vertices: Vec<f32> = Vec::new();
-        let mut indices: Vec<u32> = Vec::new();
+        let (primary, alternate) = anchors_for(layer);
+        // Batched by resolved size, not one batch per tile-layer. A label's size now
+        // depends on its population rank, so one draw can hold two of them — and
+        // `Push::line.x` carries the text size the fragment shader turns a halo width in
+        // px into SDF units with. One value cannot serve both arms, so each gets a draw.
+        // The style declares at most two arms, so this is at most two.
+        let mut batches: Vec<(f32, Vec<f32>, Vec<u32>)> = Vec::new();
+        // Icons take one batch of their own however many sizes the text has: they are a
+        // constant screen size, and they sample a different atlas through a different
+        // fragment shader, so they could not share a draw with the text regardless.
+        let mut icon_vertices: Vec<f32> = Vec::new();
+        let mut icon_indices: Vec<u32> = Vec::new();
         // Labels are enumerated in tile-list order — the same order (and the
         // same ids) the pre-pass used — and only accepted ones emit. A tile
         // whose every label collides emits nothing and skips its draw.
@@ -711,31 +831,130 @@ impl Renderer {
             tile_labels.iter().enumerate().filter(|(_, l)| l.layer_index == layer_index)
         {
             let id = placement::candidate_id(tile.z, tile.x, tile.y, layer_index, label_idx);
-            if !accepted.contains(&id) {
+            let Some(&flipped) = accepted.get(&id) else { continue };
+            // Draw at whichever anchor the placer actually accepted, or the label lands
+            // on the side its box was rejected for.
+            let anchor = if flipped { alternate.unwrap_or(primary) } else { primary };
+            let text_px = layer.text_size_for(camera.zoom, label.pop) * camera.density;
+            if text_px <= 0.0 {
                 continue;
             }
-            symbol::emit_label(label, text_px, tile_span_px, &mut vertices, &mut indices);
+            if let Some(sprite) = label.sprite {
+                symbol::emit_icon(
+                    label,
+                    sprite,
+                    camera.density,
+                    tile_span_px,
+                    &mut icon_vertices,
+                    &mut icon_indices,
+                );
+            }
+            let batch = match batches.iter_mut().find(|(size, _, _)| *size == text_px) {
+                Some(batch) => batch,
+                None => {
+                    batches.push((text_px, Vec::new(), Vec::new()));
+                    batches.last_mut().expect("just pushed")
+                }
+            };
+            symbol::emit_label(
+                label,
+                anchor,
+                layer.text_offset,
+                text_px,
+                tile_span_px,
+                &mut batch.1,
+                &mut batch.2,
+            );
         }
-        if indices.is_empty() {
+        batches.retain(|(_, _, indices)| !indices.is_empty());
+        if batches.is_empty() && icon_indices.is_empty() {
             return;
         }
+        let halo = argb_to_rgba(layer.halo_color(palette));
+        let color = argb_to_rgba(scale_alpha(layer.color(palette), layer.opacity_at(camera.zoom)));
+        let sdf_per_em = crate::tile::glyph::atlas().sdf_per_em;
+
+        // Icons first, so the label's halo paints over the icon's edge rather than under
+        // it — the order MapLibre draws them in.
+        if let Some(sprite_set) = self.sprite_set.filter(|_| !icon_indices.is_empty()) {
+            let push = Push {
+                tile_to_clip: tile_clip,
+                // Only the alpha is read by `sprite.frag`: an icon draws in its own
+                // colours, since the reference sets no `icon-color`.
+                color,
+                line: [0.0, 0.0, 0.0, 0.0],
+                misc: [tile_span_px, 0.0, 0.0, 0.0],
+            };
+            self.draw_symbol_batch(
+                command_buffer,
+                self.pipelines.sprite,
+                sprite_set,
+                &icon_vertices,
+                &icon_indices,
+                &push,
+                submitted,
+            );
+            // The sprite pipeline shares `LayerKind::Symbol`, so this still forces the
+            // fill/line path to rebind. The symbol pipeline is bound again immediately
+            // below whenever there is any text — and a label with an icon always has
+            // text, because `shape_label` returns nothing for an empty name.
+            *bound = Some(LayerKind::Symbol);
+        }
+
+        for (text_px, vertices, indices) in &batches {
+            // Halo width from the style (authored text-halo-width, 1px), in device px
+            // like the text size beside it; text color + opacity per palette.
+            let push = Push {
+                tile_to_clip: tile_clip,
+                color,
+                line: [*text_px, layer.halo_width * camera.density, sdf_per_em, 0.0],
+                misc: [tile_span_px, halo[0], halo[1], halo[2]],
+            };
+            self.draw_symbol_batch(
+                command_buffer,
+                self.pipelines.symbol,
+                glyph_set,
+                vertices,
+                indices,
+                &push,
+                submitted,
+            );
+            *bound = Some(LayerKind::Symbol);
+        }
+    }
+
+    /// Upload one transient vertex/index pair, bind `pipeline` with `set`, and draw it.
+    ///
+    /// The icon and text paths differ only in which pipeline and atlas they bind, so they
+    /// share this. Buffers retire on the frames-in-flight grace count: last frame's
+    /// command buffer may still reference them.
+    #[allow(clippy::too_many_arguments)]
+    unsafe fn draw_symbol_batch(
+        &mut self,
+        command_buffer: vk::CommandBuffer,
+        pipeline: vk::Pipeline,
+        set: vk::DescriptorSet,
+        vertices: &[f32],
+        indices: &[u32],
+        push: &Push,
+        submitted: &mut usize,
+    ) {
         let device = &self.context.device;
-        let vbuf: Buffer = match Buffer::upload(
+        let Ok(vbuf) = Buffer::upload(
             &self.context.instance,
             self.context.physical_device,
             device,
             vk::BufferUsageFlags::VERTEX_BUFFER,
-            &vertices,
-        ) {
-            Ok(b) => b,
-            Err(_) => return,
+            vertices,
+        ) else {
+            return;
         };
-        let ibuf: Buffer = match Buffer::upload(
+        let ibuf = match Buffer::upload(
             &self.context.instance,
             self.context.physical_device,
             device,
             vk::BufferUsageFlags::INDEX_BUFFER,
-            &indices,
+            indices,
         ) {
             Ok(b) => b,
             Err(_) => {
@@ -743,31 +962,15 @@ impl Renderer {
                 return;
             }
         };
-        // Bind the symbol pipeline + atlas set once per draw (cheap; labels are few).
-        device.cmd_bind_pipeline(
-            command_buffer,
-            vk::PipelineBindPoint::GRAPHICS,
-            self.pipelines.symbol,
-        );
-        *bound = Some(LayerKind::Symbol);
+        device.cmd_bind_pipeline(command_buffer, vk::PipelineBindPoint::GRAPHICS, pipeline);
         device.cmd_bind_descriptor_sets(
             command_buffer,
             vk::PipelineBindPoint::GRAPHICS,
             self.pipelines.symbol_layout,
             0,
-            &[glyph_set],
+            &[set],
             &[],
         );
-        // Halo width from the style (authored text-halo-width, 1px); text color
-        // + opacity per palette.
-        let halo = argb_to_rgba(layer.halo_color(palette));
-        let texel = 1.0 / crate::tile::glyph::ATLAS_PX as f32;
-        let push = Push {
-            tile_to_clip: tile_clip,
-            color: argb_to_rgba(scale_alpha(layer.color(palette), layer.opacity_at(camera.zoom))),
-            line: [text_px, layer.halo_width, texel, texel],
-            misc: [tile_span_px, halo[0], halo[1], halo[2]],
-        };
         device.cmd_push_constants(
             command_buffer,
             self.pipelines.symbol_layout,
@@ -779,8 +982,6 @@ impl Renderer {
         device.cmd_bind_index_buffer(command_buffer, ibuf.buffer, 0, vk::IndexType::UINT32);
         device.cmd_draw_indexed(command_buffer, indices.len() as u32, 1, 0, 0, 0);
         *submitted += 1;
-        // Retire with the frames-in-flight grace: last frame's command buffer may
-        // still reference these buffers.
         self.transients.push(TransientBuffers { vbuf, ibuf, frames: FRAMES_IN_FLIGHT });
     }
 
@@ -797,7 +998,7 @@ impl Renderer {
         layers: &[Layer],
         ordered: &[u64],
         extent: vk::Extent2D,
-    ) -> HashSet<u64> {
+    ) -> HashMap<u64, bool> {
         use crate::tile::placement;
         let mut candidates = Vec::new();
         for (index, layer) in layers.iter().enumerate() {
@@ -807,19 +1008,24 @@ impl Renderer {
             if !layer.draws_at(camera.zoom.floor().clamp(0.0, 22.0) as u8) {
                 continue;
             }
-            let text_px = layer.text_size.at(camera.zoom);
-            if text_px <= 0.0 {
+            // Device px, matching `record_symbol`: `extent` below is device px, so a
+            // Dp text size here would size every collision box at 1/density and let
+            // labels that visibly overlap all survive the placer. Resolved per label,
+            // because the size depends on the place's population rank.
+            if !layer.text_visible_at(camera.zoom) {
                 continue;
             }
+            let (primary, alternate) = anchors_for(layer);
             for key in ordered {
                 let Some(tile) = self.tiles.get(key) else { continue };
                 let tile_clip = camera.tile_to_clip(tile.z, tile.x, tile.y);
                 // Task-9 rank gating: at low UI zoom only high-pop localities
-                // become candidates at all — collision alone can't thin
-                // hundreds of towns to the major-city set. UI zoom (offset
-                // removed) so selection matches MapLibre's per-zoom set.
-                let ui_zoom = camera.zoom - 1.0;
-                let min_pop = placement::locality_min_pop(ui_zoom);
+                // Rank gating BEFORE collision: a hamlet must not
+                // become a candidate at all - collision alone can't thin
+                // hundreds of towns to the major-city set. The camera zoom is
+                // the UI zoom now that the tile grid is 512, so selection
+                // matches MapLibre's per-zoom set directly.
+                let min_pop = placement::locality_min_pop(camera.zoom);
                 for (label_idx, label) in tile
                     .labels
                     .iter()
@@ -829,6 +1035,8 @@ impl Renderer {
                     if label.rank == 2 && label.pop < min_pop {
                         continue;
                     }
+                    let inputs = box_inputs(layer, label, camera);
+                    let wh = (extent.width, extent.height);
                     candidates.push(placement::Candidate {
                         id: placement::candidate_id(
                             tile.z,
@@ -839,14 +1047,16 @@ impl Renderer {
                         ),
                         rank: label.rank,
                         pop: label.pop,
-                        rect: placement::screen_rect(
+                        rect: placement::anchored_rect(
                             label.anchor,
                             tile_clip,
-                            (extent.width, extent.height),
-                            text_px,
-                            label.total_advance,
-                            collision_padding_px(camera.zoom),
+                            wh,
+                            &inputs,
+                            primary,
                         ),
+                        alternate: alternate.map(|second| {
+                            placement::anchored_rect(label.anchor, tile_clip, wh, &inputs, second)
+                        }),
                     });
                 }
             }
@@ -877,7 +1087,7 @@ impl Renderer {
         &self,
         camera: &Camera,
         layers: &[Layer],
-        accepted: &std::collections::HashSet<u64>,
+        accepted: &HashMap<u64, bool>,
         extent: vk::Extent2D,
     ) {
         use crate::tile::placement;
@@ -900,22 +1110,24 @@ impl Renderer {
                     label.layer_index,
                     label_idx,
                 );
-                if !accepted.contains(&id) {
-                    continue;
-                }
+                let Some(&flipped) = accepted.get(&id) else { continue };
                 let Some(layer) = layers.get(label.layer_index) else { continue };
-                let text_px = layer.text_size.at(camera.zoom);
+                // Device px, as in `place_symbols` — this rebuilds the same boxes for
+                // the pick path, so it has to agree with them, including which anchor
+                // the placer settled on.
+                let text_px = layer.text_size_for(camera.zoom, label.pop) * camera.density;
                 if text_px <= 0.0 {
                     continue;
                 }
+                let (primary, alternate) = anchors_for(layer);
+                let anchor = if flipped { alternate.unwrap_or(primary) } else { primary };
                 let tile_clip = camera.tile_to_clip(tile.z, tile.x, tile.y);
-                let rect = placement::screen_rect(
+                let rect = placement::anchored_rect(
                     label.anchor,
                     tile_clip,
                     (extent.width, extent.height),
-                    text_px,
-                    label.total_advance,
-                    collision_padding_px(camera.zoom),
+                    &box_inputs(layer, label, camera),
+                    anchor,
                 );
                 // Anchor tile-local → world px (Dp) → lon/lat.
                 let wx = tile_wx + label.anchor.0 as f64 * span_dp;
@@ -946,6 +1158,7 @@ impl Renderer {
             self.pipelines = Pipelines::new(
                 &self.context.device,
                 self.swapchain.render_pass,
+                self.swapchain.samples,
                 Some(self.atlas_set.layout),
             )?;
         }
@@ -990,6 +1203,44 @@ unsafe fn try_upload_glyph_atlas(
     Ok((image, set))
 }
 
+/// Upload the process-global POI sprite sheet and allocate its descriptor set.
+///
+/// [`try_upload_glyph_atlas`]'s counterpart, and the second of the two sets
+/// [`AtlasSet`]'s pool is sized for. The sheet is already RGBA8, so
+/// [`SampledImage::upload`] takes it unchanged — no expansion step like the glyph
+/// atlas's R8 one.
+///
+/// # Safety
+///
+/// Same rules as the surrounding constructors: live device, idle queue.
+unsafe fn try_upload_sprite_atlas(
+    context: &Context,
+    atlas_set: &AtlasSet,
+    command_pool: vk::CommandPool,
+) -> Result<(SampledImage, vk::DescriptorSet), String> {
+    use crate::tile::sprite;
+    let atlas = sprite::atlas();
+    // An empty atlas is what `sprite::atlas()` leaves behind when the sheet will not
+    // decode; uploading a zero-sized image would fail in the driver instead of here.
+    if atlas.is_empty() {
+        return Err("the sprite sheet carries no icons".into());
+    }
+    let image = SampledImage::upload(
+        &context.instance,
+        context.physical_device,
+        &context.device,
+        context.queue,
+        context.queue_family_index,
+        command_pool,
+        &atlas.pixels,
+        atlas.width,
+        atlas.height,
+        vk::Format::R8G8B8A8_UNORM,
+    )?;
+    let set = atlas_set.allocate(&context.device, &image)?;
+    Ok((image, set))
+}
+
 impl Drop for Renderer {
     fn drop(&mut self) {
         unsafe {
@@ -1017,6 +1268,9 @@ impl Drop for Renderer {
             if let Some(image) = &self.glyph_atlas {
                 image.destroy(&self.context.device);
             }
+            if let Some(image) = &self.sprite_atlas {
+                image.destroy(&self.context.device);
+            }
             self.atlas_set.destroy(&self.context.device);
             self.pipelines.destroy(&self.context.device);
             self.swapchain.destroy(&self.context.device);
@@ -1026,6 +1280,42 @@ impl Drop for Renderer {
                 self.window = std::ptr::null_mut();
             }
         }
+    }
+}
+
+/// The anchors a layer's labels may be drawn at: its first choice, and the one to fall
+/// back to when that box collides.
+///
+/// A layer with no `text-variable-anchor` is centred and cannot move, which is every place
+/// layer. Only the first two are used: the reference declares exactly two, and a
+/// [`crate::tile::placement::Candidate`] carries exactly two boxes.
+fn anchors_for(layer: &Layer) -> (Anchor, Option<Anchor>) {
+    match layer.variable_anchor.as_slice() {
+        [] => (Anchor::Center, None),
+        [only] => (*only, None),
+        [first, second, ..] => (*first, Some(*second)),
+    }
+}
+
+/// Everything one label's collision box depends on besides its anchor.
+///
+/// Built once per label and reused for each candidate anchor, so the two boxes a POI is
+/// tried at can only differ in where they sit — not in how big they are.
+fn box_inputs(
+    layer: &Layer,
+    label: &geometry::ShapedLabel,
+    camera: &Camera,
+) -> crate::tile::placement::BoxInputs {
+    crate::tile::placement::BoxInputs {
+        text_px: layer.text_size_for(camera.zoom, label.pop) * camera.density,
+        advance: label.total_advance,
+        line_count: label.lines.len(),
+        offset_em: layer.text_offset,
+        // Dp from the sheet, device px here — the same conversion `emit_icon` makes.
+        icon_px: label
+            .sprite
+            .map(|s| (s.width_dp * camera.density, s.height_dp * camera.density)),
+        pad_px: collision_padding_px(camera.zoom),
     }
 }
 

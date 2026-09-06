@@ -59,7 +59,9 @@ void main() {
     uint query_stride = p.out_h;
     uint key_stride = p.out_w;
     uint query_base = head * head_dim * query_stride;
-    uint key_base = head * head_dim * key_stride;
+    // Under grouped- or multi-query attention several query heads read one key head, so K is
+    // narrower than Q and the two bases differ. `kv_head_of` is the identity when they match.
+    uint key_base = kv_head_of(head) * head_dim * key_stride;
     float total = 0.0;
     for (uint d = 0u; d < head_dim; d++) {
         total += float(arena[p.in0 + query_base + d * query_stride + query])

@@ -62,6 +62,14 @@ const CLASS_KEY: &str = "c";
 /// 200 M features that have no colour.
 const COLOR_KEY: &str = "t";
 
+/// The property key a transit line's lane inputs travel under, as a `Uint` packing the colour's
+/// ordinal, the corridor's colour count and the taper fraction one byte each.
+///
+/// A second key rather than packed alongside the colour: the two are decided in different places
+/// (the colour is the agency's, the lane inputs are the exporter's). Three bytes in one `Uint`
+/// rather than three keys, because a spilled key is an owned `String` per feature.
+const LANE_KEY: &str = "s";
+
 /// The property key a label's display name travels under, when it has one.
 ///
 /// `places` and `poi` are the only layers that set it. Absent (not empty) for everything else,
@@ -159,15 +167,26 @@ impl Sink {
     }
 
     /// Push a transit line: like [`Sink::push`], plus the route colour that becomes the body's
-    /// `transit_color`. A zero colour is refused, not written as absent — zero means "no colour"
+    /// `transit_color` and the lane inputs that become its `transit_ordinal`, `transit_lanes` and
+    /// `transit_taper`. A zero colour is refused, not written as absent — zero means "no colour"
     /// on the wire, and a transit line without one is a caller bug, not a pale line.
-    pub fn push_transit(&mut self, class: &Class, geometry: &Geometry, color: u32) -> Result<()> {
+    pub fn push_transit(
+        &mut self,
+        class: &Class,
+        geometry: &Geometry,
+        color: u32,
+        ordinal: u8,
+        lanes: u8,
+        taper: u8,
+    ) -> Result<()> {
         if color == 0 {
             return err("a transit line with no colour".to_string());
         }
         self.props[0].1 = Value::Uint(pack(class)?);
         self.props.truncate(1);
         self.props.push((COLOR_KEY.to_string(), Value::Uint(color as u64)));
+        let lane_bits = ((ordinal as u64) << 16) | ((lanes as u64) << 8) | (taper as u64);
+        self.props.push((LANE_KEY.to_string(), Value::Uint(lane_bits)));
         self.write_record(class, geometry)
     }
 
@@ -300,11 +319,19 @@ pub struct Provenance {
     pub layers: u16,
     /// Whether a coastline product was folded in, which adds features nothing else would.
     pub coastline: bool,
+    /// Whether a GTFS transit-routes export was folded in. The `transit` layer comes from nowhere
+    /// else, so a spill built without one holds no transit at all.
+    pub transit_routes: bool,
 }
 
 impl Provenance {
     /// Read the source file's identity, or an error naming it.
-    pub fn of(source: &Path, layers: crate::schema::Layers, coastline: bool) -> Result<Provenance> {
+    pub fn of(
+        source: &Path,
+        layers: crate::schema::Layers,
+        coastline: bool,
+        transit_routes: bool,
+    ) -> Result<Provenance> {
         let meta = std::fs::metadata(source)
             .map_err(|e| osm_ingest::proto::Error(format!("cannot stat {}: {e}", source.display())))?;
         let mtime = meta
@@ -327,6 +354,7 @@ impl Provenance {
                 | u16::from(layers.poi) << 8
                 | u16::from(layers.transit) << 9,
             coastline,
+            transit_routes,
         })
     }
 }
@@ -334,10 +362,13 @@ impl Provenance {
 /// Magic and version of the sidecar index. Bumped whenever the layout below changes, so an index
 /// written by an older build is refused rather than misread.
 ///
+/// v3: `transit_routes` joins `coastline`, because the `transit` layer is now sourced from a GTFS
+/// export rather than the `.pbf` -- so a spill built without one is missing a whole layer.
+///
 /// v2: `layers` widened to `u16` (ten layers) and the spill's packed class widened its layer
 /// field to 4 bits, so a v1 spill would misdecode every feature. Refused here, not there.
 const INDEX_MAGIC: &[u8; 8] = b"MAMASTOR";
-const INDEX_VERSION: u32 = 2;
+const INDEX_VERSION: u32 = 3;
 
 impl Store {
     /// Write the sidecar that lets [`Store::open`] skip stage A.
@@ -359,6 +390,7 @@ impl Store {
         out.extend_from_slice(&provenance.source_mtime.to_le_bytes());
         out.extend_from_slice(&provenance.layers.to_le_bytes());
         out.push(u8::from(provenance.coastline));
+        out.push(u8::from(provenance.transit_routes));
         out.extend_from_slice(&features.to_le_bytes());
         out.extend_from_slice(&self.count.to_le_bytes());
         for v in [self.bbox.0, self.bbox.1, self.bbox.2, self.bbox.3] {
@@ -417,21 +449,25 @@ impl Store {
             source_mtime: u64::from_le_bytes(take(8)?.try_into().expect("eight bytes")),
             layers: u16::from_le_bytes(take(2)?.try_into().expect("two bytes")),
             coastline: take(1)?[0] != 0,
+            transit_routes: take(1)?[0] != 0,
         };
         if got != want {
             return err(format!(
                 "{} was built from a different input or layer set (source {} bytes at mtime {}, \
-                 layers {:#06x}, coastline {}) than this run wants (source {} bytes at mtime {}, \
-                 layers {:#06x}, coastline {}) -- delete it or drop --reuse-store",
+                 layers {:#06x}, coastline {}, transit routes {}) than this run wants (source {} \
+                 bytes at mtime {}, layers {:#06x}, coastline {}, transit routes {}) -- delete it \
+                 or drop --reuse-store",
                 path.display(),
                 got.source_len,
                 got.source_mtime,
                 got.layers,
                 got.coastline,
+                got.transit_routes,
                 want.source_len,
                 want.source_mtime,
                 want.layers,
                 want.coastline,
+                want.transit_routes,
             ));
         }
         let features = u64::from_le_bytes(take(8)?.try_into().expect("eight bytes"));
@@ -577,7 +613,14 @@ impl Store {
         let mut sink = Sink::create(&path)?;
         for feature in features {
             if feature.transit_color != 0 {
-                sink.push_transit(&feature.class, &feature.geometry, feature.transit_color)?;
+                sink.push_transit(
+                    &feature.class,
+                    &feature.geometry,
+                    feature.transit_color,
+                    feature.transit_ordinal,
+                    feature.transit_lanes,
+                    feature.transit_taper,
+                )?;
             } else {
                 sink.push_named(&feature.class, &feature.geometry, feature.name.as_deref())?;
             }
@@ -591,8 +634,8 @@ impl Store {
 /// A record whose class property is missing or is not an integer is a corrupt file rather than a
 /// feature to skip: everything in here was written by [`Sink::push`] one run ago, so anything else
 /// means the file is not the one we wrote. A `n` string property rides along as the display
-/// name, a `t` integer as the transit colour; anything else in there is corruption for the same
-/// reason.
+/// name, a `t` integer as the transit colour and an `s` integer as its packed lane inputs;
+/// anything else in there is corruption for the same reason.
 fn feature_of(record: tile_build::spill::NormalizedFeature) -> Result<Feature> {
     let bits = match record.props.iter().find(|(key, _)| key == CLASS_KEY) {
         Some((_, Value::Uint(bits))) => *bits,
@@ -600,6 +643,9 @@ fn feature_of(record: tile_build::spill::NormalizedFeature) -> Result<Feature> {
     };
     let mut name: Option<String> = None;
     let mut transit_color: u32 = 0;
+    let mut transit_ordinal: u8 = 0;
+    let mut transit_lanes: u8 = 0;
+    let mut transit_taper: u8 = 0;
     for (key, value) in &record.props {
         if key == CLASS_KEY {
             continue;
@@ -614,12 +660,28 @@ fn feature_of(record: tile_build::spill::NormalizedFeature) -> Result<Feature> {
                 transit_color = u32::try_from(*color)
                     .map_err(|_| Error("a spilled transit colour does not fit u32".to_string()))?;
             }
+            (LANE_KEY, Value::Uint(lane_bits)) => {
+                if *lane_bits > 0xff_ff_ff {
+                    return err("a spilled transit lane triple does not fit three bytes".to_string());
+                }
+                transit_ordinal = (lane_bits >> 16) as u8;
+                transit_lanes = (lane_bits >> 8) as u8;
+                transit_taper = *lane_bits as u8;
+            }
             _ => {
                 return err(format!("a spilled feature carries an unknown property `{key}`"));
             }
         }
     }
-    Ok(Feature { class: unpack(bits), geometry: record.geometry, name, transit_color })
+    Ok(Feature {
+        class: unpack(bits),
+        geometry: record.geometry,
+        name,
+        transit_color,
+        transit_ordinal,
+        transit_lanes,
+        transit_taper,
+    })
 }
 
 /// Chunks of features as the lanes hand them over, or the error that stopped one.

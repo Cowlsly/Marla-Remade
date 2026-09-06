@@ -1,0 +1,688 @@
+//! 16 kHz PCM to 128-bin HTK log-mel frames, for Gemma 4's audio encoder.
+//!
+//! A port of `Gemma4AudioFeatureExtractor._extract_spectrogram` from transformers, which is the
+//! Universal Speech Model front end. The checkpoint ships no feature-extractor settings —
+//! `preprocessor_config.json` carries only `processor_class` — so every constant below is the
+//! reference default rather than a choice made here.
+//!
+//! # This is not [`crate::microfrontend`]
+//!
+//! Both turn 16 kHz PCM into log-mel frames off a 512-point transform at a 160-sample hop, and
+//! there the resemblance stops. That module is Google's TFLM integer op chain: breakpoint
+//! filters over a bin range, *energy* rather than magnitude, a square root, and a scaled
+//! fixed-point log. This one is HTK triangles over all 257 bins, magnitude, and a plain
+//! `ln(x + 1e-3)`. The two produce different numbers from the same audio and neither is a
+//! parameterisation of the other, so they stay apart. What they do share is the transform, and
+//! `microfrontend::fft` is `pub(crate)` for exactly that.
+//!
+//! # The chain, and the two places it is easy to get wrong
+//!
+//! Prepend `FRAME_SAMPLES / 2` zeros so frame 0 is *centred* on sample 0 — `sl.STFT`'s
+//! `semicausal` padding — then frame, window, transform, project, log.
+//!
+//! The first trap is the frame count. The reference unfolds at `FRAME_SAMPLES + 1` and then
+//! throws the extra sample away, because that slot is where HTK-flavour preemphasis would have
+//! read the previous sample from. Preemphasis is off here, so the sample is unused — but the
+//! *count* still comes from the longer window, and framing at 320 gives one frame too many on
+//! most lengths. See [`frame_count`].
+//!
+//! The second is the window. HF's `window_function` builds `np.hanning(n + 1)` and drops the
+//! last tap, which is the *periodic* Hann; the symmetric one differs on every tap but the
+//! middle and would show up as a small broadband error that looks like rounding.
+//!
+//! # The bottom filter is empty, and stays empty
+//!
+//! 128 mel filters from 0 Hz puts the first triangle at 0 -> 13.81 -> 27.89 Hz, entirely below
+//! bin 1 at 31.25 Hz. The one bin it does contain is bin 0, where its rising edge is exactly
+//! zero — so channel **0** is all zeros, and is `ln(1e-3)` for every input and every frame. The
+//! reference warns about this and keeps it; the encoder was trained on 128 channels one of which
+//! is constant, so dropping it here would be a silent off-by-one in everything downstream. It is
+//! the bottom of the bank rather than the top: the topmost triangle spans 7505..8000 Hz and is
+//! the widest column there is.
+//!
+//! # Where this stops
+//!
+//! [`LogMel::spectrogram`] is `_extract_spectrogram` and nothing else. The reference's `__call__`
+//! also truncates the waveform at 480,000 samples (30 s), zero-pads it to a multiple of 128
+//! samples, and zeroes the frames whose analysis window ran off the end of the real audio. That
+//! belongs with the encoder's batching rather than here, and is left to the caller.
+
+use crate::microfrontend::{fft, fft_tables};
+
+/// Samples per second the front end expects.
+pub const SAMPLE_RATE: u32 = 16_000;
+/// Mel channels per frame.
+pub const MELS: usize = 128;
+/// Analysis window, from `frame_length_ms = 20.0`.
+pub const FRAME_SAMPLES: usize = 320;
+/// Samples between frames, from `hop_length_ms = 10.0`.
+pub const HOP_SAMPLES: usize = 160;
+/// `2^ceil(log2(FRAME_SAMPLES))`, with `fft_overdrive` off.
+pub const FFT_SIZE: usize = 512;
+/// Bins in the one-sided transform.
+pub const BINS: usize = FFT_SIZE / 2 + 1;
+/// Low edge of the mel band, in Hz.
+pub const MIN_HZ: f64 = 0.0;
+/// High edge of the mel band, in Hz. Nyquist, so the bank spans the whole spectrum.
+pub const MAX_HZ: f64 = 8000.0;
+/// Added inside the log, so silence is `ln(1e-3)` rather than negative infinity.
+pub const MEL_FLOOR: f32 = 1e-3;
+
+/// `2595 log10(1 + hz / 700)`, the HTK mel scale.
+fn hertz_to_mel(hz: f64) -> f64 {
+    2595.0 * (1.0 + hz / 700.0).log10()
+}
+
+/// The inverse of [`hertz_to_mel`].
+fn mel_to_hertz(mel: f64) -> f64 {
+    700.0 * (10.0f64.powf(mel / 2595.0) - 1.0)
+}
+
+/// How many frames `samples` of audio produce.
+///
+/// `(samples + 160 - 321) / 160 + 1`, and zero below that. The 321 is the reference's unfold
+/// size, `FRAME_SAMPLES + 1`: it reads one sample more than it uses so that preemphasis has a
+/// predecessor for the first tap, and the frame count inherits the longer window whether
+/// preemphasis is on or off. Using 320 here would claim one extra frame for every length that is
+/// not exactly a hop boundary.
+pub fn frame_count(samples: usize) -> usize {
+    let padded = samples + FRAME_SAMPLES / 2;
+    match padded.checked_sub(FRAME_SAMPLES + 1) {
+        Some(rest) => rest / HOP_SAMPLES + 1,
+        None => 0,
+    }
+}
+
+/// The periodic Hann window, `0.5 - 0.5 cos(2 pi n / 320)` for `n` in `0..320`.
+///
+/// Computed in f64 and rounded once, because the reference builds it in f64 and calls
+/// `.astype(np.float32)`.
+pub fn hann_window() -> Vec<f32> {
+    (0..FRAME_SAMPLES)
+        .map(|n| {
+            let phase = std::f64::consts::TAU * n as f64 / FRAME_SAMPLES as f64;
+            (0.5 - 0.5 * phase.cos()) as f32
+        })
+        .collect()
+}
+
+/// The `[BINS, MELS]` triangular filter bank, row major: bin `b`, channel `c` at `b * MELS + c`.
+///
+/// `MELS + 2` breakpoints spaced evenly in mel between [`MIN_HZ`] and [`MAX_HZ`] and converted
+/// back to hertz; the triangle for channel `c` rises from breakpoint `c` to `c + 1` and falls to
+/// `c + 2`. Bin centres are `linspace(0, SAMPLE_RATE / 2, BINS)`. Unnormalised — `norm=None` in
+/// the reference — so a channel's weights peak at one and do not sum to one.
+pub fn mel_filters() -> Vec<f32> {
+    let mel_max = hertz_to_mel(MAX_HZ);
+    let mel_min = hertz_to_mel(MIN_HZ);
+    let step = (mel_max - mel_min) / (MELS + 1) as f64;
+    let mut edges: Vec<f64> =
+        (0..MELS + 2).map(|i| mel_to_hertz(mel_min + step * i as f64)).collect();
+    // `linspace` lands its last point on the endpoint exactly rather than at `start + n * step`.
+    if let Some(last) = edges.last_mut() {
+        *last = mel_to_hertz(mel_max);
+    }
+
+    let bin_width = (SAMPLE_RATE / 2) as f64 / (BINS - 1) as f64;
+    let mut bank = vec![0.0f32; BINS * MELS];
+    for bin in 0..BINS {
+        let hz = bin as f64 * bin_width;
+        for channel in 0..MELS {
+            let (Some(&left), Some(&centre), Some(&right)) =
+                (edges.get(channel), edges.get(channel + 1), edges.get(channel + 2))
+            else {
+                continue;
+            };
+            let rising = (hz - left) / (centre - left);
+            let falling = (right - hz) / (right - centre);
+            if let Some(slot) = bank.get_mut(bin * MELS + channel) {
+                *slot = rising.min(falling).max(0.0) as f32;
+            }
+        }
+    }
+    bank
+}
+
+/// Waveform in, log-mel frames out. Holds the window, the bank and the transform's tables.
+///
+/// Nothing allocates per frame, but unlike [`crate::microfrontend::Frontend`] this is not a
+/// streaming front end: the semicausal padding and the frame count are both properties of the
+/// whole utterance, and the encoder consumes the whole utterance at once anyway.
+pub struct LogMel {
+    window: Vec<f32>,
+    filters: Vec<f32>,
+    twiddles: Vec<[f32; 2]>,
+    reversed: Vec<u32>,
+    scratch: Vec<[f32; 2]>,
+    magnitude: Vec<f32>,
+}
+
+impl Default for LogMel {
+    fn default() -> LogMel {
+        LogMel::new()
+    }
+}
+
+impl LogMel {
+    /// Build the window, the filter bank and the transform's tables.
+    pub fn new() -> LogMel {
+        let (twiddles, reversed) = fft_tables(FFT_SIZE);
+        LogMel {
+            window: hann_window(),
+            filters: mel_filters(),
+            twiddles,
+            reversed,
+            scratch: vec![[0.0, 0.0]; FFT_SIZE],
+            magnitude: vec![0.0; BINS],
+        }
+    }
+
+    /// The magnitude spectrum of the most recent frame, [`BINS`] wide.
+    ///
+    /// Here to bisect a disagreement with the reference: a wrong window and a wrong filter bank
+    /// both move the log-mel output and only one of them moves this.
+    pub fn magnitude(&self) -> &[f32] {
+        &self.magnitude
+    }
+
+    /// Append [`frame_count`] frames of [`MELS`] values each to `out`, and return how many.
+    ///
+    /// `waveform` is the whole utterance at [`SAMPLE_RATE`], nominally in `-1.0..1.0`; the front
+    /// end has no gain of its own, so the scale it arrives in is the scale the encoder sees.
+    pub fn spectrogram(&mut self, waveform: &[f32], out: &mut Vec<f32>) -> usize {
+        let frames = frame_count(waveform.len());
+        let pad = FRAME_SAMPLES / 2;
+        out.reserve(frames * MELS);
+        for frame in 0..frames {
+            let start = frame * HOP_SAMPLES;
+            for (n, slot) in self.scratch.iter_mut().enumerate().take(FRAME_SAMPLES) {
+                // The left pad is not materialised: index into it and read zero.
+                let sample = match (start + n).checked_sub(pad) {
+                    Some(at) => waveform.get(at).copied().unwrap_or(0.0),
+                    None => 0.0,
+                };
+                *slot = [sample * self.window.get(n).copied().unwrap_or(0.0), 0.0];
+            }
+            for slot in self.scratch.iter_mut().skip(FRAME_SAMPLES) {
+                *slot = [0.0, 0.0];
+            }
+            fft(&mut self.scratch, &self.twiddles, &self.reversed);
+            for (bin, slot) in self.magnitude.iter_mut().enumerate() {
+                let [re, im] = self.scratch.get(bin).copied().unwrap_or([0.0, 0.0]);
+                *slot = (re * re + im * im).sqrt();
+            }
+
+            let base = out.len();
+            out.resize(base + MELS, 0.0);
+            for (bin, level) in self.magnitude.iter().enumerate() {
+                if *level == 0.0 {
+                    continue;
+                }
+                let row = self.filters.get(bin * MELS..bin * MELS + MELS).unwrap_or(&[]);
+                for (weight, slot) in row.iter().zip(out.iter_mut().skip(base)) {
+                    *slot += weight * level;
+                }
+            }
+            for slot in out.iter_mut().skip(base) {
+                *slot = (*slot + MEL_FLOOR).ln();
+            }
+        }
+        frames
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // Generated by scripts/ml/gemma4_audio_parity.py; see its docstring.
+    const REF_FRAME_LENGTHS: [usize; 13] = [
+        0, 160, 161, 320, 321, 480, 481, 1000, 4000, 5000, 8000, 16000, 480000,
+    ];
+    const REF_FRAME_COUNTS: [usize; 13] = [0, 0, 1, 1, 2, 2, 3, 6, 24, 31, 49, 99, 2999];
+    const REF_MASK_ROWS: [(usize, usize, usize, usize); 11] = [
+        (1, 128, 0, 0),
+        (160, 256, 1, 0),
+        (161, 256, 1, 1),
+        (500, 512, 3, 3),
+        (1000, 1024, 6, 6),
+        (4000, 4096, 25, 24),
+        (5000, 5120, 31, 31),
+        (20000, 20096, 125, 124),
+        (479999, 480000, 2999, 2999),
+        (480000, 480000, 2999, 2999),
+        (480001, 480000, 2999, 2999),
+    ];
+    const REF_FILTER_SUMS: [f32; 128] = [
+        0.0, 0.766007675, 0.233992325, 0.624370147, 0.375629853, 0.56835355,
+        0.43164645, 0.591604466, 0.408395534, 0.688130649, 0.311869351, 0.852282682,
+        0.228007044, 0.919710274, 0.369627292, 0.630372708, 0.712565732, 0.39406984,
+        0.893364428, 0.552064234, 0.487800364, 0.960135403, 0.575004812, 0.5728237,
+        0.852171488, 0.761024283, 0.649827402, 0.682436282, 0.906712032, 0.810932246,
+        0.749240471, 0.777984322, 0.805709901, 0.856133059, 0.976771025, 0.860962851,
+        0.885322033, 0.908790777, 0.931394418, 0.953157645, 0.974104515, 0.994258469,
+        1.01364234, 1.0322784, 1.0501883, 1.06739318, 1.08391361, 1.09976964,
+        1.19298381, 1.19944768, 1.16002841, 1.17309814, 1.18560231, 1.35015691,
+        1.28356138, 1.23483957, 1.35837156, 1.41235101, 1.27787028, 1.53199568,
+        1.36132121, 1.51000865, 1.46640577, 1.56481698, 1.48848362, 1.6905679,
+        1.53005584, 1.69101859, 1.7120788, 1.67053656, 1.72152258, 1.86301333,
+        1.8130691, 1.84255637, 1.88686134, 1.92951105, 1.97055295, 2.0100333,
+        2.04799715, 2.08448841, 2.11954983, 2.15322309, 2.26744251, 2.25751779,
+        2.26328333, 2.3586326, 2.42408152, 2.37750081, 2.57202051, 2.47028805,
+        2.63357659, 2.631302, 2.6587134, 2.76889857, 2.81919116, 2.84239141,
+        2.90584327, 2.96689913, 3.02562793, 3.08209687, 3.1363714, 3.22810679,
+        3.29123358, 3.30421905, 3.41972955, 3.46806413, 3.54131953, 3.58039064,
+        3.72886698, 3.73201206, 3.81888482, 3.90249672, 3.9829414, 4.06031012,
+        4.13469178, 4.206173, 4.31334516, 4.39933228, 4.44690956, 4.58814999,
+        4.64567, 4.73106006, 4.83722853, 4.93938994, 5.03765957, 5.13214977,
+        5.22297, 5.31022689,
+    ];
+
+    const REF_TONE_PEAKS: [(f32, usize); 2] = [(440.0, 24), (3000.0, 84)];
+    const REF_TONE_ROWS: [usize; 4] = [0, 1, 24, 48];
+    const REF_TONE: [f32; 512] = [
+        -6.90775528, 0.115827199, -1.06805375, -0.0724676845, -0.579895123, -0.149364395,
+        -0.424133554, -0.0588712061, -0.428997638, 0.147787389, -0.642566798, 0.409517059,
+        -0.868085589, 0.593130053, -0.183939812, 0.34937896, 0.562275919, 0.0398005584,
+        1.02395619, 0.999261697, 0.914881349, 1.95192199, 1.67790951, 1.69352427,
+        2.14447997, 1.94184339, 1.62844189, 1.52479659, 1.42117224, 0.74515439,
+        0.394147496, 0.260734278, 0.178749723, 0.0674562358, -0.0150409755, -0.256665607,
+        -0.334908578, -0.435699747, -0.520541992, -0.589211344, -0.66819431, -0.750326441,
+        -0.815489239, -0.883209669, -0.956651697, -1.01698204, -1.07886302, -1.14543634,
+        -1.13696147, -1.20969287, -1.31822, -1.36944691, -1.42619708, -1.36606606,
+        -1.48341503, -1.58692714, -1.55163227, -1.57785272, -1.73619893, -1.61648144,
+        -1.7938643, -1.74851742, -1.83480949, -1.82771636, -1.93152539, -1.86072234,
+        -2.01453578, -1.96488454, -2.00926571, -2.08384392, -2.10392157, -2.07873197,
+        -2.15758267, -2.19004352, -2.21475497, -2.24153389, -2.26783785, -2.29451349,
+        -2.32237855, -2.35181284, -2.38151641, -2.40997411, -2.40428144, -2.4524257,
+        -2.49143255, -2.49515089, -2.51192471, -2.57442439, -2.53519116, -2.61393293,
+        -2.5913303, -2.63230757, -2.66188279, -2.66104912, -2.68091736, -2.71299548,
+        -2.72909053, -2.74445454, -2.75889241, -2.77404933, -2.78855932, -2.79292525,
+        -2.80988817, -2.83484042, -2.83490985, -2.85288264, -2.85863856, -2.8844114,
+        -2.87086295, -2.89247025, -2.89615177, -2.89963932, -2.90695398, -2.91304301,
+        -2.9124707, -2.91660401, -2.91565386, -2.91360068, -2.92245588, -2.90633718,
+        -2.90850119, -2.9073133, -2.89970452, -2.88150091, -2.87202889, -2.86415029,
+        -2.853362, -2.84045739, -6.90775528, -4.65611132, -5.62751148, -4.5591449,
+        -5.00596243, -5.5100319, -5.70980346, -4.24566536, -4.58543404, -3.82250231,
+        -4.56020615, -4.70522507, -4.77003484, -2.64922969, -3.57746049, -3.05855604,
+        -2.47976547, -2.49894849, -0.912939311, -1.84327256, -1.02851594, 1.70733085,
+        2.13949372, 2.2225578, 2.83419559, 2.50478316, 1.91048069, 1.44675972,
+        -0.34279279, -0.874517245, -2.03942984, -2.76091039, -2.48075038, -2.7853359,
+        -4.69180295, -3.43929625, -3.98041825, -4.41029802, -4.29839117, -4.67756535,
+        -5.06616811, -4.79163073, -5.29869545, -5.44900782, -5.29334276, -5.69860867,
+        -5.50009208, -5.98632057, -5.75970969, -5.84671191, -6.27880693, -5.98457004,
+        -6.20975043, -6.07110791, -6.4370089, -6.2359509, -6.51350736, -6.30297615,
+        -6.56992109, -6.40081456, -6.65377476, -6.46026562, -6.61139045, -6.54663581,
+        -6.63051666, -6.55011453, -6.57727284, -6.73777063, -6.66740709, -6.67554278,
+        -6.65441085, -6.63014329, -6.73774554, -6.7546344, -6.74631943, -6.72924573,
+        -6.75748402, -6.7220948, -6.73905053, -6.72265757, -6.76001633, -6.80378287,
+        -6.73752404, -6.63060642, -6.58241795, -6.65284146, -6.59562971, -6.59617064,
+        -6.63020131, -6.70710833, -6.74550524, -6.66915066, -6.57474808, -6.68339872,
+        -6.5673124, -6.54983683, -6.71811914, -6.79949987, -6.70218286, -6.70691925,
+        -6.6384433, -6.62030962, -6.71844089, -6.67216013, -6.53747239, -6.70122882,
+        -6.45529997, -6.48885351, -6.55622319, -6.71100603, -6.87667325, -6.8001267,
+        -6.63361946, -6.64282407, -6.65873675, -6.63061303, -6.72918397, -6.68290798,
+        -6.78946612, -6.8554214, -6.71872078, -6.58337544, -6.51836034, -6.5185381,
+        -6.56079497, -6.66141415, -6.59964943, -6.73885207, -6.90775528, -4.65611132,
+        -5.62751148, -4.5591449, -5.00596243, -5.5100319, -5.70980346, -4.24566536,
+        -4.58543404, -3.82250231, -4.56020615, -4.70522507, -4.77003484, -2.64922969,
+        -3.57746049, -3.05855604, -2.47976547, -2.49894849, -0.912939311, -1.84327256,
+        -1.02851594, 1.70733085, 2.13949372, 2.2225578, 2.83419559, 2.50478316,
+        1.91048069, 1.44675972, -0.34279279, -0.874517245, -2.03942984, -2.76091039,
+        -2.48075038, -2.7853359, -4.69180295, -3.43929625, -3.98041825, -4.41029802,
+        -4.29839117, -4.67756535, -5.06616811, -4.79163073, -5.29869545, -5.44900782,
+        -5.29334276, -5.69860867, -5.50009208, -5.98632057, -5.75970969, -5.84671191,
+        -6.27880693, -5.98457004, -6.20975043, -6.07110791, -6.4370089, -6.2359509,
+        -6.51350736, -6.30297615, -6.56992109, -6.40081456, -6.65377476, -6.46026562,
+        -6.61139045, -6.54663581, -6.63051666, -6.55011453, -6.57727284, -6.73777063,
+        -6.66740709, -6.67554278, -6.65441085, -6.63014329, -6.73774554, -6.7546344,
+        -6.74631943, -6.72924573, -6.75748402, -6.7220948, -6.73905053, -6.72265757,
+        -6.76001633, -6.80378287, -6.73752404, -6.63060642, -6.58241795, -6.65284146,
+        -6.59562971, -6.59617064, -6.63020131, -6.70710833, -6.74550524, -6.66915066,
+        -6.57474808, -6.68339872, -6.5673124, -6.54983683, -6.71811914, -6.79949987,
+        -6.70218286, -6.70691925, -6.6384433, -6.62030962, -6.71844089, -6.67216013,
+        -6.53747239, -6.70122882, -6.45529997, -6.48885351, -6.55622319, -6.71100603,
+        -6.87667325, -6.8001267, -6.63361946, -6.64282407, -6.65873675, -6.63061303,
+        -6.72918397, -6.68290798, -6.78946612, -6.8554214, -6.71872078, -6.58337544,
+        -6.51836034, -6.5185381, -6.56079497, -6.66141415, -6.59964943, -6.73885207,
+        -6.90775528, -5.43430991, -6.20086499, -4.62803009, -5.07061493, -5.13152463,
+        -5.35443793, -4.43647034, -4.76987631, -3.78939909, -4.52880651, -5.11961842,
+        -4.85207485, -2.67149517, -3.55777431, -3.03857705, -2.50109228, -2.50796896,
+        -0.913459768, -1.83769021, -1.02664702, 1.70711166, 2.1394735, 2.2225655,
+        2.83426269, 2.5047514, 1.91043715, 1.44672776, -0.341273456, -0.874609093,
+        -2.04205802, -2.76172443, -2.47608344, -2.78715955, -4.6223419, -3.43363688,
+        -3.98654568, -4.38636953, -4.28232112, -4.6957205, -5.06525589, -4.77859238,
+        -5.28897561, -5.40555845, -5.29026167, -5.64257055, -5.47103912, -6.07087758,
+        -5.7389326, -5.81006153, -6.18180225, -6.00023735, -6.21922259, -6.01856939,
+        -6.52176237, -6.22756894, -6.43485284, -6.29922816, -6.501708, -6.36634489,
+        -6.66667204, -6.45177775, -6.55811221, -6.5906188, -6.56682383, -6.62064125,
+        -6.59443061, -6.63285366, -6.68491175, -6.69541035, -6.5974781, -6.64739983,
+        -6.67687621, -6.73910907, -6.7578857, -6.72785535, -6.72309734, -6.76123424,
+        -6.67039045, -6.7320537, -6.73594146, -6.74778075, -6.6890395, -6.56922507,
+        -6.52279446, -6.69970616, -6.63538608, -6.52795799, -6.71534309, -6.6620974,
+        -6.74572103, -6.69865406, -6.68634566, -6.68879468, -6.60756899, -6.65205342,
+        -6.77496086, -6.78324427, -6.75474105, -6.78491151, -6.67778655, -6.59274778,
+        -6.7075291, -6.63448385, -6.57934407, -6.68796156, -6.43142549, -6.52693545,
+        -6.60821634, -6.74302647, -6.87290217, -6.80890484, -6.67827595, -6.6603476,
+        -6.71498439, -6.6608397, -6.74891252, -6.63900668, -6.78401111, -6.86265983,
+        -6.74454433, -6.61858598, -6.57601562, -6.51464453, -6.52192414, -6.67624931,
+        -6.63910373, -6.72816021,
+    ];
+
+    const REF_NOISE_ROWS: [usize; 4] = [0, 8, 15, 24];
+    const REF_NOISE: [f32; 512] = [
+        -6.90775528, -6.90775528, -6.90775528, -6.90775528, -6.90775528, -6.90775528,
+        -6.90775528, -6.90775528, -6.90775528, -6.90775528, -6.90775528, -6.90775528,
+        -6.90775528, -6.90775528, -6.90775528, -6.90775528, -6.90775528, -6.90775528,
+        -6.90775528, -6.90775528, -6.90775528, -6.90775528, -6.90775528, -6.90775528,
+        -6.90775528, -6.90775528, -6.90775528, -6.90775528, -6.90775528, -6.90775528,
+        -6.90775528, -6.90775528, -6.90775528, -6.90775528, -6.90775528, -6.90775528,
+        -6.90775528, -6.90775528, -6.90775528, -6.90775528, -6.90775528, -6.90775528,
+        -6.90775528, -6.90775528, -6.90775528, -6.90775528, -6.90775528, -6.90775528,
+        -6.90775528, -6.90775528, -6.90775528, -6.90775528, -6.90775528, -6.90775528,
+        -6.90775528, -6.90775528, -6.90775528, -6.90775528, -6.90775528, -6.90775528,
+        -6.90775528, -6.90775528, -6.90775528, -6.90775528, -6.90775528, -6.90775528,
+        -6.90775528, -6.90775528, -6.90775528, -6.90775528, -6.90775528, -6.90775528,
+        -6.90775528, -6.90775528, -6.90775528, -6.90775528, -6.90775528, -6.90775528,
+        -6.90775528, -6.90775528, -6.90775528, -6.90775528, -6.90775528, -6.90775528,
+        -6.90775528, -6.90775528, -6.90775528, -6.90775528, -6.90775528, -6.90775528,
+        -6.90775528, -6.90775528, -6.90775528, -6.90775528, -6.90775528, -6.90775528,
+        -6.90775528, -6.90775528, -6.90775528, -6.90775528, -6.90775528, -6.90775528,
+        -6.90775528, -6.90775528, -6.90775528, -6.90775528, -6.90775528, -6.90775528,
+        -6.90775528, -6.90775528, -6.90775528, -6.90775528, -6.90775528, -6.90775528,
+        -6.90775528, -6.90775528, -6.90775528, -6.90775528, -6.90775528, -6.90775528,
+        -6.90775528, -6.90775528, -6.90775528, -6.90775528, -6.90775528, -6.90775528,
+        -6.90775528, -6.90775528, -6.90775528, 1.10368136, -0.0814687455, 1.18202222,
+        0.674086119, 1.30129663, 1.02624601, 1.4524591, 1.08196194, 1.6379237,
+        0.846763823, 1.85114717, 0.530636709, 1.92044629, 0.951061124, 1.48471737,
+        1.37009364, 0.650846822, 1.01417987, 0.22201124, 0.139279812, 1.18808022,
+        0.574680968, 0.424914831, 0.22058273, 0.113414088, 0.150786986, 0.273043266,
+        0.384116904, 0.864815001, 1.17220472, 1.38234196, 1.48726779, 1.48036444,
+        1.36981318, 0.961658482, 0.844450304, 0.811346843, 0.825339854, 0.943593318,
+        1.2384294, 1.59435408, 1.85768936, 1.96375025, 1.87575362, 1.52852439,
+        0.937431863, 1.01648087, 1.41454351, 1.38462487, 1.21851481, 1.41491013,
+        1.78540707, 2.08907059, 1.77041892, 1.63332333, 2.24898452, 2.35208938,
+        1.82497342, 1.57739994, 1.472043, 1.16403082, 1.25804223, 2.10748137,
+        2.17740656, 2.31560231, 2.13056412, 2.0669558, 1.62463526, 1.48559566,
+        1.80291051, 1.65150581, 1.2070903, 1.72513116, 2.1434589, 2.12243146,
+        1.86699741, 1.80286593, 2.24133256, 2.28873325, 2.43386085, 2.47732807,
+        2.11692482, 1.86431426, 2.26296959, 2.49227331, 2.53309138, 2.07920803,
+        1.91913626, 2.49835249, 2.25290271, 2.86032799, 2.86453007, 2.60138521,
+        2.43487509, 2.04221069, 2.24315863, 2.70849792, 2.90600308, 2.5122749,
+        2.04626767, 2.12480033, 2.87349127, 3.18223522, 2.76795935, 3.17666739,
+        2.59372021, 2.72476791, 2.72237905, 2.90858874, 3.32568608, 3.13743899,
+        2.87503886, 3.12455491, 2.84583319, 2.98574442, 2.77865769, 2.82812897,
+        3.23171531, 2.42764119, 2.89097404, 3.80546637, 3.72956156, 2.46200432,
+        2.69400862, 3.34537222, 3.68703694, 3.47869273, -6.90775528, 0.944442284,
+        -0.240577768, 0.707485446, 0.199672627, 0.950376262, 0.67536187, 1.45139987,
+        1.08090281, 1.82543814, 1.03423818, 2.02309156, 0.648418319, 1.92957094,
+        0.723801306, 1.25741677, 0.785234708, 0.177248691, 0.950747631, 1.07027545,
+        0.96658239, 1.84467192, 1.2785895, 1.17575768, 1.21716859, -0.568228925,
+        0.283787541, 0.704287979, 1.28814448, 1.46601122, 1.53164587, 1.65516025,
+        1.75704134, 1.88596485, 1.79015978, -0.232729794, 1.34874015, 1.66544841,
+        1.68353777, 1.82191276, 1.84125591, 1.44541715, 1.66734955, 2.1610481,
+        1.98555211, 0.963465872, 0.712782743, 1.23280785, 1.09228866, 1.31659001,
+        2.03394253, 2.16801097, 1.91847052, 1.83041111, 1.92029882, 1.57462854,
+        1.20577947, 1.90371749, 2.20457276, 2.0846581, 0.98126909, 1.47201995,
+        0.923291883, 1.61406793, 1.9038384, 1.90532967, 0.852779096, 1.95396745,
+        2.95504988, 2.56921351, 1.86088402, 2.17758421, 1.52289866, 1.64660618,
+        1.56663085, 1.7623093, 2.67332155, 2.26657505, 1.20436693, 2.28920396,
+        2.04821167, 1.20994831, 1.9821323, 2.39779743, 2.22081177, 3.10762213,
+        3.52155513, 3.11711862, 2.14912058, 2.3550525, 2.74247214, 2.35738456,
+        2.13669781, 2.46743167, 2.51903451, 2.83621559, 2.8998643, 2.74527928,
+        2.51664694, 2.68731401, 3.39449417, 3.088192, 2.85220926, 2.76926481,
+        2.92501036, 2.88903299, 2.1410271, 2.21367984, 2.83281509, 3.45324587,
+        3.59365658, 3.44009302, 3.05991417, 3.32672779, 2.9884109, 3.28850967,
+        3.27938096, 3.01106143, 3.1954184, 3.20814465, 2.88880901, 3.43842899,
+        3.56019078, 3.27743988, 3.32378077, 2.78003804, 2.96784355, 2.92626806,
+        -6.90775528, -2.26631649, -3.43053069, -2.15721297, -2.65964245, -1.97505696,
+        -2.24791384, -1.72195466, -2.09004977, -1.41681153, -2.2032428, -1.10317784,
+        -2.39653447, -0.979414164, -1.89243813, -1.36137054, -1.30048067, -1.92092619,
+        -1.19552141, -1.85291016, -1.99138858, -1.51244246, -2.16368066, -2.15524959,
+        -1.72651471, -1.67229377, -1.72528515, -1.6050164, -1.22832591, -1.27990656,
+        -1.33675256, -1.27773879, -1.21123841, -1.09113021, -0.831334945, -0.797652096,
+        -0.625521629, -0.459714969, -0.306204938, -0.167639677, -0.043781348, 0.0675428575,
+        0.169324755, 0.264250146, 0.353771875, 0.437662502, 0.51417416, 0.580625603,
+        0.703345605, 0.732887108, 0.701890286, 0.693898148, 0.663203598, 0.718444668,
+        0.56180894, 0.396997334, 0.341744625, 0.222713103, 0.00416862684, 0.145333058,
+        0.0583857485, 0.223517597, 0.242345051, 0.323900959, 0.251236721, 0.307995468,
+        0.0971015817, 0.0541065972, -0.121382175, -0.322781969, -0.434618284, -0.430318174,
+        -0.390338684, -0.170094731, 0.106434164, 0.354501114, 0.554151242, 0.727916742,
+        0.899566575, 1.05214408, 1.1355343, 1.09836048, 0.923068107, 0.54951349,
+        0.45663018, 0.743732003, 0.914747991, 0.900887774, 0.997810383, 1.05480506,
+        1.18897317, 1.16634209, 1.1076565, 1.1406831, 1.23330539, 1.28007508,
+        1.23651587, 1.11211923, 1.00977277, 1.05343845, 1.19540931, 1.22296633,
+        0.862892132, -0.0284080496, 0.729135883, 1.22668576, 1.23423492, 0.930077611,
+        0.437421798, 0.160740667, 0.704537754, 1.10118228, 1.2987806, 1.49952509,
+        1.70381572, 1.69405181, 1.87872772, 2.25066366, 2.23662378, 1.73064319,
+        0.890180346, 1.02435653, 1.37649953, 1.57099457, 1.63290953, 1.52072455,
+        1.41955117, 1.60426133,
+    ];
+
+    /// between the two `sin`s cannot reach the comparison.
+    fn tone(count: usize, hz: f64, amplitude: f64) -> Vec<f32> {
+        (0..count)
+            .map(|i| {
+                let phase = std::f64::consts::TAU * hz * i as f64 / SAMPLE_RATE as f64;
+                let value = (amplitude * phase.sin() + 0.5).floor() as i64;
+                value.clamp(-32768, 32767) as f32 / 32768.0
+            })
+            .collect()
+    }
+
+    /// Full-scale hashed noise over the middle half, silence either side.
+    ///
+    /// Bit-identical to `noise_burst` in `scripts/ml/gemma4_audio_parity.py`. Integer only, and
+    /// a hash rather than a ramp because a ramp is nearly one frequency.
+    fn noise_burst(count: usize) -> Vec<f32> {
+        (0..count)
+            .map(|i| {
+                if i < count / 4 || i >= 3 * count / 4 {
+                    return 0.0;
+                }
+                let mut h = (i as u32).wrapping_mul(73_856_093);
+                h ^= h >> 13;
+                h = h.wrapping_mul(1_274_126_177);
+                h ^= h >> 16;
+                ((h & 0xFFFF) as i32 - 32768) as f32 / 32768.0
+            })
+            .collect()
+    }
+
+    fn run(waveform: &[f32]) -> Vec<f32> {
+        let mut out = Vec::new();
+        let frames = LogMel::new().spectrogram(waveform, &mut out);
+        assert_eq!(frames, frame_count(waveform.len()));
+        assert_eq!(out.len(), frames * MELS);
+        out
+    }
+
+    #[test]
+    fn the_frame_count_matches_the_reference_unfold() {
+        // Every count here is what `_extract_spectrogram` actually returned, not what its
+        // formula says. 320 samples give one frame and 321 give two: the unfold is at 321, so a
+        // whole extra hop of audio is needed before the second window exists. Framing at 320
+        // would give two and three, which no comparison of values would ever notice.
+        //
+        // 480000 -> 2999 is the one the rest of the audio track rests on: it is the reference's
+        // own 30 s `max_length`, and 2999 mel frames is what becomes T = 750 after the two
+        // stride-2 convolutions downstream. It is here so that number is under test rather than
+        // checked by hand once.
+        for (length, want) in REF_FRAME_LENGTHS.iter().zip(REF_FRAME_COUNTS.iter()) {
+            assert_eq!(frame_count(*length), *want, "{length} samples");
+        }
+    }
+
+    #[test]
+    fn the_valid_row_count_is_the_frame_count_of_the_unpadded_length() {
+        // The caller's side of the contract, pinned here because this module owns the framing
+        // arithmetic even though the zeroing itself is the caller's job. Every row below came
+        // out of the reference's full `__call__` — its returned `input_features` shape and its
+        // returned `input_features_mask` — not out of `_extract_spectrogram`.
+        //
+        //     total rows = frame_count(padded)
+        //     valid rows = frame_count(min(real, 480000)), and they are a contiguous prefix
+        //
+        // So the reference's own `arange(F) * 160 + 321 - 1` indexed into a left-zero-padded
+        // attention mask is just `frame_count` twice, and a caller has no reason to port that
+        // expression. Getting the boundary wrong is silent either way: zero a valid row and the
+        // encoder loses real audio, leave a padded one live and padding leaks into it.
+        //
+        // Two of these rows are the interesting ones. `(160, 256, 1, 0)` is a frame with no
+        // valid samples at all, which is reachable for any real length under 161 — the 160-zero
+        // semicausal pad is masked out too, so a frame can exist with nothing real behind it.
+        // `(480001, 480000, 2999, 2999)` is the 30 s truncation, which is why `valid` takes the
+        // min rather than the raw length.
+        for (real, padded, total, valid) in REF_MASK_ROWS {
+            assert_eq!(frame_count(padded), total, "{real} real -> {padded} padded rows");
+            assert_eq!(frame_count(real.min(480_000)), valid, "{real} real valid rows");
+            assert!(valid <= total, "{real}: {valid} valid of {total}");
+            // The padding is in SAMPLES, not frames. Read as frames it would give 3072 here and
+            // a downstream T of 768 rather than 750.
+            assert!(padded % 128 == 0 || padded == 480_000, "{padded} is not a sample multiple");
+        }
+    }
+
+    #[test]
+    fn the_filter_bank_matches_the_reference_column_sums() {
+        // The bank on its own, with no transform in the way: if this passes and the spectrogram
+        // does not, the fault is in the window or the FFT rather than in the mel arithmetic.
+        // A column sum pins the triangle's position and its width, since the weights rise to one
+        // at the centre and the sum is how many bins the triangle reaches.
+        let bank = mel_filters();
+        let mut worst = 0.0f32;
+        for channel in 0..MELS {
+            let sum: f32 = (0..BINS)
+                .map(|bin| bank.get(bin * MELS + channel).copied().unwrap_or(0.0))
+                .sum();
+            let want = REF_FILTER_SUMS.get(channel).copied().unwrap_or(0.0);
+            worst = worst.max((sum - want).abs());
+        }
+        assert!(worst < 1e-6, "worst filter column sum deviation is {worst}");
+    }
+
+    #[test]
+    fn the_bottom_filter_is_empty_and_the_rest_are_not() {
+        // Channel 0's triangle spans 0..27.89 Hz and the bins are 31.25 Hz apart, so the only
+        // bin it reaches is bin 0, where its rising edge is exactly zero. The reference warns
+        // and keeps it, so channel 0 is `ln(1e-3)` for every input and every frame. It is the
+        // bottom of the bank and not the top, which is worth pinning: the topmost triangle is
+        // 16 bins wide and is the largest column in the bank.
+        let bank = mel_filters();
+        let empty: Vec<usize> = (0..MELS)
+            .filter(|channel| (0..BINS).all(|bin| bank.get(bin * MELS + channel) == Some(&0.0)))
+            .collect();
+        assert_eq!(empty, vec![0]);
+    }
+
+    #[test]
+    fn the_window_is_periodic_rather_than_symmetric() {
+        // `np.hanning(321)[:-1]`, which is zero at the first tap and *not* at the last. The
+        // symmetric window is zero at both ends and differs on every tap but the middle, which
+        // reads as a small broadband error rather than as an obvious break.
+        let window = hann_window();
+        assert_eq!(window.len(), FRAME_SAMPLES);
+        assert_eq!(window.first().copied(), Some(0.0));
+        assert_eq!(window.get(FRAME_SAMPLES / 2).copied(), Some(1.0));
+        let last = window.last().copied().unwrap_or(0.0);
+        assert!(last > 0.0 && last < 1e-3, "the last tap is {last}, so the window is symmetric");
+        for n in 1..FRAME_SAMPLES / 2 {
+            let (up, down) = (window.get(n).copied(), window.get(FRAME_SAMPLES - n).copied());
+            assert_eq!(up, down, "tap {n} is not mirrored");
+        }
+    }
+
+    #[test]
+    fn silence_is_the_mel_floor_everywhere() {
+        // `ln(1e-3)`, exactly: nothing here can produce a smaller mel value, so this is the
+        // bottom of the encoder's input range rather than an artefact of the floor.
+        let frames = run(&vec![0.0f32; 4000]);
+        assert_eq!(frames.len(), 24 * MELS);
+        assert!(frames.iter().all(|v| *v == MEL_FLOOR.ln()), "silence is not the floor");
+    }
+
+    #[test]
+    fn a_pure_tone_peaks_at_its_mel_channel_and_not_its_linear_one() {
+        // The single check that the window, the transform and the filter bank agree about what
+        // a frequency is. 440 Hz belongs to mel channel 24 and linear bin 7, and 3 kHz to mel 84
+        // and linear 48 — far enough apart that a bank built on the wrong scale, or a transform
+        // whose bins are half the width they should be, lands somewhere else entirely rather
+        // than one channel off. Both peaks come from the reference.
+        for (hz, want) in REF_TONE_PEAKS {
+            let frames = run(&tone(8000, hz as f64, 8192.0));
+            let frame = frames.get(10 * MELS..11 * MELS).unwrap_or(&[]);
+            let peak = frame
+                .iter()
+                .enumerate()
+                .fold((0usize, f32::NEG_INFINITY), |best, (c, v)| {
+                    if *v > best.1 {
+                        (c, *v)
+                    } else {
+                        best
+                    }
+                })
+                .0;
+            assert_eq!(peak, want, "{hz} Hz peaks at channel {peak}");
+            let linear = (hz / 8000.0 * (MELS - 1) as f32).round() as usize;
+            assert!(peak.abs_diff(linear) > 10, "{hz} Hz cannot tell mel from linear");
+        }
+    }
+
+    #[test]
+    fn the_spectrogram_matches_the_reference_extractor() {
+        // `Gemma4AudioFeatureExtractor._extract_spectrogram` itself, out of site-packages, over
+        // signals both sides generate from the same integer recipe. What is left in the residual
+        // is this module's f32 transform against numpy's f64 one.
+        //
+        // The log is why there are two bounds. `ln(mel + 1e-3)` near the floor divides an
+        // absolute error by about 1e-3, so a channel carrying nothing reports a thousand times
+        // the error of one carrying signal, and the worst *log* deviation says more about the
+        // floor than about the transform. The second bound undoes that: it exponentiates both
+        // sides back to mel and scales by the loudest channel in the same frame, which is the
+        // f32 transform's own relative error and the number that would move if anything here
+        // were actually wrong. Both are measured rather than guessed — tighten either if it
+        // comes in lower. As of writing: 7.60e-4 of log, at the tone's channel 111, where the
+        // reference is -6.800 and the mel value behind it is 1.1e-4; and 2.24e-7 of the frame
+        // peak, at the tone's own peak channel, which is under two ulps of f32.
+        let mut worst = (0.0f32, "", 0usize, 0usize, 0.0f32);
+        let mut worst_mel = (0.0f32, "", 0usize, 0usize, 0.0f32);
+        for (case, waveform, rows, want) in [
+            ("tone", tone(8000, 440.0, 8192.0), REF_TONE_ROWS.as_slice(), REF_TONE.as_slice()),
+            ("noise", noise_burst(5000), REF_NOISE_ROWS.as_slice(), REF_NOISE.as_slice()),
+        ] {
+            let frames = run(&waveform);
+            for (probe, row) in rows.iter().enumerate() {
+                let reference = want.get(probe * MELS..probe * MELS + MELS).unwrap_or(&[]);
+                let peak = reference.iter().copied().fold(f32::NEG_INFINITY, f32::max).exp();
+                for (channel, want) in reference.iter().enumerate() {
+                    let got = frames.get(row * MELS + channel).copied().unwrap_or(0.0);
+                    let off = (got - want).abs();
+                    if off > worst.0 {
+                        worst = (off, case, *row, channel, *want);
+                    }
+                    let mel = (got.exp() - want.exp()).abs() / peak;
+                    if mel > worst_mel.0 {
+                        worst_mel = (mel, case, *row, channel, *want);
+                    }
+                }
+            }
+        }
+        assert!(worst.0 < 1e-3, "worst log-mel deviation is {worst:?}");
+        assert!(worst_mel.0 < 5e-7, "worst mel deviation against the frame peak is {worst_mel:?}");
+    }
+
+    #[test]
+    fn the_reference_signals_exercise_the_range_rather_than_the_floor() {
+        // A comparison of two floors passes while measuring nothing. The tone is spectrally
+        // sparse on purpose, so most of its 128 channels *are* at the floor and the bar is that
+        // enough of them are not; the noise burst has to be almost entirely above it.
+        for (want, above) in [(REF_TONE.as_slice(), 100), (REF_NOISE.as_slice(), 300)] {
+            let low = want.iter().copied().fold(f32::INFINITY, f32::min);
+            let high = want.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+            assert_eq!(low, MEL_FLOOR.ln(), "the empty channel should sit at the floor");
+            assert!(high > 2.0, "the reference only reaches {high}");
+            let live = want.iter().filter(|v| **v > MEL_FLOOR.ln()).count();
+            assert!(live >= above, "only {live} of {} values carry signal", want.len());
+        }
+    }
+}

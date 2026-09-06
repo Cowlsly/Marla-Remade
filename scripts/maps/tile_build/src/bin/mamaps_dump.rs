@@ -225,10 +225,17 @@ fn run(
                     for (fi, feature) in layer.features.iter().enumerate() {
                         for (pi, part) in layer.parts_of(feature).iter().enumerate() {
                             let pts = layer.points(part);
-                            // Transit colour rides along when set: the spot-check for coloured
-                            // lines (empty for every other layer).
+                            // Transit colour and lane inputs ride along when set: the
+                            // spot-check for coloured lines and for the parallel fan-out
+                            // (both empty for every other layer).
                             let color = if feature.transit_color != 0 {
-                                format!("\ttcolor={:06X}", feature.transit_color)
+                                format!(
+                                    "\ttcolor={:06X}\ttordinal={}\ttlanes={}\tttaper={}",
+                                    feature.transit_color,
+                                    feature.transit_ordinal,
+                                    feature.transit_lanes,
+                                    feature.transit_taper,
+                                )
                             } else {
                                 String::new()
                             };

@@ -61,6 +61,7 @@ const LINE_VERT: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/line.vert.spv
 const LINE_FRAG: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/line.frag.spv"));
 const SYMBOL_VERT: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/symbol.vert.spv"));
 const SYMBOL_FRAG: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/symbol.frag.spv"));
+const SPRITE_FRAG: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/sprite.frag.spv"));
 
 pub struct Pipelines {
     pub layout: vk::PipelineLayout,
@@ -69,6 +70,12 @@ pub struct Pipelines {
     pub fill: vk::Pipeline,
     pub line: vk::Pipeline,
     pub symbol: vk::Pipeline,
+    /// POI icons. Same vertex format, same push block and the same
+    /// [`symbol_layout`](Self::symbol_layout) as [`symbol`](Self::symbol) — only the
+    /// fragment shader differs, because an icon is a picture and a glyph is a distance
+    /// field. Sharing the layout is what lets the renderer swap atlases with a descriptor
+    /// bind instead of a second pipeline layout.
+    pub sprite: vk::Pipeline,
 }
 
 impl Pipelines {
@@ -81,6 +88,7 @@ impl Pipelines {
     pub unsafe fn new(
         device: &ash::Device,
         render_pass: vk::RenderPass,
+        samples: vk::SampleCountFlags,
         atlas_layout: Option<vk::DescriptorSetLayout>,
     ) -> Result<Pipelines, String> {
         let push_range = vk::PushConstantRange::default()
@@ -99,6 +107,7 @@ impl Pipelines {
         let line_frag = shader_module(device, LINE_FRAG)?;
         let symbol_vert = shader_module(device, SYMBOL_VERT)?;
         let symbol_frag = shader_module(device, SYMBOL_FRAG)?;
+        let sprite_frag = shader_module(device, SPRITE_FRAG)?;
 
         let fill_attributes = [vk::VertexInputAttributeDescription::default()
             .location(0)
@@ -145,6 +154,7 @@ impl Pipelines {
             device,
             layout,
             render_pass,
+            samples,
             fill_vert,
             fill_frag,
             (fill::FLOATS_PER_VERTEX * 4) as u32,
@@ -154,6 +164,7 @@ impl Pipelines {
             device,
             layout,
             render_pass,
+            samples,
             line_vert,
             line_frag,
             (stroke::FLOATS_PER_VERTEX * 4) as u32,
@@ -161,8 +172,8 @@ impl Pipelines {
         );
 
         // The symbol pipeline needs the atlas descriptor set, so it gets its own
-        // layout: same push-constant range plus set 0. M2's sprite pipeline reuses
-        // this layout with a second set from the same pool.
+        // layout: same push-constant range plus set 0. The sprite pipeline reuses this
+        // layout with a second set from the same pool.
         let symbol_layout = match atlas_layout {
             Some(set_layout) => {
                 let symbol_layout_info = vk::PipelineLayoutCreateInfo::default()
@@ -179,6 +190,7 @@ impl Pipelines {
                 device.destroy_shader_module(line_frag, None);
                 device.destroy_shader_module(symbol_vert, None);
                 device.destroy_shader_module(symbol_frag, None);
+                device.destroy_shader_module(sprite_frag, None);
                 device.destroy_pipeline_layout(layout, None);
                 return Err("symbol pipeline needs an atlas descriptor set layout".into());
             }
@@ -187,8 +199,19 @@ impl Pipelines {
             device,
             symbol_layout,
             render_pass,
+            samples,
             symbol_vert,
             symbol_frag,
+            (symbol::FLOATS_PER_VERTEX * 4) as u32,
+            &symbol_attributes,
+        );
+        let sprite = build(
+            device,
+            symbol_layout,
+            render_pass,
+            samples,
+            symbol_vert,
+            sprite_frag,
             (symbol::FLOATS_PER_VERTEX * 4) as u32,
             &symbol_attributes,
         );
@@ -200,20 +223,15 @@ impl Pipelines {
         device.destroy_shader_module(line_frag, None);
         device.destroy_shader_module(symbol_vert, None);
         device.destroy_shader_module(symbol_frag, None);
+        device.destroy_shader_module(sprite_frag, None);
 
-        match (fill, line, symbol) {
-            (Ok(fill), Ok(line), Ok(symbol)) => {
-                Ok(Pipelines { layout, symbol_layout, fill, line, symbol })
+        match (fill, line, symbol, sprite) {
+            (Ok(fill), Ok(line), Ok(symbol), Ok(sprite)) => {
+                Ok(Pipelines { layout, symbol_layout, fill, line, symbol, sprite })
             }
-            (fill, line, symbol) => {
-                if let Ok(p) = fill {
-                    device.destroy_pipeline(p, None);
-                }
-                if let Ok(p) = line {
-                    device.destroy_pipeline(p, None);
-                }
-                if let Ok(p) = symbol {
-                    device.destroy_pipeline(p, None);
+            (fill, line, symbol, sprite) => {
+                for created in [fill, line, symbol, sprite].into_iter().flatten() {
+                    device.destroy_pipeline(created, None);
                 }
                 device.destroy_pipeline_layout(symbol_layout, None);
                 device.destroy_pipeline_layout(layout, None);
@@ -229,6 +247,7 @@ impl Pipelines {
         device.destroy_pipeline(self.fill, None);
         device.destroy_pipeline(self.line, None);
         device.destroy_pipeline(self.symbol, None);
+        device.destroy_pipeline(self.sprite, None);
         device.destroy_pipeline_layout(self.symbol_layout, None);
         device.destroy_pipeline_layout(self.layout, None);
     }
@@ -238,6 +257,7 @@ unsafe fn build(
     device: &ash::Device,
     layout: vk::PipelineLayout,
     render_pass: vk::RenderPass,
+    samples: vk::SampleCountFlags,
     vertex: vk::ShaderModule,
     fragment: vk::ShaderModule,
     stride: u32,
@@ -279,8 +299,10 @@ unsafe fn build(
         .cull_mode(vk::CullModeFlags::NONE)
         .front_face(vk::FrontFace::COUNTER_CLOCKWISE)
         .line_width(1.0);
-    let multisample = vk::PipelineMultisampleStateCreateInfo::default()
-        .rasterization_samples(vk::SampleCountFlags::TYPE_1);
+    // Must match the render pass's colour attachment, which `swapchain` chooses from
+    // what the device supports.
+    let multisample =
+        vk::PipelineMultisampleStateCreateInfo::default().rasterization_samples(samples);
 
     // Straight src-alpha over one-minus-src-alpha. Layer order does the rest.
     let blend_attachment = vk::PipelineColorBlendAttachmentState::default()

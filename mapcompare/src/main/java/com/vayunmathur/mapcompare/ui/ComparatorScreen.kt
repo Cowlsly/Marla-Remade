@@ -25,9 +25,11 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import com.vayunmathur.library.map.CameraPosition
 import com.vayunmathur.library.map.GeoPoint
+import com.vayunmathur.library.map.LayerOptions
 import com.vayunmathur.library.map.MapStyle
 import com.vayunmathur.library.map.VectorMap
 import com.vayunmathur.library.map.rememberCameraState
+import com.vayunmathur.library.map.MapOptions as VectorMapOptions
 import com.vayunmathur.library.ui.AppScaffold
 import com.vayunmathur.library.ui.Button
 import com.vayunmathur.library.ui.FilterChip
@@ -58,6 +60,12 @@ fun ComparatorScreen(archivePath: String? = null, pickProbe: Boolean = false) {
 
     var mapStyleJson by remember { mutableStateOf<String?>(null) }
     var styleError by remember { mutableStateOf<String?>(null) }
+
+    // The optional layers default off, so without these there is nothing to compare against
+    // the reference's `pois`/rail layers. Toggling re-tessellates the resident tiles in place,
+    // which is the other half of what these chips are here to exercise.
+    var poi by remember { mutableStateOf(false) }
+    var transit by remember { mutableStateOf(false) }
 
     LaunchedEffect(Unit) {
         try {
@@ -93,6 +101,22 @@ fun ComparatorScreen(archivePath: String? = null, pickProbe: Boolean = false) {
                 }
             }
 
+            Row(
+                Modifier.fillMaxWidth().padding(horizontal = 8.dp).padding(bottom = 6.dp),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                FilterChip(
+                    selected = poi,
+                    onClick = { poi = !poi },
+                    label = { Text("POI") },
+                )
+                FilterChip(
+                    selected = transit,
+                    onClick = { transit = !transit },
+                    label = { Text("Transit") },
+                )
+            }
+
             Row(Modifier.fillMaxWidth().height(28.dp)) {
                 Box(
                     Modifier.weight(1f).fillMaxSize().background(Color(0xFFE9E7E2)),
@@ -110,6 +134,9 @@ fun ComparatorScreen(archivePath: String? = null, pickProbe: Boolean = false) {
                     VectorMap(
                         cameraState = vulkanCamera,
                         style = MapStyle.Standard,
+                        options = VectorMapOptions(
+                            layerOptions = LayerOptions(poi = poi, transit = transit),
+                        ),
                         archivePath = archivePath,
                         modifier = Modifier.fillMaxSize(),
                         // TEMPORARY task-17 pick probe (remove with pickProbe flag):

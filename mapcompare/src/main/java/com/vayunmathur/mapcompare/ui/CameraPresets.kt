@@ -39,4 +39,13 @@ val PRESETS: List<CameraPreset> = listOf(
     CameraPreset("Tokyo wide road z16", 139.76, 35.68, 16.0),
     CameraPreset("Tokyo wide road z17", 139.76, 35.68, 17.0),
     CameraPreset("Tokyo wide road z18", 139.76, 35.68, 18.0),
+    // Transit corridor lanes: the three corridors the exporter's lane assignment is judged
+    // on, plus the zooms the lane count steps over. Market Street is ten services, Oakland is
+    // BART's five, San Jose is three VTA lines; how many lanes each draws depends on the zoom.
+    CameraPreset("Market St z9", -122.4080, 37.7850, 9.0),
+    CameraPreset("Market St z11", -122.4080, 37.7850, 11.0),
+    CameraPreset("Market St z13", -122.4080, 37.7850, 13.0),
+    CameraPreset("Market St z17", -122.4080, 37.7850, 17.0),
+    CameraPreset("Oakland z16", -122.2715, 37.8055, 16.0),
+    CameraPreset("San Jose z16", -121.8890, 37.3355, 16.0),
 )

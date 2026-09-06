@@ -32,7 +32,6 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalWindowInfo
 import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.unit.DpOffset
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.vayunmathur.library.util.NavBackStack
@@ -48,28 +47,22 @@ import kotlinx.coroutines.flow.conflate
 import kotlinx.coroutines.flow.filterNotNull
 import kotlinx.coroutines.withContext
 import androidx.compose.runtime.snapshotFlow
-import com.vayunmathur.library.map.CameraPosition
 import com.vayunmathur.library.map.GeoPoint
 import com.vayunmathur.library.map.VectorMap
 import com.vayunmathur.library.map.rememberCameraState
 
 // Helper class to hold cluster data
 data class MapCluster(
-    val position: DpOffset,
+    /**
+     * Geographic, not screen space. The marker layer places itself from the live camera, so
+     * a cluster's position no longer goes stale between re-clustering passes and there is
+     * nothing to re-project per frame.
+     */
+    val position: GeoPoint,
     val coverPhoto: Photo,
     val allPhotos: List<Photo>,
     val count: Int,
 )
-
-/**
- * The inputs [MapPage]'s per-frame re-projection last ran for, so an unchanged
- * frame can be skipped. Deliberately not Compose state: `onFrame` runs every
- * frame, and a state write there would mean a recomposition every frame.
- */
-private class ProjectionMemo {
-    var position: CameraPosition? = null
-    var source: List<MapCluster>? = null
-}
 
 /** Minimum gap between re-clustering passes while the camera keeps moving. */
 private const val CLUSTER_THROTTLE_MS = 200L
@@ -92,11 +85,9 @@ fun MapPage(
 
     // Clusters managed by VM (CPU-bound generation on Dispatchers.Default)
     val generatedClusters by photoMapViewModel.generatedClusters.collectAsState()
-    var clusters: List<MapCluster> by remember { mutableStateOf(listOf()) }
     var selectedCluster: MapCluster? by remember { mutableStateOf(null) }
 
     val dpsize = LocalWindowInfo.current.containerDpSize
-    val projectionMemo = remember { ProjectionMemo() }
 
     // Driven by camera movement rather than a fixed 200 ms tick, so an idle map
     // does no work. This also removes the old `?: continue` on a null projection,
@@ -113,12 +104,11 @@ fun MapPage(
             .collect { projection ->
                 val rawLocations = withContext(Dispatchers.Default) {
                     positions.mapNotNull { (gps, photo) ->
-                        val dpOffset = projection.screenLocationFromPosition(
-                            GeoPoint(gps.second, gps.first)
-                        )
+                        val geo = GeoPoint(gps.second, gps.first)
+                        val dpOffset = projection.screenLocationFromPosition(geo)
                         val visible = dpOffset.x.value > 0 && dpOffset.y.value > 0 &&
                             dpOffset.x < dpsize.width && dpOffset.y < dpsize.height
-                        if (visible) dpOffset to photo else null
+                        if (visible) Triple(dpOffset, geo, photo) else null
                     }
                 }
                 photoMapViewModel.regenerateClusters(rawLocations, 50.dp)
@@ -142,90 +132,59 @@ fun MapPage(
                 onMapClick = {
                     selectedCluster = null
                 },
-                onFrame = {
-                    val projection = cameraState.projection
-                    val position = cameraState.position
-
-                    // FAST PATH: re-project existing clusters so markers don't
-                    // drift when panning/zooming between re-clustering intervals.
-                    // Gated on the inputs actually changing: this runs every frame,
-                    // and assigning `clusters` unconditionally was a state write —
-                    // so a recomposition — on every frame of a still map.
-                    if (projection != null &&
-                        (projectionMemo.position != position || projectionMemo.source !== generatedClusters)
-                    ) {
-                        projectionMemo.position = position
-                        projectionMemo.source = generatedClusters
-
-                        val updatedClusters = generatedClusters.mapNotNull { cluster ->
-                            val lat = cluster.coverPhoto.lat
-                            val long = cluster.coverPhoto.long
-                            if (lat == null || long == null) return@mapNotNull null
-                            cluster.copy(
-                                position = projection.screenLocationFromPosition(GeoPoint(long, lat))
-                            )
-                        }
-                        clusters = updatedClusters
-
-                        // Lifted out of the mapping pass, which mutated it while
-                        // iterating and matched on a value that includes the very
-                        // position being replaced.
-                        selectedCluster = selectedCluster?.let { selected ->
-                            updatedClusters.find { it.coverPhoto.id == selected.coverPhoto.id }
-                        }
-                    }
-                }
-            )
-
-            // Layer: Markers
-            Box(Modifier.fillMaxSize()) {
-                clusters.forEach { cluster ->
-                    Box(
-                        Modifier
-                            .offset(cluster.position.x, cluster.position.y)
-                            .size(50.dp)
-                            .background(Color.White, shape = MaterialTheme.shapes.small)
-                            .padding(2.dp)
-                    ) {
-                        ImageLoader.PhotoItem(cluster.coverPhoto, Modifier.fillMaxSize()) {
-                            selectedCluster = cluster
-                        }
-                        if (cluster.count > 1) {
-                            Box(
-                                modifier = Modifier
-                                    .align(Alignment.TopEnd)
-                                    .offset(x = 8.dp, y = (-8).dp)
-                                    .size(22.dp)
-                                    .background(Color.Red, CircleShape)
-                                    .border(1.dp, Color.White, CircleShape),
-                                contentAlignment = Alignment.Center
-                            ) {
-                                Text(
-                                    text = cluster.count.toString(),
-                                    color = Color.White,
-                                    fontSize = 10.sp,
-                                    fontWeight = FontWeight.Bold
-                                )
-                            }
-                        }
-                    }
-                }
-                selectedCluster?.let { selectedCluster ->
-                    Surface(Modifier.align(Alignment.BottomCenter), color = MaterialTheme.colorScheme.background) {
-                        LazyRow(
-                            Modifier.height(100.dp).padding(vertical = 8.dp).fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                // Chips are centre-anchored, which is a deliberate 25 dp shift: this used to
+                // offset a 50 dp chip by the raw projected point, so every cluster was drawn
+                // down and right of the place it described.
+                generatedClusters.forEach { cluster ->
+                    MapMarker(cluster.position) {
+                        Box(
+                            Modifier
+                                .size(50.dp)
+                                .background(Color.White, shape = MaterialTheme.shapes.small)
+                                .padding(2.dp)
                         ) {
-                            item {
-                                Spacer(Modifier.padding(8.dp))
+                            ImageLoader.PhotoItem(cluster.coverPhoto, Modifier.fillMaxSize()) {
+                                selectedCluster = cluster
                             }
-                            items(selectedCluster.allPhotos, key = { it.id }, contentType = { "photo_thumbnail" }) {
-                                ImageLoader.PhotoItem(it, Modifier.fillMaxHeight().aspectRatio(1f)) {
-                                    backStack.add(Route.PhotoPage(it.id, selectedCluster.allPhotos))
+                            if (cluster.count > 1) {
+                                Box(
+                                    modifier = Modifier
+                                        .align(Alignment.TopEnd)
+                                        .offset(x = 8.dp, y = (-8).dp)
+                                        .size(22.dp)
+                                        .background(Color.Red, CircleShape)
+                                        .border(1.dp, Color.White, CircleShape),
+                                    contentAlignment = Alignment.Center
+                                ) {
+                                    Text(
+                                        text = cluster.count.toString(),
+                                        color = Color.White,
+                                        fontSize = 10.sp,
+                                        fontWeight = FontWeight.Bold
+                                    )
                                 }
                             }
-                            item {
-                                Spacer(Modifier.padding(8.dp))
+                        }
+                    }
+                }
+            }
+
+            selectedCluster?.let { selectedCluster ->
+                Surface(Modifier.align(Alignment.BottomCenter), color = MaterialTheme.colorScheme.background) {
+                    LazyRow(
+                        Modifier.height(100.dp).padding(vertical = 8.dp).fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        item {
+                            Spacer(Modifier.padding(8.dp))
+                        }
+                        items(selectedCluster.allPhotos, key = { it.id }, contentType = { "photo_thumbnail" }) {
+                            ImageLoader.PhotoItem(it, Modifier.fillMaxHeight().aspectRatio(1f)) {
+                                backStack.add(Route.PhotoPage(it.id, selectedCluster.allPhotos))
                             }
+                        }
+                        item {
+                            Spacer(Modifier.padding(8.dp))
                         }
                     }
                 }

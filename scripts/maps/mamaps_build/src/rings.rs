@@ -380,6 +380,9 @@ mod tests {
             parts_offset: 0,
             part_count: rings.len() as u32,
             transit_color: 0,
+            transit_ordinal: 0,
+            transit_lanes: 0,
+            transit_taper: 0,
         });
         for (index, ring) in rings.iter().enumerate() {
             layer.parts.push(Part {
@@ -502,6 +505,9 @@ mod tests {
             parts_offset: 0,
             part_count: 1,
             transit_color: 0,
+            transit_ordinal: 0,
+            transit_lanes: 0,
+            transit_taper: 0,
         });
         layer.parts.push(Part { coord_start: 0, point_count: 3, winding: WINDING_OUTER });
         layer.coords = vec![(0, 0), (50, 0), (50, 50)];
@@ -577,7 +583,7 @@ mod tests {
                     // A hole, wound the same way as its exterior, which stage C has to reverse.
                     ring(-120.2, 35.2, 0.3),
                 ]]),
-                name: None, transit_color: 0,
+                name: None, transit_color: 0, transit_ordinal: 0, transit_lanes: 0, transit_taper: 0,
             },
             crate::extract::Feature {
                 class: Class::area(dict::LAYER_WATER, crate::schema::kind("water"), 0),
@@ -586,7 +592,7 @@ mod tests {
                     // A hole nowhere near its exterior, which stage C has to drop.
                     ring(-100.0, 20.0, 0.1),
                 ]]),
-                name: None, transit_color: 0,
+                name: None, transit_color: 0, transit_ordinal: 0, transit_lanes: 0, transit_taper: 0,
             },
         ];
         let settings = crate::tiler::Settings {

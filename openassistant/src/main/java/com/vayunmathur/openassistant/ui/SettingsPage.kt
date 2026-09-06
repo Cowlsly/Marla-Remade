@@ -33,31 +33,12 @@ fun SettingsPage(backStack: NavBackStack<Route>, viewModel: AssistantViewModel) 
     val scope = rememberCoroutineScope()
     val ds = remember(context) { DataStoreUtils.getInstance(context) }
 
-    var systemPrompt by remember {
-        mutableStateOf(
-            ds.getString(InferenceService.KEY_SYSTEM_PROMPT)
-                ?: InferenceService.DEFAULT_SYSTEM_PROMPT
-        )
-    }
 
     SettingsScreen(
-        state = SettingsUiState(memories = memories, systemPrompt = systemPrompt),
+        state = SettingsUiState(memories = memories),
         actions = object : SettingsActions {
             override fun back() = backStack.pop()
             override fun deleteMemory(memory: Memory) = viewModel.deleteMemory(memory)
-            override fun setSystemPrompt(prompt: String) {
-                systemPrompt = prompt
-                scope.launch { ds.setString(InferenceService.KEY_SYSTEM_PROMPT, prompt) }
-            }
-            override fun resetSystemPrompt() {
-                systemPrompt = InferenceService.DEFAULT_SYSTEM_PROMPT
-                scope.launch {
-                    ds.setString(
-                        InferenceService.KEY_SYSTEM_PROMPT,
-                        InferenceService.DEFAULT_SYSTEM_PROMPT
-                    )
-                }
-            }
         },
         // Passed in rather than built inside the screen: the backup buttons need the
         // database passphrase, which only exists on a real device.
@@ -92,37 +73,6 @@ fun SettingsScreen(
         actions = backupButtons,
         scrollBehavior = appBarScrollBehavior(),
     ) {
-            item {
-                Text(
-                    text = stringResource(R.string.system_prompt),
-                    style = MaterialTheme.typography.titleLarge,
-                    fontWeight = FontWeight.Bold,
-                    modifier = Modifier.padding(bottom = 8.dp)
-                )
-            }
-            item {
-                OutlinedTextField(
-                    value = state.systemPrompt,
-                    onValueChange = { actions.setSystemPrompt(it) },
-                    modifier = Modifier.fillMaxWidth(),
-                    label = { Text(stringResource(R.string.system_prompt)) },
-                    minLines = 5,
-                    maxLines = 12,
-                )
-            }
-            item {
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.End
-                ) {
-                    TextButton(
-                        onClick = { actions.resetSystemPrompt() },
-                        enabled = state.systemPrompt != InferenceService.DEFAULT_SYSTEM_PROMPT
-                    ) {
-                        Text(stringResource(R.string.reset_to_default))
-                    }
-                }
-            }
             item {
                 Text(
                     text = stringResource(R.string.memories),

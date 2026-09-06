@@ -40,20 +40,28 @@ void main() {
     // The tensor is `[C, 1, W]`, so this is (channel, 0, position).
     uint channel, unused_row, position;
     unpack(index, channel, unused_row, position);
-
     uint head_dim = p.in_c;
-    uint half_dim = head_dim / 2u;
+    // Independent rotary blocks inside one head. 1 is ordinary RoPE and reduces every line below
+    // to what it was; 2 is the vision tower's row-and-column pair. See `Push::rope_axes`.
+    uint axes = max(p.rope_axes, 1u);
+    uint block = head_dim / axes;
+    uint half_dim = block / 2u;
     uint within = channel % head_dim;
-    uint frequency = within % half_dim;
-    // The partner channel is `half_dim` away, in whichever direction stays inside the head.
-    bool lower = within < half_dim;
+    // Which block of the head this channel is in, and where inside it.
+    uint sub = within / block;
+    uint local = within % block;
+    uint frequency = local % half_dim;
+    // The partner is `half_dim` away **within the block**, so a rotation never crosses from the
+    // row half into the column half - which would mix two positions into one pair.
+    bool lower = local < half_dim;
     uint partner = lower ? channel + half_dim : channel - half_dim;
-
-    float angle_cos = float(arena[p.in1 + frequency * p.out_w + position]);
-    float angle_sin = float(arena[p.in1 + (half_dim + frequency) * p.out_w + position]);
+    // Each block reads its own slice of the angle table: cosines then sines, per block.
+    uint angle_base = sub * block;
+    float angle_cos = float(arena[p.in1 + (angle_base + frequency) * p.out_w + position]);
+    float angle_sin =
+        float(arena[p.in1 + (angle_base + half_dim + frequency) * p.out_w + position]);
     float self = float(arena[p.in0 + channel * p.out_w + position]);
     float other = float(arena[p.in0 + partner * p.out_w + position]);
-
     // The lower half subtracts its partner's sine term; the upper half adds its own.
     float rotated = lower ? -other * angle_sin : other * angle_sin;
     arena[p.out_at + index] = float16_t(self * angle_cos + rotated);

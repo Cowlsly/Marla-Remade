@@ -64,6 +64,9 @@ fn tile(z: u8, x: u64, _y: u64) -> Body {
         parts_offset: 0,
         part_count: 1,
         transit_color: 0,
+        transit_ordinal: 0,
+        transit_lanes: 0,
+        transit_taper: 0,
     });
     earth.parts.push(Part { coord_start: 0, point_count: 4, winding: WINDING_OUTER });
     let e = DEFAULT_EXTENT as i16;
@@ -80,6 +83,9 @@ fn tile(z: u8, x: u64, _y: u64) -> Body {
         parts_offset: 0,
         part_count: 2,
         transit_color: 0,
+        transit_ordinal: 0,
+        transit_lanes: 0,
+        transit_taper: 0,
     });
     water.parts.push(Part { coord_start: 0, point_count: 4, winding: WINDING_OUTER });
     water.parts.push(Part { coord_start: 4, point_count: 4, winding: WINDING_HOLE });
@@ -106,6 +112,9 @@ fn tile(z: u8, x: u64, _y: u64) -> Body {
             parts_offset: 0,
             part_count: 1,
             transit_color: 0,
+            transit_ordinal: 0,
+            transit_lanes: 0,
+            transit_taper: 0,
         });
         roads.parts.push(Part { coord_start: 0, point_count: 3, winding: WINDING_OUTER });
         roads.coords = vec![(0, e / 2), (e / 2, e / 2 + 64), (e, e / 2)];

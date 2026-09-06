@@ -9,6 +9,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.text.BasicText
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Size
@@ -36,14 +37,14 @@ import kotlin.math.roundToInt
  *
  * ## What is and is not finished
  *
- * Fills, lines and casings, in light and dark, with pan, pinch, double-tap and quick zoom.
- * There are deliberately **no labels** — text is Phase 7 and realistically 40–60% of the
- * total effort — and the style is a ~14-layer stand-in rather than an authored one.
+ * Fills, lines and casings, in light and dark, with pan, pinch, double-tap and quick zoom,
+ * plus optional POI and transit layers and a native pick for tile-baked place labels. The
+ * style is a ~14-layer stand-in rather than an authored one.
  *
- * It has also **not been verified on hardware.** The whole CPU pipeline is unit-tested, but
- * no frame has been presented on a real GPU. If Vulkan fails to initialise the map shows
- * its background colour rather than crashing, and everything that failed is in logcat under
- * `MapRenderer`. Validation layers are on in debug builds.
+ * If Vulkan fails to initialise the map shows its background colour rather than crashing,
+ * and everything that failed is in logcat under `MapRenderer`. Hosts that want to say so can
+ * pass [fallback]; `:library:ui` has a themed message for it. Validation layers are on in
+ * debug builds.
  *
  * @param style [MapStyle.Standard] or [MapStyle.Muted] — muted for hosts drawing their own
  *   data on top, which is what `weather` needs.
@@ -51,8 +52,17 @@ import kotlin.math.roundToInt
  *   are `maps`' own contrast-checked `BasemapPalette`, so the apps agree with each other.
  *   Switching is free: only a push constant changes.
  * @param imageOverlay a georeferenced translucent image drawn over the basemap.
- * @param onFrame called after each presented frame — a real per-frame hook, which is what
- *   `photos` needs and MapLibre cannot offer.
+ * @param onFrame called after each presented frame.
+ *
+ *   Kept for `library/map/src/androidTest/.../BasemapScreenshotTest.kt`, which counts frames
+ *   to prove the renderer presented anything at all — the only way to observe that, since
+ *   Vulkan needs a real GPU. It used to *also* fire from a `LaunchedEffect` on the camera,
+ *   so that `photos` could re-project overlays on a pan that drew no new tiles; [MapMarker]
+ *   makes that unnecessary and nothing else wanted the second signal, so this now means
+ *   what its name says and nothing more.
+ * @param fallback drawn over the surface when the renderer could not be brought up, so a
+ *   failure is not a silent flat rectangle. Defaults to drawing nothing, which is the old
+ *   behaviour. `:library:ui` has a themed, translated message for this.
  */
 @Composable
 fun VectorMap(
@@ -73,15 +83,15 @@ fun VectorMap(
     onMapClickWithScreen: ((MapClick) -> Unit)? = null,
     onFrame: () -> Unit = {},
     archivePath: String? = null,
-    content: @Composable () -> Unit = {},
+    fallback: @Composable (MapRenderState.Unavailable) -> Unit = {},
+    content: @Composable MapScope.() -> Unit = {},
 ) {
     val density = LocalDensity.current.density
 
-    // A camera move has to reach a consumer that reprojects overlays even on a frame that
-    // drew nothing new: a pan with no new tiles still moves every pin.
-    LaunchedEffect(cameraState.position, cameraState.viewportDp) {
-        if (cameraState.viewportDp != null) onFrame()
-    }
+    // Remembered and @Stable so the content lambda gets the same receiver across
+    // recompositions. A fresh receiver every time would make large content subtrees —
+    // `maps`' MapLayers is one — permanently unskippable.
+    val mapScope = remember(cameraState) { MapScope(cameraState) }
 
     Box(
         modifier
@@ -101,16 +111,18 @@ fun VectorMap(
             cameraState = cameraState,
             darkBasemap = darkBasemap,
             muted = style == MapStyle.Muted,
+            layerOptions = options.layerOptions,
             archivePath = archivePath,
             modifier = Modifier.fillMaxSize(),
             onFrame = onFrame,
+            fallback = fallback,
         )
 
         if (imageOverlay != null) {
             GeoreferencedOverlay(imageOverlay, cameraState)
         }
 
-        content()
+        mapScope.content()
     }
 }
 

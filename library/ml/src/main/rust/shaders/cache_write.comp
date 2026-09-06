@@ -36,8 +36,19 @@ void main() {
     // A cache that has run out of room drops the position rather than corrupting whatever the
     // arena put after it. The caller is expected to stop before this; a shader cannot report it,
     // so the safe failure is the silent one rather than an out-of-bounds store.
-    if (step_params.prefix >= p.in_h) {
+    // `p.group` is the positions being written: 0 or 1 is the decode step's single row, more is
+    // a prefill's whole prompt.
+    //
+    // The two need different addressing, and this is the one place the layouts disagree. A cache
+    // is position-major - position `t`, channel `c` at `t * width + c`. A prefill's K and V are
+    // `[width, 1, T]`, so they are **channel**-major: `c * T + t`. For one position the two
+    // coincide and a reshape is free; for more it is a transpose, and doing it here costs one
+    // divide rather than a whole extra op and a second pass over the arena.
+    uint positions = max(p.group, 1u);
+    uint channel = index / positions;
+    uint position = index % positions;
+    if (step_params.prefix + position >= p.in_h) {
         return;
     }
-    arena[p.out_at + step_params.prefix * p.in_c + index] = arena[p.in0 + index];
+    arena[p.out_at + (step_params.prefix + position) * p.in_c + channel] = arena[p.in0 + index];
 }

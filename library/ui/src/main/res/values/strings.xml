@@ -128,4 +128,6 @@
     <string name="game_completed">Completed</string>
     <!-- Shared library: UI - DailyChallengeCard: title of the card opening today's challenge. Noun phrase -->
     <string name="game_daily_challenge">Daily Challenge</string>
+    <!-- Shared library: UI - MapUnavailableMessage: shown in place of the map when the graphics renderer could not start on this device. Full sentence, user cannot act on it -->
+    <string name="map_unavailable">The map can\'t be displayed on this device.</string>
 </resources>

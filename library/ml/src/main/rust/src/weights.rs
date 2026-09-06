@@ -149,6 +149,56 @@ pub mod graph {
     /// The next free id after NLLB's 18, with 7..10 and 15 staying retired.
     /// `maml_convert.py` has `GRAPHS["maia"]` at the same number.
     pub const MAIA: u32 = 19;
+
+    /// Gemma 4 E2B instruction-tuned, the text decoder. See [`crate::nets::gemma4`].
+    ///
+    /// The next free id after Maia's 19, with 7..10 and 15 staying retired. **Not 19**: the port
+    /// plan originally claimed that number, which Maia already holds - a collision would make a
+    /// `.maml` parse as the wrong net rather than be refused.
+    /// `maml_convert.py` has `GRAPHS["gemma4_text"]` at the same number.
+    pub const GEMMA4_TEXT: u32 = 20;
+
+    /// Gemma 4's two embedding tables, gathered on the host. See [`crate::nets::gemma4`].
+    ///
+    /// Its own file rather than tensors in [`GEMMA4_TEXT`] because nothing on the device reads
+    /// it: a decode step needs one row of each table, and binding 4.7 GB to gather 1536 values
+    /// would be absurd. Splitting it also lets the text model load while the embedding streams.
+    pub const GEMMA4_EMBED: u32 = 21;
+
+    /// Gemma 4's vision tower. See [`crate::nets::gemma4_vision`].
+    ///
+    /// Its own file because it is optional: a device that never sends an image never downloads
+    /// 99 MB of encoder.
+    pub const GEMMA4_VISION: u32 = 22;
+
+    /// The Now Playing audio fingerprinter, 415 ms of log-mel in and a 64-d embedding out. See
+    /// [`crate::nets::nnfp`].
+    ///
+    /// The next free id after Gemma 4's vision tower at 22, with 7..10 and 15 staying retired.
+    /// `maml_convert.py` has `GRAPHS["nnfp"]` at the same number.
+    ///
+    /// Ported from a **TFLite** flatbuffer rather than an ONNX export or a PyTorch checkpoint,
+    /// which is a third input kind for the converter; see `nnfp_layers` there.
+    ///
+    /// The music/not-music gate that runs in front of this on the DSP is a separate 8.2K-
+    /// parameter network. It **is** ported, as [`crate::gate`], but it holds no id here and
+    /// never will: it runs on the CPU with its 9,772 bytes of weights embedded by
+    /// `include_bytes!`, so there is no `.maml` for an id to identify. An id names a forward
+    /// pass the Vulkan runtime executes, and the gate is not one.
+    ///
+    /// So 23 has no successor reserved. 24 went to Gemma 4's audio encoder, which is the next
+    /// thing that actually needed a graph.
+    pub const NNFP: u32 = 23;
+
+    /// Gemma 4's audio tower. See [`crate::nets::gemma4_audio`].
+    ///
+    /// The next free id after the fingerprinter at 23, with 7..10 and 15 staying retired.
+    /// `maml_convert.py` has `GRAPHS["gemma4_audio"]` at the same number.
+    ///
+    /// Its own file for the reason the vision tower has one, and more so: it is 165 MB at int4,
+    /// larger than the vision tower's 98 MB, and a device that never sends audio should not
+    /// download it.
+    pub const GEMMA4_AUDIO: u32 = 24;
 }
 
 /// One tensor's entry in the table: where it is and what shape it is.
@@ -704,6 +754,78 @@ impl<'a> Reader<'a> {
         let scale = f16_to_f32(u16::from_le_bytes(half));
         Ok(bytes.iter().map(|&b| f32::from(b as i8) * scale).collect())
     }
+
+    /// One row of an int4 tensor, dequantised by that row's **block** scales.
+    ///
+    /// The int4 counterpart of [`Reader::int8_row`], and the difference is the scale: an int8 row
+    /// has one, an int4 row has `ceil(stride / I4_BLOCK)` of them and each covers its own span of
+    /// the row. Reading the first and applying it to the whole row would produce numbers of
+    /// entirely the right magnitude for the first 32 columns and nonsense after.
+    ///
+    /// Exists for the same caller [`Reader::int8_row`] does: Gemma 4's embedding is two tables of
+    /// 262144 rows, and a decode step needs one row of each. Binding 4.7 GB of table to gather
+    /// 1536 values is not a trade worth making.
+    ///
+    /// # Odd strides
+    ///
+    /// A row starts on a **byte** boundary only if `stride` is even. Every table this reads has
+    /// an even stride - 1536 and 8960 - so rather than carry a nibble offset through the loop,
+    /// an odd stride is refused. A silent half-byte skew would be far harder to find later than
+    /// this error is now.
+    pub fn int4_row(
+        &self,
+        index: usize,
+        scale_index: usize,
+        dims: &[u32],
+        row: u32,
+    ) -> Result<Vec<f32>, String> {
+        let found = self.table.shaped(index, dims)?;
+        if found.dtype != Dtype::I4 {
+            return Err(format!("tensor {index} is {:?}, and this dequantises int4", found.dtype));
+        }
+        let rows = *dims.first().ok_or("an int4 row read needs a row count")?;
+        if row >= rows {
+            return Err(format!("row {row} of a {rows}-row tensor {index}"));
+        }
+        let stride = (found.len / rows) as usize;
+        if !stride.is_multiple_of(2) {
+            return Err(format!(
+                "tensor {index} has a {stride}-element row, which does not start on a byte"
+            ));
+        }
+        let blocks = (stride as u32).div_ceil(I4_BLOCK);
+        let mut packed = vec![0u8; stride / 2];
+        let at = u64::from(found.offset) + u64::from(row) * (stride as u64 / 2);
+        self.data.read_at(at, &mut packed).map_err(|e| format!("tensor {index} row {row}: {e}"))?;
+
+        let scale = self.table.shaped(scale_index, &[rows, blocks])?;
+        if scale.dtype.is_quantised() {
+            return Err(format!("tensor {scale_index} is {:?}, and a scale is fp16", scale.dtype));
+        }
+        let mut scale_bytes = vec![0u8; blocks as usize * 2];
+        self.data
+            .read_at(
+                u64::from(scale.offset) + u64::from(row) * u64::from(blocks) * 2,
+                &mut scale_bytes,
+            )
+            .map_err(|e| format!("tensor {scale_index} row {row}: {e}"))?;
+        let scales: Vec<f32> = scale_bytes
+            .chunks_exact(2)
+            .map(|pair| f16_to_f32(u16::from_le_bytes([pair[0], pair[1]])))
+            .collect();
+
+        let mut out = Vec::with_capacity(stride);
+        for (at, &byte) in packed.iter().enumerate() {
+            // Low nibble first, sign-extended from four bits, as `int4_at` does in the shaders.
+            for nibble in [byte & 0x0f, byte >> 4] {
+                let code = if nibble >= 8 { i32::from(nibble) - 16 } else { i32::from(nibble) };
+                let column = out.len() as u32;
+                out.push(code as f32 * scales[(column / I4_BLOCK) as usize]);
+            }
+            debug_assert!(out.len() <= stride, "byte {at} overran the row");
+        }
+        Ok(out)
+    }
 }
 
 /// Fill `buf` from `offset` without moving the file's cursor.
@@ -1083,6 +1205,143 @@ mod tests {
         assert_eq!(scale.elem_offset(), ALIGNMENT / 2);
         // And the payload survived: a five-byte tensor is not padded to an even length.
         assert_eq!(&weights.data()[0..5], &[0x80, 0xFF, 0x00, 0x01, 0x7F]);
+    }
+
+    #[test]
+    fn an_int4_tensor_of_odd_length_rounds_its_last_nibble_up() {
+        // The one place the converter and the reader can disagree without either looking wrong.
+        // Five four-bit elements are two and a half bytes; `Dtype::bytes` rounds to three and the
+        // final high nibble is padding. A converter that wrote two bytes would produce a file
+        // that parses - the bounds check would pass - and whose last element read as whatever
+        // followed it.
+        let values: Vec<i8> = vec![-8, -1, 0, 1, 7];
+        let blob = write_mixed(
+            graph::SUPERTONIC_VE,
+            &[
+                Fixture::I4(vec![5], values.clone()),
+                Fixture::F16(vec![1], vec![0.5]),
+            ],
+        );
+        let weights = Weights::parse(&blob, graph::SUPERTONIC_VE).expect("parses");
+        let quantised = weights.tensor(0).expect("the int4 tensor");
+        assert_eq!(quantised.dtype, Dtype::I4);
+        assert_eq!(quantised.len, 5, "five elements, not five bytes");
+        assert_eq!(Dtype::I4.bytes(5), 3, "two and a half bytes rounds up");
+        // The scale still lands on the 16-byte boundary, as it does after an int8 tensor.
+        let scale = weights.tensor(1).expect("the scale");
+        assert_eq!(scale.offset, ALIGNMENT);
+        assert_eq!(quantised.word_offset(), 0);
+
+        // Low nibble first, sign preserved. -8 and 7 are the ends of the representable range, so
+        // a reader that treated the nibbles as unsigned would give 8 and 7 rather than -8 and 7.
+        let packed = &weights.data()[0..3];
+        assert_eq!(packed[0], 0x08 | (0x0f << 4), "-8 then -1");
+        assert_eq!(packed[1], 0x00 | (0x01 << 4), "0 then 1");
+        assert_eq!(packed[2], 0x07, "7, with the high nibble left as padding");
+    }
+
+    #[test]
+    fn an_int4_tensor_of_even_length_uses_exactly_half_its_elements_in_bytes() {
+        let values: Vec<i8> = (0..64).map(|i| ((i % 16) - 8) as i8).collect();
+        let blob = write_mixed(
+            graph::SUPERTONIC_VE,
+            &[Fixture::I4(vec![8, 8], values), Fixture::F16(vec![8], vec![1.0; 8])],
+        );
+        let weights = Weights::parse(&blob, graph::SUPERTONIC_VE).expect("parses");
+        let quantised = weights.tensor(0).expect("the int4 tensor");
+        assert_eq!(quantised.len, 64);
+        assert_eq!(Dtype::I4.bytes(64), 32);
+        // 32 bytes is two alignment units, so the scale follows at 32 rather than at 16.
+        assert_eq!(weights.tensor(1).expect("the scale").offset, 32);
+    }
+
+    #[test]
+    fn an_int4_tensor_past_the_data_section_is_refused() {
+        // The bounds check has to use `Dtype::bytes` too, or an int4 tensor claiming twice the
+        // elements the file holds would pass a byte-stride check.
+        let mut blob = Vec::new();
+        blob.extend_from_slice(&MAGIC);
+        blob.extend_from_slice(&FORMAT_VERSION.to_le_bytes());
+        blob.extend_from_slice(&graph::SUPERTONIC_VE.to_le_bytes());
+        blob.extend_from_slice(&1u32.to_le_bytes());
+        blob.extend_from_slice(&[0u8; 32]);
+        blob.extend_from_slice(&((HEADER_BYTES + TENSOR_ENTRY_BYTES) as u32).to_le_bytes());
+        blob.extend_from_slice(&16u32.to_le_bytes());
+        blob.extend_from_slice(&[0u8; 8]);
+        blob.extend_from_slice(&1u32.to_le_bytes()); // rank
+        for dim in [64u32, 0, 0, 0] {
+            blob.extend_from_slice(&dim.to_le_bytes());
+        }
+        blob.extend_from_slice(&2u32.to_le_bytes()); // DTYPE_I4
+        blob.extend_from_slice(&0u32.to_le_bytes()); // offset
+        blob.extend_from_slice(&64u32.to_le_bytes()); // len: 32 bytes, into a 16-byte section
+        blob.extend_from_slice(&[0u8; 16]);
+        let error = Weights::parse(&blob, graph::SUPERTONIC_VE).expect_err("out of bounds");
+        assert!(error.contains("spans"), "{error}");
+    }
+
+    #[test]
+    fn an_int4_row_is_dequantised_by_its_own_block_scales() {
+        // The whole point of int4's rank-2 scale, and the failure it prevents: reading the first
+        // block's scale and applying it to the row gives numbers of exactly the right magnitude
+        // for the first 32 columns and nonsense after. So the fixture makes the blocks differ by
+        // a factor of eight and checks every column, not a sample.
+        let rows = 3u32;
+        let stride = 96u32; // three whole blocks of 32
+        let blocks = stride / I4_BLOCK;
+        let codes: Vec<i8> = (0..(rows * stride) as i32).map(|i| ((i * 5) % 15 - 7) as i8).collect();
+        let scales: Vec<f32> = (0..rows * blocks)
+            .map(|i| 0.03125 * f32::from(1u8 << (i % blocks) as u8))
+            .collect();
+        let blob = write_mixed(
+            graph::SUPERTONIC_VE,
+            &[
+                Fixture::I4(vec![rows, stride], codes.clone()),
+                Fixture::F16(vec![rows, blocks], scales.clone()),
+            ],
+        );
+        let weights = Weights::parse(&blob, graph::SUPERTONIC_VE).expect("parses");
+        let reader = weights.reader();
+        for row in 0..rows {
+            let got = reader.int4_row(0, 1, &[rows, stride], row).expect("a row");
+            assert_eq!(got.len() as u32, stride);
+            for column in 0..stride {
+                let code = codes[(row * stride + column) as usize];
+                let scale = scales[(row * blocks + column / I4_BLOCK) as usize];
+                assert!(
+                    (got[column as usize] - f32::from(code) * scale).abs() < 1e-6,
+                    "row {row} column {column}: {} against {}",
+                    got[column as usize],
+                    f32::from(code) * scale
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn an_int4_row_read_refuses_an_odd_stride_and_a_row_past_the_end() {
+        // An odd stride would put every second row half a byte out of step. Refusing beats
+        // carrying a nibble offset that nothing in this tree needs.
+        let blob = write_mixed(
+            graph::SUPERTONIC_VE,
+            &[Fixture::I4(vec![2, 3], vec![1, 2, 3, 4, 5, 6]), Fixture::F16(vec![2, 1], vec![1.0; 2])],
+        );
+        let weights = Weights::parse(&blob, graph::SUPERTONIC_VE).expect("parses");
+        let reader = weights.reader();
+        let odd = reader.int4_row(0, 1, &[2, 3], 0).expect_err("an odd stride");
+        assert!(odd.contains("does not start on a byte"), "{odd}");
+
+        let blob = write_mixed(
+            graph::SUPERTONIC_VE,
+            &[Fixture::I4(vec![2, 4], vec![1, 2, 3, 4, 5, 6, 7, -8]), Fixture::F16(vec![2, 1], vec![1.0; 2])],
+        );
+        let weights = Weights::parse(&blob, graph::SUPERTONIC_VE).expect("parses");
+        let reader = weights.reader();
+        let past = reader.int4_row(0, 1, &[2, 4], 2).expect_err("row 2 of 2");
+        assert!(past.contains("row 2"), "{past}");
+        // And the last code is -8, which only survives if the nibble is sign-extended.
+        let last = reader.int4_row(0, 1, &[2, 4], 1).expect("row 1");
+        assert!((last[3] + 8.0).abs() < 1e-6, "sign extension: {last:?}");
     }
 
     #[test]

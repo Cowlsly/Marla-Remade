@@ -5,7 +5,8 @@
 # `cargo build` here resolves offline and never pulls the aarch64-android
 # toolchain or the app crates' lints. It emits a compact per-region transit
 # index consumed on-device by `maps/src/main/rust/src/transit.rs` (P11b), plus a
-# `transit_stops` binary that emits the basemap stop layer as geojsonseq.
+# `transit_stops` binary that emits the basemap stop layer as geojsonseq and a
+# `transit_shapes` binary that emits the basemap's coloured rail lines the same way.
 [package]
 name = "gtfs_ingest"
 version = "0.1.0"
@@ -32,6 +33,9 @@ path = "src/bin/resolve_feeds.rs"
 [[bin]]
 name = "transit_dump"
 path = "src/bin/transit_dump.rs"
+[[bin]]
+name = "transit_shapes"
+path = "src/bin/transit_shapes.rs"
 
 [dependencies]
 

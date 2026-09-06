@@ -54,7 +54,7 @@
 //! [`Plan`]: crate::nets::Plan
 
 use crate::nets::{Kind, Push};
-use crate::weights::{Dtype, Tensor};
+use crate::weights::Tensor;
 
 use super::context::Limits;
 
@@ -263,6 +263,7 @@ fn tensor_end(at: u64, tensors: &[Tensor]) -> Option<u64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::weights::Dtype;
 
     /// The spec's guaranteed floor for the two limits that matter, plus 1 GiB of allocation.
     fn floor() -> Limits {
@@ -386,6 +387,48 @@ mod tests {
                 );
             }
             assert_eq!(checked, 3, "{kind:?} reads a kernel, a bias and a scale");
+        }
+    }
+
+    #[test]
+    fn an_attention_table_rebases_in_elements_not_words() {
+        // The counterpart of `every_int8_kind_rebases_its_kernel_in_words` for the kinds whose
+        // `weight` is an fp16 ELEMENT index. `rebase` picks the word divisor from a `matches!`
+        // naming the three int8 kinds and falls through to elements for everything else, so a new
+        // element-unit kind is correct by default and a new WORD-unit one is silently halved —
+        // which is exactly how `ConvVecInt8` was wrong. This pins the other side of that branch so
+        // that "tidying" the `matches!` to include an attention kind fails here.
+        //
+        // Asserted through BYTES, like the int8 test, so it cannot pass by agreeing with
+        // `rebase`'s own arithmetic.
+        //
+        // Worth having even though nothing reaches it on a device today: the banded fixtures in
+        // `vulkan::parity` are a few hundred bytes, so they land in one window with a zero base
+        // and `rebase` returns early. Running that suite under `MODELRUNNER_MAX_STORAGE_RANGE`
+        // therefore says nothing about these kinds, and a passing segmented run would be read as
+        // though it did.
+        let segments = Segments::plan(333_783_488, &floor()).unwrap();
+        let window = segments.all()[3];
+        assert!(window.base > 0, "the file must actually be windowed");
+        for kind in [Kind::AttnScoresBanded, Kind::AttnScoresRelative] {
+            let push = Push {
+                weight: (window.base / 2) as u32 + 9,
+                ..Push::default()
+            };
+            let absolute = kind.weight_reads(&push);
+            let out = segments.rebase(3, kind, &push);
+            let mut checked = 0;
+            for read in absolute {
+                assert_eq!(read.field, "weight", "{kind:?} reads only a table");
+                checked += 1;
+                assert_eq!(
+                    u64::from(out.weight) * 2 + window.base,
+                    read.at,
+                    "{kind:?} rebased its table off its byte address"
+                );
+            }
+            assert_eq!(checked, 1, "{kind:?} reads exactly one weight tensor");
+            assert_eq!(out.weight, 9, "{kind:?} should land back at its in-window offset");
         }
     }
 

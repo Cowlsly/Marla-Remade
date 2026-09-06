@@ -101,22 +101,44 @@ fn city_zoom(tags: &(impl TagSource + ?Sized)) -> u8 {
     if capital { zoom.saturating_sub(1) } else { zoom }
 }
 
-/// A 0–255 population rank for `kind_detail`: millions at the top, unknown at zero.
+/// A 0-15 population rank for `kind_detail`: millions at the top, unknown at zero.
 ///
-/// Logarithmic-ish in three steps, because what matters is the order of magnitude: a city of
+/// The buckets are the reference basemap's `population_rank`, because the authored style
+/// sizes and gates place labels by comparing against it: a locality is drawn large above
+/// rank 13 at z2, above 12 at z6, above 9 at z10. A coarser scale cannot express that.
+/// This was three buckets (5 M, 500 k, any) and the style had to approximate the whole
+/// curve with one ramp and a fixed multiplier, which drew small towns at city size and
+/// let them win collisions against the cities they should have lost to.
+///
+/// Each step is an order-of-magnitude-ish threshold, which is what matters: a city of
 /// 8 M outranks one of 800 k, and both outrank an unpopulated hamlet nobody counted.
 fn rank_of(tags: &(impl TagSource + ?Sized)) -> u16 {
+    const BUCKETS: &[(u64, u16)] = &[
+        (10_000_000, 15),
+        (5_000_000, 14),
+        (1_000_000, 13),
+        (500_000, 12),
+        (200_000, 11),
+        (100_000, 10),
+        (50_000, 9),
+        (20_000, 8),
+        (10_000, 7),
+        (5_000, 6),
+        (2_000, 5),
+        (1_000, 4),
+        (500, 3),
+        (200, 2),
+        (1, 1),
+    ];
     let population = population_of(tags);
-    if population >= 5_000_000 {
-        3
-    } else if population >= 500_000 {
-        2
-    } else if population > 0 {
-        1
-    } else {
-        0
-    }
-    .min(u16::MAX)
+    BUCKETS
+        .iter()
+        .find(|(floor, _)| population >= *floor)
+        .map(|(_, rank)| *rank)
+        // Zero is "nobody counted", which is not the same as a village of two hundred:
+        // it sorts and sizes below every known population rather than beside the
+        // smallest one.
+        .unwrap_or(0)
 }
 
 fn population_of(tags: &(impl TagSource + ?Sized)) -> u64 {
@@ -204,6 +226,37 @@ mod tests {
         let class = classify_tags(&[("place", "city"), ("population", "8000000")]).expect("city");
         // Numeric, like boundaries' admin level: the renderer compares, not matches.
         assert_eq!(class.flags, FLAG_DETAIL_NUMERIC);
-        assert_eq!(class.kind_detail, 3);
+        assert_eq!(class.kind_detail, 14, "8 M lands in the 5 M bucket");
+    }
+
+    /// The style compares this against thresholds of 8, 9, 11, 12 and 13, so those
+    /// boundaries have to fall where the reference basemap puts them or a locality is
+    /// sized and gated against the wrong arm.
+    #[test]
+    fn the_rank_matches_the_reference_population_buckets() {
+        let rank = |population: &str| {
+            classify_tags(&[("place", "city"), ("population", population)])
+                .expect("place")
+                .kind_detail
+        };
+        for (population, want) in [
+            ("12000000", 15),
+            ("6000000", 14),
+            ("1200000", 13),
+            ("600000", 12),
+            ("250000", 11),
+            ("120000", 10),
+            ("60000", 9),
+            ("25000", 8),
+            ("12000", 7),
+            ("1", 1),
+        ] {
+            assert_eq!(rank(population), want, "population {population}");
+        }
+        // The thresholds are inclusive floors, which is what the `>=` comparisons expect.
+        assert_eq!(rank("1000000"), 13);
+        assert_eq!(rank("999999"), 12);
+        assert_eq!(rank("50000"), 9);
+        assert_eq!(rank("49999"), 8);
     }
 }

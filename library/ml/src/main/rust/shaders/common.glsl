@@ -104,6 +104,19 @@ layout(push_constant) uniform Push {
     // Key/value heads, when fewer than `group`. Zero means "as many as `group`", which is
     // ordinary multi-head attention. See `kv_head_of`.
     uint kv_heads;
+    // Non-zero when this op's attention slides, so its first key is `window_start`.
+    //
+    // A push constant and not a step parameter, because whether a layer slides is structural -
+    // Gemma 4's layers 0-3 slide and layer 4 does not, for every step of every generation. Baking
+    // it at record time is what lets one `StepParams` serve both: `window_start` is computed once
+    // by the host and the layers that must ignore it do.
+    uint sliding;
+    // Independent rotary sub-blocks per head. 1 is ordinary 1-D RoPE.
+    //
+    // Gemma 4's vision tower uses 2: a 64-wide head is two 32-wide blocks, one rotated by the
+    // patch's row and one by its column, each with its own 16 frequencies. See `rope_axes` in
+    // `nets/mod.rs`.
+    uint rope_axes;
 } p;
 
 // Keys a cached-attention op attends over, as an inclusive `[first, last]` range.
@@ -114,8 +127,16 @@ layout(push_constant) uniform Push {
 //
 // When `p.dyn_keys` is zero the op was built at a fixed length and the range is the whole row,
 // which is every net that does not decode.
+// The first key an attention op may read.
+//
+// `window_start ..= prefix`, which is why this is a range and not a count: Gemma 4 alternates
+// four sliding layers to one global one, and the sliding ones must not see the whole cache.
+//
+// When `p.dyn_keys` is zero the op was built at a fixed length and the range is the whole row,
+// which is every net that does not decode. When it is set but `p.sliding` is not, the op attends
+// the whole prefix - a full-attention layer sharing a submit with sliding ones.
 uint attn_first() {
-    return p.dyn_keys != 0u ? step_params.window_start : 0u;
+    return (p.dyn_keys != 0u && p.sliding != 0u) ? step_params.window_start : 0u;
 }
 
 uint attn_last(uint stride) {

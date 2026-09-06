@@ -29,18 +29,21 @@
 use std::fs::File;
 use std::os::fd::FromRawFd;
 
-use jni::objects::{JByteArray, JClass, JFloatArray, JIntArray, JLongArray, JString};
+use jni::objects::{
+    JByteArray, JClass, JFloatArray, JIntArray, JLongArray, JObjectArray, JShortArray, JString,
+};
 use jni::sys::{jfloatArray, jint, jintArray, jlong, jstring};
 use jni::JNIEnv;
 
 use crate::nets::{
-    maia, mobilefacenet, nllb, ppocr_det, ppocr_rec, scrfd, selfie, supertonic_duration,
-    supertonic_sampler, supertonic_text, supertonic_vocoder, tinyclip, u2netp, whisper, Plan,
+    gemma4, gemma4_audio, gemma4_vision, maia, mobilefacenet, nllb, nnfp, ppocr_det, ppocr_rec,
+    scrfd, selfie, supertonic_duration, supertonic_sampler, supertonic_text, supertonic_vocoder,
+    tinyclip, u2netp, whisper, Plan,
 };
 use crate::post::ctc::Dictionary;
 use crate::post::nms::{self, Face, Maps};
 use crate::post::ocr::{self, Line};
-use crate::post::sentencepiece::Table;
+use crate::post::sentencepiece::{Table, GEMMA};
 use crate::post::supertonic;
 use crate::post::translate;
 use crate::post::whisper as whisper_post;
@@ -1792,6 +1795,263 @@ pub unsafe extern "system" fn Java_com_vayunmathur_library_ml_MlNative_destroyMa
     drop(unsafe { Box::from_raw(handle as *mut MaiaHandle) });
 }
 
+/// The Now Playing audio fingerprinter and its log-mel front end, as `:nowplaying` holds it.
+///
+/// # One net, one plan, no state
+///
+/// A plain [`Net`] like Maia's: the input is always [`nnfp::WINDOW_FRAMES`] frames, so there is
+/// nothing to re-record. The export was a *streaming* graph with six circular buffers, but
+/// `nets::nnfp` unrolls that into a fixed window, which is what lets it be one recorded command
+/// buffer — see that module for the argument. Two calls with the same samples give the same
+/// embedding; there is no warm-up and no carried state.
+///
+/// # The front end lives here, not in Kotlin
+///
+/// [`crate::microfrontend::Frontend`] holds precomputed window, mel and twiddle tables, so
+/// keeping one alive per handle means an embedding allocates nothing. It is reset before each
+/// window because a window is self-contained: [`nnfp_embed`] is handed all the samples the
+/// answer depends on.
+///
+/// # The weights file does not stay open
+///
+/// Unlike [`MaiaHandle`], no [`Streamed`] is retained. Maia keeps its file because
+/// `elo_embedding` reads rows on the host at inference time; nothing here does, so the whole
+/// file is uploaded in `Net::new` and the descriptor is closed rather than held on the APK for
+/// the life of the process.
+struct NnfpHandle {
+    net: Net,
+    frontend: crate::microfrontend::Frontend,
+}
+
+/// Bring up the fingerprinter from its one bundled `.maml`. Returns 0 on failure.
+///
+/// The descriptor is an `AssetFileDescriptor`'s, so it carries an offset and a length: the file
+/// is a *range of the APK* rather than a file of its own, which is also why the asset has to be
+/// stored uncompressed — `noCompress += "maml"` in the app's Gradle configuration.
+///
+/// # Safety
+///
+/// Called only by the JVM, with a descriptor nothing else holds.
+#[no_mangle]
+pub extern "system" fn Java_com_vayunmathur_library_ml_MlNative_createNnfp<'l>(
+    _env: JNIEnv<'l>,
+    _class: JClass<'l>,
+    fd: jint,
+    offset: jlong,
+    length: jlong,
+) -> jlong {
+    if fd < 0 {
+        log(&format!("nnfp is unavailable: descriptor {fd} is not open"));
+        return 0;
+    }
+    // SAFETY: the caller detached the descriptor, so nothing else owns it, and `File` closes
+    // it on drop — including on every failure path below.
+    let file = unsafe { File::from_raw_fd(fd) };
+    match build_nnfp(file, offset, length) {
+        Ok(handle) => Box::into_raw(Box::new(handle)) as jlong,
+        Err(e) => {
+            log(&format!("nnfp is unavailable: {e}"));
+            0
+        }
+    }
+}
+
+fn build_nnfp(file: File, offset: jlong, length: jlong) -> Result<NnfpHandle, String> {
+    let (at, len) = match (u64::try_from(offset), u64::try_from(length)) {
+        (Ok(at), Ok(len)) => (at, len),
+        _ => return Err(format!("the graph spans {offset}+{length}")),
+    };
+    let weights = Streamed::open(file, at, len, graph::NNFP)?;
+    if weights.len() != nnfp::TENSORS {
+        return Err(format!("a file of {} tensors, not {}", weights.len(), nnfp::TENSORS));
+    }
+    let plan = nnfp::build(&weights.offsets())?;
+    let net = Net::new(context::shared()?, plan, &weights, RESCALE_ONLY)?;
+    let frontend = crate::microfrontend::Frontend::new(crate::microfrontend::NOW_PLAYING)?;
+    // `weights` drops here, closing the descriptor: the whole file is already in the device
+    // buffer and nothing reads it on the host.
+    Ok(NnfpHandle { net, frontend })
+}
+
+/// The 64-value fingerprint for one window of audio, or null on failure.
+///
+/// `pcm` is exactly [`nnfp::WINDOW_SAMPLES`] mono 16-bit samples at 16 kHz — 415 ms, the
+/// network's receptive field. i16 rather than f32 because that is what `AudioRecord` produces
+/// and what the front end's fixed-point window expects; converting through float would lose
+/// precision for nothing.
+///
+/// The embedding is **not** normalised. Whether the descriptor is compared by cosine, by L2 or
+/// by a product quantiser could not be recovered from the model, so the caller's matcher
+/// decides rather than this inventing a convention.
+///
+/// # Safety
+///
+/// `handle` must be a non-zero value from `createNnfp` that has not been destroyed.
+#[no_mangle]
+pub unsafe extern "system" fn Java_com_vayunmathur_library_ml_MlNative_nnfpEmbed<'l>(
+    mut env: JNIEnv<'l>,
+    _class: JClass<'l>,
+    handle: jlong,
+    pcm: JShortArray<'l>,
+) -> jfloatArray {
+    let null = std::ptr::null_mut();
+    if handle == 0 {
+        return null;
+    }
+    // SAFETY: the caller guarantees the handle came from `createNnfp` and is still live.
+    // `&mut` because inference writes the net's staging buffer; Kotlin serialises calls.
+    let handle = unsafe { &mut *(handle as *mut NnfpHandle) };
+    let embedding = match read_short_array(&mut env, &pcm) {
+        Ok(samples) => run_nnfp(handle, &samples),
+        Err(e) => Err(e),
+    };
+    match embedding.and_then(|values| new_float_array(&mut env, &values)) {
+        Ok(array) => array,
+        Err(e) => {
+            log(&format!("nnfp failed: {e}"));
+            null
+        }
+    }
+}
+
+fn run_nnfp(handle: &mut NnfpHandle, pcm: &[i16]) -> Result<Vec<f32>, String> {
+    if pcm.len() != nnfp::WINDOW_SAMPLES {
+        return Err(format!("{} samples, not {}", pcm.len(), nnfp::WINDOW_SAMPLES));
+    }
+    // A window is self-contained, so nothing from the last call may leak into this one.
+    handle.frontend.reset();
+    let mut frames = Vec::with_capacity(nnfp::WINDOW_FRAMES as usize * handle.frontend.channels());
+    let produced = handle.frontend.process(pcm, &mut frames);
+    if produced != nnfp::WINDOW_FRAMES as usize {
+        return Err(format!("{produced} log-mel frames, not {}", nnfp::WINDOW_FRAMES));
+    }
+    let outputs = handle.net.infer_raw(&frames)?;
+    let [embedding] = outputs.as_slice() else {
+        return Err(format!("{} outputs, expected one", outputs.len()));
+    };
+    Ok(embedding.clone())
+}
+
+/// Free the fingerprinter's net.
+///
+/// Exactly once per non-zero handle from `createNnfp`. When it is the last user of the shared
+/// `VkDevice`, the device goes away with it.
+///
+/// # Safety
+///
+/// `handle` must be a non-zero value from `createNnfp`, and must not be used again.
+#[no_mangle]
+pub unsafe extern "system" fn Java_com_vayunmathur_library_ml_MlNative_destroyNnfp<'l>(
+    _env: JNIEnv<'l>,
+    _class: JClass<'l>,
+    handle: jlong,
+) {
+    if handle == 0 {
+        return;
+    }
+    // SAFETY: the caller guarantees this handle came from `createNnfp` and has not been
+    // destroyed. `Net`'s Drop waits for the device to go idle before freeing.
+    drop(unsafe { Box::from_raw(handle as *mut NnfpHandle) });
+}
+
+/// Now Playing's always-on music gate. Handed to Kotlin as an opaque `jlong`.
+///
+/// Unlike every other handle in this file there is no device, no plan and no asset: the
+/// gate is 8,200 int8 parameters embedded in the binary and it runs on the CPU. See
+/// [`crate::gate`] for why. Construction cannot fail for want of hardware, only if the
+/// front end rejects its configuration, so a zero return here means a genuine bug.
+#[no_mangle]
+pub extern "system" fn Java_com_vayunmathur_library_ml_MlNative_createMusicGate<'l>(
+    _env: JNIEnv<'l>,
+    _class: JClass<'l>,
+) -> jlong {
+    match crate::gate::MusicGate::new() {
+        Ok(handle) => Box::into_raw(Box::new(handle)) as jlong,
+        Err(e) => {
+            log(&format!("the music gate is unavailable: {e}"));
+            0
+        }
+    }
+}
+
+/// Feed PCM and get one music probability per completed 10 ms hop, oldest first.
+///
+/// Returns an empty array rather than null when a call completes no hop or the gate is
+/// still warming up — both are ordinary, and null is reserved for a real failure. The gate
+/// is stateful across calls; `resetMusicGate` starts a fresh session.
+///
+/// # Safety
+///
+/// `handle` must be a live value from `createMusicGate`, and Kotlin must serialise calls.
+#[no_mangle]
+pub unsafe extern "system" fn Java_com_vayunmathur_library_ml_MlNative_musicGatePush<'l>(
+    mut env: JNIEnv<'l>,
+    _class: JClass<'l>,
+    handle: jlong,
+    pcm: JShortArray<'l>,
+    count: jint,
+) -> jfloatArray {
+    let null = std::ptr::null_mut();
+    if handle == 0 {
+        return null;
+    }
+    // SAFETY: the caller guarantees the handle came from `createMusicGate` and is live.
+    let handle = unsafe { &mut *(handle as *mut crate::gate::MusicGate) };
+    let scores = read_short_array(&mut env, &pcm).and_then(|samples| {
+        let count = usize::try_from(count).unwrap_or(usize::MAX);
+        if count > samples.len() {
+            return Err(format!("{count} samples of a {}-sample array", samples.len()));
+        }
+        let mut out = Vec::new();
+        handle.push(&samples[..count], &mut out);
+        Ok(out)
+    });
+    match scores.and_then(|values| new_float_array(&mut env, &values)) {
+        Ok(array) => array,
+        Err(e) => {
+            log(&format!("the music gate failed: {e}"));
+            null
+        }
+    }
+}
+
+/// Discard the front end's partial frame and the trunk's 230 ms of context.
+///
+/// # Safety
+///
+/// `handle` must be a live value from `createMusicGate`.
+#[no_mangle]
+pub unsafe extern "system" fn Java_com_vayunmathur_library_ml_MlNative_resetMusicGate<'l>(
+    _env: JNIEnv<'l>,
+    _class: JClass<'l>,
+    handle: jlong,
+) {
+    if handle == 0 {
+        return;
+    }
+    // SAFETY: the caller guarantees the handle came from `createMusicGate` and is live.
+    unsafe { &mut *(handle as *mut crate::gate::MusicGate) }.reset();
+}
+
+/// Free the gate. Idempotent on the Kotlin side, which nulls its handle first.
+///
+/// # Safety
+///
+/// `handle` must be a non-zero value from `createMusicGate`, and must not be used again.
+#[no_mangle]
+pub unsafe extern "system" fn Java_com_vayunmathur_library_ml_MlNative_destroyMusicGate<'l>(
+    _env: JNIEnv<'l>,
+    _class: JClass<'l>,
+    handle: jlong,
+) {
+    if handle == 0 {
+        return;
+    }
+    // SAFETY: the caller guarantees this handle came from `createMusicGate` and has not
+    // been destroyed.
+    drop(unsafe { Box::from_raw(handle as *mut crate::gate::MusicGate) });
+}
+
 /// whisper-base, as `:speech` holds it. Handed to Kotlin as an opaque `jlong`.
 ///
 /// # One net, two plans, and two kinds of cache
@@ -2108,6 +2368,14 @@ fn read_int_array(env: &mut JNIEnv, array: &JIntArray) -> Result<Vec<i32>, Strin
     Ok(out)
 }
 
+fn read_short_array(env: &mut JNIEnv, array: &JShortArray) -> Result<Vec<i16>, String> {
+    let len = env.get_array_length(array).map_err(|e| format!("array length: {e}"))?;
+    let mut out = vec![0i16; len.max(0) as usize];
+    env.get_short_array_region(array, 0, &mut out)
+        .map_err(|e| format!("get_short_array_region: {e}"))?;
+    Ok(out)
+}
+
 fn new_float_array(env: &mut JNIEnv, values: &[f32]) -> Result<jfloatArray, String> {
     let array: JFloatArray = env
         .new_float_array(values.len() as jint)
@@ -2130,4 +2398,1318 @@ fn log(message: &str) {
     unsafe {
         let _ = __android_log_write(ERROR, tag.as_ptr(), text.as_ptr());
     }
+}
+
+
+/// Gemma 4 E2B, as `:openassistant` holds it. Handed to Kotlin as an opaque `jlong`.
+///
+/// # Why the loop is Kotlin's and not this module's
+///
+/// litertlm owned the whole turn: template, tool calls, sampling, streaming. Replacing it with a
+/// single `generate(prompt) -> String` would reproduce that opacity and put the chat template,
+/// the tool protocol and the stop conditions in Rust, where none of them belong. So the boundary
+/// is one token: Kotlin pushes ids, asks for the next, and decides what to do with it. That is
+/// also what lets the UI stream, since it already streams by writing each chunk to Room.
+///
+/// # Two files
+///
+/// The text model and the embedding are separate `.maml`s with separate graph ids. Nothing on the
+/// device reads the embedding - a step needs one row of a 262144-row table - so it stays a
+/// [`Streamed`] and is gathered on the host, exactly as NLLB's tied embedding is.
+struct Gemma4Handle {
+    net: Reshaped<gemma4::Pass>,
+    /// The text model, retained for the rotary tables which are also host-read.
+    weights: Streamed,
+    /// The two embedding tables.
+    embed: Streamed,
+    /// `scripts/ml/gemma4_tokenizer.py`'s table.
+    tokenizer: Vec<u8>,
+    /// Rotary angles for the sliding layers, `[MAX_CONTEXT, HEAD_DIM]`, read once.
+    ///
+    /// A few megabytes held for the life of the handle rather than re-read per token. At 40 ms a
+    /// token a re-read would be most of the step.
+    local: Vec<f32>,
+    /// The same for the full-attention layers, `[MAX_CONTEXT, GLOBAL_HEAD_DIM]`.
+    global: Vec<f32>,
+    /// The largest tier this device's memory affords. See `gemma4::tier_for`.
+    ceiling: u32,
+
+    /// Positions the KV caches are allocated for: one of [`gemma4::CONTEXT_TIERS`].
+    ///
+    /// Chosen per device rather than compiled in, because 18 KB a position means the tier *is*
+    /// the memory: 19 MB at 1,024 and 302 MB at 16,384. A phone with 4 GB should hold a short
+    /// conversation rather than fail to start.
+    context: u32,
+
+    /// Positions already in the KV cache, which is the next token's position.
+    ///
+    /// Resetting a conversation sets this to zero and nothing else: attention reads only
+    /// `[window_start, prefix]`, so rows past the new prefix are never looked at again and
+    /// overwriting them lazily is free.
+    position: u32,
+}
+
+fn gemma4_plan(offsets: &Offsets, pass: gemma4::Pass) -> Result<Plan, String> {
+    gemma4::build(offsets, pass)
+}
+
+impl Gemma4Handle {
+    /// Feed one token and return its logits, or `None` while only filling the cache.
+    fn step(&mut self, token: u32, want_logits: bool) -> Result<Option<Vec<f32>>, String> {
+        let (hidden, per_layer) = gemma4::gather(&self.embed.reader(), token)?;
+        self.step_hidden(&hidden, &per_layer, want_logits)
+    }
+
+    /// Feed one **soft token**: an encoder's output standing in for a token's embedding.
+    ///
+    /// The per-layer inputs come from the pad token, which is what the reference does - it
+    /// rewrites the placeholder id to `pad_token_id` before gathering, then overwrites only the
+    /// hidden state with the encoder's row. So the two halves of a soft token's input come from
+    /// different places, and using the placeholder's own per-layer row instead would be a quiet
+    /// and plausible-looking error.
+    fn step_soft(&mut self, hidden: &[f32], want_logits: bool) -> Result<Option<Vec<f32>>, String> {
+        if hidden.len() != gemma4::D_MODEL as usize {
+            return Err(format!("a soft token of {} values, not {}", hidden.len(), gemma4::D_MODEL));
+        }
+        let (_, per_layer) = gemma4::gather(&self.embed.reader(), gemma4::embed::PLACEHOLDERS[0])?;
+        self.step_hidden(hidden, &per_layer, want_logits)
+    }
+
+    /// The step itself, once both halves of the input are in hand.
+    fn step_hidden(
+        &mut self,
+        hidden: &[f32],
+        per_layer: &[f32],
+        want_logits: bool,
+    ) -> Result<Option<Vec<f32>>, String> {
+        if self.position >= self.context {
+            return Err(format!("the cache is full at {} positions", self.context));
+        }
+        let row = |table: &[f32], width: u32| -> Vec<f32> {
+            let from = (self.position * width) as usize;
+            table[from..from + width as usize].to_vec()
+        };
+        let local = row(&self.local, gemma4::HEAD_DIM);
+        let global = row(&self.global, gemma4::GLOBAL_HEAD_DIM);
+        // Prefill positions do not need logits, and until now they computed them anyway: the
+        // plan was `DecodeStep` unconditionally and `want_logits` only decided whether the host
+        // kept the result. The head is four int4 projections over the 262,144-entry vocabulary,
+        // 227 MB of the 1.30 GB of weights - 17.5 % of the bytes a pass touches, discarded on
+        // every one of the ~1,870 positions a prompt is long.
+        //
+        // `Prefill { tokens: 1 }` runs all thirty-five layers, fills all thirty caches and stops
+        // before the final norm and the head. Its one output is the hidden state, which nothing
+        // here wants.
+        //
+        // SAFETY OF SWITCHING PLANS MID-CONVERSATION, which is not obvious and is not guaranteed
+        // by the type system: `Reshaped::at` re-records whenever the mode changes, and the caches
+        // live in the arena, so the two plans must agree on where they are. They do - measured,
+        // not assumed: every cache operand is identical across the two, at all twenty-nine
+        // offsets, because at `tokens: 1` the inputs are the same size and `finish` assigns arena
+        // offsets by walking the pinned list in declaration order. That equality is pinned by a
+        // test in `nets::gemma4`; if it ever fails, prefill writes the caches where decode does
+        // not read them and the model answers fluently from whatever was in the arena.
+        //
+        // The arena never reallocates either, which would drop the caches outright: decode's is
+        // the larger of the two, the net is created at decode, and `rebuild` only grows.
+        let mode = if want_logits {
+            gemma4::Mode::DecodeStep
+        } else {
+            gemma4::Mode::Prefill { tokens: 1 }
+        }
+        .at(self.context);
+        let at = self.net.at(mode)?;
+        at.set_params(StepParams {
+            prefix: self.position,
+            window_start: self.position.saturating_sub(gemma4::WINDOW - 1),
+        })?;
+        let ran = std::time::Instant::now();
+        let out = at.infer_raw_many(&[hidden, per_layer, &local, &global])?;
+        // Every sixteenth, so the log is a sample rather than a flood.
+        if self.position % 16 == 0 {
+            log(&format!(
+                "gemma4 decode at {}: {:.0} ms gpu, head {}",
+                self.position,
+                ran.elapsed().as_secs_f64() * 1000.0,
+                if want_logits { "on" } else { "off" },
+            ));
+        }
+        self.position += 1;
+        if !want_logits {
+            return Ok(None);
+        }
+        if out.len() != gemma4::HEAD_SPLITS {
+            return Err(format!("a step returned {} tensors, not {}", out.len(), gemma4::HEAD_SPLITS));
+        }
+        let mut logits = Vec::with_capacity(gemma4::VOCAB as usize);
+        for split in out.iter().take(gemma4::HEAD_SPLITS) {
+            logits.extend_from_slice(split);
+        }
+        Ok(Some(logits))
+    }
+
+    /// Reallocate the caches so at least `needed` positions fit. Returns the new capacity.
+    ///
+    /// # This throws the cache away
+    ///
+    /// The caches live in the arena, and a bigger arena is a different allocation - nothing
+    /// copies the old contents across. So a grow resets the position to zero and the caller has
+    /// to feed the whole prompt again.
+    ///
+    /// That is why the tiers double rather than creep: over a long conversation the re-prefill
+    /// happens four times, not once per message. The caller is told by the return value, which
+    /// it must treat as "the cache is now empty".
+    fn grow(&mut self, needed: u32) -> Result<u32, String> {
+        if needed <= self.context {
+            return Ok(self.context);
+        }
+        let Some(tier) = gemma4::CONTEXT_TIERS
+            .iter()
+            .copied()
+            .find(|tier| *tier >= needed && *tier <= self.ceiling)
+        else {
+            return Err(format!(
+                "{needed} positions, and this device's cache stops at {}",
+                self.ceiling
+            ));
+        };
+        let rebuilt = Reshaped::streamed(
+            context::shared()?,
+            self.weights.offsets(),
+            &self.weights,
+            gemma4::Mode::DecodeStep.at(tier),
+            gemma4_plan,
+        )?;
+        log(&format!(
+            "gemma4 cache grew {} -> {tier} positions ({} MB), so the prompt is re-fed",
+            self.context,
+            (u64::from(tier) * u64::from(gemma4::BYTES_PER_POSITION)) / 1_000_000,
+        ));
+        self.net = rebuilt;
+        self.context = tier;
+        self.position = 0;
+        Ok(tier)
+    }
+
+    /// Feed many tokens in **one** submit, filling the caches and returning nothing.
+    ///
+    /// The prompt path, and the reason a conversation starts in under a second rather than in
+    /// tens of them. At one position a pass is bandwidth-bound: it reads 1.30 GB of weights to
+    /// produce a single 1536-wide vector, which measured 28.81 ms. At T positions it reads the
+    /// same 1.30 GB once and every projection becomes a GEMM over T columns, so the weights are
+    /// amortised T ways.
+    ///
+    /// Chunked rather than one submit for the whole prompt, because attention is quadratic in T
+    /// and the score maps are a real allocation - eight heads of T x T at [`CHUNK`] is 16 MB,
+    /// and the arena has to hold it alongside everything else.
+    fn prefill(&mut self, tokens: &[u32]) -> Result<(), String> {
+        if tokens.is_empty() {
+            return Ok(());
+        }
+        if self.position as usize + tokens.len() > self.context as usize {
+            return Err(format!(
+                "a prompt of {} positions past this device's {} cache",
+                self.position as usize + tokens.len(),
+                self.context
+            ));
+        }
+        for chunk in tokens.chunks(CHUNK as usize) {
+            let width = chunk.len() as u32;
+            let gathering = std::time::Instant::now();
+            // Gathered per position and laid out `[C, 1, T]` - channel-major, which is what
+            // every op in the pass expects and what `cache_write` transposes on the way in.
+            let mut hidden = vec![0f32; (gemma4::D_MODEL * width) as usize];
+            let mut per_layer =
+                vec![0f32; (gemma4::PER_LAYER * gemma4::LAYERS as u32 * width) as usize];
+            let mut local = vec![0f32; (gemma4::HEAD_DIM * width) as usize];
+            let mut global = vec![0f32; (gemma4::GLOBAL_HEAD_DIM * width) as usize];
+            for (offset, &token) in chunk.iter().enumerate() {
+                let (h, p) = gemma4::gather(&self.embed.reader(), token)?;
+                let column = offset as u32;
+                let position = self.position + column;
+                place(&mut hidden, &h, column, width);
+                place(&mut per_layer, &p, column, width);
+                // Written out rather than closed over: a closure returning a borrow of its own
+                // argument needs a named lifetime, and two call sites do not justify one.
+                let from = (position * gemma4::HEAD_DIM) as usize;
+                let row = &self.local[from..from + gemma4::HEAD_DIM as usize];
+                place(&mut local, row, column, width);
+                let from = (position * gemma4::GLOBAL_HEAD_DIM) as usize;
+                let row = &self.global[from..from + gemma4::GLOBAL_HEAD_DIM as usize];
+                place(&mut global, row, column, width);
+            }
+            let gathered = gathering.elapsed();
+            let submitted = std::time::Instant::now();
+            let at = self.net.at(gemma4::Mode::Prefill { tokens: width }.at(self.context))?;
+            let recorded = submitted.elapsed();
+            at.set_params(StepParams {
+                prefix: self.position,
+                window_start: self.position.saturating_sub(gemma4::WINDOW - 1),
+            })?;
+            let ran = std::time::Instant::now();
+            at.infer_raw_many(&[&hidden, &per_layer, &local, &global])?;
+            // Timed on the device because nothing about a desktop GPU predicts a phone's. The
+            // record time is called out separately: `Reshaped` re-records whenever the mode or
+            // the width changes, and a prompt whose last chunk is short pays it twice.
+            log(&format!(
+                "gemma4 prefill {width} positions: {:.0} ms gather, {:.0} ms record, {:.0} ms gpu",
+                gathered.as_secs_f64() * 1000.0,
+                recorded.as_secs_f64() * 1000.0,
+                ran.elapsed().as_secs_f64() * 1000.0,
+            ));
+            self.position += width;
+        }
+        Ok(())
+    }
+}
+
+/// Positions one prefill submit covers.
+///
+/// # This is bounded by the fence, not by the arena
+///
+/// The obvious constraint is memory - attention is quadratic in this - and it is not the binding
+/// one. `FENCE_TIMEOUT_NS` gives a submit five seconds, and a phone GPU is some thirty times
+/// slower than the desktop one these numbers were taken on. Measured there, a submit costs about
+/// 76 ms at 8 positions and 167 ms at 128: mostly a fixed cost, because the pass streams 1.30 GB
+/// of weights whatever T is. Thirty times 167 ms is over five seconds, which is exactly the
+/// `wait_for_fences TIMEOUT` a real device reported.
+///
+/// A timeout is not a soft failure. The submission is still in flight, nothing can cancel it, so
+/// the net is **poisoned** and every later call on it fails too - which is why the retry in
+/// `InferenceService` failed as well and the user saw two dead turns rather than one.
+///
+/// # Re-raised after the barrier fix
+///
+/// 16 was chosen when a 128-wide submit blew the fence, and that was *before* barriers were
+/// narrowed from the whole arena to each op's own output. Measured on a Tensor G4 afterwards, a
+/// submit is about **1,058 ms fixed plus 4.7 ms a position** - almost all fixed, because the
+/// pass streams the same 1.30 GB of weights whatever T is.
+///
+/// So the chunk is nearly free to raise and enormously expensive to keep small: a 1,910-position
+/// prompt is 136 seconds at 16 and 20 at 192. At 192 a submit is ~1.96 s against the 5 s fence,
+/// which leaves room for a device rather slower than the one measured.
+
+/// Measured, not extrapolated: 16 works at 1,133 ms and 192 times out past five seconds. The
+/// slope between T=6 and T=16 is 4.7 ms a position, and projecting it to 192 predicted 1.96 s -
+/// wrong, because attention is **quadratic** in T and both of those samples were inside a single
+/// 16-wide tile. 64 is four times the throughput of 16 with a wide margin on the fence.
+const CHUNK: u32 = 64;
+
+/// Write one position's `values` into column `column` of a `[C, 1, width]` block.
+///
+/// The layout is channel-major - channel `c` at `c * width + column` - which is the transpose of
+/// how the values arrive. Getting this backwards is not a shape error and produces a prompt whose
+/// tokens are scrambled across channels.
+fn place(into: &mut [f32], values: &[f32], column: u32, width: u32) {
+    for (channel, &value) in values.iter().enumerate() {
+        let at = channel * width as usize + column as usize;
+        if let Some(slot) = into.get_mut(at) {
+            *slot = value;
+        }
+    }
+}
+
+/// The most likely token, and nothing else.
+///
+/// Greedy. litertlm sampled with `top_k` 64 and `top_p` 0.95 and this does not, which is a real
+/// behavioural change: replies become deterministic and slightly flatter. Sampling belongs on the
+/// Kotlin side of the boundary where a seed can be held and a temperature exposed, and adding it
+/// here would put a policy decision in the wrong module.
+fn argmax(logits: &[f32]) -> u32 {
+    let mut best = (f32::NEG_INFINITY, 0u32);
+    for (index, &value) in logits.iter().enumerate() {
+        if value > best.0 {
+            best = (value, index as u32);
+        }
+    }
+    best.1
+}
+
+/// Bring up Gemma 4 from its two `.maml`s and its tokenizer table. Returns 0 on failure.
+///
+/// # Safety
+///
+/// Called only by the JVM, with a valid `env`, arrays it owns, and descriptors nothing else holds.
+#[no_mangle]
+#[allow(clippy::too_many_arguments)]
+pub extern "system" fn Java_com_vayunmathur_library_ml_MlNative_createGemma4<'l>(
+    mut env: JNIEnv<'l>,
+    _class: JClass<'l>,
+    text_fd: jint,
+    text_offset: jlong,
+    text_length: jlong,
+    embed_fd: jint,
+    embed_offset: jlong,
+    embed_length: jlong,
+    tokenizer: JByteArray<'l>,
+    // Bytes of KV cache this device will spend. See `gemma4::tier_for`.
+    budget: jlong,
+) -> jlong {
+    // Both descriptors are adopted before anything may fail. The caller detached them, so a path
+    // that returns without wrapping one leaks it for the life of the process - and there are two
+    // here, so the usual single-`fd` shape is not enough.
+    if text_fd < 0 || embed_fd < 0 {
+        log(&format!("gemma4 is unavailable: descriptors {text_fd} and {embed_fd}"));
+        return 0;
+    }
+    // SAFETY: the caller detached both, so nothing else owns them, and `File` closes them on drop
+    // including on every failure path below.
+    let text = unsafe { File::from_raw_fd(text_fd) };
+    let embed = unsafe { File::from_raw_fd(embed_fd) };
+    let spans = (
+        u64::try_from(text_offset),
+        u64::try_from(text_length),
+        u64::try_from(embed_offset),
+        u64::try_from(embed_length),
+    );
+    let built = match spans {
+        (Ok(ta), Ok(tl), Ok(ea), Ok(el)) => {
+            build_gemma4(&mut env, text, ta, tl, embed, ea, el, &tokenizer, budget.max(0) as u64)
+        }
+        _ => Err("a graph span that is not a positive offset and length".to_string()),
+    };
+    match built {
+        Ok(handle) => Box::into_raw(Box::new(handle)) as jlong,
+        Err(e) => {
+            log(&format!("gemma4 is unavailable: {e}"));
+            0
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn build_gemma4<'l>(
+    env: &mut JNIEnv<'l>,
+    text: File,
+    text_at: u64,
+    text_len: u64,
+    embed: File,
+    embed_at: u64,
+    embed_len: u64,
+    tokenizer: &JByteArray<'l>,
+    budget: u64,
+) -> Result<Gemma4Handle, String> {
+    let weights = Streamed::open(text, text_at, text_len, graph::GEMMA4_TEXT)?;
+    let embed = Streamed::open(embed, embed_at, embed_len, graph::GEMMA4_EMBED)?;
+    let tokenizer = env
+        .convert_byte_array(tokenizer)
+        .map_err(|e| format!("cannot read the tokenizer table: {e}"))?;
+    // Parsed once here to refuse a bad table at construction rather than at the first turn, when
+    // the UI has already committed to having a working assistant.
+    let parsed = Table::parse_with(&tokenizer, GEMMA)?;
+    if parsed.len() != gemma4::VOCAB as usize {
+        return Err(format!("a tokenizer of {} pieces, not {}", parsed.len(), gemma4::VOCAB));
+    }
+    if !parsed.has_byte_fallback() {
+        return Err("a tokenizer without byte fallback, which cannot spell every reply".into());
+    }
+    let reader = weights.reader();
+    let local = reader.fp16(gemma4::ROTARY_LOCAL, &[gemma4::MAX_CONTEXT, gemma4::HEAD_DIM])?;
+    let global =
+        reader.fp16(gemma4::ROTARY_GLOBAL, &[gemma4::MAX_CONTEXT, gemma4::GLOBAL_HEAD_DIM])?;
+    drop(reader);
+    // The largest cache this device's memory budget affords. Kotlin measures the device;
+    // native turns that into positions, because only native knows a position costs 18 KB.
+    let cache = gemma4::tier_for(budget);
+    log(&format!(
+        "gemma4 cache {cache} positions, {} MB, from a {} MB budget",
+        (u64::from(cache) * u64::from(gemma4::BYTES_PER_POSITION)) / 1_000_000,
+        budget / 1_000_000,
+    ));
+    let net = Reshaped::streamed(
+        context::shared()?,
+        weights.offsets(),
+        &weights,
+        gemma4::Mode::DecodeStep.at(gemma4::CONTEXT_TIERS[0]),
+        gemma4_plan,
+    )?;
+    Ok(Gemma4Handle {
+        net,
+        weights,
+        embed,
+        tokenizer,
+        local,
+        global,
+        ceiling: cache,
+        // Start at the smallest tier whatever the device affords. A conversation that stays
+        // short never pays for a cache it does not use, and 19 MB against 301 MB is the
+        // difference between the assistant being a background cost and being the reason
+        // something else was killed.
+        context: gemma4::CONTEXT_TIERS[0],
+        position: 0,
+    })
+}
+
+/// Encode text to token ids, matching HuggingFace's `tokenizers` for this vocabulary.
+///
+/// `specials` are matched literally and never merged into - the chat markers a template inserts.
+/// Passing them from Kotlin rather than hardcoding them here is deliberate: which markers a
+/// prompt may contain is a policy question, and a model that let a user's text spell a turn
+/// boundary would let them forge one.
+///
+/// # Safety
+///
+/// Called only by the JVM, with a live handle from `createGemma4`.
+#[no_mangle]
+pub unsafe extern "system" fn Java_com_vayunmathur_library_ml_MlNative_encodeGemma4<'l>(
+    mut env: JNIEnv<'l>,
+    _class: JClass<'l>,
+    handle: jlong,
+    text: JString<'l>,
+    specials: JObjectArray<'l>,
+) -> jintArray {
+    if handle == 0 {
+        return std::ptr::null_mut();
+    }
+    // SAFETY: the caller guarantees the handle came from `createGemma4` and is still live.
+    let handle = unsafe { &*(handle as *const Gemma4Handle) };
+    let encoded = match env.get_string(&text) {
+        Ok(text) => encode_gemma4(&mut env, handle, &String::from(text), &specials),
+        Err(e) => Err(format!("cannot read the prompt: {e}")),
+    };
+    match encoded {
+        Ok(ids) => match new_int_array(&mut env, &ids) {
+            Ok(array) => array,
+            Err(e) => {
+                log(&format!("gemma4 cannot return its token ids: {e}"));
+                std::ptr::null_mut()
+            }
+        },
+        Err(e) => {
+            log(&format!("gemma4 cannot encode: {e}"));
+            std::ptr::null_mut()
+        }
+    }
+}
+
+fn encode_gemma4<'l>(
+    env: &mut JNIEnv<'l>,
+    handle: &Gemma4Handle,
+    text: &str,
+    specials: &JObjectArray<'l>,
+) -> Result<Vec<i32>, String> {
+    let table = Table::parse_with(&handle.tokenizer, GEMMA)?;
+    let count = env.get_array_length(specials).map_err(|e| format!("{e}"))?;
+    let mut owned = Vec::with_capacity(count as usize);
+    for index in 0..count {
+        let item = env.get_object_array_element(specials, index).map_err(|e| format!("{e}"))?;
+        let item: JString = item.into();
+        let text = env.get_string(&item).map_err(|e| format!("{e}"))?;
+        owned.push(String::from(text));
+    }
+    let borrowed: Vec<&str> = owned.iter().map(String::as_str).collect();
+    // The JVM's arrays are signed, and the vocabulary fits in a positive `i32` twice over, so the
+    // cast is total rather than merely usually right.
+    Ok(table.encode_with_specials(text, &borrowed).into_iter().map(|id| id as i32).collect())
+}
+
+/// Text for a run of token ids, fusing byte pieces back into characters.
+///
+/// # Safety
+///
+/// Called only by the JVM, with a live handle from `createGemma4`.
+#[no_mangle]
+pub unsafe extern "system" fn Java_com_vayunmathur_library_ml_MlNative_decodeGemma4<'l>(
+    mut env: JNIEnv<'l>,
+    _class: JClass<'l>,
+    handle: jlong,
+    tokens: JIntArray<'l>,
+) -> jstring {
+    if handle == 0 {
+        return std::ptr::null_mut();
+    }
+    // SAFETY: the caller guarantees the handle came from `createGemma4` and is still live.
+    let handle = unsafe { &*(handle as *const Gemma4Handle) };
+    let decoded = read_int_array(&mut env, &tokens).and_then(|ids| {
+        let table = Table::parse_with(&handle.tokenizer, GEMMA)?;
+        // Negative ids cannot name a piece; dropping them keeps `decode`'s "one bad token loses a
+        // word, not the reply" behaviour rather than failing the whole call.
+        let ids: Vec<u32> = ids.into_iter().filter_map(|id| u32::try_from(id).ok()).collect();
+        Ok(table.decode(&ids))
+    });
+    match decoded {
+        Ok(text) => match env.new_string(&text) {
+            Ok(string) => string.into_raw(),
+            Err(e) => {
+                log(&format!("gemma4 cannot return its text: {e}"));
+                std::ptr::null_mut()
+            }
+        },
+        Err(e) => {
+            log(&format!("gemma4 cannot decode: {e}"));
+            std::ptr::null_mut()
+        }
+    }
+}
+
+/// Feed tokens into the cache without generating. Returns the new position, or -1.
+///
+/// The prompt path: every token but the last only fills the KV cache, so its logits are computed
+/// and thrown away. Doing that here rather than one JNI call at a time keeps a 500-token prompt
+/// to one crossing instead of 500.
+///
+/// # Safety
+///
+/// Called only by the JVM, with a live handle from `createGemma4`.
+#[no_mangle]
+pub unsafe extern "system" fn Java_com_vayunmathur_library_ml_MlNative_pushGemma4<'l>(
+    mut env: JNIEnv<'l>,
+    _class: JClass<'l>,
+    handle: jlong,
+    tokens: JIntArray<'l>,
+) -> jint {
+    if handle == 0 {
+        return -1;
+    }
+    // SAFETY: the caller guarantees the handle came from `createGemma4` and is still live. It is
+    // `&mut` because a step advances the cache, and Kotlin serialises calls on one handle.
+    let handle = unsafe { &mut *(handle as *mut Gemma4Handle) };
+    let pushed = read_int_array(&mut env, &tokens).and_then(|ids| {
+        let mut owned = Vec::with_capacity(ids.len());
+        for token in ids {
+            owned.push(
+                u32::try_from(token)
+                    .map_err(|_| format!("token {token} is not in the vocabulary"))?,
+            );
+        }
+        handle.prefill(&owned)?;
+        Ok(handle.position)
+    });
+    match pushed {
+        Ok(position) => jint::try_from(position).unwrap_or(-1),
+        Err(e) => {
+            log(&format!("gemma4 cannot take the prompt: {e}"));
+            -1
+        }
+    }
+}
+
+/// Feed one token and return the next, greedily. -1 on failure.
+///
+/// # Safety
+///
+/// Called only by the JVM, with a live handle from `createGemma4`.
+#[no_mangle]
+pub unsafe extern "system" fn Java_com_vayunmathur_library_ml_MlNative_stepGemma4<'l>(
+    _env: JNIEnv<'l>,
+    _class: JClass<'l>,
+    handle: jlong,
+    token: jint,
+) -> jint {
+    if handle == 0 {
+        return -1;
+    }
+    // SAFETY: the caller guarantees the handle came from `createGemma4` and is still live.
+    let handle = unsafe { &mut *(handle as *mut Gemma4Handle) };
+    let token = match u32::try_from(token) {
+        Ok(token) if token < gemma4::VOCAB => token,
+        _ => {
+            log(&format!("gemma4 was given token {token}, which is not in the vocabulary"));
+            return -1;
+        }
+    };
+    match handle.step(token, true) {
+        Ok(Some(logits)) => jint::try_from(argmax(&logits)).unwrap_or(-1),
+        Ok(None) => -1,
+        Err(e) => {
+            log(&format!("gemma4 step failed: {e}"));
+            -1
+        }
+    }
+}
+
+/// Positions currently in the KV cache.
+///
+/// # Safety
+///
+/// Called only by the JVM, with a live handle from `createGemma4`.
+#[no_mangle]
+pub unsafe extern "system" fn Java_com_vayunmathur_library_ml_MlNative_positionGemma4<'l>(
+    _env: JNIEnv<'l>,
+    _class: JClass<'l>,
+    handle: jlong,
+) -> jint {
+    if handle == 0 {
+        return -1;
+    }
+    // SAFETY: the caller guarantees the handle came from `createGemma4` and is still live.
+    let handle = unsafe { &*(handle as *const Gemma4Handle) };
+    jint::try_from(handle.position).unwrap_or(-1)
+}
+
+/// Time one decode pass and one head-free pass, and log both. Returns -1 always.
+///
+/// # What this settles
+///
+/// A decode step costs 676 ms on a Tensor G4 against 41 ms on a desktop, and the question is
+/// whether that is the **weights** or the **dispatches**. The two answers need completely
+/// different work - better kernels versus fusing ops - so guessing is expensive.
+///
+/// The head is the discriminator. It is four of the pass's 1,094 dispatches, and 402 MB of its
+/// 1.30 GB of weights. So running with it and without it:
+///
+/// * bandwidth-bound -> the head-free pass is about **31% faster**
+/// * dispatch-bound  -> it is about **0.4% faster**, which is nothing
+///
+/// # Safety
+///
+/// Called only by the JVM, with a live handle from `createGemma4`.
+#[no_mangle]
+pub unsafe extern "system" fn Java_com_vayunmathur_library_ml_MlNative_benchmarkGemma4<'l>(
+    _env: JNIEnv<'l>,
+    _class: JClass<'l>,
+    handle: jlong,
+) -> jint {
+    if handle == 0 {
+        return -1;
+    }
+    // SAFETY: the caller guarantees the handle came from `createGemma4` and is still live.
+    let handle = unsafe { &mut *(handle as *mut Gemma4Handle) };
+    let Ok((hidden, per_layer)) = gemma4::gather(&handle.embed.reader(), 2) else {
+        return -1;
+    };
+    let local = handle.local[..gemma4::HEAD_DIM as usize].to_vec();
+    let global = handle.global[..gemma4::GLOBAL_HEAD_DIM as usize].to_vec();
+    for (label, mode) in [
+        ("with head   ", gemma4::Mode::DecodeStep),
+        ("without head", gemma4::Mode::Prefill { tokens: 1 }),
+    ] {
+        let mut best = f64::MAX;
+        for _ in 0..3 {
+            handle.position = 0;
+            let Ok(at) = handle.net.at(mode.at(handle.context)) else { continue };
+            let _ = at.set_params(StepParams { prefix: 0, window_start: 0 });
+            let started = std::time::Instant::now();
+            if at.infer_raw_many(&[&hidden, &per_layer, &local, &global]).is_err() {
+                continue;
+            }
+            best = best.min(started.elapsed().as_secs_f64() * 1000.0);
+        }
+        log(&format!("gemma4 benchmark {label}: {best:.0} ms"));
+    }
+    handle.position = 0;
+    -1
+}
+
+/// Load a baked prefix cache, so the fixed prompt is never prefilled on device. Returns the
+/// positions loaded, or -1.
+///
+/// # What this saves
+///
+/// The system block is ~334 positions and the tool declarations take it past a thousand. On a
+/// Tensor G4 that is 14 seconds of prefill, paid on every cold start, to compute numbers that
+/// are the same on every device - the tokens do not change, so neither do the keys and values.
+/// `examples/bake_gemma4_prefix.rs` computes them once and this loads the result.
+///
+/// The caller must have the matching tokens and set its own reuse record to them, or the next
+/// turn will re-feed the prefix and undo the point. It must also be the *same* prefix: native
+/// checks only the size, because it has no way to know what tokens produced these numbers.
+///
+/// # Safety
+///
+/// Called only by the JVM, with a live handle from `createGemma4`.
+#[no_mangle]
+pub unsafe extern "system" fn Java_com_vayunmathur_library_ml_MlNative_loadPrefixGemma4<'l>(
+    mut env: JNIEnv<'l>,
+    _class: JClass<'l>,
+    handle: jlong,
+    positions: jint,
+    cache: JByteArray<'l>,
+) -> jint {
+    if handle == 0 {
+        return -1;
+    }
+    // SAFETY: the caller guarantees the handle came from `createGemma4` and is still live.
+    let handle = unsafe { &mut *(handle as *mut Gemma4Handle) };
+    let Ok(positions) = u32::try_from(positions) else {
+        return -1;
+    };
+    let loaded = env
+        .convert_byte_array(&cache)
+        .map_err(|e| format!("cannot read the cache: {e}"))
+        .and_then(|bytes| {
+            if positions > handle.context {
+                // A device on a small tier cannot hold the whole prefix. Refusing leaves it to
+                // prefill normally, which is slow and right, rather than loading a truncated
+                // cache and attending over keys that stop mid-prompt.
+                return Err(format!(
+                    "a {positions}-position prefix into a {} cache",
+                    handle.context
+                ));
+            }
+            let at = handle.net.at(gemma4::Mode::DecodeStep.at(handle.context))?;
+            at.import_pinned(gemma4::CACHE_TENSORS, positions, &bytes)?;
+            handle.position = positions;
+            Ok(positions)
+        });
+    match loaded {
+        Ok(positions) => {
+            log(&format!("gemma4 loaded a {positions}-position prefix cache"));
+            jint::try_from(positions).unwrap_or(-1)
+        }
+        Err(e) => {
+            log(&format!("gemma4 cannot load the prefix cache: {e}"));
+            -1
+        }
+    }
+}
+
+/// Positions the cache currently holds, or -1.
+///
+/// # Safety
+///
+/// Called only by the JVM, with a live handle from `createGemma4`.
+#[no_mangle]
+pub unsafe extern "system" fn Java_com_vayunmathur_library_ml_MlNative_capacityGemma4<'l>(
+    _env: JNIEnv<'l>,
+    _class: JClass<'l>,
+    handle: jlong,
+) -> jint {
+    if handle == 0 {
+        return -1;
+    }
+    // SAFETY: the caller guarantees the handle came from `createGemma4` and is still live.
+    let handle = unsafe { &*(handle as *const Gemma4Handle) };
+    jint::try_from(handle.context).unwrap_or(-1)
+}
+
+/// Grow the cache so `needed` positions fit. Returns the new capacity, or -1.
+///
+/// **The cache is emptied**: a bigger arena is a different allocation and nothing is copied
+/// across, so the caller must feed its whole prompt again afterwards. Returning the capacity
+/// rather than a boolean is deliberate - the caller needs the number to decide whether the
+/// prompt fits at all.
+///
+/// # Safety
+///
+/// Called only by the JVM, with a live handle from `createGemma4`.
+#[no_mangle]
+pub unsafe extern "system" fn Java_com_vayunmathur_library_ml_MlNative_growGemma4<'l>(
+    _env: JNIEnv<'l>,
+    _class: JClass<'l>,
+    handle: jlong,
+    needed: jint,
+) -> jint {
+    if handle == 0 {
+        return -1;
+    }
+    // SAFETY: the caller guarantees the handle came from `createGemma4` and is still live.
+    let handle = unsafe { &mut *(handle as *mut Gemma4Handle) };
+    let Ok(needed) = u32::try_from(needed) else {
+        return -1;
+    };
+    match handle.grow(needed) {
+        Ok(capacity) => jint::try_from(capacity).unwrap_or(-1),
+        Err(e) => {
+            log(&format!("gemma4 cannot grow: {e}"));
+            -1
+        }
+    }
+}
+
+/// Rewind the cache to `position`, keeping everything before it. Returns the new position, or -1.
+///
+/// # The point of this
+///
+/// A turn's prompt is almost entirely the previous turn's prompt: the same system block, the same
+/// tool declarations, the same history. Re-feeding all of it is how this started - `generate`
+/// called `reset` and pushed the lot - and with 24 tools that is some 1,600 positions of prefill
+/// before the model has seen a single new word, on every message.
+///
+/// The KV cache for that prefix is still sitting in the arena, still correct, because the tokens
+/// that produced it have not changed. Seeking to the length of the unchanged prefix and pushing
+/// only the new suffix turns a 1,600-position prefill into a 15-position one.
+///
+/// Rewinding is safe for exactly the reason [`Java_com_vayunmathur_library_ml_MlNative_resetGemma4`]
+/// is: attention reads `[window_start, prefix]` and never past it, so the rows above `position`
+/// are unreachable until something overwrites them. It is the caller's job to be sure the tokens
+/// below `position` really are unchanged - native cannot check that, and a wrong seek is a model
+/// answering a conversation that never happened.
+///
+/// # Safety
+///
+/// Called only by the JVM, with a live handle from `createGemma4`.
+#[no_mangle]
+pub unsafe extern "system" fn Java_com_vayunmathur_library_ml_MlNative_seekGemma4<'l>(
+    _env: JNIEnv<'l>,
+    _class: JClass<'l>,
+    handle: jlong,
+    position: jint,
+) -> jint {
+    if handle == 0 {
+        return -1;
+    }
+    // SAFETY: the caller guarantees the handle came from `createGemma4` and is still live.
+    let handle = unsafe { &mut *(handle as *mut Gemma4Handle) };
+    match u32::try_from(position) {
+        Ok(position) if position <= handle.position => {
+            handle.position = position;
+            jint::try_from(position).unwrap_or(-1)
+        }
+        // Forward is refused: those rows were never written, so attending over them would read
+        // whatever the arena happened to hold.
+        _ => {
+            log(&format!("gemma4 cannot seek to {position} from {}", handle.position));
+            -1
+        }
+    }
+}
+
+/// Start a new conversation on the same handle.
+///
+/// Only the position is reset. Attention reads `[window_start, prefix]`, so cache rows past the
+/// new prefix are never read again and overwriting them lazily costs nothing - clearing them
+/// would be a gigabyte of pointless writes between every turn.
+///
+/// # Safety
+///
+/// Called only by the JVM, with a live handle from `createGemma4`.
+#[no_mangle]
+pub unsafe extern "system" fn Java_com_vayunmathur_library_ml_MlNative_resetGemma4<'l>(
+    _env: JNIEnv<'l>,
+    _class: JClass<'l>,
+    handle: jlong,
+) {
+    if handle == 0 {
+        return;
+    }
+    // SAFETY: the caller guarantees the handle came from `createGemma4` and is still live.
+    let handle = unsafe { &mut *(handle as *mut Gemma4Handle) };
+    handle.position = 0;
+}
+
+/// Release the handle. Idempotent from Kotlin's side, which zeroes its field first.
+///
+/// # Safety
+///
+/// Called only by the JVM, once, with a handle from `createGemma4` that nothing else is using.
+#[no_mangle]
+pub unsafe extern "system" fn Java_com_vayunmathur_library_ml_MlNative_destroyGemma4<'l>(
+    _env: JNIEnv<'l>,
+    _class: JClass<'l>,
+    handle: jlong,
+) {
+    if handle == 0 {
+        return;
+    }
+    // SAFETY: the caller guarantees this runs once, after every other call on the handle.
+    drop(unsafe { Box::from_raw(handle as *mut Gemma4Handle) });
+}
+
+/// Feed soft tokens - an encoder's output - into the decoder's cache.
+///
+/// `embeddings` is `n * 1536` floats, one row per soft token, and it advances the position by `n`.
+/// Returns the number fed, or -1. The logits are discarded: a soft token is never the last thing
+/// in a prompt, because the template closes the image with `<eoi>` and opens a model turn.
+///
+/// This is the seam the vision tower attaches to. The decoder is text-only and gathers a row of
+/// the embedding table per token; an image has no token to gather, so its rows arrive here
+/// instead. See `Gemma4Handle::step_soft` for why the per-layer half still comes from the table.
+///
+/// # Safety
+///
+/// Called only by the JVM, with a live handle from `createGemma4`.
+#[no_mangle]
+pub unsafe extern "system" fn Java_com_vayunmathur_library_ml_MlNative_pushSoftGemma4<'l>(
+    mut env: JNIEnv<'l>,
+    _class: JClass<'l>,
+    handle: jlong,
+    embeddings: JFloatArray<'l>,
+) -> jint {
+    if handle == 0 {
+        return -1;
+    }
+    // SAFETY: the caller guarantees the handle came from `createGemma4` and is still live, and
+    // that no other call on it overlaps this one.
+    let handle = unsafe { &mut *(handle as *mut Gemma4Handle) };
+    let fed = read_float_array(&mut env, &embeddings).and_then(|values| {
+        let width = gemma4::D_MODEL as usize;
+        if values.is_empty() || !values.len().is_multiple_of(width) {
+            return Err(format!("{} values, which is not a whole number of {width}", values.len()));
+        }
+        for row in values.chunks_exact(width) {
+            handle.step_soft(row, false)?;
+        }
+        Ok((values.len() / width) as jint)
+    });
+    match fed {
+        Ok(count) => count,
+        Err(e) => {
+            log(&format!("gemma4 could not take soft tokens: {e}"));
+            -1
+        }
+    }
+}
+
+/// Gemma 4's vision tower, which is its own `.maml` and its own graph id.
+///
+/// Separate from [`Gemma4Handle`] because it is optional: a device that never sends an image never
+/// downloads it, and a handle that failed to build must not take the assistant down with it.
+struct Gemma4VisionHandle {
+    net: Reshaped<gemma4_vision::Mode>,
+    /// Retained for the two position tables, which are gathered on the host.
+    weights: Streamed,
+}
+
+fn gemma4_vision_plan(offsets: &Offsets, mode: gemma4_vision::Mode) -> Result<Plan, String> {
+    gemma4_vision::build(offsets, mode)
+}
+
+/// Bring up the vision tower from its `.maml`. Returns 0 on failure, having logged why.
+///
+/// # Safety
+///
+/// Called only by the JVM, with a descriptor the caller detached and nothing else holds.
+#[no_mangle]
+pub extern "system" fn Java_com_vayunmathur_library_ml_MlNative_createGemma4Vision<'l>(
+    _env: JNIEnv<'l>,
+    _class: JClass<'l>,
+    fd: jint,
+    offset: jlong,
+    length: jlong,
+) -> jlong {
+    if fd < 0 {
+        log(&format!("the gemma4 vision tower is unavailable: descriptor {fd} is not open"));
+        return 0;
+    }
+    // SAFETY: the caller detached the descriptor, so nothing else owns it, and `File` closes it
+    // on drop including on every failure path below.
+    let file = unsafe { File::from_raw_fd(fd) };
+    match build_gemma4_vision(file, offset, length) {
+        Ok(handle) => Box::into_raw(Box::new(handle)) as jlong,
+        Err(e) => {
+            log(&format!("the gemma4 vision tower is unavailable: {e}"));
+            0
+        }
+    }
+}
+
+fn build_gemma4_vision(file: File, offset: jlong, length: jlong) -> Result<Gemma4VisionHandle, String> {
+    let (at, len) = match (u64::try_from(offset), u64::try_from(length)) {
+        (Ok(at), Ok(len)) => (at, len),
+        _ => return Err(format!("the graph spans {offset}+{length}")),
+    };
+    let weights = Streamed::open(file, at, len, graph::GEMMA4_VISION)?;
+    if weights.len() != gemma4_vision::TENSORS {
+        return Err(format!("a file of {} tensors, not {}", weights.len(), gemma4_vision::TENSORS));
+    }
+    // Recorded at the grid a square image resolves to. `at` re-records when a later image has a
+    // different aspect ratio, which against sixteen layers over a couple of thousand patches
+    // costs nothing worth avoiding.
+    let start = gemma4_vision::Grid::for_image(1, 1, gemma4_vision::DEFAULT_SOFT_TOKENS)?;
+    let net = Reshaped::streamed(
+        context::shared()?,
+        weights.offsets(),
+        &weights,
+        gemma4_vision::Mode::Image(start),
+        gemma4_vision_plan,
+    )?;
+    Ok(Gemma4VisionHandle { net, weights })
+}
+
+/// The pixel size an image of `width x height` must be resized to, as `[width, height]`.
+///
+/// Kotlin does the resize - it is bitmap work the platform does better, as it is for TinyCLIP -
+/// but it cannot choose the size, because the target is the reference preprocessor's
+/// aspect-ratio-preserving fit to a patch budget and getting it wrong by one block changes the
+/// number of soft tokens. So the runtime decides and Kotlin obeys.
+///
+/// Returns null if the budget or the image is one no grid exists for.
+///
+/// # Safety
+///
+/// Called only by the JVM.
+#[no_mangle]
+pub extern "system" fn Java_com_vayunmathur_library_ml_MlNative_gemma4VisionSize<'l>(
+    mut env: JNIEnv<'l>,
+    _class: JClass<'l>,
+    width: jint,
+    height: jint,
+    soft_tokens: jint,
+) -> jintArray {
+    let null = std::ptr::null_mut();
+    let sized = u32::try_from(width)
+        .ok()
+        .zip(u32::try_from(height).ok())
+        .zip(u32::try_from(soft_tokens).ok());
+    let Some(((width, height), soft_tokens)) = sized else {
+        return null;
+    };
+    match gemma4_vision::Grid::for_image(width, height, soft_tokens) {
+        Ok(grid) => {
+            let (w, h) = grid.pixels();
+            match new_int_array(&mut env, &[w as i32, h as i32]) {
+                Ok(array) => array,
+                Err(e) => {
+                    log(&format!("cannot return a vision size: {e}"));
+                    null
+                }
+            }
+        }
+        Err(e) => {
+            log(&format!("no vision grid for {width}x{height}: {e}"));
+            null
+        }
+    }
+}
+
+/// Encode one image into soft tokens: `[n, 1536]` flattened, or null.
+///
+/// `pixels` is ARGB_8888 at exactly the size [`Java_com_vayunmathur_library_ml_MlNative_gemma4VisionSize`]
+/// asked for. The result goes straight to `pushSoftGemma4`, unscaled - the reference scatters the
+/// tower's output into the decoder's embeddings as it is, while text embeddings carry a
+/// `sqrt(hidden_size)` the converter folded into the table. Scaling these to match would be
+/// wrong in a way nothing downstream would flag.
+///
+/// # Safety
+///
+/// Called only by the JVM, with a live handle from `createGemma4Vision`.
+#[no_mangle]
+pub unsafe extern "system" fn Java_com_vayunmathur_library_ml_MlNative_encodeImageGemma4<'l>(
+    mut env: JNIEnv<'l>,
+    _class: JClass<'l>,
+    handle: jlong,
+    pixels: JIntArray<'l>,
+    width: jint,
+    height: jint,
+) -> jfloatArray {
+    let null = std::ptr::null_mut();
+    if handle == 0 {
+        return null;
+    }
+    // SAFETY: the caller guarantees the handle came from `createGemma4Vision` and is still live.
+    // It is `&mut` because a new aspect ratio re-records the net, and Kotlin serialises calls.
+    let handle = unsafe { &mut *(handle as *mut Gemma4VisionHandle) };
+    let encoded = read_int_array(&mut env, &pixels)
+        .and_then(|values| run_gemma4_vision(handle, &values, width, height));
+    match encoded.and_then(|values| new_float_array(&mut env, &values)) {
+        Ok(array) => array,
+        Err(e) => {
+            log(&format!("the gemma4 vision tower failed: {e}"));
+            null
+        }
+    }
+}
+
+fn run_gemma4_vision(
+    handle: &mut Gemma4VisionHandle,
+    pixels: &[i32],
+    width: jint,
+    height: jint,
+) -> Result<Vec<f32>, String> {
+    let (Ok(width), Ok(height)) = (u32::try_from(width), u32::try_from(height)) else {
+        return Err(format!("an image of {width}x{height}"));
+    };
+    if !width.is_multiple_of(gemma4_vision::PATCH) || !height.is_multiple_of(gemma4_vision::PATCH) {
+        return Err(format!("{width}x{height} is not a whole number of patches"));
+    }
+    let grid = gemma4_vision::Grid::new(height / gemma4_vision::PATCH, width / gemma4_vision::PATCH)?;
+    let inputs = gemma4_vision::prepare(&handle.weights.reader(), grid, pixels)?;
+    let mode = gemma4_vision::Mode::Image(grid);
+    let out = handle
+        .net
+        .at(mode)?
+        .infer_raw_many(&[&inputs[0], &inputs[1], &inputs[2]])?;
+    let features = one_output(out)?;
+    let tokens = grid.soft_tokens() as usize;
+    let width = gemma4_vision::OUT_DIM as usize;
+    if features.len() != tokens * width {
+        return Err(format!("{} values, not {}", features.len(), tokens * width));
+    }
+    // The plan writes `[1536, 1, tokens]`; the decoder reads one soft token at a time, so this
+    // hands back `[tokens, 1536]`.
+    Ok(transpose(&features, width, tokens))
+}
+
+/// Release the vision tower.
+///
+/// # Safety
+///
+/// Called only by the JVM, once, with a handle from `createGemma4Vision` that nothing else uses.
+#[no_mangle]
+pub unsafe extern "system" fn Java_com_vayunmathur_library_ml_MlNative_destroyGemma4Vision<'l>(
+    _env: JNIEnv<'l>,
+    _class: JClass<'l>,
+    handle: jlong,
+) {
+    if handle == 0 {
+        return;
+    }
+    // SAFETY: the caller guarantees this runs once, after every other call on the handle.
+    drop(unsafe { Box::from_raw(handle as *mut Gemma4VisionHandle) });
+}
+
+/// Gemma 4's audio tower, which is its own `.maml` and its own graph id.
+///
+/// Separate from [`Gemma4Handle`] for the reason the vision tower is: optional, separately
+/// downloaded, and a failure here leaves the assistant answering without sound rather than not
+/// answering.
+///
+/// # This one owns a front end, which the vision tower did not
+///
+/// The vision tower takes patches Kotlin already produced. This takes a **waveform**, and the
+/// log-mel spectrogram between the two is [`crate::logmel`] - reference-verified, and until now
+/// with no caller. It lives in the handle rather than being built per call because it holds the
+/// Hann window, the 128-channel filter bank and the transform's twiddle tables, none of which
+/// depend on the clip.
+struct Gemma4AudioHandle {
+    net: Reshaped<gemma4_audio::Mode>,
+    /// The log-mel front end. Stateful only in its scratch buffers; one clip at a time.
+    mel: crate::logmel::LogMel,
+}
+
+fn gemma4_audio_plan(offsets: &Offsets, mode: gemma4_audio::Mode) -> Result<Plan, String> {
+    gemma4_audio::build(offsets, mode)
+}
+
+/// Bring up the audio tower from its `.maml`. Returns 0 on failure, having logged why.
+///
+/// # Safety
+///
+/// Called only by the JVM, with a descriptor the caller detached and nothing else holds.
+#[no_mangle]
+pub extern "system" fn Java_com_vayunmathur_library_ml_MlNative_createGemma4Audio<'l>(
+    _env: JNIEnv<'l>,
+    _class: JClass<'l>,
+    fd: jint,
+    offset: jlong,
+    length: jlong,
+) -> jlong {
+    if fd < 0 {
+        log(&format!("the gemma4 audio tower is unavailable: descriptor {fd} is not open"));
+        return 0;
+    }
+    // SAFETY: the caller detached the descriptor, so nothing else owns it, and `File` closes it
+    // on drop including on every failure path below.
+    let file = unsafe { File::from_raw_fd(fd) };
+    match build_gemma4_audio(file, offset, length) {
+        Ok(handle) => Box::into_raw(Box::new(handle)) as jlong,
+        Err(e) => {
+            log(&format!("the gemma4 audio tower is unavailable: {e}"));
+            0
+        }
+    }
+}
+
+fn build_gemma4_audio(file: File, offset: jlong, length: jlong) -> Result<Gemma4AudioHandle, String> {
+    let (at, len) = match (u64::try_from(offset), u64::try_from(length)) {
+        (Ok(at), Ok(len)) => (at, len),
+        _ => return Err(format!("the graph spans {offset}+{length}")),
+    };
+    let weights = Streamed::open(file, at, len, graph::GEMMA4_AUDIO)?;
+    if weights.len() != gemma4_audio::TENSORS {
+        return Err(format!("a file of {} tensors, not {}", weights.len(), gemma4_audio::TENSORS));
+    }
+    // Recorded at the cap. `at` re-records per clip length, and unlike the vision tower's grid
+    // there is only one axis to vary, so most conversations settle on a handful of lengths.
+    // Recording at the longest means the first short clip re-records downward rather than the
+    // arena having to grow.
+    let longest = crate::logmel::frame_count(gemma4_audio::MAX_SAMPLES) as u32;
+    let net = Reshaped::streamed(
+        context::shared()?,
+        weights.offsets(),
+        &weights,
+        gemma4_audio::Mode::Clip { frames: longest },
+        gemma4_audio_plan,
+    )?;
+    Ok(Gemma4AudioHandle { net, mel: crate::logmel::LogMel::new() })
+}
+
+/// Encode one clip into soft tokens: `[n, 1536]` flattened, or null.
+///
+/// `samples` is **16 kHz mono** in roughly `-1.0..1.0`. The front end has no gain of its own, so
+/// the scale it arrives in is the scale the tower sees. The result goes straight to
+/// `pushSoftGemma4`, unscaled, for the reason the vision tower's does.
+///
+/// # What this does to the waveform, and what it deliberately does not
+///
+/// Truncates to [`gemma4_audio::MAX_SAMPLES`] - thirty seconds, the reference's own cap and what
+/// makes the token count bounded. It does **not** pad to a multiple of 128 samples. The reference
+/// does, so a batch stacks, and then spends a validity mask through the whole tower undoing it;
+/// this runtime records a plan per frame count and passes the clip at its true length. Measured
+/// bit-identical against the export over 68 configurations. See `nets::gemma4_audio::prepare`.
+///
+/// # Safety
+///
+/// Called only by the JVM, with a live handle from `createGemma4Audio`.
+#[no_mangle]
+pub unsafe extern "system" fn Java_com_vayunmathur_library_ml_MlNative_encodeAudioGemma4<'l>(
+    mut env: JNIEnv<'l>,
+    _class: JClass<'l>,
+    handle: jlong,
+    samples: JFloatArray<'l>,
+) -> jfloatArray {
+    let null = std::ptr::null_mut();
+    if handle == 0 {
+        return null;
+    }
+    // SAFETY: the caller guarantees the handle came from `createGemma4Audio` and is still live.
+    // `&mut` because a new clip length re-records the net, and Kotlin serialises calls.
+    let handle = unsafe { &mut *(handle as *mut Gemma4AudioHandle) };
+    let encoded = read_float_array(&mut env, &samples)
+        .and_then(|waveform| run_gemma4_audio(handle, &waveform));
+    match encoded.and_then(|values| new_float_array(&mut env, &values)) {
+        Ok(array) => array,
+        Err(e) => {
+            log(&format!("the gemma4 audio tower failed: {e}"));
+            null
+        }
+    }
+}
+
+fn run_gemma4_audio(handle: &mut Gemma4AudioHandle, waveform: &[f32]) -> Result<Vec<f32>, String> {
+    // The cap is the reference's, and it is what bounds the arena at 49.8 MiB. Truncating here
+    // rather than refusing is deliberate: a caller who hands over a minute of audio wants the
+    // first thirty seconds encoded, not an error.
+    let capped = &waveform[..waveform.len().min(gemma4_audio::MAX_SAMPLES)];
+    let frames = crate::logmel::frame_count(capped.len());
+    let count = u32::try_from(frames).map_err(|_| format!("{frames} mel frames"))?;
+    let tokens = gemma4_audio::tokens(count);
+    if tokens < gemma4_audio::MIN_TOKENS {
+        return Err(format!(
+            "{} samples is {frames} mel frames and {tokens} soft tokens, under the {} the \
+             attention band needs - about {} ms of audio",
+            capped.len(),
+            gemma4_audio::MIN_TOKENS,
+            capped.len() * 1000 / crate::logmel::SAMPLE_RATE as usize
+        ));
+    }
+
+    let mut mel = Vec::new();
+    let produced = handle.mel.spectrogram(capped, &mut mel);
+    if produced != frames {
+        return Err(format!("the front end made {produced} frames, not {frames}"));
+    }
+    let input = gemma4_audio::prepare(&mel, count)?;
+    let out = handle
+        .net
+        .at(gemma4_audio::Mode::Clip { frames: count })?
+        .infer_raw_many(&[&input])?;
+    let features = one_output(out)?;
+    let width = gemma4_audio::OUT_DIM as usize;
+    let rows = tokens as usize;
+    if features.len() != rows * width {
+        return Err(format!("{} values, not {}", features.len(), rows * width));
+    }
+    // The plan writes `[1536, 1, tokens]`; the decoder reads one soft token at a time, so this
+    // hands back `[tokens, 1536]`.
+    Ok(transpose(&features, width, rows))
+}
+
+/// Release the audio tower.
+///
+/// # Safety
+///
+/// Called only by the JVM, once, with a handle from `createGemma4Audio` that nothing else uses.
+#[no_mangle]
+pub unsafe extern "system" fn Java_com_vayunmathur_library_ml_MlNative_destroyGemma4Audio<'l>(
+    _env: JNIEnv<'l>,
+    _class: JClass<'l>,
+    handle: jlong,
+) {
+    if handle == 0 {
+        return;
+    }
+    // SAFETY: the caller guarantees this runs once, after every other call on the handle.
+    drop(unsafe { Box::from_raw(handle as *mut Gemma4AudioHandle) });
 }

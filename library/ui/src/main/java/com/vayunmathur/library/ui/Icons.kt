@@ -187,6 +187,7 @@ import androidx.compose.material.icons.filled.Map
 import androidx.compose.material.icons.filled.Menu
 import androidx.compose.material.icons.filled.Mic
 import androidx.compose.material.icons.filled.MicOff
+import androidx.compose.material.icons.filled.MusicNote
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.MyLocation
 import androidx.compose.material.icons.filled.Navigation
@@ -1380,3 +1381,10 @@ fun IconFlag(modifier: Modifier = Modifier, tint: Color = LocalContentColor.curr
 @Composable
 fun IconMine(modifier: Modifier = Modifier, tint: Color = LocalContentColor.current) =
     AppIcon(Icons.Filled.Brightness7, "Mine", modifier, tint)
+
+// --- Music detection ---
+
+/** A single quaver - music is playing. */
+@Composable
+fun IconMusicNote(modifier: Modifier = Modifier, tint: Color = LocalContentColor.current) =
+    AppIcon(Icons.Filled.MusicNote, "Music", modifier, tint)

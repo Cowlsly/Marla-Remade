@@ -62,6 +62,106 @@ pub enum Variant {
     Dark,
 }
 
+/// An optional layer group the host app opts into at runtime.
+///
+/// A layer with no toggle is basemap and always drawn. The two that have one carry data
+/// every archive already ships but which most consumers do not want: POI icons clutter a
+/// map whose job is to show one pin, and transit lines are noise outside a transit app.
+/// Defaulting them **off** is what makes the five existing consumers cost nothing.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Toggle {
+    Poi,
+    Transit,
+}
+
+/// Which optional layers are on. Both off by default.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub struct LayerToggles {
+    pub poi: bool,
+    pub transit: bool,
+}
+
+impl LayerToggles {
+    /// Is a layer carrying `toggle` drawn?
+    ///
+    /// `None` is basemap, and always yes — which is why this takes an `Option` rather
+    /// than making every caller special-case the common layer.
+    pub fn enabled(&self, toggle: Option<Toggle>) -> bool {
+        match toggle {
+            None => true,
+            Some(Toggle::Poi) => self.poi,
+            Some(Toggle::Transit) => self.transit,
+        }
+    }
+}
+
+/// The toggles plus a generation counter, in one atomic word, shared with the tile
+/// workers.
+///
+/// Gating happens at **tessellation** time rather than at draw time, because that is
+/// where the cost is: with POI off, no label is shaped and no placement candidate is
+/// built for any resident tile. The price of gating there is that a toggle change
+/// invalidates meshes, so every mesh records the generation it was built at and the
+/// renderer re-requests anything stale. Re-tessellation goes through the existing worker
+/// pool and reads the archive it already has, so nothing is refetched and nothing is
+/// evicted — the same "re-decorate without reloading" shape as a palette switch, one step
+/// heavier.
+///
+/// One word rather than three atomics so a worker's read is a consistent snapshot: a
+/// mesh tagged with one generation but built from another's flags would either never be
+/// refreshed or be refreshed forever.
+#[derive(Debug)]
+pub struct SharedToggles(std::sync::atomic::AtomicU32);
+
+impl SharedToggles {
+    /// Generations start at 1, so a mesh from a default-initialised 0 is always stale.
+    pub fn new(toggles: LayerToggles) -> SharedToggles {
+        SharedToggles(std::sync::atomic::AtomicU32::new(Self::pack(toggles, 1)))
+    }
+
+    fn pack(toggles: LayerToggles, generation: u32) -> u32 {
+        (generation << 2) | (u32::from(toggles.poi) << 1) | u32::from(toggles.transit)
+    }
+
+    /// The current toggles and the generation they belong to.
+    pub fn get(&self) -> (LayerToggles, u32) {
+        let word = self.0.load(std::sync::atomic::Ordering::Acquire);
+        (
+            LayerToggles { poi: word & 0b10 != 0, transit: word & 0b01 != 0 },
+            word >> 2,
+        )
+    }
+
+    /// Set the toggles, bumping the generation. Returns `true` when anything changed.
+    ///
+    /// A no-op set must not bump: the host may call this on every recomposition, and a
+    /// bump there would re-tessellate the whole resident set for nothing.
+    pub fn set(&self, toggles: LayerToggles) -> bool {
+        let (current, generation) = self.get();
+        if current == toggles {
+            return false;
+        }
+        self.0.store(
+            Self::pack(toggles, generation.wrapping_add(1).max(1)),
+            std::sync::atomic::Ordering::Release,
+        );
+        true
+    }
+}
+
+/// Where a label sits relative to its anchor point.
+///
+/// Only the horizontal cases exist, because only they are used: place labels are centred
+/// and the reference `pois` layer offers `["left", "right"]`. `Left` means the label's
+/// left edge is at the anchor, so the text runs to the **right** of the point — which is
+/// MapLibre's sense of the word and the opposite of the intuitive reading.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Anchor {
+    Center,
+    Left,
+    Right,
+}
+
 impl Variant {
     pub fn from_dark(dark: bool) -> Variant {
         if dark {
@@ -166,6 +266,20 @@ pub struct Layer {
     /// style draws road casings. Whether there is a gap *at all* is decided once, at
     /// tessellation time, by [`gapped`](Self::gapped).
     pub gap_width: Ramp,
+    /// Distance between two adjacent parallel lines of one corridor, in Dp.
+    ///
+    /// Only `transit-rail` sets it. Screen-space rather than a ground distance, and constant
+    /// across zoom: the fan widens in discrete jumps as [`lanes`](Self::lanes) steps up, which
+    /// is what makes a colour visibly re-assign at a boundary instead of its neighbours merely
+    /// closing in on it.
+    pub spread: Ramp,
+    /// How many parallel lanes a corridor draws at a given zoom, floored at read.
+    ///
+    /// The one thing a feature cannot carry: it is a property of the camera, not of the route.
+    /// A feature carries its colour's ordinal and its corridor's colour count
+    /// ([`tilecodec::mamaps::body::Feature::transit_ordinal`]) and
+    /// [`Layer::lane_offset_px`] turns the three into a lateral offset per frame.
+    pub lanes: Ramp,
     /// Dash and gap lengths in line widths, as `line-dasharray` defines them.
     pub dash: (f32, f32),
     /// Halo color (ARGB), light and dark. The authored `text-halo-color` per layer;
@@ -179,12 +293,49 @@ pub struct Layer {
     /// Text size in px, as a zoom ramp. Zero/empty for non-symbol layers.
     ///
     /// The authored `text-size` is a *pixel* size at the camera zoom (unlike a road
-    /// width in Dp it is not density-scaled — MapLibre sizes text in screen px).
+    /// width in Dp it is not density-scaled - MapLibre sizes text in screen px, and
+    /// the renderer applies density on the way to the shader because the tile span it
+    /// is measured against is in device px).
+    ///
+    /// This is the arm for a place **below** [`Layer::rank_threshold`].
     pub text_size: Ramp,
+    /// Text size for a place **at or above** [`Layer::rank_threshold`], where the
+    /// authored style gives a second arm.
+    ///
+    /// `places_country` and `places_locality` size their labels with a two-arm `case`
+    /// on `population_rank`, and the gap is wide: at z10 a locality is 12px below the
+    /// threshold and 20px above it. Collapsing that to a single ramp drew every small
+    /// town at close to city size - and because a label's collision box follows its
+    /// size, those towns then beat the cities they should have lost to.
+    pub text_size_large: Option<Ramp>,
+    /// The population rank at which [`Layer::text_size_large`] takes over, per zoom.
+    ///
+    /// Falls as the camera descends (13 at z2 down to 8 at z15): the closer in, the
+    /// smaller a place may be and still be worth drawing large.
+    pub rank_threshold: Option<Ramp>,
     /// Uppercase the label (`text-transform: uppercase` in the authored style).
     pub uppercase: bool,
     /// Glyph weight: the authored `text-font` reduced to Regular/Medium.
     pub medium: bool,
+    /// Which optional layer group this belongs to, or `None` for always-on basemap.
+    pub toggle: Option<Toggle>,
+    /// Draw a sprite icon beside the label, named by the feature's `kind`.
+    ///
+    /// Only the POI layers set this. The reference style's `icon-image` is
+    /// `match(kind, "station", "train_station", kind)`, which is a rename of one kind and
+    /// otherwise the kind itself — so a boolean plus that one rule says all of it, and no
+    /// per-layer icon name has to be authored.
+    pub icon: bool,
+    /// `text-offset` in ems, applied along the resolved anchor.
+    pub text_offset: (f32, f32),
+    /// `text-max-width` in ems, the target width line breaking aims for. Zero means no
+    /// wrapping, which is what every place layer wants.
+    pub text_max_width: f32,
+    /// `text-variable-anchor`: the anchors to try, in order, before giving up.
+    ///
+    /// Empty means the label is centred and does not move, which is the place layers'
+    /// behaviour and what MapLibre does with no variable anchor declared.
+    pub variable_anchor: Vec<Anchor>,
     pub min_zoom: u8,
     pub max_zoom: u8,
     /// The `style/basemap.json` layer this was transcribed from.
@@ -259,6 +410,29 @@ impl Layer {
         zoom >= self.min_zoom && zoom <= self.max_zoom
     }
 
+    /// This label's size in px at `zoom`, for a place of population rank `pop`.
+    ///
+    /// Picks between the two arms the authored style declares. A layer without a second
+    /// arm answers from [`Layer::text_size`] whatever the rank, which is what every
+    /// non-place symbol layer wants.
+    pub fn text_size_for(&self, zoom: f64, pop: u16) -> f32 {
+        match (&self.text_size_large, &self.rank_threshold) {
+            (Some(large), Some(threshold)) if f32::from(pop) >= threshold.at(zoom) => {
+                large.at(zoom)
+            }
+            _ => self.text_size.at(zoom),
+        }
+    }
+
+    /// Whether any place could produce a visible label at `zoom`.
+    ///
+    /// The cheap per-layer gate before the per-label sizing: a layer whose *widest* arm
+    /// has ramped to zero cannot draw anything, whatever ranks the tile holds.
+    pub fn text_visible_at(&self, zoom: f64) -> bool {
+        let large = self.text_size_large.as_ref().map_or(0.0, |ramp| ramp.at(zoom));
+        self.text_size.at(zoom).max(large) > 0.0
+    }
+
     /// A casing: two bands offset either side of the centreline.
     ///
     /// Read at tessellation time, so it cannot vary with zoom — one geometry has to serve every
@@ -272,6 +446,41 @@ impl Layer {
     /// The stroke this layer draws at `zoom`, in Dp.
     pub fn stroke(&self, zoom: f64) -> Stroke {
         Stroke { width_dp: self.width.at(zoom), gap_width_dp: self.gap_width.at(zoom) }
+    }
+
+    /// How far sideways a transit feature's mesh shifts at `zoom`, in device pixels.
+    ///
+    /// `count` is the corridor's colour count and `ordinal` the colour's index within it, both
+    /// straight off the feature; `taper` is how far into the lane this piece sits, over 255.
+    ///
+    /// Past the style's lane count the colours are squashed onto the lanes there are rather
+    /// than the fan growing without bound. Squashing rather than wrapping is what keeps the map
+    /// free of crossings at every zoom: the map is monotonic in `ordinal`, so two colours can
+    /// come to share a lane but can never swap sides.
+    ///
+    /// It squashes from the **middle**. Ordinal zero takes lane zero and the last ordinal takes
+    /// the last lane, so the outermost line on each side of a corridor keeps a lane to itself
+    /// for as long as there is one to spare, and the doubling-up happens where it is least
+    /// visible. Six colours over four lanes go `0,1,1,2,2,3` — one, two, two, one — where
+    /// spacing them evenly would give `0,0,1,2,2,3` and crowd the two edges instead.
+    pub fn lane_offset_px(
+        &self,
+        zoom: f64,
+        density: f32,
+        ordinal: u8,
+        count: u8,
+        taper: u8,
+    ) -> f32 {
+        let lanes = (self.lanes.at(zoom).floor() as i32).min(count as i32);
+        if lanes < 2 {
+            return 0.0;
+        }
+        // `lanes >= 2` implies `count >= 2`, so the divisor cannot be zero. The `+ steps` is
+        // the round-to-nearest, which is what puts the wider buckets in the middle.
+        let (span, steps) = (lanes - 1, count as i32 - 1);
+        let lane = (2 * ordinal as i32 * span + steps) / (2 * steps);
+        (2 * lane - (lanes - 1)) as f32 * self.spread.at(zoom) * density / 2.0
+            * (taper as f32 / 255.0)
     }
 
     /// The fill opacity this layer draws at `zoom`, in 0..=1.
@@ -591,6 +800,78 @@ mod tests {
         assert_eq!(count, ids.len(), "layer ids are used as identities");
     }
 
+    /// The lane arithmetic, at density 1 so a Dp is a pixel: `lanes` lanes of the constant
+    /// 6 Dp spacing, centred on the track, so an even count straddles it and an odd one sits
+    /// one line on it. The count comes from the style's zoom step, not from the feature.
+    #[test]
+    fn a_corridor_fans_out_centred_on_the_track_it_shares() {
+        let rail = find("transit-rail");
+        let of = |zoom: f64, ordinal: u8, count: u8| rail.lane_offset_px(zoom, 1.0, ordinal, count, 255);
+        assert_eq!([of(9.0, 0, 2), of(9.0, 1, 2)], [-3.0, 3.0], "two lanes straddle it");
+        assert_eq!([of(11.0, 0, 3), of(11.0, 1, 3), of(11.0, 2, 3)], [-6.0, 0.0, 6.0]);
+        assert_eq!(
+            [of(13.0, 0, 4), of(13.0, 1, 4), of(13.0, 2, 4), of(13.0, 3, 4)],
+            [-9.0, -3.0, 3.0, 9.0],
+        );
+        // Past the zoom's lane count the ordinals squash, so a busy corridor shares lanes
+        // rather than fanning off the street — from the middle, so the outermost line on each
+        // side keeps a lane of its own.
+        assert_eq!(of(9.0, 1, 4), of(9.0, 0, 4), "ordinals 0 and 1 of 4 share lane 0 of 2");
+        assert_eq!(of(9.0, 3, 4), of(9.0, 2, 4), "and 2 and 3 share lane 1");
+        assert!(of(9.0, 2, 4) > of(9.0, 1, 4), "without the two halves swapping");
+        // A corridor of one has nothing to fan, and neither does a single-lane zoom.
+        assert_eq!(of(13.0, 0, 1), 0.0);
+        assert_eq!(of(8.0, 1, 4), 0.0);
+    }
+
+    /// Two groups of three merging, at a zoom that can draw four lanes: the outermost line on
+    /// each side keeps a lane to itself and the four in the middle pair up, rather than the
+    /// crowding landing on the two edges where it is most visible.
+    #[test]
+    fn a_corridor_past_its_lane_budget_doubles_up_in_the_middle() {
+        let rail = find("transit-rail");
+        let of = |ordinal: u8| rail.lane_offset_px(13.0, 1.0, ordinal, 6, 255);
+        assert_eq!(
+            [of(0), of(1), of(2), of(3), of(4), of(5)],
+            [-9.0, -3.0, -3.0, 3.0, 3.0, 9.0],
+            "one, two, two, one across the four lanes z13 draws",
+        );
+    }
+
+    /// The property the whole lane-order pass rests on: within a corridor the offset never
+    /// decreases as the ordinal rises, at any zoom and any colour count. Two lines can come
+    /// to share a lane, but they can never cross.
+    #[test]
+    fn squashing_a_corridor_onto_fewer_lanes_never_reorders_it() {
+        let rail = find("transit-rail");
+        for count in 1u8..=12 {
+            for step in 0..=40 {
+                let zoom = 4.0 + f64::from(step) * 0.5;
+                let offsets: Vec<f32> = (0..count)
+                    .map(|ordinal| rail.lane_offset_px(zoom, 1.0, ordinal, count, 255))
+                    .collect();
+                assert!(
+                    offsets.windows(2).all(|w| w[0] <= w[1]),
+                    "count {count} at zoom {zoom}: {offsets:?}",
+                );
+                // And the fan always reaches its full width: the first and last ordinals take
+                // the outermost lanes, which is what makes the squashing land in the middle.
+                let (first, last) = (offsets[0], offsets[offsets.len() - 1]);
+                assert_eq!(first, -last, "count {count} at zoom {zoom}: {offsets:?}");
+            }
+        }
+    }
+
+    /// The taper is a fraction of whatever the offset turns out to be, which is why it has to
+    /// travel separately from the lane index.
+    #[test]
+    fn a_taper_scales_the_offset_it_eases_into() {
+        let rail = find("transit-rail");
+        assert_eq!(rail.lane_offset_px(9.0, 1.0, 1, 2, 255), 3.0);
+        assert_eq!(rail.lane_offset_px(9.0, 1.0, 1, 2, 128), 3.0 * (128.0 / 255.0));
+        assert_eq!(rail.lane_offset_px(9.0, 1.0, 1, 2, 0), 0.0);
+    }
+
     // --- the road flag/detail filters (issue #3) -------------------------------
 
     fn feature(kind: &str, flags: u8, detail: &str) -> tilecodec::mamaps::body::Feature {
@@ -604,6 +885,9 @@ mod tests {
             parts_offset: 0,
             part_count: 0,
             transit_color: 0,
+            transit_ordinal: 0,
+            transit_lanes: 0,
+            transit_taper: 0,
         }
     }
 

@@ -11,6 +11,9 @@
 //! * [`nets`] — the two hardcoded forward passes, and the small compiler that packs
 //!   their activations into one arena and resolves every offset.
 //! * [`preprocess`] — bitmap to fp16 NCHW, and the fp16 conversions.
+//! * [`microfrontend`] — 16 kHz PCM to log-mel frames, for the audio nets.
+//! * [`gate`] — Now Playing's always-on music detector, on the CPU. See its header.
+//! * [`logmel`] — 16 kHz PCM to Gemma 4's 128-bin HTK log-mel, which is a different chain.
 //! * [`vulkan`] — device, pipelines, the recorded command buffer.
 //!
 //! # GPU only, by decision
@@ -41,6 +44,9 @@
 //! Vulkan still passes `cargo test`. On an `x86_64-pc-windows-gnu` host, `libloading`
 //! needs a `dlltool` on `PATH` to build; the NDK's `llvm-dlltool` works under that name.
 
+pub mod gate;
+pub mod logmel;
+pub mod microfrontend;
 pub mod nets;
 pub mod post;
 pub mod preprocess;

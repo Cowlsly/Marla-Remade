@@ -1,0 +1,30 @@
+#version 450
+//! Clamp a tensor to a range held in the weights.
+//!
+//! # Why the vision tower needs this and the decoder does not
+//!
+//! Gemma 4's vision config sets `use_clipped_linears`, and the export puts a `Clip` around every
+//! linear in the tower - 177 of them, each with its own calibrated `(min, max)`. They are not
+//! decoration: they bound activations that would otherwise leave fp16's range on some inputs,
+//! and dropping them changes the numbers everywhere downstream.
+//!
+//! The bounds live in the weights rather than in a push constant because they differ per clip and
+//! `Builder` sees only shapes and offsets - it cannot read a number at build time. One `[2]`
+//! tensor per clip is four bytes against a tower of 337 MB.
+//!
+//! # Push fields
+//!
+//! `p.in0`, `p.out_at` and `p.count` as usual; `p.act_weight` is the fp16 offset of the pair,
+//! minimum first.
+
+#include "common.glsl"
+
+void main() {
+    uint index = global_index();
+    if (index >= p.count) {
+        return;
+    }
+    float low = float(weights[p.act_weight]);
+    float high = float(weights[p.act_weight + 1u]);
+    arena[p.out_at + index] = float16_t(clamp(float(arena[p.in0 + index]), low, high));
+}

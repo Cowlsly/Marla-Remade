@@ -78,6 +78,7 @@ include(":games:chess")
 include(":games:unblockjam")
 include(":games:wordmaker")
 include(":music")
+include(":nowplaying")
 include(":clock")
 include(":games:alchemist")
 include(":games:pipes")
@@ -127,6 +128,7 @@ include(":cast")
 include(":cast:protocol")
 include(":cast:tv")
 include(":mapcompare")
+include(":tuner")
 
 // Personal / private app modules live under personal/ (gitignored). Included only
 // when present so the public repo still configures without them.

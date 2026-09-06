@@ -544,7 +544,25 @@ impl Net {
                         );
                     }
                 }
-                self.barrier(buffer);
+                // Only what this op wrote. See `barrier_over`: the whole-arena form cost more
+                // than the arithmetic it was protecting.
+                let (offset, size) = match *op {
+                    Op::Dispatch { push, .. } => {
+                        let elems = u64::from(push.out_c)
+                            * u64::from(push.out_h.max(1))
+                            * u64::from(push.out_w.max(1));
+                        (u64::from(push.out) * 2, elems * 2)
+                    }
+                    Op::Copy { dst, elems, .. } => (u64::from(dst) * 2, u64::from(elems) * 2),
+                };
+                // A zero-length range is not a barrier at all, and a shape this could not read
+                // is a plan bug rather than something to guess around - so fall back to the
+                // whole arena, which is always correct if slower.
+                if size == 0 || offset + size > self.arena.size {
+                    self.barrier(buffer);
+                } else {
+                    self.barrier_over(buffer, offset, size);
+                }
             }
 
             let mut read_back = 0u64;
@@ -596,8 +614,28 @@ impl Net {
     ///
     /// `buffer` must be inside a `begin`/`end` pair.
     unsafe fn barrier(&self, buffer: vk::CommandBuffer) {
-        // Whole-buffer rather than per-range: consecutive ops address overlapping parts
-        // of one arena by design, so there is nothing to narrow to.
+        // SAFETY: as `barrier_over`, which this defers to for the whole arena.
+        unsafe { self.barrier_over(buffer, 0, vk::WHOLE_SIZE) }
+    }
+
+    /// A barrier over `offset .. offset + size` of the arena, in bytes.
+    ///
+    /// # Why the range matters
+    ///
+    /// It used to be the whole buffer on every op, on the reasoning that consecutive ops overlap
+    /// anyway so there is nothing to narrow to. That is true of *which* ops depend on which, and
+    /// false about what the barrier costs: a decode step is 1,094 ops and therefore 1,094
+    /// whole-buffer barriers, and on a tile-based mobile GPU each one is a pipeline drain over a
+    /// buffer that is now up to 303 MB. Measured on a Tensor G4 a decode step took 676 ms, of
+    /// which the arithmetic accounts for perhaps a tenth - the rest was this.
+    ///
+    /// An op only ever makes visible what it wrote, so the range is its own output. Anything
+    /// earlier was already made visible by the barrier that followed *it*.
+    ///
+    /// # Safety
+    ///
+    /// `buffer` must be inside a `begin`/`end` pair, and the range must be inside the arena.
+    unsafe fn barrier_over(&self, buffer: vk::CommandBuffer, offset: u64, size: u64) {
         let barrier = vk::BufferMemoryBarrier::default()
             .src_access_mask(vk::AccessFlags::SHADER_WRITE | vk::AccessFlags::TRANSFER_WRITE)
             .dst_access_mask(
@@ -609,8 +647,8 @@ impl Net {
             .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
             .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
             .buffer(self.arena.buffer)
-            .offset(0)
-            .size(vk::WHOLE_SIZE);
+            .offset(offset)
+            .size(size);
         self.context.device.cmd_pipeline_barrier(
             buffer,
             vk::PipelineStageFlags::COMPUTE_SHADER | vk::PipelineStageFlags::TRANSFER,
@@ -853,6 +891,191 @@ impl Net {
     }
 
     /// The mask's dimensions, which is what the Kotlin wrapper reports to its caller.
+    /// Copy arena ranges out, as raw fp16 bytes, concatenated in the order given.
+    ///
+    /// Its own submit rather than a hook in the inference path: this runs twice in a process at
+    /// most - once to produce a cache, once to check one - so the simplest correct thing wins
+    /// over anything folded into the hot path.
+    fn read_arena(&mut self, ranges: &[(u32, u32)]) -> Result<Vec<u8>, String> {
+        // Chunked to the staging buffer, which is half a megabyte against caches that run to
+        // tens. One submit per chunk: this runs twice in a process, so the cost of the extra
+        // submits is irrelevant beside not needing a second large allocation.
+        let mut out = Vec::new();
+        for batch in batches(ranges, self.staging.size) {
+            out.extend_from_slice(&self.read_batch(&batch)?);
+        }
+        Ok(out)
+    }
+
+    /// One staging-sized batch of arena ranges, as raw fp16 bytes.
+    fn read_batch(&mut self, ranges: &[(u32, u32)]) -> Result<Vec<u8>, String> {
+        let total: u64 = ranges.iter().map(|&(_, elems)| u64::from(elems) * 2).sum();
+        if total == 0 {
+            return Ok(Vec::new());
+        }
+        let device = &self.context.device;
+        // SAFETY: one command buffer, recorded and submitted here and waited on before return,
+        // so nothing else observes it and the fence outlives the work.
+        unsafe {
+            device
+                .begin_command_buffer(self.command_buffer, &vk::CommandBufferBeginInfo::default())
+                .map_err(|e| format!("begin: {e:?}"))?;
+            let mut at = 0u64;
+            for &(from, elems) in ranges {
+                let region = vk::BufferCopy::default()
+                    .src_offset(u64::from(from) * 2)
+                    .dst_offset(at)
+                    .size(u64::from(elems) * 2);
+                device.cmd_copy_buffer(
+                    self.command_buffer,
+                    self.arena.buffer,
+                    self.staging.buffer,
+                    std::slice::from_ref(&region),
+                );
+                at += u64::from(elems) * 2;
+            }
+            device.end_command_buffer(self.command_buffer).map_err(|e| format!("end: {e:?}"))?;
+            self.run_once()?;
+        }
+        let mut halves = vec![0u16; (total / 2) as usize];
+        self.staging.read_f16(&mut halves)?;
+        let mut out = Vec::with_capacity(total as usize);
+        for half in halves {
+            out.extend_from_slice(&half.to_le_bytes());
+        }
+        Ok(out)
+    }
+
+    /// Copy `bytes` into arena ranges, the inverse of [`Net::read_arena`].
+    fn write_arena(&mut self, ranges: &[(u32, u32)], bytes: &[u8]) -> Result<(), String> {
+        let mut at = 0usize;
+        for batch in batches(ranges, self.staging.size) {
+            let size: usize = batch.iter().map(|&(_, e)| e as usize * 2).sum();
+            let Some(slice) = bytes.get(at..at + size) else {
+                return Err(format!("a cache shorter than its {} ranges", ranges.len()));
+            };
+            self.write_batch(&batch, slice)?;
+            at += size;
+        }
+        Ok(())
+    }
+
+    /// One staging-sized batch, the inverse of [`Net::read_batch`].
+    fn write_batch(&mut self, ranges: &[(u32, u32)], bytes: &[u8]) -> Result<(), String> {
+        self.staging.write(bytes)?;
+        let device = &self.context.device;
+        // SAFETY: as `read_arena`.
+        unsafe {
+            device
+                .begin_command_buffer(self.command_buffer, &vk::CommandBufferBeginInfo::default())
+                .map_err(|e| format!("begin: {e:?}"))?;
+            let mut at = 0u64;
+            for &(to, elems) in ranges {
+                let region = vk::BufferCopy::default()
+                    .src_offset(at)
+                    .dst_offset(u64::from(to) * 2)
+                    .size(u64::from(elems) * 2);
+                device.cmd_copy_buffer(
+                    self.command_buffer,
+                    self.staging.buffer,
+                    self.arena.buffer,
+                    std::slice::from_ref(&region),
+                );
+                at += u64::from(elems) * 2;
+            }
+            device.end_command_buffer(self.command_buffer).map_err(|e| format!("end: {e:?}"))?;
+            self.run_once()
+        }
+    }
+
+    /// Submit the recorded command buffer and wait for it.
+    ///
+    /// # Safety
+    ///
+    /// The command buffer must be recorded and ended, and not already in flight.
+    unsafe fn run_once(&self) -> Result<(), String> {
+        let device = &self.context.device;
+        let submit =
+            vk::SubmitInfo::default().command_buffers(std::slice::from_ref(&self.command_buffer));
+        unsafe {
+            device.reset_fences(&[self.fence]).map_err(|e| format!("reset: {e:?}"))?;
+            // The queue is shared with every other net in the process, so the lock is not
+            // optional - see `Context::lock_queue`.
+            let guard = self.context.lock_queue();
+            let submitted = device
+                .queue_submit(self.context.queue, std::slice::from_ref(&submit), self.fence)
+                .map_err(|e| format!("queue_submit {e:?}"));
+            drop(guard);
+            submitted?;
+            device
+                .wait_for_fences(&[self.fence], true, FENCE_TIMEOUT_NS)
+                .map_err(|e| format!("wait_for_fences {e:?}"))?;
+        }
+        Ok(())
+    }
+
+    /// The first `positions` of every pinned tensor, as raw fp16 bytes.
+    ///
+    /// # What this is for
+    ///
+    /// The system block and tool declarations are the same ~1,100 positions on every device and
+    /// every launch, and prefilling them costs 14 seconds on a phone. They are also the same
+    /// *numbers*: the tokens do not change, so neither do the keys and values. Computing them
+    /// once here and shipping the result means no device ever computes them again.
+    ///
+    /// The layout is per-tensor and in plan order - `positions * width` elements from the start
+    /// of each - so it does not depend on the arena's offsets and survives a different cache
+    /// tier on the far side. It is not bit-identical across GPUs, which does not matter: the
+    /// difference is fp16 rounding, well inside the quantisation noise the weights already have.
+    pub fn export_pinned(&mut self, tensors: usize, positions: u32) -> Result<Vec<u8>, String> {
+        let mut wanted = Vec::new();
+        // `tensors` rather than all of them: a plan's pinned list is whatever survives between
+        // submits, and for Gemma that is the thirty KV caches *and* the soft-token buffers the
+        // multimodal path keeps. Only the caches are a function of the prompt prefix; the rest
+        // belong to whatever image or clip was last seen and mean nothing to another device.
+        let Some(caches) = self.plan.pinned.get(..tensors) else {
+            return Err(format!("{tensors} pinned of {}", self.plan.pinned.len()));
+        };
+        for cache in caches {
+            let width = cache.shape.w;
+            if positions > cache.shape.c {
+                return Err(format!("{positions} positions of a {} cache", cache.shape.c));
+            }
+            wanted.push((cache.at, positions * width));
+        }
+        self.read_arena(&wanted)
+    }
+
+    /// Write `bytes` back over the first `positions` of every pinned tensor.
+    ///
+    /// The inverse of [`Net::export_pinned`], and it checks the length rather than trusting it -
+    /// a file from a different model or a different position count would otherwise be written
+    /// into the caches and answered from.
+    pub fn import_pinned(
+        &mut self,
+        tensors: usize,
+        positions: u32,
+        bytes: &[u8],
+    ) -> Result<(), String> {
+        let mut wanted = Vec::new();
+        let mut expect = 0usize;
+        let Some(caches) = self.plan.pinned.get(..tensors) else {
+            return Err(format!("{tensors} pinned of {}", self.plan.pinned.len()));
+        };
+        for cache in caches {
+            if positions > cache.shape.c {
+                return Err(format!("{positions} positions of a {} cache", cache.shape.c));
+            }
+            let elems = positions * cache.shape.w;
+            wanted.push((cache.at, elems));
+            expect += elems as usize * 2;
+        }
+        if bytes.len() != expect {
+            return Err(format!("a cache of {} bytes, not {expect}", bytes.len()));
+        }
+        self.write_arena(&wanted, bytes)
+    }
+
     pub fn output_size(&self) -> Result<(u32, u32), String> {
         let output = self.plan.output()?;
         Ok((output.shape.w, output.shape.h))
@@ -874,7 +1097,16 @@ fn binding_elems(bindings: &[crate::nets::Binding]) -> usize {
 /// short enough that a genuinely hung GPU does not block a UI thread forever. `:camera`
 /// runs this on a dedicated executor, `:photos` on its own thread, so neither blocks the
 /// main thread even at the limit.
-const FENCE_TIMEOUT_NS: u64 = 5_000_000_000;
+///
+/// # Raised from five seconds
+///
+/// Five was chosen for a desktop, where any submit is milliseconds and a slow one means a hung
+/// GPU. A phone is not that: a legitimate prefill of 64 positions streams 1.30 GB of weights and
+/// takes seconds, and the old bound turned that into `wait_for_fences TIMEOUT` - which poisons
+/// the net, so the retry fails too and the user sees two dead turns rather than a slow one.
+///
+/// Twenty still bounds a genuine hang; it just no longer calls slow hardware broken.
+const FENCE_TIMEOUT_NS: u64 = 20_000_000_000;
 
 fn push_bytes(push: &crate::nets::Push) -> &[u8] {
     // SAFETY: `Push` is `repr(C)` and entirely `u32`, so it has no padding and no
@@ -942,4 +1174,32 @@ mod tests {
         assert_eq!(bytes.get(0..4), Some(&0x1111_1111u32.to_ne_bytes()[..]), "prefix first");
         assert_eq!(bytes.get(4..8), Some(&0x2222_2222u32.to_ne_bytes()[..]), "window_start second");
     }
+}
+
+/// Split `ranges` so each batch fits `budget` bytes, splitting a long range across batches.
+///
+/// A single KV cache row set is 16,384 positions of 512 bytes, far past any staging buffer, so
+/// splitting *within* a range is the case that matters rather than merely between them.
+fn batches(ranges: &[(u32, u32)], budget: u64) -> Vec<Vec<(u32, u32)>> {
+    let per = (budget / 2).max(1) as u32;
+    let mut out: Vec<Vec<(u32, u32)>> = Vec::new();
+    let mut current: Vec<(u32, u32)> = Vec::new();
+    let mut room = per;
+    for &(at, elems) in ranges {
+        let mut done = 0u32;
+        while done < elems {
+            if room == 0 {
+                out.push(std::mem::take(&mut current));
+                room = per;
+            }
+            let take = room.min(elems - done);
+            current.push((at + done, take));
+            done += take;
+            room -= take;
+        }
+    }
+    if !current.is_empty() {
+        out.push(current);
+    }
+    out
 }

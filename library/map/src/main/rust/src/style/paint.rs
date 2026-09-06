@@ -27,16 +27,19 @@
 //! `style/basemap.json`, the 71-layer MapLibre style this used to interpret at runtime, is kept
 //! vendored beside the flat file for one reason: `the_flat_style_agrees_with_basemap_json`
 //! cross-checks every value that exists in both, so a transcription slip fails a build instead
-//! of being found on a screenshot. Two columns are deliberately **ours** and are not
+//! of being found on a screenshot. One column is deliberately **ours** and is not
 //! cross-checked:
 //!
 //! * **The dark colours.** `basemap.json` is light-only. These are
 //!   `maps/src/main/java/com/vayunmathur/maps/ui/theme/BasemapPalette.kt`'s contrast-checked
-//!   values by role — see [`super`]'s module docs for why that palette rather than a third
+//!   values by role - see [`super`]'s module docs for why that palette rather than a third
 //!   party's.
-//! * **The line colours.** The authored file draws roads white on grey casings; these are the
-//!   warmer set the app has always drawn, and `roads_stay_legible_against_the_land_behind_them`
-//!   is what holds them honest.
+//!
+//! The light line colours used to be a second such column - a warmer set with cream fills over
+//! tan casings. It was measured against the comparator and reverted to the authored
+//! white-on-`#e0e0e0`: a casing *darker* than the land it sits on outlines every road, so a
+//! street grid at z14 filled with tan linework and the map read as blurred rather than warm.
+//! The bridge layers had never diverged, so the two halves of the same road disagreed as well.
 //!
 //! One flattening is worth naming. The authored style splits two road casings into
 //! `*_casing_early`/`*_casing_late` pairs at z12, one gated by `maxzoom` and the other by
@@ -46,7 +49,7 @@
 //! of that is immediately below the z12 split, which is where two ramps meeting at a point are
 //! furthest apart. `a_collapsed_casing_pair_matches_its_authored_late_half` pins the bound.
 
-use super::{Layer, LayerKind};
+use super::{Anchor, Layer, LayerKind, Toggle};
 use serde_json::Value as Json;
 use std::sync::OnceLock;
 use tilecodec::mamaps::body::{FLAG_IS_BRIDGE, FLAG_IS_LINK, FLAG_IS_TUNNEL};
@@ -63,13 +66,21 @@ const FLAT: &str = include_str!("../../style/basemap.flat.json");
 /// The archive stops at z14 and the renderer overzooms past it.
 pub const MAX_ZOOM: u8 = 22;
 
-/// The narrowest half-width worth drawing, in device pixels.
+/// The narrowest half-width the **geometry** is allowed to be, in device pixels.
 ///
-/// The ramps go continuously to zero and the line pipeline is single-sampled with no coverage
-/// term in its shader, so a quad narrower than a pixel is filled only where it happens to
-/// straddle a pixel centre. That rasterises as stipple which crawls along the road while
-/// panning, rather than as the faint continuous line the ramp is asking for. Holding it at one
-/// pixel wide is what a renderer that antialiased its line edges would end up drawing anyway.
+/// A quad narrower than a pixel is filled only where it happens to straddle a pixel
+/// centre, which rasterises as stipple that crawls along the road while panning. So
+/// `shaders/line.vert` expands any thinner stroke to this, and `line.frag` takes the
+/// difference straight back off as alpha — the road ends up a faint continuous line,
+/// which is what the ramp was asking for.
+///
+/// This used to be applied here, in [`Stroke::half_px`], where it could only round a
+/// sub-pixel road *up* to a solid pixel. That is why low zooms read as heavier than
+/// MapLibre's: every road the style had ramped down to a hairline drew at full
+/// strength. The floor belongs with the rasteriser, not with the style.
+///
+/// GLSL cannot include a Rust constant, so both shaders carry the literal;
+/// [`the_shader_width_floor_matches_this_constant`] pins them together.
 pub const MIN_HALF_WIDTH_PX: f32 = 0.5;
 
 /// A line's stroke at one zoom, in Dp.
@@ -93,14 +104,11 @@ impl Stroke {
 
     /// Half-width and half-gap in device pixels, which is what the vertex shader extrudes by.
     ///
-    /// Halved because the shader offsets each edge from the centreline. The width is floored at
-    /// [`MIN_HALF_WIDTH_PX`]; the gap is not, since two bands standing a sub-pixel distance
-    /// apart simply read as one band of their combined thickness.
+    /// Halved because the shader offsets each edge from the centreline. Neither is floored:
+    /// the shader widens a sub-pixel stroke to [`MIN_HALF_WIDTH_PX`] of geometry and fades it
+    /// by coverage instead, so the value handed over stays the width the style asked for.
     pub fn half_px(&self, density: f32) -> (f32, f32) {
-        (
-            (self.width_dp * density / 2.0).max(MIN_HALF_WIDTH_PX),
-            self.gap_width_dp * density / 2.0,
-        )
+        (self.width_dp * density / 2.0, self.gap_width_dp * density / 2.0)
     }
 }
 
@@ -252,10 +260,19 @@ fn layer(json: &Json) -> Result<Layer, String> {
         "opacity",
         "width",
         "gap_width",
+        "spread",
+        "lanes",
         "dash",
         "text_size",
+        "text_size_large",
+        "rank_threshold",
         "uppercase",
         "medium",
+        "toggle",
+        "icon",
+        "text_offset",
+        "text_max_width",
+        "variable_anchor",
         "halo_light",
         "halo_dark",
         "halo_width",
@@ -372,6 +389,37 @@ fn layer(json: &Json) -> Result<Layer, String> {
         Ok(ids)
     };
 
+    let toggle = match json.get("toggle").map(|v| v.as_str()) {
+        None => None,
+        Some(Some("poi")) => Some(Toggle::Poi),
+        Some(Some("transit")) => Some(Toggle::Transit),
+        Some(other) => return Err(format!("`{id}` has an unknown toggle {other:?}")),
+    };
+    let text_offset = match json.get("text_offset").map(|v| v.as_array()) {
+        None => (0.0, 0.0),
+        Some(Some(pair)) => match pair.as_slice() {
+            [x, y] => match (x.as_f64(), y.as_f64()) {
+                (Some(x), Some(y)) => (x as f32, y as f32),
+                _ => return Err(format!("`{id}`'s text_offset must be two numbers")),
+            },
+            _ => return Err(format!("`{id}`'s text_offset must be `[x, y]`")),
+        },
+        Some(None) => return Err(format!("`{id}`'s text_offset must be an array")),
+    };
+    let variable_anchor: Vec<Anchor> = match json.get("variable_anchor") {
+        None => Vec::new(),
+        Some(Json::Array(names)) => names
+            .iter()
+            .map(|name| match name.as_str() {
+                Some("center") => Ok(Anchor::Center),
+                Some("left") => Ok(Anchor::Left),
+                Some("right") => Ok(Anchor::Right),
+                other => Err(format!("`{id}`'s variable_anchor names an unknown anchor {other:?}")),
+            })
+            .collect::<Result<_, _>>()?,
+        Some(_) => return Err(format!("`{id}`'s variable_anchor must be an array")),
+    };
+
     Ok(Layer {
         source_layer: source,
         source_layer_id,
@@ -388,10 +436,32 @@ fn layer(json: &Json) -> Result<Layer, String> {
         opacity: Ramp::parse(json.get("opacity"), &id, "opacity", 1.0)?,
         width: Ramp::parse(json.get("width"), &id, "width", 0.0)?,
         gap_width: Ramp::parse(json.get("gap_width"), &id, "gap_width", 0.0)?,
+        spread: Ramp::parse(json.get("spread"), &id, "spread", 0.0)?,
+        lanes: Ramp::parse(json.get("lanes"), &id, "lanes", 1.0)?,
         dash,
         text_size: Ramp::parse(json.get("text_size"), &id, "text_size", 0.0)?,
+        // Optional second arm: present only where the authored style's `text-size` is a
+        // `case` on `population_rank`. Both halves have to be there or neither, since a
+        // threshold with nothing to switch to says nothing.
+        text_size_large: match json.get("text_size_large") {
+            Some(value) => Some(Ramp::parse(Some(value), &id, "text_size_large", 0.0)?),
+            None => None,
+        },
+        rank_threshold: match json.get("rank_threshold") {
+            Some(value) => Some(Ramp::parse(Some(value), &id, "rank_threshold", 0.0)?),
+            None => None,
+        },
         uppercase: json.get("uppercase").and_then(Json::as_bool).unwrap_or(false),
         medium: json.get("medium").and_then(Json::as_bool).unwrap_or(false),
+        toggle,
+        icon: json.get("icon").and_then(Json::as_bool).unwrap_or(false),
+        text_offset,
+        text_max_width: json
+            .get("text_max_width")
+            .and_then(Json::as_f64)
+            .map(|v| v as f32)
+            .unwrap_or(0.0),
+        variable_anchor,
         halo_light: color(json.get("halo_light"), &id).unwrap_or(0x00000000),
         halo_dark: color(json.get("halo_dark"), &id).unwrap_or(0x00000000),
         halo_width: json
@@ -473,18 +543,82 @@ mod tests {
     #[test]
     fn the_vendored_flat_style_parses() {
         let style = parse(FLAT).expect("style/basemap.flat.json should parse");
-        // 24 fills, 22 lines and 4 symbols. Asserted exactly: the file is the layer
-        // set, so a layer appearing or disappearing is a decision rather than an
-        // incidental restyle. The 22 lines are the 12 surface/link layers plus 10
-        // bridge layers (5 casings + 5 fills): the authored `is_bridge` pass the
-        // flat file used to drop entirely, which is what hid the Bay Bridge and
-        // the Golden Gate (task 8). The 4 symbols are the places hierarchy
+        // Counted exactly, and split basemap from optional: the file *is* the layer set,
+        // so a layer appearing or disappearing is a decision rather than an incidental
+        // restyle. Splitting the count means adding an optional layer touches one number
+        // that says what it is, instead of nudging a basemap total that then no longer
+        // states what the basemap is.
+        //
+        // Basemap: 24 fills, 22 lines and 4 symbols. The 22 lines are the 12
+        // surface/link layers plus 10 bridge layers (5 casings + 5 fills): the authored
+        // `is_bridge` pass the flat file used to drop entirely, which is what hid the Bay
+        // Bridge and the Golden Gate (task 8). The 4 symbols are the places hierarchy
         // (country/region/locality/subplace).
-        let fills = style.layers.iter().filter(|l| l.kind == LayerKind::Fill).count();
-        let lines = style.layers.iter().filter(|l| l.kind == LayerKind::Line).count();
-        let symbols = style.layers.iter().filter(|l| l.kind == LayerKind::Symbol).count();
-        assert_eq!((fills, lines, symbols), (24, 22, 4));
+        //
+        // Optional: 1 transit line, and 6 POI symbols — one per colour group of the
+        // reference `pois` layer's `text-color` `case` on `kind`. Six and not seven: the
+        // `case` has a `#e2dfda` default arm, but the same layer's `filter` admits exactly
+        // the 36 kinds the six groups list between them, so the default is unreachable.
+        // A seventh unfiltered layer would not be a fallback, it would draw all 36 POIs a
+        // second time in the wrong colour —
+        // `the_poi_colour_groups_partition_the_kinds_the_reference_admits` pins the
+        // arithmetic that makes the omission safe.
+        let count = |kind: LayerKind, optional: bool| {
+            style
+                .layers
+                .iter()
+                .filter(|l| l.kind == kind && l.toggle.is_some() == optional)
+                .count()
+        };
+        assert_eq!(
+            (count(LayerKind::Fill, false), count(LayerKind::Line, false), count(LayerKind::Symbol, false)),
+            (24, 22, 4),
+            "the basemap layer set",
+        );
+        assert_eq!(
+            (count(LayerKind::Fill, true), count(LayerKind::Line, true), count(LayerKind::Symbol, true)),
+            (0, 1, 6),
+            "the optional layer set",
+        );
         assert_eq!(style.background, (0xFF80DEEA, 0xFF0D1B2A));
+    }
+
+    /// The six POI layers have to cover the reference filter exactly: every kind once, and
+    /// no kind twice.
+    ///
+    /// A kind missing from all six is a POI the reference draws and we do not. A kind in
+    /// two is a POI drawn twice, in whichever colour comes last — and since the layers are
+    /// one per colour, that is a silent recolouring rather than a visible double image.
+    /// This is also what licenses leaving the `case`'s default arm out entirely.
+    #[test]
+    fn the_poi_colour_groups_partition_the_kinds_the_reference_admits() {
+        let root = basemap();
+        let authored = authored_layer(&root, "pois");
+        // `["all", ["in", ["get","kind"], ["literal", [...]]], [">=", ["zoom"], ...]]`
+        let mut admitted: Vec<String> = Vec::new();
+        let filter = authored.get("filter").and_then(Json::as_array).expect("a filter");
+        for clause in filter {
+            let Some(clause) = clause.as_array() else { continue };
+            if clause.first().and_then(Json::as_str) != Some("in") {
+                continue;
+            }
+            let Some(literal) = clause.get(2).and_then(Json::as_array) else { continue };
+            let Some(names) = literal.get(1).and_then(Json::as_array) else { continue };
+            admitted.extend(names.iter().filter_map(Json::as_str).map(str::to_string));
+        }
+        assert_eq!(admitted.len(), 36, "the reference admits 36 kinds");
+
+        let mut drawn: Vec<String> = layers()
+            .iter()
+            .filter(|l| l.toggle == Some(Toggle::Poi))
+            .flat_map(|l| l.kinds.iter().cloned())
+            .collect();
+        let before = drawn.len();
+        drawn.sort_unstable();
+        drawn.dedup();
+        assert_eq!(before, drawn.len(), "a kind is claimed by two POI layers");
+        admitted.sort_unstable();
+        assert_eq!(drawn, admitted, "the POI layers do not cover the reference filter");
     }
 
     #[test]
@@ -696,18 +830,61 @@ mod tests {
         }
     }
 
-    /// A sub-pixel stroke has no antialiasing to fade it, so it must not be pushed as one.
+    /// A bridge is drawn by the bridge layers and by nothing else: every surface road
+    /// layer carries `forbid_flags: ["bridge"]`. So wherever a surface class draws, its
+    /// bridge counterpart has to draw too, or the road is chopped at every crossing.
+    ///
+    /// This is what hid the Golden Gate and the Bay Bridge below z12, and with them every
+    /// highway overpass in the network - `roads-bridges-highway` had a `minzoom` of 12
+    /// that the authored style does not give it.
     #[test]
-    fn a_sub_pixel_stroke_is_held_at_one_pixel_wide() {
+    fn a_highway_bridge_draws_wherever_a_surface_highway_does() {
+        let (surface, bridge) = (find("roads-highway"), find("roads-bridges-highway"));
+        assert!(
+            surface.forbid_flags & FLAG_IS_BRIDGE != 0,
+            "the surface layer must exclude bridges, or this test proves nothing",
+        );
+        for tenth in 0..=220 {
+            let zoom = tenth as f64 / 10.0;
+            if !surface.stroke(zoom).visible() || !surface.draws_at(zoom.floor() as u8) {
+                continue;
+            }
+            assert!(
+                bridge.draws_at(zoom.floor() as u8) && bridge.stroke(zoom).visible(),
+                "a highway draws at z{zoom} but its bridges do not",
+            );
+        }
+    }
+    #[test]
+    fn a_sub_pixel_stroke_keeps_its_true_width() {
         let hair = Stroke { width_dp: 0.18, gap_width_dp: 0.0 };
         let (half_width, _) = hair.half_px(3.0);
-        assert_eq!(half_width, MIN_HALF_WIDTH_PX, "0.18 Dp at density 3 is 0.27 px of half-width");
-        // A stroke already wider than a pixel is left exactly alone.
+        assert!(
+            (half_width - 0.27).abs() < 1e-6,
+            "0.18 Dp at density 3 is 0.27 px of half-width, got {half_width}",
+        );
+        assert!(half_width < MIN_HALF_WIDTH_PX, "and it is under the shader's floor");
+        // A stroke already wider than a pixel is unaffected either way.
         let solid = Stroke { width_dp: 4.0, gap_width_dp: 3.0 };
         assert_eq!(solid.half_px(3.0), (6.0, 4.5));
-        // Density scales it, so the floor bites at a width that varies with the screen.
-        assert_eq!(Stroke { width_dp: 0.4, gap_width_dp: 0.0 }.half_px(1.0).0, MIN_HALF_WIDTH_PX);
+        // Density still scales it.
+        assert_eq!(Stroke { width_dp: 0.4, gap_width_dp: 0.0 }.half_px(1.0).0, 0.2);
         assert_eq!(Stroke { width_dp: 0.4, gap_width_dp: 0.0 }.half_px(3.0).0, 0.6);
+    }
+
+    /// Both line shaders hardcode the floor because GLSL cannot include a Rust
+    /// constant. A silent divergence would put the geometry and the coverage term on
+    /// different widths, which shows up as roads that are too faint or too hard-edged
+    /// — subtle enough to survive review.
+    #[test]
+    fn the_shader_width_floor_matches_this_constant() {
+        let declared = format!("const float MIN_HALF_WIDTH_PX = {MIN_HALF_WIDTH_PX:.1};");
+        for (name, source) in [
+            ("line.vert", include_str!("../../shaders/line.vert")),
+            ("line.frag", include_str!("../../shaders/line.frag")),
+        ] {
+            assert!(source.contains(&declared), "{name} does not declare `{declared}`");
+        }
     }
 
     /// The gap is deliberately not floored: two bands a sub-pixel apart read as one band, which
@@ -728,9 +905,11 @@ mod tests {
         };
 
         // z3.87, where road colour covered 19.72% of the viewport. The casing is gated out by
-        // its own ramp and the fill collapses to the one-pixel floor.
+        // its own ramp, and the fill is a hairline the shader now fades rather than rounding
+        // up to a solid pixel.
         assert_eq!(of("roads-highway-casing", 3.87), None);
-        assert_eq!(of("roads-highway", 3.87), Some(1.0));
+        let hairline = of("roads-highway", 3.87).expect("drawn");
+        assert!(hairline < 1.0, "{hairline} px should be sub-pixel at z3.87");
         // Was a 6.0 Dp fill plus a 1.25 Dp casing 6.0 Dp apart: 18 px of fill on a density-3
         // screen, which is the 15-25 px ribbon that merged adjacent roads into sheets.
 
@@ -916,21 +1095,63 @@ mod tests {
         }
     }
 
-    /// City labels track the authored big-city arm at the zooms MapLibre is
-    /// compared at — not the small-town arm. The authored `text-size` is
-    /// data-driven (`case` over `population_rank`, so the cross-check skips it);
-    /// the flat file transcribes one value, and the M1 parity verdict moved it
-    /// from mid-arm to big-arm at city zooms (z6: 14 → 16 against big-17).
+    /// Place labels carry the authored two-arm size, keyed on population rank.
+    ///
+    /// The authored `text-size` for country and locality is data-driven (`case` over
+    /// `population_rank`), so the cross-check against `basemap.json` skips it and this
+    /// pins the transcription instead. It used to be one collapsed ramp with a fixed
+    /// 1.25x/0.85x nudge in `tile::symbol`, which drew a hamlet at close to city size —
+    /// and since a collision box follows the label's size, those hamlets then beat the
+    /// cities they overlapped.
     #[test]
     fn city_labels_track_the_big_city_arm_at_compared_zooms() {
-        let at = |id: &str, zoom: f64| find(id).text_size.at(zoom);
-        assert_eq!(at("places-locality", 6.0), 16.0);
-        assert_eq!(at("places-locality", 10.0), 19.0);
-        // Region and subplace are plain ramps, so the cross-check already pins
-        // them stop-for-stop against basemap.json; locality and country are
-        // data-driven there and transcribed here.
-        assert_eq!(at("places-region", 7.0), 16.0);
-        assert_eq!(at("places-subplace", 14.0), 14.0);
+        let size = |id: &str, zoom: f64, pop: u16| find(id).text_size_for(zoom, pop);
+
+        // z10: the authored threshold is rank 9 (50k), 12px below and 20px above.
+        assert_eq!(size("places-locality", 10.0, 13), 20.0, "a million-plus city");
+        assert_eq!(size("places-locality", 10.0, 9), 20.0, "50k is on the threshold");
+        assert_eq!(size("places-locality", 10.0, 8), 12.0, "a 20k town");
+        assert_eq!(size("places-locality", 10.0, 0), 12.0, "uncounted");
+
+        // z6: the threshold rises to rank 12 (500k), so a 200k town drops to the small arm.
+        assert_eq!(size("places-locality", 6.0, 12), 17.0);
+        assert_eq!(size("places-locality", 6.0, 11), 11.0);
+
+        // Countries switch at rank 8 by z6.
+        assert_eq!(size("places-country", 6.0, 8), 18.0);
+        assert_eq!(size("places-country", 6.0, 7), 10.0);
+
+        // Region and subplace are plain ramps in the authored style too, so they answer
+        // the same size at every rank and the cross-check pins them stop-for-stop.
+        for pop in [0, 8, 15] {
+            assert_eq!(size("places-region", 7.0, pop), 16.0);
+            assert_eq!(size("places-subplace", 14.0, pop), 14.0);
+        }
+    }
+
+    /// The two halves of a data-driven size have to arrive together: a threshold with no
+    /// large arm silently never fires, and a large arm with no threshold never applies.
+    #[test]
+    fn a_data_driven_size_declares_both_halves() {
+        for layer in layers() {
+            assert_eq!(
+                layer.text_size_large.is_some(),
+                layer.rank_threshold.is_some(),
+                "`{}` declares only half of a data-driven text size",
+                layer.id,
+            );
+            // And the big arm really is the bigger one, or the switch is inverted.
+            if let Some(large) = &layer.text_size_large {
+                for tenth in 0..=220 {
+                    let zoom = tenth as f64 / 10.0;
+                    assert!(
+                        large.at(zoom) >= layer.text_size.at(zoom),
+                        "`{}` draws big places smaller at z{zoom}",
+                        layer.id,
+                    );
+                }
+            }
+        }
     }
 
     // --- the cross-check against basemap.json ------------------------------
@@ -1056,13 +1277,26 @@ mod tests {
         let root = basemap();
         for layer in layers() {
             let authored = authored_layer(&root, &layer.authored);
-            assert_eq!(
-                authored.get("source-layer").and_then(Json::as_str),
-                Some(layer.source_layer.as_str()),
-                "`{}` reads a different source layer than `{}` does",
-                layer.id,
-                layer.authored,
-            );
+            // The source layer has to match, with two structural exceptions that are not
+            // transcription slips:
+            //
+            //  * `poi` vs `pois`. The archive's own layer table names it in the singular
+            //    (`dict::LAYERS`); the reference tile set uses the plural. Same data.
+            //  * `transit`. The reference has no transit layer at all — `v4.pmtiles` does
+            //    not carry one — so `transit-rail` names `roads_rail` for the *colour* it
+            //    copies while reading a source only our archives have. Its width is not
+            //    cross-checked either; see the width arm below.
+            if layer.toggle != Some(Toggle::Transit) {
+                let expected =
+                    if layer.source_layer == "poi" { "pois" } else { layer.source_layer.as_str() };
+                assert_eq!(
+                    authored.get("source-layer").and_then(Json::as_str),
+                    Some(expected),
+                    "`{}` reads a different source layer than `{}` does",
+                    layer.id,
+                    layer.authored,
+                );
+            }
             match layer.kind {
                 LayerKind::Fill => {
                     // The light colour has to be one the authored `fill-color` can produce.
@@ -1091,11 +1325,17 @@ mod tests {
                     // width ramp of their own; the stroke tessellator keys off
                     // the gap peak, so width agreement is vacuous there. The
                     // default-1.0 only fires when authored has NO line-width.
+                    //
+                    // Transit is exempt for a different reason: a route line is
+                    // one object the eye follows across the network, so it is a
+                    // constant width at every zoom rather than `roads_rail`'s
+                    // ramp. `a_transit_line_is_one_constant_width` pins that
+                    // deliberate divergence in place of this comparison.
                     let authored_has_width = authored
                         .get("paint")
                         .and_then(|p| p.get("line-width"))
                         .is_some();
-                    if authored_has_width {
+                    if authored_has_width && layer.toggle != Some(Toggle::Transit) {
                         assert_ramps_agree(&layer.id, "width", &layer.width, &width);
                     }
                     let gap = authored_property(&authored, "line-gap-width")
@@ -1103,6 +1343,27 @@ mod tests {
                     assert_ramps_agree(&layer.id, "gap_width", &layer.gap_width, &gap);
                 }
                 LayerKind::Symbol => {
+                    // A POI layer's colour is one arm of the authored `text-color` `case`,
+                    // exactly as a data-driven fill's colour is one arm of its
+                    // `fill-color`. Checked the same way, because the six-way colour split
+                    // is most of what "matching the reference" means for this layer — and
+                    // a mistyped hex would otherwise only show as a slightly-wrong shade.
+                    if let Some(text_color) =
+                        authored.get("paint").and_then(|p| p.get("text-color"))
+                    {
+                        let mut colors = Vec::new();
+                        colors_in(text_color, &mut colors);
+                        if colors.len() > 1 {
+                            assert!(
+                                colors.contains(&layer.light),
+                                "`{}`'s {:#010X} is not a colour `{}`'s text-color paints: {:?}",
+                                layer.id,
+                                layer.light,
+                                layer.authored,
+                                colors.iter().map(|c| format!("{c:#010X}")).collect::<Vec<_>>(),
+                            );
+                        }
+                    }
                     // Text sizes are layout properties in the authored style, not
                     // paint — compared stop-for-stop against `text-size`. Data-driven
                     // sizes (`case` over population_rank) are transcribed as the
@@ -1181,6 +1442,62 @@ mod tests {
                     );
                 }
             }
+        }
+    }
+
+    /// **The deliberate divergence from `roads_rail`**, in place of the width comparison
+    /// `the_flat_style_agrees_with_basemap_json` skips for this layer.
+    ///
+    /// A basemap's rail casing is scenery and thickens with the zoom like every other road. A
+    /// transit line is not scenery — it is one object the eye follows from end to end, and a route
+    /// that is a hairline at z10 and a band at z18 reads as two different things. So it is a
+    /// constant width, and the floor is where the network first appears rather than where the
+    /// stroke first has a pixel in it.
+    ///
+    /// The cap is not arbitrary: `no_line_layer_is_more_than_a_couple_of_dp_wide_below_street_zoom`
+    /// walks z0..z8 over the ramp alone and does not consult `min_zoom`, so a constant here is
+    /// spent against that budget at every zoom whether or not it is drawn.
+    #[test]
+    fn a_transit_line_is_one_constant_width_from_its_own_floor() {
+        let layer = find("transit-rail");
+        assert_eq!(layer.min_zoom, 8, "the network's floor, matching `schema::transit::MIN_ZOOM`");
+        assert_eq!(layer.max_zoom, MAX_ZOOM);
+        for tenth in 0..=(MAX_ZOOM as u32 * 10) {
+            let zoom = tenth as f64 / 10.0;
+            assert!(
+                (layer.width.at(zoom) - 3.0).abs() < 1e-6,
+                "transit-rail is {} Dp at z{zoom}",
+                layer.width.at(zoom),
+            );
+        }
+        // Whatever the constant becomes, it has to stay inside the shallow-zoom budget.
+        assert!(layer.width.at(0.0) * 2.0 <= 10.0, "over the shallow-zoom width budget");
+    }
+
+    /// The corridor fan-out: routes sharing one track are one line at regional zoom and separate
+    /// parallel lines once the camera is close enough to tell them apart.
+    ///
+    /// The *count* steps rather than the spacing ramping. Widening a spacing ramp makes four
+    /// lanes narrower at low zoom, which is not the same as a corridor carrying fewer of them:
+    /// they all thin together and converge into one unreadable stripe. Stepping the count
+    /// instead keeps a constant, legible 6 Dp between adjacent lanes at every zoom and makes a
+    /// colour visibly re-assign to a different lane at each boundary.
+    #[test]
+    fn transit_lanes_step_with_zoom_over_a_constant_spacing() {
+        let layer = find("transit-rail");
+        // Two adjacent lanes are always 6 Dp apart, whatever the camera is doing.
+        for zoom in [0.0, 8.0, 9.5, 11.0, 13.0, 20.0] {
+            assert_eq!(layer.spread.at(zoom), 6.0, "the spacing is constant at z{zoom}");
+        }
+        assert_eq!(layer.lanes.at(8.0).floor(), 1.0, "one corridor below z9");
+        assert_eq!(layer.lanes.at(9.0).floor(), 2.0, "two lanes from z9");
+        assert_eq!(layer.lanes.at(11.0).floor(), 3.0, "three from z11");
+        assert_eq!(layer.lanes.at(13.0).floor(), 4.0, "four from z13");
+        assert_eq!(layer.lanes.at(20.0).floor(), 4.0, "and it stays there");
+        // Nothing else moves sideways, or every road in the style would.
+        for other in layers().iter().filter(|l| l.id != "transit-rail") {
+            assert_eq!(other.spread.peak(), 0.0, "{} must not spread", other.id);
+            assert_eq!(other.lanes.peak(), 1.0, "{} must not fan out", other.id);
         }
     }
 

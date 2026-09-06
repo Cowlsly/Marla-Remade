@@ -65,7 +65,7 @@ import java.io.File
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun LiteRTChatUi(
+fun AssistantChatUi(
     backStack: NavBackStack<Route>,
     conversationId: Long,
     assistantViewModel: AssistantViewModel,
@@ -153,9 +153,11 @@ fun LiteRTChatUi(
             if (isRecording) assistantViewModel.stopRecording()
             val newConv = resources.getString(R.string.new_conversation)
             val imagePaths = selectedImageFiles.map { it.absolutePath }
-            val audioPath = recordedAudioPath
             val textToSend = inputText
             scope.launch {
+                // Awaited rather than read: the WAV is written after stopRecording() returns, so
+                // reading the path here would dispatch one to a file that does not exist yet.
+                val audioPath = assistantViewModel.awaitRecordedAudio()
                 var currentId = conversationId
                 if (currentId == 0L) {
                     currentId = assistantViewModel.upsertConversation(Conversation(newConv))
@@ -390,7 +392,7 @@ fun ChatBubble(message: Message) {
                                     }
                                     context.startActivity(intent)
                                 } catch (e: Exception) {
-                                    Log.w("LiteRTChatUi", "Failed to open link: $url", e)
+                                    Log.w("AssistantChatUi", "Failed to open link: $url", e)
                                 }
                             },
                             modifier = Modifier.align(Alignment.End)

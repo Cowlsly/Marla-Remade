@@ -119,6 +119,7 @@ import com.vayunmathur.findfamily.util.Platform
 import com.vayunmathur.findfamily.util.UwbSessionManager
 import com.vayunmathur.library.ui.BackupButtons
 import com.vayunmathur.library.map.GeoPoint
+import com.vayunmathur.library.map.rememberCameraState
 import com.vayunmathur.library.util.NavBackStack
 import com.vayunmathur.library.ui.IconClose
 import com.vayunmathur.library.ui.IconCopy
@@ -280,6 +281,12 @@ fun MainPage(
         person = selectedUser?.let { PersonUiState(it, userPositions[it.id], waypoints) }
     )
 
+    // Owned here, not by MapView: the two animateTo effects below drive it, and MapView is
+    // reached through MainPageContent's stateless `map` slot. This was previously a
+    // process-global `val camera` in MapView.kt for exactly that reason. rememberSaveable
+    // inside rememberCameraState now also carries it across rotation and process death.
+    val camera = rememberCameraState()
+
     MainPageContent(
         state = state,
         familyActions = familyActions,
@@ -315,6 +322,7 @@ fun MainPage(
 
             MapView(
                 ffViewModel,
+                camera = camera,
                 onUserClick = {
                     ffViewModel.selectUser(it)
                 },

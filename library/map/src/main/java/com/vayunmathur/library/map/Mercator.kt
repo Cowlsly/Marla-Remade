@@ -7,24 +7,24 @@ import kotlin.math.pow
 import kotlin.math.sin
 import kotlin.math.sinh
 
-/** A point in Web-Mercator world pixels (logical, 256 px/tile, known-good grid). */
+/** A point in Web-Mercator world pixels (logical, 512 px/tile). */
 internal data class WorldPx(val x: Double, val y: Double)
 
 /**
- * Standard Web Mercator with a 256-logical-px tile grid, matching the Rust
+ * Standard Web Mercator on a 512-logical-px tile grid, matching the Rust
  * renderer's `TILE_SIZE`. All values are in density-independent ("logical")
  * pixels so callers can work in `Dp` and only convert to device pixels when
  * drawing. The projection is internally consistent with the tile rendering
  * (both use this object), so overlays pin exactly to the basemap regardless
  * of device density.
  *
- * MapLibre parity (ground scale at the same zoom float) comes from a +1 zoom
- * offset applied at the camera boundary, NOT from a 512 tile: a 512 TILE_SIZE
- * was tried and reverted (task 1, magenta verdict — label quads invisible,
- * roads cut at seams) while 256 renders both clean.
+ * 512 is MapLibre's convention and the one the vector archives are authored on.
+ * This was 256 while the renderer compensated with a +1 zoom offset at the camera
+ * boundary, which meant this object and the basemap it was supposed to agree with
+ * were a factor of two apart.
  */
 internal object Mercator {
-    const val TILE_SIZE = 256.0
+    const val TILE_SIZE = 512.0
 
     /** Total map width/height in logical px at [zoom]. */
     fun worldSize(zoom: Double): Double = TILE_SIZE * 2.0.pow(zoom)

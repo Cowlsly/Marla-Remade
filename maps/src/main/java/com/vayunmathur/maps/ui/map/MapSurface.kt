@@ -9,6 +9,8 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.DpRect
 import androidx.compose.ui.unit.DpSize
 import com.vayunmathur.library.map.CameraState
+import com.vayunmathur.library.map.LayerOptions
+import com.vayunmathur.library.map.MapOptions
 import com.vayunmathur.library.map.VectorMap
 import com.vayunmathur.library.ui.FreeHeightSheetState
 import com.vayunmathur.maps.BuildConfig
@@ -39,9 +41,12 @@ import org.maplibre.spatialk.geojson.Position
  * The map surface: the renderer, its overlay layers, and what a tap on it means.
  *
  * Renders with library:map's [VectorMap] (Vulkan basemap, phone-side only). The overlay
- * pins/routes/puck are plain Compose in [MapLayers], hit-tested in-memory — the renderer
- * has no vector-layer API. Tile-baked place labels resolve through the native pick
+ * pins/routes/puck are plain Compose in [MapLayers], hit-tested in-memory - the renderer
+ * has no vector-layer API for them. Tile-baked place labels resolve through the native pick
  * ([queryRenderedLabels][com.vayunmathur.library.map.Projection.queryRenderedLabels]).
+ *
+ * The transit toggle is the one layer the renderer draws itself, via [LayerOptions]; see
+ * [pinFeatures] for what that means for hit-testing.
  */
 @Composable
 fun MapSurface(
@@ -74,11 +79,20 @@ fun MapSurface(
     val context = LocalContext.current
     val archivePath = remember(context) { resolveDevArchivePath(context) }
 
+    // The renderer has carried a transit layer all along; :maps simply never asked for it,
+    // so flipping the layers switch drew nothing but Compose stops. Remembered because
+    // VulkanMapSurface keys a LaunchedEffect on this by equality and a fresh instance every
+    // recomposition would churn it.
+    val mapOptions = remember(transitEnabled) {
+        MapOptions(layerOptions = LayerOptions(transit = transitEnabled))
+    }
+
     VectorMap(
         cameraState = camera,
         modifier = modifier,
         darkBasemap = darkBasemap,
         archivePath = archivePath,
+        options = mapOptions,
         // GAP (deferred, renderer has no raster-layer API): the Google traffic tiles
         // have nothing to mount on. [trafficEnabled] is kept so the toggle plumbing
         // survives; see also the no-op branch in [MapLayers].
@@ -223,9 +237,17 @@ private data class TaggedFeature(val layerId: String, val feature: Feature1)
  * The tappable pin set: every Compose-drawn pin as the [Feature1] its resolver
  * (`toSelected*`) already understands, tagged for [MapFeaturePicker]'s per-layer
  * probes. Built from the same inputs the layers draw from, so the hit-test can never
- * disagree with what is on screen. (The baked transit-stop pins are a renderer-side
- * no-op with no Compose pins, so the transit probe correctly finds nothing until
- * renderer vector-layer support lands.)
+ * disagree with what is on screen.
+ *
+ * ## Known limitation: renderer transit lines are not tappable
+ *
+ * The transit toggle now drives the renderer's own transit layer, so rail and route lines
+ * are drawn in the basemap. Those are **geometry, not pins** — they have no Compose
+ * counterpart here, and the native pick answers placed *labels* only, which is why
+ * extending [MapFeaturePicker.NATIVE_LABEL_LAYER_IDS] would not reach them either
+ * (`toFeature1` resolves admin place ids and nothing else). Tapping a rail line therefore
+ * falls through to reverse-geocode, exactly as tapping empty basemap does. Live-departure
+ * stop pins are unaffected: those are Compose-drawn and still probe normally.
  */
 private fun pinFeatures(
     projection: com.vayunmathur.library.map.Projection,

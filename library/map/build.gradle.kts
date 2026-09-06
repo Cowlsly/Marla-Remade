@@ -17,10 +17,19 @@ androidComponents {
 dependencies {
     implementation(libs.androidx.compose.foundation)
 
-    // The renderer's HTTP transport. The Rust crate does not open sockets: it calls back
-    // through library/jni-http into NativeHttpBridge here, so pmtiles range requests keep
-    // library:network's reduced CA bundle and HttpURLConnection-only policy, and the
-    // renderer gains no second TLS stack.
+    // For androidx.lifecycle.compose.LocalLifecycleOwner, which drives the frame loop's
+    // ON_START/ON_STOP reconciliation. Scoped to this module rather than the convention
+    // plugin: one consumer does not justify reconfiguring every module.
+    implementation(libs.androidx.lifecycle.runtime.compose)
+
+    // The renderer's HTTP transport, and now also ConnectivityMonitor (package
+    // com.vayunmathur.library.util), which drives live online/offline into the renderer.
+    // The Rust crate does not open sockets: it calls back through library/jni-http into
+    // NativeHttpBridge here, so pmtiles range requests keep library:network's reduced CA
+    // bundle and HttpURLConnection-only policy, and the renderer gains no second TLS stack.
+    //
+    // Deliberately not :library — that would drag Room, DataStore, Navigation 3 and
+    // :sdk:games onto this module's compile classpath for one object.
     implementation(project(":library:network"))
 
     // Own GeoPoint/GeoBounds – no spatialk exposure for non-maplibre apps.
@@ -47,7 +56,7 @@ dependencies {
 
 // The Vulkan vector-tile renderer: `library/map/src/main/rust`, on ash.
 //
-// arm64 only, which is what the five consumer apps build
+// arm64 only, which is what the seven consumer apps build
 // (`common-conventions-app.gradle.kts:131-133`). `libvulkan.so` is on the device, so this
 // .so is our own code and nothing else — the whole size argument against bundling Dawn.
 //

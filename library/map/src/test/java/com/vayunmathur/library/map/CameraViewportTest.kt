@@ -46,12 +46,14 @@ class CameraViewportTest {
     @Test
     fun measuring_the_viewport_enforces_the_fill_zoom() {
         // Otherwise zooming all the way out leaves blank margins around a world smaller
-        // than the viewport.
+        // than the viewport. Asserted against the world size rather than a zoom number,
+        // so the tile grid can change without silently weakening the check.
         val camera = CameraState(CameraPosition(GeoPoint(0.0, 0.0), 0.0))
         camera.setViewport(Size(1024f, 768f))
+        val world = Mercator.worldSize(camera.position.zoom)
         assertTrue(
-            camera.position.zoom >= 2.0,
-            "1024 dp needs at least z2 to fill; got ${camera.position.zoom}",
+            world >= 1024.0 - 1e-6,
+            "1024 dp must be covered; world was $world dp at z${camera.position.zoom}",
         )
     }
 

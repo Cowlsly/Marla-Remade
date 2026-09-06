@@ -1,5 +1,6 @@
 package com.vayunmathur.openassistant.util
 
+import com.vayunmathur.library.downloadservice.ModelUrls
 import android.app.Application
 import android.content.Intent
 import android.util.Log
@@ -141,13 +142,36 @@ class AssistantViewModel(
     /** Stops the current recording (if any) but keeps [recordedAudioPath] for send. */
     fun stopRecording() {
         audioRecorder?.stop()
-        audioRecorder = null
         _isRecording.value = false
+    }
+
+    /**
+     * The recording's path once the file is actually on disk, or null if none arrived.
+     *
+     * [stopRecording] ends the capture but the WAV is written afterwards, by the coroutine
+     * `WavRecorder.start` launched. Reading [recordedAudioPath] straight after stopping therefore
+     * yields a path to a file that does not exist yet, and the attachment is dropped downstream
+     * without a word - which is indistinguishable from the assistant not supporting audio.
+     *
+     * Send waits on this instead. Clearing the path when nothing arrived is deliberate: a stale
+     * path is worse than none, because everything downstream treats it as an attachment the user
+     * made and the model is told a clip could not be heard when there was no clip.
+     */
+    suspend fun awaitRecordedAudio(): String? {
+        val recorder = audioRecorder ?: return _recordedAudioPath.value
+        val written = recorder.finish()
+        audioRecorder = null
+        if (written == null) {
+            Log.w(TAG, "recording produced no file: ${_recordedAudioPath.value}")
+            _recordedAudioPath.value = null
+        }
+        return _recordedAudioPath.value
     }
 
     /** Stops recording and discards the pending audio file path. */
     fun cancelRecording() {
         stopRecording()
+        audioRecorder = null
         _recordedAudioPath.value = null
     }
 
@@ -190,9 +214,12 @@ class AssistantViewModel(
                 val externalDir = context.getExternalFilesDir(null) ?: return@launch
                 // The siglip2_* files backed the SigLIP2 embedding provider, which is
                 // gone along with ONNX Runtime; they are ~450 MB on installs that used it.
-                val legacyModelFiles = listOf(
-                    "gemma4.litertlm",
-                    "gemma4-4b.litertlm",
+                // The siglip2_* files backed the SigLIP2 embedding provider, which is
+                // gone along with ONNX Runtime; they are ~450 MB on installs that used it.
+                // The .litertlm bundles are the whole previous model - several gigabytes -
+                // left behind when the assistant moved to :library:ml's .maml format, and by
+                // far the largest thing an upgrading install would otherwise keep forever.
+                val legacyModelFiles = ModelUrls.OBSOLETE + listOf(
                     "siglip2_vision_model_fp16.onnx",
                     "siglip2_text_model_int8.onnx",
                     "siglip2_tokenizer.model",

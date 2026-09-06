@@ -1,0 +1,49 @@
+{
+  "instruments": [
+    {
+      "id": "guitar-standard",
+      "familyId": "guitar",
+      "kind": "FRETTED",
+      "strings": [
+        { "openMidi": 40, "label": "E" },
+        { "openMidi": 45, "label": "A" },
+        { "openMidi": 50, "label": "D" },
+        { "openMidi": 55, "label": "G" },
+        { "openMidi": 59, "label": "B" },
+        { "openMidi": 64, "label": "E" }
+      ],
+      "fretCount": 15,
+      "analysis": { "minHz": 70.0, "maxHz": 1400.0 },
+      "capoSupported": true,
+      "isDefaultForFamily": true
+    },
+    {
+      "id": "ukulele-gcea",
+      "familyId": "ukulele",
+      "kind": "FRETTED",
+      "strings": [
+        { "openMidi": 67, "label": "G" },
+        { "openMidi": 60, "label": "C" },
+        { "openMidi": 64, "label": "E" },
+        { "openMidi": 69, "label": "A" }
+      ],
+      "fretCount": 15,
+      "analysis": { "minHz": 230.0, "maxHz": 1800.0 },
+      "partials": [1.0, 0.18, 0.07],
+      "capoSupported": true,
+      "isDefaultForFamily": true,
+      "reentrant": true
+    },
+    {
+      "id": "piano",
+      "familyId": "piano",
+      "kind": "KEYBOARD",
+      "strings": [],
+      "fretCount": 0,
+      "keyboard": { "lowestMidi": 21, "highestMidi": 108 },
+      "analysis": { "minHz": 27.0, "maxHz": 4200.0 },
+      "capoSupported": false,
+      "isDefaultForFamily": true
+    }
+  ]
+}

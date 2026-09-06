@@ -45,6 +45,12 @@ tilecodec = { path = "../../../../tilecodec/src/main/rust" }
 # stack, so pmtiles range requests keep `library:network`'s reduced CA bundle.
 jni_http = { path = "../../../../jni-http/src/main/rust" }
 ab_glyph = "0.2.32"
+# The POI sprite sheet is a PNG, and nothing else in this crate can decode one. Already in
+# the workspace lock file, so this promotes an existing transitive crate to a direct
+# dependency rather than adding to the tree. Decoding at first use ships the 28 KB
+# compressed sheet instead of the 466 KB of raw RGBA a `build.rs` decode would bake into
+# the `.so` — the same trade the fonts make with `ab_glyph`.
+png = "0.18"
 
 # `default-features = false` drops the `linked` feature, so nothing links against
 # libvulkan at build time; `loaded` dlopen's it, which is what an Android app must

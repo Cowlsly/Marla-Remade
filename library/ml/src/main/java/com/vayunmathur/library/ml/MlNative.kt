@@ -173,6 +173,10 @@ internal object MlNative {
      *
      * [tokenizer] stays a byte array, where streaming saves nothing.
      *
+     * [cacheBudgetBytes] is how much memory this device will spend on the KV cache. Native turns
+     * it into positions - one costs 18 KB - and picks the largest tier that fits, so a 4 GB phone
+     * holds a short conversation instead of failing to allocate a long one.
+     *
      * The maml's graph id is 18 (`graph::NLLB`), agreed three-ways with model-eng
      * and rust-eng - native rejects any other file at load.
      *
@@ -327,6 +331,81 @@ internal object MlNative {
     external fun destroyMaia(handle: Long)
 
     /**
+     * Bring up the Now Playing audio fingerprinter from its one bundled `.maml`. Returns 0 on
+     * failure.
+     *
+     * One forward pass per window and no state, so like [createMaia] there is only ever one
+     * plan and native never re-records.
+     *
+     * The plan arrives as a **file descriptor** because it is a bundled asset: [offset] and
+     * [length] are the `AssetFileDescriptor`'s, since an asset is a *range of the APK* rather
+     * than a file of its own. `AssetManager.openFd` throws for a deflated entry, which is what
+     * `noCompress += "maml"` in the app's `build.gradle.kts` is for.
+     *
+     * Unlike [createMaia] native does **not** keep the descriptor open: nothing in this network
+     * is read on the host, so the whole file goes to the device at construction and the
+     * descriptor is closed there and then.
+     *
+     * **The descriptor must be detached.** Native takes ownership and closes it, on the failure
+     * paths as much as the successful one, so a caller must not close it itself.
+     *
+     * Freed by [destroyNnfp], not [destroy], [destroyOcr] or [destroySupertonic].
+     */
+    external fun createNnfp(fd: Int, offset: Long, length: Long): Long
+
+    /**
+     * The 64-value fingerprint for one window of audio, or null on failure.
+     *
+     * [pcm] is exactly [NnfpHandle.WINDOW_SAMPLES] mono 16-bit samples at 16 kHz — 415 ms, the
+     * network's whole receptive field. `ShortArray` rather than `FloatArray` because that is
+     * what `AudioRecord.read` produces and what the fixed-point log-mel front end wants;
+     * routing it through float would cost precision for nothing. A wrong length is an error
+     * rather than a pad or a truncate.
+     *
+     * Native runs the front end itself, so there is no separate feature step to keep in sync.
+     * Two calls with the same samples give the same answer: the streaming graph's circular
+     * buffers are unrolled into the fixed window, so there is no carried state and no warm-up.
+     *
+     * The embedding is **not** normalised — whether the descriptor is matched by cosine, by L2
+     * or through a product quantiser could not be recovered from the model, so that is the
+     * caller's decision rather than an invented convention.
+     */
+    external fun nnfpEmbed(handle: Long, pcm: ShortArray): FloatArray?
+
+    /**
+     * Free the fingerprinter's network.
+     * Exactly once per non-zero handle from [createNnfp].
+     */
+    external fun destroyNnfp(handle: Long)
+
+    /**
+     * The music gate, Now Playing's always-on "is this music?" classifier.
+     *
+     * Never returns 0 in practice: there is no device, no plan and no asset behind this
+     * one - the 8,200 int8 parameters are in the binary and it runs on the CPU. A 0 means
+     * the native library is a build that does not have it.
+     *
+     * Freed by [destroyMusicGate], not [destroyNnfp] or any other destroy.
+     */
+    external fun createMusicGate(): Long
+
+    /**
+     * Feed [count] mono 16 kHz samples from the front of [pcm] and get one music
+     * probability per completed 10 ms hop, oldest first.
+     *
+     * Empty rather than null when a call completes no hop or the gate is still inside its
+     * 230 ms warm-up; both are ordinary. Null means the call actually failed. The gate is
+     * stateful across calls - [resetMusicGate] starts a fresh session.
+     */
+    external fun musicGatePush(handle: Long, pcm: ShortArray, count: Int): FloatArray?
+
+    /** Discard the gate's streaming state. */
+    external fun resetMusicGate(handle: Long)
+
+    /** Free the gate. Exactly once per non-zero handle from [createMusicGate]. */
+    external fun destroyMusicGate(handle: Long)
+
+    /**
      * Bring up whisper-base from its one `.maml` and the ids read from `generation_config.json`.
      * Returns 0 on failure.
      *
@@ -449,4 +528,199 @@ internal object MlNative {
      * and passing one to the wrong destroy is undefined.
      */
     external fun destroySupertonic(handle: Long)
+
+    /**
+     * Bring up Gemma 4 E2B from its two `.maml`s and its tokenizer table. Returns 0 on failure.
+     *
+     * # Two descriptors, both consumed
+     *
+     * The text decoder and the embedding are separate files with separate graph ids (20 and 21).
+     * Native adopts **both** and closes them on every path, including failure - so the caller
+     * must detach both and must not close either afterwards. There is no partial-success case:
+     * either the handle is non-zero and owns them, or it is 0 and they are already closed.
+     *
+     * They are separate because nothing on the device reads the embedding. A decode step needs
+     * one row of a 262144-row table, so it is gathered on the host and streamed, exactly as
+     * NLLB's tied embedding is. Splitting also lets the decoder load while the embedding is
+     * still downloading.
+     *
+     * [tokenizer] stays a byte array, where streaming saves nothing.
+     *
+     * Freed by [destroyGemma4], not [destroy], [destroyOcr], [destroySupertonic],
+     * [destroyTinyclip] or [destroyNllb].
+     */
+    external fun createGemma4(
+        textFd: Int,
+        textOffset: Long,
+        textLength: Long,
+        embedFd: Int,
+        embedOffset: Long,
+        embedLength: Long,
+        tokenizer: ByteArray,
+        cacheBudgetBytes: Long,
+    ): Long
+
+    /**
+     * Token ids for [text], with [specials] matched literally rather than merged into.
+     *
+     * [specials] are the chat markers a template inserts - `<bos>`, the turn tags, the tool tags.
+     * They are passed rather than hardcoded native-side because which markers a prompt may
+     * contain is a policy question: a model that let a user's text spell a turn boundary would
+     * let them forge one, so the *caller* decides, and user text is encoded with an empty list.
+     *
+     * Null on failure.
+     */
+    external fun encodeGemma4(handle: Long, text: String, specials: Array<String>): IntArray?
+
+    /** Text for a run of token ids, fusing byte pieces back into characters. Null on failure. */
+    external fun decodeGemma4(handle: Long, tokens: IntArray): String?
+
+    /**
+     * Feed [tokens] into the KV cache without generating. Returns the new position, or -1.
+     *
+     * The prompt path. Every token but the last only fills the cache, so this keeps a 500-token
+     * prompt to one JNI crossing instead of 500.
+     */
+    external fun pushGemma4(handle: Long, tokens: IntArray): Int
+
+    /**
+     * Feed one token and return the most likely next one. -1 on failure.
+     *
+     * Greedy, with no sampling: replies are deterministic. litertlm sampled at `top_k` 64 and
+     * `top_p` 0.95, so this is a real behavioural change and not only an implementation one.
+     */
+    external fun stepGemma4(handle: Long, token: Int): Int
+
+    /** Positions currently in the KV cache, or -1. */
+    external fun positionGemma4(handle: Long): Int
+
+    /**
+     * Start a new conversation on the same handle.
+     *
+     * Only the position resets. Attention reads `[windowStart, prefix]`, so cache rows past the
+     * new prefix are never read again - clearing them would be a gigabyte of pointless writes
+     * between turns.
+     */
+    external fun resetGemma4(handle: Long)
+
+    /**
+     * Rewind the cache to [position], keeping everything below it. Returns it, or -1.
+     *
+     * The other half of [pushGemma4]. A turn's prompt is almost all of the previous turn's
+     * prompt, and the cache for that prefix is still correct - so the caller seeks to the length
+     * of the unchanged part and pushes only what is new.
+     *
+     * **The caller is responsible for the prefix actually being unchanged.** Native cannot check
+     * it, and a wrong seek does not fail: the model answers a conversation that never happened.
+     * Seeking forward is refused, because those rows hold whatever the arena last put there.
+     */
+    external fun seekGemma4(handle: Long, position: Int): Int
+
+    /**
+     * Time a decode pass with and without the logits head, and log both.
+     *
+     * The head is 4 of the pass's 1,094 dispatches but 402 MB of its 1.30 GB of weights, so the
+     * gap between the two says whether this runtime is limited by memory or by dispatch count -
+     * which decides whether the work is better kernels or fewer of them.
+     */
+    external fun benchmarkGemma4(handle: Long): Int
+
+    /**
+     * Load a precomputed KV cache for the fixed prompt prefix. Returns the positions, or -1.
+     *
+     * The caller must have the tokens that produced [cache] and record them as the cache's
+     * contents, or the next turn re-feeds the prefix and the saving is lost. Native checks only
+     * the byte count - it cannot know which tokens these keys and values came from.
+     */
+    external fun loadPrefixGemma4(handle: Long, positions: Int, cache: ByteArray): Int
+
+    /** Positions the KV cache currently holds, or -1. */
+    external fun capacityGemma4(handle: Long): Int
+
+    /**
+     * Grow the cache so [needed] positions fit. Returns the new capacity, or -1 if the device
+     * cannot afford it.
+     *
+     * **This empties the cache.** A larger arena is a different allocation and nothing is copied
+     * into it, so the caller must feed its whole prompt again and discard any record of what the
+     * cache held. Tiers double, so a long conversation pays this a handful of times rather than
+     * on every message.
+     */
+    external fun growGemma4(handle: Long, needed: Int): Int
+
+    /** Release a [createGemma4] handle. */
+    external fun destroyGemma4(handle: Long)
+
+    /**
+     * Feed soft tokens - an encoder's output - into the KV cache. Returns how many, or -1.
+     *
+     * [embeddings] is `n * 1536` floats, one row per soft token, and the position advances by
+     * `n`. This is how an image reaches a decoder that is otherwise text-only: there is no token
+     * id to gather an embedding for, so the vision tower's rows are pushed as the embedding.
+     *
+     * Pass [Gemma4VisionHandle.encode]'s output unchanged. It is deliberately not scaled.
+     */
+    external fun pushSoftGemma4(handle: Long, embeddings: FloatArray): Int
+
+    /**
+     * Bring up Gemma 4's vision tower from its own `.maml`. 0 on failure.
+     *
+     * A third file and a third graph id, separate from [createGemma4] because it is optional: a
+     * device that never sends an image never downloads it, and a tower that fails to load leaves
+     * the assistant answering text.
+     *
+     * Freed by [destroyGemma4Vision].
+     */
+    external fun createGemma4Vision(fd: Int, offset: Long, length: Long): Long
+
+    /**
+     * The `[width, height]` in pixels an image of [width] x [height] must be resized to. Null if
+     * there is no grid for it.
+     *
+     * The resize itself is Kotlin's, but the size is not a free choice: it is the reference
+     * preprocessor's aspect-ratio-preserving fit to a patch budget, and being one 48-pixel block
+     * out changes the number of soft tokens the tower emits. [softTokens] must be one of 70, 140,
+     * 280, 560 or 1120.
+     */
+    external fun gemma4VisionSize(width: Int, height: Int, softTokens: Int): IntArray?
+
+    /**
+     * Encode one image to soft tokens: `n * 1536` floats, or null.
+     *
+     * [pixels] is ARGB_8888 at exactly the size [gemma4VisionSize] returned.
+     */
+    external fun encodeImageGemma4(
+        handle: Long,
+        pixels: IntArray,
+        width: Int,
+        height: Int,
+    ): FloatArray?
+
+    /** Release a [createGemma4Vision] handle. */
+    external fun destroyGemma4Vision(handle: Long)
+
+    /**
+     * Bring up Gemma 4's audio tower from its own `.maml`. 0 on failure.
+     *
+     * A fourth file and a fourth graph id, optional on the same terms as [createGemma4Vision]: a
+     * device that never sends audio never downloads its 166 MB, and a tower that fails to load
+     * leaves the assistant answering without sound.
+     *
+     * Freed by [destroyGemma4Audio].
+     */
+    external fun createGemma4Audio(fd: Int, offset: Long, length: Long): Long
+
+    /**
+     * Encode one clip to soft tokens: `n * 1536` floats, or null.
+     *
+     * [samples] is 16 kHz mono in roughly -1..1. Native runs the log-mel front end, truncates to
+     * thirty seconds, and returns one row per 40 ms of audio. Unlike [encodeImageGemma4] there is
+     * no size to negotiate first: the clip's own length decides the token count.
+     *
+     * Null when the clip is too short for the tower's 12-wide attention band - about 0.45 s.
+     */
+    external fun encodeAudioGemma4(handle: Long, samples: FloatArray): FloatArray?
+
+    /** Release a [createGemma4Audio] handle. */
+    external fun destroyGemma4Audio(handle: Long)
 }

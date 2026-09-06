@@ -1,0 +1,132 @@
+#version 450
+//! Attention scores over a **backward sliding window**, stored as a band, with the
+//! relative-position term and the logit cap fused in.
+//!
+//! `scores[h][q][j] = tanh(t / cap) * cap` where
+//! `t = Q[h,.,q] . K[h,.,k] + Q[h,.,q] . table[h][j + 1]` and `k = q - (band - 1) + j`.
+//!
+//! Twelve uses, one per conformer layer of Gemma 4's audio tower. See `nets::gemma4_audio`.
+//!
+//! # The band is the layout, not an optimisation applied to a square map
+//!
+//! The tower attends `0 <= q - k <= 11`, so the output is `[heads, T, band]` with `band` 12 and
+//! every slot a pair the mask admits. At the 750-token cap a square `[heads, T, T]` map is 31x
+//! the memory and 31x the arithmetic with 1.6% of its slots live. `p.out_w` is therefore the
+//! **band width**, not the key count - which is why the sequence stride here comes from
+//! `p.in_h * p.in_w` and not from `p.out_w` the way `attn_scores.comp` reads it.
+//!
+//! Nothing downstream needs a windowed softmax: a filled 12-wide row is an ordinary softmax
+//! domain, so the plain `softmax.comp` normalises this untouched.
+//!
+//! # The guard
+//!
+//! `j + q + 1 >= band`, with the subtraction only after it. **This mirrors `band_key_in` in
+//! `nets/gemma4_audio.rs`** - same shape, same order - and `nets::reference::attn_scores_banded`
+//! calls that function rather than restating it, so this line is the only place in the tree
+//! where the expression is written out a second time. Keep them identical.
+//!
+//! It mirrors `band_key_in(p.kh, ..)` and not `band_key(..)`, which is the same guard frozen at
+//! the tower's own span of twelve. This op is parameterised by `Push::kh`, so pinning it to the
+//! constant would be right at band 12 and wrong at every other width - which is exactly the bug
+//! the CPU arm had, and it read as a plausible band rather than as a failure.
+//!
+//! It is written this way because four rearrangements were tried and every one is wrong:
+//!
+//! * `k >= 0` is vacuous for an unsigned `k`; the compiler discards it.
+//! * `j >= band - 1 - q` underflows for `q > 11`, wrapping to about 4.29e9 so the guard rejects
+//!   the whole band - correct on twelve rows and empty on the 738 after them.
+//! * Computing `k`, using it, and masking the result afterwards has already read out of bounds.
+//!   The guard has to gate the **read**.
+//! * `k < T` alone is safe here, where wrap is defined, but the CPU arm cannot share it: the
+//!   same subtraction panics in a Rust debug build, which is what every parity run is.
+//!
+//! The form above is purely additive, so there is nothing to wrap on either side.
+//!
+//! `k < stride` is kept as the upper bound. `band_key` guards the lower bound only, and the
+//! upper is free *solely* because right context is zero, so `k <= q < T`. It is retained
+//! because that is a property of this tower rather than of the expression.
+//!
+//! # The relative term is content-dependent, and in band coordinates it needs no skew
+//!
+//! `relative_k_proj(sinusoid)`, dot-producted against the query Transformer-XL style rather than
+//! added as a bias, so it cannot be precomputed per `(q, k)`. The displacement `q - k` is
+//! `band - 1 - j`, so the table column is `j + 1` **independent of `q`** - which is what removes
+//! the export's `_rel_shift` pad/reshape/slice entirely. See `gemma4_audio::rel_column`.
+//!
+//! `p.weight` is the table as `[heads, offsets, head_dim]`, transposed by the converter from the
+//! export's `[heads, head_dim, offsets]` so that `head_dim` - the axis this contracts over - is
+//! contiguous. `p.kw` is the offset count, 13 for a 12-wide band; column 0 is displacement 12,
+//! which the mask never admits.
+//!
+//! # There is no scale here, and that is deliberate
+//!
+//! `p.param0_bits` is passed through so the oracle and this agree field for field, but
+//! `Builder::attn_scores_banded` hardcodes it to 1.0 and takes no scale argument.
+//!
+//! The export's query scale is `(head_dim ** -0.5) / ln 2 = 0.127517431974411`
+//! (`val_279`; note the `/ ln 2`, so it is *not* `1/sqrt(128) = 0.088388`).
+//! `maml_convert.py` folds it into `softplus(per_dim_scale)` and emits the product as a
+//! per-layer `[d_model, 1, 1]` `QueryScale` tensor, so Q arrives here already scaled.
+//!
+//! It could not be applied here in any case: `softplus(per_dim_scale)` varies per channel, and
+//! `p.param0_bits` is one float. Applying the scalar part alone would be wrong twice over.
+//! Compare `Builder::attn_scores_prescaled`, which exists for the same reason after the vision
+//! tower shipped every score divided by eight.
+//!
+//! # The cap is fused, and the fill goes in after it
+//!
+//! `p.param1_bits` is `attention_logit_cap`. It applies to the sum of both terms and **before**
+//! the mask, so it cannot be a separate `softcap.comp` pass: that pass would run over a band
+//! already holding the sentinel and map it to `tanh(-1310.08) * 50 = -50`, a finite weight the
+//! softmax would then happily include. Fusing puts the sentinel in after the cap, which is
+//! correct by construction rather than by remembering the order.
+//!
+//! Dead slots get `-65504.0`, fp16's most negative finite value - `nets::gemma4_audio::MASK_FILL`.
+//! Not `-1e9`, which saturates to `-inf` in this fp16 arena and turns a fully masked row into
+//! `0/0 = NaN`.
+
+#include "common.glsl"
+
+void main() {
+    uint index = global_index();
+    if (index >= p.count) {
+        return;
+    }
+    // The output is `[heads, queries, band]`, so the third field is the band column and not a
+    // key. `key` is derived from it below.
+    uint head, query, column;
+    unpack(index, head, query, column);
+
+    uint head_dim = p.in_c / p.group;
+    // Q and K are `[d_model, 1, T]`, so this is T: one channel every T elements. `score_map`
+    // refuses a height above one, which is what makes the two spellings the same number.
+    uint stride = p.in_h * p.in_w;
+    uint band = p.kh;
+
+    // Mirrors `band_key_in` in `nets/gemma4_audio.rs`: the guard is `j + q + 1 >= band` and the
+    // subtraction happens only after it has proved the result non-negative. The smallest sum the
+    // guard admits is exactly `band`, so `query + column + 1 - band` cannot wrap even at the
+    // boundary. Do not rearrange it - see the header for the four forms that are wrong.
+    float score = -65504.0;
+    if (column + query + 1u >= band) {
+        uint key = query + column + 1u - band;
+        // The upper bound, free only because right context is zero. Kept anyway.
+        if (key < stride) {
+            uint base = head * head_dim * stride;
+            // Column `j` of the band is relative offset `j + 1`, whatever `query` is.
+            uint row = p.weight + (head * p.kw + column + 1u) * head_dim;
+            float total = 0.0;
+            for (uint d = 0u; d < head_dim; d++) {
+                uint channel = base + d * stride;
+                // One load of Q serves both terms; they contract over the same axis.
+                float q = float(arena[p.in0 + channel + query]);
+                total += q * float(arena[p.in1 + channel + key]);
+                total += q * float(weights[row + d]);
+            }
+            total *= uintBitsToFloat(p.param0_bits);
+            float cap = uintBitsToFloat(p.param1_bits);
+            score = tanh(total / cap) * cap;
+        }
+    }
+    arena[p.out_at + index] = float16_t(score);
+}

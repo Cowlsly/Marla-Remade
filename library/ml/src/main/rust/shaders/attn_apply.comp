@@ -42,10 +42,11 @@ void main() {
     uint queries = p.out_w;
     uint keys = p.in_w;
     uint head_dim = p.out_c / p.group;
+    uint head = channel / head_dim;
     // `S[head][query][*]`, contiguous in the key index.
-    uint row = p.in0 + ((channel / head_dim) * queries + query) * keys;
-    // `V[channel][*]`, likewise contiguous, because `V`'s height is 1.
-    uint values = p.in1 + channel * keys;
+    uint row = p.in0 + (head * queries + query) * keys;
+    // `V`'s channel for this query head, which under multi-query attention is shared.
+    uint values = p.in1 + (kv_head_of(head) * head_dim + (channel % head_dim)) * keys;
 
     float total = 0.0;
     for (uint j = 0u; j < keys; j++) {

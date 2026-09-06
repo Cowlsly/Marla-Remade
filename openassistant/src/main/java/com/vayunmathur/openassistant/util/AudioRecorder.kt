@@ -11,6 +11,7 @@ import android.net.Uri
 import android.util.Log
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
 import java.io.File
 import java.io.FileOutputStream
@@ -20,6 +21,7 @@ import java.nio.ByteOrder
 class WavRecorder(val context: Context, val outputFile: File, val scope: CoroutineScope) {
     private var audioRecord: AudioRecord? = null
     private var isRecording = false
+    private var writer: Job? = null
     private val sampleRate = 16000
     private val channelConfig = AudioFormat.CHANNEL_IN_MONO
     private val audioFormat = AudioFormat.ENCODING_PCM_16BIT
@@ -33,7 +35,7 @@ class WavRecorder(val context: Context, val outputFile: File, val scope: Corouti
         isRecording = true
         audioRecord?.startRecording()
 
-        scope.launch(Dispatchers.IO) {
+        writer = scope.launch(Dispatchers.IO) {
             val tempRaw = File(context.cacheDir, "temp_${System.currentTimeMillis()}.raw")
             FileOutputStream(tempRaw).use { fos ->
                 val buffer = ByteArray(bufferSize)
@@ -58,6 +60,27 @@ class WavRecorder(val context: Context, val outputFile: File, val scope: Corouti
         audioRecord = null
     }
 
+    /**
+     * Stop capturing, wait for the WAV to reach disk, and return it - null if none arrived.
+     *
+     * [stop] only ends the capture loop; the file is written by the coroutine [start] launched,
+     * afterwards. A caller that reads [outputFile] as soon as [stop] returns finds nothing there,
+     * which is silent rather than an error and reads exactly like audio not being supported.
+     *
+     * Stopping is folded in rather than left to the caller so the two cannot be ordered wrongly:
+     * joining a writer whose loop is still running would wait forever. [stop] is idempotent, so
+     * calling it first as well is harmless.
+     *
+     * The length test is against the header: [writeWavFile] always emits [WAV_HEADER_BYTES], so a
+     * file of exactly that size captured no audio at all.
+     */
+    suspend fun finish(): File? {
+        stop()
+        writer?.join()
+        writer = null
+        return outputFile.takeIf { it.isFile && it.length() > WAV_HEADER_BYTES }
+    }
+
     private fun writeWavFile(rawFile: File, wavFile: File) {
         val rawData = rawFile.readBytes()
         val totalAudioLen = rawData.size.toLong()
@@ -65,7 +88,7 @@ class WavRecorder(val context: Context, val outputFile: File, val scope: Corouti
         val byteRate = (16 * sampleRate * 1 / 8).toLong()
 
         FileOutputStream(wavFile).use { out ->
-            val header = ByteBuffer.allocate(44).order(ByteOrder.LITTLE_ENDIAN)
+            val header = ByteBuffer.allocate(WAV_HEADER_BYTES).order(ByteOrder.LITTLE_ENDIAN)
             header.put("RIFF".toByteArray(Charsets.US_ASCII))
             header.putInt(totalDataLen.toInt())
             header.put("WAVE".toByteArray(Charsets.US_ASCII))
@@ -82,6 +105,11 @@ class WavRecorder(val context: Context, val outputFile: File, val scope: Corouti
             out.write(header.array())
             out.write(rawData)
         }
+    }
+
+    companion object {
+        /** The canonical PCM WAV header this writes, and the size a silent file will be. */
+        const val WAV_HEADER_BYTES = 44
     }
 }
 

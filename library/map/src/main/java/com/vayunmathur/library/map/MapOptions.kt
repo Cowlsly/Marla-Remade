@@ -37,4 +37,9 @@ data class OrnamentOptions(
 data class MapOptions(
     val gestureOptions: GestureOptions = GestureOptions(),
     val ornamentOptions: OrnamentOptions = OrnamentOptions(),
+    /**
+     * Which optional layers (POI, transit) to draw. Both off by default — see
+     * [LayerOptions] for why, and for what turning one on costs.
+     */
+    val layerOptions: LayerOptions = LayerOptions(),
 )

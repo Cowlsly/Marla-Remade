@@ -31,6 +31,7 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 mod coalesce;
+mod corridor;
 mod extract;
 mod rings;
 mod shapefile;
@@ -96,6 +97,7 @@ fn main() -> ExitCode {
     let mut simplification = tiler::DEFAULT_SIMPLIFICATION;
     let mut build_id: Option<u64> = None;
     let mut coastline: Option<PathBuf> = None;
+    let mut transit_routes: Option<PathBuf> = None;
 
     let mut i = 1;
     while i < args.len() {
@@ -125,6 +127,10 @@ fn main() -> ExitCode {
             }
             "--coastline" => value("--coastline").map(|v| {
                 coastline = Some(PathBuf::from(v));
+                2
+            }),
+            "--transit-routes" => value("--transit-routes").map(|v| {
+                transit_routes = Some(PathBuf::from(v));
                 2
             }),
             "--layers" => value("--layers").and_then(|v| {
@@ -178,6 +184,7 @@ fn main() -> ExitCode {
         keep_store,
         reuse_store,
         coastline,
+        transit_routes,
         layers,
         min_zoom,
         max_zoom,
@@ -198,6 +205,9 @@ struct RunSettings {
     report: Option<PathBuf>,
     /// A prepared land polygon for `earth`'s mainland. Without it the layer carries islands only.
     coastline: Option<PathBuf>,
+    /// A prepared GTFS export for `transit`'s coloured rail lines. Without it the layer is empty:
+    /// nothing in the `.osm.pbf` produces one.
+    transit_routes: Option<PathBuf>,
     layers: schema::Layers,
     min_zoom: u8,
     max_zoom: u8,
@@ -230,8 +240,23 @@ fn run(
         // not an error: an island is real data and the renderer's backdrop is the water colour.
         println!("no --coastline given, so `earth` carries islands only and there is no mainland");
     }
-    let provenance = store::Provenance::of(input, layers, run.coastline.is_some())
-        .map_err(|e| e.to_string())?;
+    // The same asymmetry, for the same reasons: the flag without the layer is a mistake worth
+    // stopping for, the layer without the flag is a legitimate build of an archive with no transit.
+    if run.transit_routes.is_some() && !layers.transit {
+        return Err("--transit-routes was given but the transit layer is not selected".to_string());
+    }
+    if run.transit_routes.is_none() && layers.transit {
+        println!(
+            "no --transit-routes given, so `transit` is empty; its lines come from GTFS, not the .pbf"
+        );
+    }
+    let provenance = store::Provenance::of(
+        input,
+        layers,
+        run.coastline.is_some(),
+        run.transit_routes.is_some(),
+    )
+    .map_err(|e| e.to_string())?;
     // Stage A is most of a large build -- 17.6 minutes of a north-america run, and identical every
     // time for the same input and layer set. `--reuse-store` skips it, which is what makes iterating
     // on the tiler affordable. The index records what it was built from and `Store::open` refuses a
@@ -246,8 +271,14 @@ fn run(
         );
         (store, extract::Stats { features, ..Default::default() })
     } else {
-        let (store, stats) = extract::extract(input, layers, run.coastline.as_deref(), &spill)
-            .map_err(|e| format!("{}: {e}", input.display()))?;
+        let (store, stats) = extract::extract(
+            input,
+            layers,
+            run.coastline.as_deref(),
+            run.transit_routes.as_deref(),
+            &spill,
+        )
+        .map_err(|e| format!("{}: {e}", input.display()))?;
         println!(
             "classified {} way(s), {} relation(s) and {} node(s) -> {} feature(s), {} node(s) resolved",
             stats.ways_classified,
@@ -264,10 +295,13 @@ fn run(
         if stats.land_polygons > 0 {
             println!("  including {} prepared land polygon(s)", stats.land_polygons);
         }
-        if stats.transit_relations > 0 {
+        if stats.transit_routes > 0 {
+            println!("  including {} coloured transit route(s) from GTFS", stats.transit_routes);
+        }
+        if stats.corridor_promotions > 0 {
             println!(
-                "  including {} transit route relation(s) -> {} coloured way(s)",
-                stats.transit_relations, stats.transit_way_features,
+                "  {} road way(s) pulled to their corridor's zoom",
+                stats.corridor_promotions,
             );
         }
         if run.keep_store {
@@ -281,7 +315,15 @@ fn run(
     // simplification and every reader has to drop its cache. Derived rather than asked for, so a
     // forgotten `--build-id` cannot silently republish under the old one.
     let build_id = run.build_id.unwrap_or_else(|| {
-        derive_build_id(input, layers, min_zoom, max_zoom, simplification, stats.features)
+        derive_build_id(
+            input,
+            layers,
+            min_zoom,
+            max_zoom,
+            simplification,
+            stats.features,
+            run.transit_routes.is_some(),
+        )
     });
 
     let settings = tiler::Settings {
@@ -420,6 +462,11 @@ fn scratch_path(out: &std::path::Path) -> PathBuf {
 /// cache key would double the build's I/O for a number that only has to change when the data does.
 /// A rebuild from an unchanged file therefore keeps its id, which is what makes a byte-identical
 /// rebuild byte-identical.
+///
+/// The leading generator revision has to be bumped whenever this crate changes what it *puts* in an
+/// archive for the same input, because readers cache byte ranges under `(url, build_id)` and the
+/// URL is deliberately stable across republishes. A device with a warm cache would otherwise keep
+/// serving the old archive's bytes forever. See `library/map/.../tile/source.rs`.
 fn derive_build_id(
     input: &std::path::Path,
     layers: schema::Layers,
@@ -427,6 +474,7 @@ fn derive_build_id(
     max_zoom: u8,
     simplification: f64,
     features: u64,
+    transit_routes: bool,
 ) -> u64 {
     let mut h = 0xcbf2_9ce4_8422_2325u64;
     let mut eat = |bytes: &[u8]| {
@@ -435,7 +483,24 @@ fn derive_build_id(
             h = h.wrapping_mul(0x100_0000_01b3);
         }
     };
-    eat(b"mamaps_build/1");
+    // Revision 7: a `transit` feature carries the lane *inputs* (ordinal, colour count, taper)
+    // rather than a baked offset, so the same feeds yield different transit records again.
+    //
+    // Revision 6: a `transit` feature carries a corridor slot (`transit_spread`), the exporter
+    // collapses a route's two directions into one line, and `coalesce` keys on the slot -- so
+    // the same feeds now yield different transit geometry again.
+    //
+    // Revision 5: the `transit` layer is sourced from a GTFS export (`--transit-routes`) rather
+    // than from OSM route relations, so the same `.pbf` now yields entirely different transit
+    // geometry and colours -- and none at all without the flag.
+    //
+    // Revision 4: `coalesce` keys line merging on `transit_color` too, so transit lines of one
+    // mode but different operator colours no longer collapse into one feature.
+    //
+    // Revision 3: road `min_zoom` is decided per corridor (`corridor`), and place
+    // `kind_detail` carries the reference basemap's 0-15 population rank rather than a
+    // three-step one (`schema::places::rank_of`).
+    eat(b"mamaps_build/7");
     eat(input.to_string_lossy().as_bytes());
     if let Ok(meta) = std::fs::metadata(input) {
         eat(&meta.len().to_le_bytes());
@@ -458,6 +523,9 @@ fn derive_build_id(
         u8::from(layers.transit),
         min_zoom,
         max_zoom,
+        // A build with a transit-routes file and one without carry different layers from the
+        // same `.pbf`, and readers cache byte ranges under `(url, build_id)`.
+        u8::from(transit_routes),
     ]);
     eat(&simplification.to_le_bytes());
     eat(&features.to_le_bytes());
@@ -480,8 +548,8 @@ fn build_report(
     out.push_str(&format!("  \"ways_classified\": {},\n", stats.ways_classified));
     out.push_str(&format!("  \"relations_classified\": {},\n", stats.relations_classified));
     out.push_str(&format!("  \"nodes_classified\": {},\n", stats.nodes_classified));
-    out.push_str(&format!("  \"transit_relations\": {},\n", stats.transit_relations));
-    out.push_str(&format!("  \"transit_way_features\": {},\n", stats.transit_way_features));
+    out.push_str(&format!("  \"transit_routes\": {},\n", stats.transit_routes));
+    out.push_str(&format!("  \"corridor_promotions\": {},\n", stats.corridor_promotions));
     out.push_str(&format!("  \"features\": {},\n", stats.features));
     out.push_str(&format!("  \"geometry_failed\": {},\n", stats.geometry_failed));
     out.push_str(&format!("  \"nodes_needed\": {},\n", stats.nodes_needed));
@@ -523,6 +591,7 @@ fn usage() {
          \x20                   [--layers earth,water,buildings,roads,boundaries,landcover,landuse]\n\
          \x20                   [--min-zoom N] [--max-zoom N]\n\
          \x20                   [--coastline LAND.geojsonseq]\n\
+         \x20                   [--transit-routes ROUTES.geojsonseq]\n\
          \x20                   [--simplification F] [--build-id N] [--report FILE]\n\
          \x20                   [--keep-store] [--reuse-store]\n\
          \n\
@@ -554,13 +623,16 @@ mod tests {
     #[test]
     fn a_build_id_follows_the_inputs_that_decide_the_output() {
         let path = std::path::Path::new("nonexistent.osm.pbf");
-        let base = derive_build_id(path, schema::Layers::all(), 0, 14, 1.0, 100);
-        assert_eq!(base, derive_build_id(path, schema::Layers::all(), 0, 14, 1.0, 100), "stable");
+        let all = schema::Layers::all();
+        let base = derive_build_id(path, all, 0, 14, 1.0, 100, false);
+        assert_eq!(base, derive_build_id(path, all, 0, 14, 1.0, 100, false), "stable");
         for other in [
-            derive_build_id(path, schema::Layers::all(), 1, 14, 1.0, 100),
-            derive_build_id(path, schema::Layers::all(), 0, 15, 1.0, 100),
-            derive_build_id(path, schema::Layers::all(), 0, 14, 2.0, 100),
-            derive_build_id(path, schema::Layers::all(), 0, 14, 1.0, 101),
+            derive_build_id(path, all, 1, 14, 1.0, 100, false),
+            derive_build_id(path, all, 0, 15, 1.0, 100, false),
+            derive_build_id(path, all, 0, 14, 2.0, 100, false),
+            derive_build_id(path, all, 0, 14, 1.0, 101, false),
+            // A transit-routes file adds a whole layer the same `.pbf` would not produce.
+            derive_build_id(path, all, 0, 14, 1.0, 100, true),
             derive_build_id(
                 path,
                 schema::Layers { water: true, ..schema::Layers::none() },
@@ -568,8 +640,17 @@ mod tests {
                 14,
                 1.0,
                 100,
+                false,
             ),
-            derive_build_id(std::path::Path::new("other.osm.pbf"), schema::Layers::all(), 0, 14, 1.0, 100),
+            derive_build_id(
+                std::path::Path::new("other.osm.pbf"),
+                all,
+                0,
+                14,
+                1.0,
+                100,
+                false,
+            ),
         ] {
             assert_ne!(base, other, "a changed input should change the id");
         }
