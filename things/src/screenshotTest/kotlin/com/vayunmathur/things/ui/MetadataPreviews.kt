@@ -37,6 +37,7 @@ class MetadataPreviews {
                 scalePaired = true,
                 scaleLink = LinkState.Connected,
                 scaleConnectionState = "Connected — step on scale",
+                scaleUserSlot = 1,
                 scaleSex = Sex.Male,
                 scaleAge = "30",
                 scaleHeight = "178",
@@ -47,6 +48,7 @@ class MetadataPreviews {
                 onScaleAthleteChange = {},
                 onForgetBottle = {},
                 onForgetScale = {},
+                onResetScale = {},
                 onHealthConnectClick = {},
                 onOpenDevices = {},
             )

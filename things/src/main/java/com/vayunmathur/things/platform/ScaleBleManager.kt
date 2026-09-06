@@ -74,6 +74,7 @@ class ScaleBleManager {
         private const val CMD_TIME = 0x20
         private const val CMD_START = 0x22
         private const val CMD_USER_SYNC = 0xA0
+        private const val CMD_IDENTIFY_WEIGHT = 0xA2
 
         /**
          * VA-class scales (ScaleBleUtils.isVaScale) speak a variant of the protocol: the config
@@ -81,10 +82,14 @@ class ScaleBleManager {
          * 3..4, and nothing is reported at all until a user slot is synced with 0xA0.
          */
         private val VA_CATEGORIES = setOf(128, 129, 134, 143)
+        private const val VA_SUB_REGISTER = 1
         private const val VA_SUB_VISIT = 2
+        private const val VA_SUB_DELETE = 4
         private const val VA_VISITOR_INDEX = 0xFE
         private const val VA_VISITOR_KEY_HI = 0xFF
         private const val VA_VISITOR_KEY_LO = 0xEE
+        /** Delete takes every slot at once; bit(n-1) selects slot n, so 0xFF is all eight. */
+        private const val VA_DELETE_ALL_MASK = 0xFF
         /** Body-fat algorithm id; we only use the scale's raw impedance, so this is inert. */
         private const val VA_ALGORITHM = 7
         /** 1 = Asia reference range, 2 = rest of world. */
@@ -138,6 +143,14 @@ class ScaleBleManager {
     /** VA scales scale the weight up by this instead of dividing by [weightRatio]. */
     private var kgWeightRatio = 0.1
     private var isVaScale = false
+    /**
+     * Set once the scale has accepted us into one of its eight slots. Null means we are running
+     * as the transient visitor, either before the first registration or because all slots were
+     * taken.
+     */
+    private var vaUserIndex: Int? = null
+    /** 0x12 byte[16] bit 5: whether the scale accepts an app-supplied reference weight. */
+    private var supportsIdentifyWeight = false
     private var scaleType = 0
     private var notifyChar: UUID = CHAR_FFE1
     private var indicateChar: UUID? = null
@@ -361,6 +374,9 @@ class ScaleBleManager {
         timeRetries = 0
         scaleType = 0
         weightRatio = 10.0
+        // Re-established from the 0x12 info frame and the user handshake on every connection.
+        supportsIdentifyWeight = false
+        vaUserIndex = null
         resetBurst()
     }
 
@@ -594,7 +610,8 @@ class ScaleBleManager {
                 handler.removeCallbacks(timeRetry)
                 if (isVaScale) {
                     // A VA scale reports nothing until it has a user slot to attribute it to.
-                    sendVisitorUser()
+                    // A pending wipe has to go first, since it invalidates any slot we hold.
+                    if (DeviceController.scaleResetPending()) sendDeleteAllUsers() else syncUser()
                 } else {
                     Log.d(TAG, "time frame acknowledged; starting measurement")
                     handler.removeCallbacks(sendStart)
@@ -608,23 +625,60 @@ class ScaleBleManager {
     }
 
     /**
-     * Register as the transient "visitor" slot. This is what QNBleApi.connectDevice does, and it
-     * avoids consuming one of the scale's eight persistent user slots.
+     * Claim our slot on the scale: visit the one we already hold, or register for a new one.
+     *
+     * Registering is what makes offline weigh-ins attributable — the scale stamps each stored
+     * record with the slot it matched, so a dedicated slot is the only way to tell our readings
+     * apart from the rest of the household's.
+     */
+    private fun syncUser() {
+        val index = DeviceController.scaleUserIndex()
+        if (index == null) {
+            sendUserFrame(VA_SUB_REGISTER, index = 0, key = DeviceController.scaleUserKey())
+        } else {
+            sendUserFrame(VA_SUB_VISIT, index = index, key = DeviceController.scaleUserKey())
+        }
+    }
+
+    /**
+     * The transient slot, used only when the scale has no room left for us. Measurements still
+     * work; they just cannot be told apart from anyone else's when taken offline.
      */
     private fun sendVisitorUser() {
+        vaUserIndex = null
+        sendUserFrame(VA_SUB_VISIT, VA_VISITOR_INDEX, keyHi = VA_VISITOR_KEY_HI, keyLo = VA_VISITOR_KEY_LO)
+    }
+
+    private fun sendUserFrame(
+        sub: Int,
+        index: Int,
+        key: Int? = null,
+        keyHi: Int = (key ?: 0) shr 8 and 0xFF,
+        keyLo: Int = (key ?: 0) and 0xFF,
+    ) {
         val profile = DeviceController.scaleProfile.value
+        // The wire encoding is the inverse of the SDK's own BleUser convention.
         val gender = if (profile.sex == Sex.Male) 0 else 1
         val age = profile.age.coerceIn(6, 80)
         val heightMm = (profile.heightCm.coerceIn(40.0, 240.0) * 10).toInt()
-        Log.d(TAG, "sync visitor user: gender=$gender age=$age heightMm=$heightMm")
+        Log.d(TAG, "user sync sub=$sub index=$index gender=$gender age=$age heightMm=$heightMm")
         enqueue(
             bleWriteChar,
             buildFrame(
-                CMD_USER_SYNC, VA_SUB_VISIT,
-                VA_VISITOR_INDEX, VA_VISITOR_KEY_HI, VA_VISITOR_KEY_LO,
+                CMD_USER_SYNC, sub,
+                index, keyHi, keyLo,
                 gender, age, (heightMm shr 8) and 0xFF, heightMm and 0xFF,
                 VA_ALGORITHM, VA_FAT_GRADE,
             ),
+        )
+    }
+
+    /** Frees all eight slots. Ten trailing zero bytes pad it to the length the scale expects. */
+    private fun sendDeleteAllUsers() {
+        Log.d(TAG, "resetting all scale user slots")
+        enqueue(
+            bleWriteChar,
+            buildFrame(CMD_USER_SYNC, VA_SUB_DELETE, VA_DELETE_ALL_MASK, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0),
         )
     }
 
@@ -632,13 +686,40 @@ class ScaleBleManager {
         if (v.size < 5) return
         val sub = v[2].toInt() and 0xFF
         val index = v[3].toInt() and 0xFF
-        val result = v[4].toInt() and 0xFF
-        Log.d(TAG, "user sync result sub=$sub index=$index result=$result")
-        if (sub != VA_SUB_VISIT || result != 1) return
-        // Ask for the stored records. Bit 0 is the visitor/unattributed bucket, which is where a
-        // weigh-in taken with no phone present lands; bits 1..8 are other household members'
-        // slots, which we deliberately do not claim as our own.
-        enqueue(bleWriteChar, buildCmd(CMD_START, 0x00, 0x01))
+        val ok = (v[4].toInt() and 0xFF) == 1
+        Log.d(TAG, "user sync result sub=$sub index=$index ok=$ok")
+        when (sub) {
+            VA_SUB_REGISTER -> {
+                if (!ok) {
+                    // The scale only fails this when all eight slots are occupied.
+                    Log.w(TAG, "no free scale slots; falling back to visitor")
+                    sendVisitorUser()
+                    return
+                }
+                DeviceController.saveScaleUserIndex(index)
+                // Registering does not make us the active user; a visit still has to follow.
+                sendUserFrame(VA_SUB_VISIT, index, key = DeviceController.scaleUserKey())
+            }
+            VA_SUB_VISIT -> {
+                if (!ok) return
+                vaUserIndex = if (index == VA_VISITOR_INDEX) null else index
+                requestStoredRecords()
+            }
+            VA_SUB_DELETE -> {
+                DeviceController.onScaleResetDone()
+                if (ok) syncUser() else Log.w(TAG, "scale reset rejected")
+            }
+        }
+    }
+
+    /**
+     * Ask for buffered records. The mask selects slots by bit(n); bit 0 is the unattributed
+     * bucket, which we deliberately leave out — a weigh-in the scale could not match is more
+     * likely to be someone else's than ours.
+     */
+    private fun requestStoredRecords() {
+        val mask = vaUserIndex?.let { 1 shl it } ?: 1
+        enqueue(bleWriteChar, buildCmd(CMD_START, (mask shr 8) and 0xFF, mask and 0xFF))
     }
 
     /**
@@ -653,6 +734,14 @@ class ScaleBleManager {
             return
         }
         val index = v[4].toInt() and 0xFF
+        val recordUser = v[5].toInt() and 0xFF
+        // The mask should already have filtered these scale-side; re-check rather than risk
+        // filing someone else's weigh-in, or an unattributed one (0xF0), as ours.
+        val ours = vaUserIndex
+        if (ours != null && recordUser != ours) {
+            Log.d(TAG, "stored record $index/$total belongs to user $recordUser; skipped")
+            return
+        }
         // Timestamp is little-endian here while weight and impedance below are big-endian; that
         // asymmetry is in the reference decoder, not a mistake.
         var seconds = 0L
@@ -665,7 +754,7 @@ class ScaleBleManager {
         }
         val weight = decodeWeightByMultiplication(twoByteInt(v[10], v[11]), kgWeightRatio)
         if (weight <= 0) return
-        Log.d(TAG, "stored record $index/$total user=${v[5].toInt() and 0xFF} weight=$weight")
+        Log.d(TAG, "stored record $index/$total user=$recordUser weight=$weight")
         DeviceController.onScaleHistory(
             weightKg = weight,
             r50 = fourResTwoByte2Int(v[12], v[13]),
@@ -684,6 +773,7 @@ class ScaleBleManager {
             0, 1, 18 -> if (weight > 0) DeviceController.onScaleRealtimeWeight(weight)
             2 -> {
                 enqueue(configChar, buildCmd(CMD_OVER, 0x10))
+                sendIdentifyWeight(weight)
                 if (v.size < 11) {
                     DeviceController.onScaleMeasurement(weight, 0, 0)
                     return
@@ -697,6 +787,18 @@ class ScaleBleManager {
         }
     }
 
+    /**
+     * Tell the scale what our slot weighs. This is the reference the firmware matches against
+     * when someone weighs in with no phone around, so keeping it current is what makes offline
+     * attribution — and therefore the stored-record filter — work.
+     */
+    private fun sendIdentifyWeight(weightKg: Double) {
+        val index = vaUserIndex ?: return
+        if (!supportsIdentifyWeight || weightKg <= 0) return
+        val raw = Math.round(weightKg * 100).toInt()
+        enqueue(bleWriteChar, buildFrame(CMD_IDENTIFY_WEIGHT, index, (raw shr 8) and 0xFF, raw and 0xFF))
+    }
+
     private fun handleScaleInfo(v: ByteArray) {
         // scaleType is echoed back in every command we send, so read it before the length check.
         if (v.size >= 3) scaleType = v[2].toInt() and 0xFF
@@ -705,6 +807,7 @@ class ScaleBleManager {
         if (v.size < 15) return
         weightRatio = if ((v[10].toInt() and 0x01) == 1) 100.0 else 10.0
         kgWeightRatio = if ((v[10].toInt() and 0x01) == 1) 0.01 else 0.1
+        if (v.size > 16) supportsIdentifyWeight = ((v[16].toInt() shr 5) and 1) == 1
         // Units etc. available at v[10] bits, v[16] lbPrecision, v[17] unit mask.
         // We keep ratio for weight decode; other bytes inform display only.
         DeviceController.scaleConnectionState.value = "Connected — step on scale"

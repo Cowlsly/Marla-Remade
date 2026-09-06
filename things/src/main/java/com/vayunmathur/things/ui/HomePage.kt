@@ -9,7 +9,10 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.res.stringResource
@@ -19,6 +22,7 @@ import com.vayunmathur.library.ui.AppScaffold
 import com.vayunmathur.library.ui.Button
 import com.vayunmathur.library.ui.Card
 import com.vayunmathur.library.ui.Checkbox
+import com.vayunmathur.library.ui.ConfirmDialog
 import com.vayunmathur.library.ui.ExperimentalMaterial3Api
 import com.vayunmathur.library.ui.FilterChip
 import com.vayunmathur.library.ui.IconButton
@@ -57,6 +61,7 @@ fun HomePage(
     scalePaired: Boolean,
     scaleLink: LinkState,
     scaleConnectionState: String,
+    scaleUserSlot: Int?,
     scaleSex: Sex,
     scaleAge: String,
     scaleHeight: String,
@@ -67,6 +72,7 @@ fun HomePage(
     onScaleAthleteChange: (Boolean) -> Unit,
     onForgetBottle: () -> Unit,
     onForgetScale: () -> Unit,
+    onResetScale: () -> Unit,
     onHealthConnectClick: () -> Unit,
     onOpenDevices: () -> Unit,
 ) {
@@ -105,6 +111,7 @@ fun HomePage(
                     ScaleCard(
                         link = scaleLink,
                         connectionState = scaleConnectionState,
+                        userSlot = scaleUserSlot,
                         sex = scaleSex,
                         age = scaleAge,
                         height = scaleHeight,
@@ -114,6 +121,7 @@ fun HomePage(
                         onHeightChange = onScaleHeightChange,
                         onAthleteChange = onScaleAthleteChange,
                         onForget = onForgetScale,
+                        onReset = onResetScale,
                     )
                 }
             }
@@ -238,6 +246,7 @@ private fun formatClockTime(millis: Long): String =
 private fun ScaleCard(
     link: LinkState,
     connectionState: String,
+    userSlot: Int?,
     sex: Sex,
     age: String,
     height: String,
@@ -247,11 +256,23 @@ private fun ScaleCard(
     onHeightChange: (String) -> Unit,
     onAthleteChange: (Boolean) -> Unit,
     onForget: () -> Unit,
+    onReset: () -> Unit,
 ) {
+    var confirmReset by remember { mutableStateOf(false) }
     Card(modifier = Modifier.fillMaxWidth()) {
         Column(modifier = Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
             Text(stringResource(R.string.scale_title), style = MaterialTheme.typography.titleSmall)
             LinkStatusText(link, connectionState)
+            // The scale files each weigh-in under one of its eight slots; ours is what lets the
+            // app pick out measurements taken while the phone was away.
+            Text(
+                if (userSlot != null) {
+                    stringResource(R.string.scale_user_slot, userSlot)
+                } else {
+                    stringResource(R.string.scale_user_unregistered)
+                },
+                style = MaterialTheme.typography.bodySmall,
+            )
 
             // The profile drives the body-composition maths, so it stays editable whether or not
             // the scale happens to be awake.
@@ -286,7 +307,27 @@ private fun ScaleCard(
                 stringResource(R.string.syncs_to_health_connect),
                 style = MaterialTheme.typography.bodySmall
             )
+            OutlinedButton(onClick = { confirmReset = true }) {
+                Text(stringResource(R.string.scale_reset_users))
+            }
             OutlinedButton(onClick = onForget) { Text(stringResource(R.string.forget_device)) }
         }
+    }
+
+    if (confirmReset) {
+        ConfirmDialog(
+            title = stringResource(R.string.scale_reset_title),
+            message = stringResource(R.string.scale_reset_message),
+            confirmLabel = stringResource(R.string.scale_reset_confirm),
+            // Without an explicit dismiss label the dialog renders no cancel button, which is a
+            // poor way to guard something destructive.
+            dismissLabel = stringResource(R.string.cancel),
+            destructive = true,
+            onConfirm = {
+                confirmReset = false
+                onReset()
+            },
+            onDismiss = { confirmReset = false },
+        )
     }
 }

@@ -47,6 +47,7 @@ fun Navigation(
                 scalePaired = DeviceController.scalePaired.value,
                 scaleLink = DeviceController.scaleLink.value,
                 scaleConnectionState = DeviceController.scaleConnectionState.value,
+                scaleUserSlot = DeviceController.scaleUserSlot.value,
                 scaleSex = DeviceController.scaleSex.value,
                 scaleAge = DeviceController.scaleAge.value,
                 scaleHeight = DeviceController.scaleHeight.value,
@@ -69,6 +70,7 @@ fun Navigation(
                 },
                 onForgetBottle = onForgetBottle,
                 onForgetScale = onForgetScale,
+                onResetScale = { DeviceController.requestScaleReset() },
                 onHealthConnectClick = onHealthConnectClick,
                 onOpenDevices = { backStack.add(Route.Devices) },
             )

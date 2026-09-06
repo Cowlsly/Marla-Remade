@@ -18,6 +18,7 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.launch
+import kotlin.random.Random
 
 /**
  * Process-scoped owner of the BLE managers, device state, and all the bottle/scale logic that
@@ -73,6 +74,8 @@ object DeviceController {
 
     // Scale (Renpho Elis 1 / Qingniu) — offline BLE only, no cloud.
     val scaleDevices = mutableStateListOf<ScaleBleManager.ScaleBleDevice>()
+    /** Which of the scale's eight user slots is ours, or null until we have registered. */
+    val scaleUserSlot = mutableStateOf<Int?>(null)
     val scaleScanning = mutableStateOf(false)
     val scaleConnectionState = mutableStateOf("Disconnected")
     val scaleRealtimeWeight = mutableStateOf<Double?>(null)
@@ -94,6 +97,7 @@ object DeviceController {
         scaleBleManager = ScaleBleManager()
         loadScaleProfile()
         loadBottleTelemetry()
+        scaleUserSlot.value = scaleUserIndex()
         refreshPaired()
         initialized = true
     }
@@ -261,6 +265,9 @@ object DeviceController {
 
     fun disconnectScale() {
         clearDeviceAddress(SCALE_ADDRESS_KEY)
+        // The slot belongs to this pairing; keeping it would strand a slot on the scale that we
+        // could no longer visit.
+        clearScaleUserSlot()
         scaleBleManager.disconnect()
     }
 
@@ -279,6 +286,55 @@ object DeviceController {
         if (prefs.contains(SCALE_CATEGORY_KEY)) prefs.getInt(SCALE_CATEGORY_KEY, 0) else null
 
     fun savedScaleEncryptsResistance(): Boolean = prefs.getBoolean(SCALE_ENCRYPT_RES_KEY, false)
+
+    /**
+     * Our slot on the scale, or null if we have not registered yet.
+     *
+     * The slot's key cannot be read back off the scale (that needs characteristics this hardware
+     * does not expose), so once assigned it has to survive forever — losing it strands the slot,
+     * recoverable only by resetting the scale.
+     */
+    fun scaleUserIndex(): Int? =
+        if (prefs.contains(SCALE_USER_INDEX_KEY)) prefs.getInt(SCALE_USER_INDEX_KEY, 0) else null
+
+    /** Stable per-slot secret. Generated once; the scale expects the same value on every visit. */
+    fun scaleUserKey(): Int {
+        val existing = prefs.getInt(SCALE_USER_KEY_KEY, 0)
+        if (existing in 1..9999) return existing
+        val generated = Random.nextInt(1, 10000)
+        prefs.edit { putInt(SCALE_USER_KEY_KEY, generated) }
+        return generated
+    }
+
+    fun saveScaleUserIndex(index: Int) {
+        prefs.edit { putInt(SCALE_USER_INDEX_KEY, index) }
+        scaleUserSlot.value = index
+    }
+
+    private fun clearScaleUserSlot() {
+        prefs.edit {
+            remove(SCALE_USER_INDEX_KEY)
+            remove(SCALE_USER_KEY_KEY)
+        }
+        scaleUserSlot.value = null
+    }
+
+    /**
+     * Wipe every user slot on the scale. It is powered off between weigh-ins, so this is recorded
+     * and carried out on the next connection rather than attempted now.
+     */
+    fun requestScaleReset() {
+        prefs.edit { putBoolean(SCALE_PENDING_RESET_KEY, true) }
+        clearScaleUserSlot()
+        AppMessages.show("Scale will be reset next time it connects")
+    }
+
+    fun scaleResetPending(): Boolean = prefs.getBoolean(SCALE_PENDING_RESET_KEY, false)
+
+    fun onScaleResetDone() {
+        prefs.edit { remove(SCALE_PENDING_RESET_KEY) }
+        clearScaleUserSlot()
+    }
 
     /** Reconnect to any remembered devices. No-op without permission or a powered-on adapter. */
     fun autoConnectSavedDevices() {
@@ -439,4 +495,7 @@ object DeviceController {
     private const val SCALE_ADDRESS_KEY = "scale_address"
     private const val SCALE_CATEGORY_KEY = "scale_category"
     private const val SCALE_ENCRYPT_RES_KEY = "scale_encrypt_resistance"
+    private const val SCALE_USER_INDEX_KEY = "scale_user_index"
+    private const val SCALE_USER_KEY_KEY = "scale_user_key"
+    private const val SCALE_PENDING_RESET_KEY = "scale_pending_reset"
 }

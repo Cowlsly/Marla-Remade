@@ -69,6 +69,18 @@
     <string name="age">Age</string>
     <string name="height_cm">Height (cm)</string>
     <string name="athlete">Athlete mode</string>
+    <!-- Which of the scale's eight user slots is ours. %1$d = slot number 1-8 -->
+    <string name="scale_user_slot">Scale user <xliff:g id="slot" example="3">%1$d</xliff:g> of 8</string>
+    <!-- Shown before the scale has assigned us one of its eight user slots -->
+    <string name="scale_user_unregistered">Not registered on the scale yet</string>
+    <!-- Button that erases every stored user profile on the scale. Verb phrase -->
+    <string name="scale_reset_users">Reset scale users</string>
+    <!-- Title of the confirmation dialog for erasing the scale's user slots -->
+    <string name="scale_reset_title">Reset scale users?</string>
+    <!-- Warns that the reset is not limited to this app's own slot -->
+    <string name="scale_reset_message">This erases all eight user profiles stored on the scale, including any belonging to other people in your household. They would each have to set the scale up again. Your own measurements already in Health Connect are not affected.</string>
+    <!-- Confirm button on the scale reset dialog. Verb -->
+    <string name="scale_reset_confirm">Reset</string>
     <!-- Scale scan button -->
     <string name="scan_scale">Scan scale</string>
     <!-- Health Connect -->
