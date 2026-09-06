@@ -134,6 +134,10 @@ fn poi_kind(tags: &(impl TagSource + ?Sized)) -> Option<(&'static str, u8)> {
     if tags.get("amenity") == Some("ferry_terminal") {
         return Some(("ferry_terminal", 11));
     }
+    // Fuel is a driver's landmark, so it appears with the shops rather than the street furniture.
+    if tags.get("amenity") == Some("fuel") {
+        return Some(("fuel", 14));
+    }
     // Nature and outdoors.
     match tags.get("natural") {
         Some("beach") => return Some(("beach", 12)),
@@ -156,6 +160,11 @@ fn poi_kind(tags: &(impl TagSource + ?Sized)) -> Option<(&'static str, u8)> {
     }
     if matches!(tags.get("tourism"), Some("museum" | "gallery")) {
         return Some(("museum", 13));
+    }
+    // Lodging. `guest_house` is included because OSM uses it for the small end of the same thing;
+    // the app's Hotels chip means "somewhere to sleep", not "a building tagged tourism=hotel".
+    if matches!(tags.get("tourism"), Some("hotel" | "motel" | "hostel" | "guest_house")) {
+        return Some(("hotel", 14));
     }
     if tags.get("tourism") == Some("artwork") {
         return Some(("artwork", 14));
@@ -213,6 +222,15 @@ fn poi_kind(tags: &(impl TagSource + ?Sized)) -> Option<(&'static str, u8)> {
     if matches!(tags.get("shop"), Some("clothes" | "shoes" | "fashion")) {
         return Some(("clothes", 15));
     }
+    // Money. `bank` is separate from `atm` and drawn earlier because a branch is a landmark and a
+    // machine is not — but the app's ATM chip selects both, since most branches have a machine and
+    // OSM frequently tags only the branch.
+    if tags.get("amenity") == Some("bank") {
+        return Some(("bank", 15));
+    }
+    if tags.get("amenity") == Some("atm") {
+        return Some(("atm", 16));
+    }
     // Street furniture and the small stuff, last.
     if matches!(tags.get("amenity"), Some("bench" | "shelter")) {
         return Some(("bench", 16));
@@ -253,7 +271,7 @@ mod tests {
 
     #[test]
     fn every_style_poi_kind_is_reachable() {
-        // The style draws 37 kinds; each must be producible from real OSM tags, or the tiler
+        // The style draws 41 kinds; each must be producible from real OSM tags, or the tiler
         // ships a sprite name nothing ever carries.
         for (tags, want) in [
             (vec![("natural", "beach")], "beach"),
@@ -291,6 +309,11 @@ mod tests {
             (vec![("tourism", "attraction")], "attraction"),
             (vec![("tourism", "museum")], "museum"),
             (vec![("tourism", "artwork")], "artwork"),
+            (vec![("amenity", "fuel")], "fuel"),
+            (vec![("tourism", "hotel")], "hotel"),
+            (vec![("tourism", "hostel")], "hotel"),
+            (vec![("amenity", "atm")], "atm"),
+            (vec![("amenity", "bank")], "bank"),
         ] {
             // `theatre` has no clean OSM tag mapping (the style draws `theatre` but OSM tags
             // theatres `amenity=theatre`, handled below) — every other kind must resolve.

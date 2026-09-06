@@ -5,7 +5,6 @@ import androidx.compose.ui.unit.DpRect
 import androidx.compose.ui.unit.dp
 import com.vayunmathur.maps.data.Feature1
 import com.vayunmathur.maps.ui.FAMILY_LOCATION_LAYER_ID
-import com.vayunmathur.maps.ui.MA_POIS_LAYER_ID
 import com.vayunmathur.maps.ui.PARKING_PIN_LAYER_ID
 import com.vayunmathur.maps.ui.SAVED_PLACE_LAYER_ID
 import com.vayunmathur.maps.ui.SEARCH_RESULT_LAYER_ID
@@ -56,7 +55,7 @@ class MapFeaturePickerTest {
     private val tap = DpOffset(100.dp, 200.dp)
 
     @Test
-    fun `probes run parking, stop, search, saved, family, poi in that order`() = runBlocking {
+    fun `probes run parking, stop, search, saved, family in that order`() = runBlocking {
         val source = FakeSource(emptyMap())
         MapFeaturePicker(source, transitEnabled = true).pickPin(tap)
 
@@ -67,9 +66,24 @@ class MapFeaturePickerTest {
                 setOf(SEARCH_RESULT_LAYER_ID),
                 setOf(SAVED_PLACE_LAYER_ID),
                 setOf(FAMILY_LOCATION_LAYER_ID),
-                setOf(MA_POIS_LAYER_ID),
             ),
             source.queried,
+        )
+    }
+
+    /**
+     * Ambient POIs left this chain when the renderer took over drawing them: they arrive as
+     * `MapClick.poi`, already picked against the collision pass that put them on screen.
+     * Pinned so a future change cannot quietly reintroduce the duplicate viewport query.
+     */
+    @Test
+    fun `poi layers are not probed here`() = runBlocking {
+        val source = FakeSource(emptyMap())
+        val picker = MapFeaturePicker(source, transitEnabled = true)
+        picker.pickPin(tap)
+        assertTrue(
+            picker.probeOrder.none { it.contains("poi", ignoreCase = true) },
+            "a POI probe came back: ${picker.probeOrder}",
         )
     }
 
@@ -81,13 +95,13 @@ class MapFeaturePickerTest {
         assertEquals(picker.probeOrder, source.queried.map { it.single() })
     }
 
-    /** Parking wins outright: a car spot on top of a POI is still the car spot. */
+    /** Parking wins outright: a car spot on top of a family pin is still the car spot. */
     @Test
     fun `parking beats everything below it and stops the search`() = runBlocking {
         val source = FakeSource(
             mapOf(
                 PARKING_PIN_LAYER_ID to listOf(bareFeature()),
-                MA_POIS_LAYER_ID to listOf(bareFeature()),
+                FAMILY_LOCATION_LAYER_ID to listOf(bareFeature()),
             )
         )
         val hit = MapFeaturePicker(source, transitEnabled = true).pickPin(tap)
@@ -111,7 +125,7 @@ class MapFeaturePickerTest {
     fun `probeOrder omits the transit layer while it is off`() {
         val picker = MapFeaturePicker(FakeSource(emptyMap()), transitEnabled = false)
         assertTrue(TRANSIT_STOP_LAYER_ID !in picker.probeOrder)
-        assertEquals(5, picker.probeOrder.size)
+        assertEquals(4, picker.probeOrder.size)
     }
 
     /**
@@ -125,8 +139,8 @@ class MapFeaturePickerTest {
 
         assertNull(hit)
         assertTrue(
-            source.queried.any { MA_POIS_LAYER_ID in it },
-            "gave up before reaching the POI layer",
+            source.queried.any { FAMILY_LOCATION_LAYER_ID in it },
+            "gave up before reaching the last probe",
         )
     }
 

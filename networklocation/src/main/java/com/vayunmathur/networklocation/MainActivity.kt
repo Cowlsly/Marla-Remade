@@ -18,7 +18,9 @@ import com.vayunmathur.library.ui.Text
 
 /**
  * Status screen for the system network-location + geocoder provider. This app is primarily
- * headless (two bound framework services); the launcher entry just reports state.
+ * headless (two bound framework services); this screen just reports state and offers the
+ * offline-database download. It has no launcher entry — Settings links to it from
+ * Location -> Location services.
  */
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -44,6 +46,7 @@ class MainActivity : ComponentActivity() {
                             modifier = Modifier.padding(top = 12.dp),
                             style = MaterialTheme.typography.bodyMedium,
                         )
+                        OfflineDatabaseSection(Modifier.padding(top = 24.dp))
                     }
                 }
             }

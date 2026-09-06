@@ -2,25 +2,25 @@ package com.vayunmathur.networklocation
 
 import android.app.Service
 import android.content.Intent
-import android.content.res.AssetFileDescriptor
 import android.location.Address
 import android.location.GeocoderParams
 import android.os.IBinder
+import android.os.ParcelFileDescriptor
 import com.android.location.provider.GeocodeProvider
-import java.io.IOException
 import java.util.Locale
 
 /**
- * System geocoder backed entirely by the bundled offline planet DB — no network. Bound by the
+ * System geocoder backed entirely by the offline planet DB — no network. Bound by the
  * framework via the `com.android.location.service.GeocodeProvider` action; the app must be the
  * configured geocode provider (config_geocoderProviderPackageName) and hold INSTALL_LOCATION_PROVIDER.
  *
- * The search itself runs in native Rust ([GeocoderNative]) over `geocoder.geodb`, opened straight
- * from the APK asset fd. The provider contract: return null on success (results appended to
- * `addrs`) or an error string.
+ * The search itself runs in native Rust ([GeocoderNative]) over `geocoder.geodb`, which is
+ * downloaded to device-protected storage rather than bundled (see [OfflineDatabases]). The
+ * provider contract: return null on success (results appended to `addrs`) or an error string.
+ * Until the download lands there is no online fallback, so every request reports unavailable.
  */
 class GeocodeService : Service() {
-    private var afd: AssetFileDescriptor? = null
+    private var pfd: ParcelFileDescriptor? = null
     private var handle: Long = 0L
 
     private val provider: GeocodeProvider by lazy {
@@ -32,7 +32,7 @@ class GeocodeService : Service() {
                 params: GeocoderParams,
                 addrs: MutableList<Address>,
             ): String? {
-                if (handle == 0L) return "geocoder database unavailable"
+                if (!ensureOpen()) return "geocoder database unavailable"
                 val flat = GeocoderNative.reverse(handle, latitude, longitude) ?: return null
                 if (flat.size >= GeocoderNative.FIELDS_PER_ADDRESS) addrs.add(flat.toAddress(0, params.locale))
                 return null
@@ -48,7 +48,7 @@ class GeocodeService : Service() {
                 params: GeocoderParams,
                 addrs: MutableList<Address>,
             ): String? {
-                if (handle == 0L) return "geocoder database unavailable"
+                if (!ensureOpen()) return "geocoder database unavailable"
                 val parts = locationName.split(",").map { it.trim() }.filter { it.isNotEmpty() }
                 if (parts.size < 4) return null
                 val country = parts[parts.size - 1]
@@ -71,25 +71,52 @@ class GeocodeService : Service() {
 
     override fun onCreate() {
         super.onCreate()
+        openDatabase()
+    }
+
+    /**
+     * Open the database on first use after it has arrived, and report whether it is usable.
+     *
+     * The service is bound by the framework for the life of the boot, so it is normally
+     * created long before the multi-gigabyte download finishes. Nothing signals completion,
+     * so retry here: a single stat on the miss path is far cheaper than a geocode, and it
+     * means the geocoder starts answering without waiting for a reboot.
+     */
+    @Synchronized
+    private fun ensureOpen(): Boolean {
+        if (handle == 0L && OfflineDatabases.isPresent(this, OfflineDatabases.GEOCODER)) {
+            openDatabase()
+        }
+        return handle != 0L
+    }
+
+    /**
+     * (Re)open the geocoder DB. Safe to call again once a download completes: the previous
+     * handle is released first, and a still-absent file just leaves the handle at 0.
+     */
+    @Synchronized
+    fun openDatabase() {
+        closeDatabase()
         if (!GeocoderNative.available) return
-        try {
-            val fd = assets.openFd(ASSET_NAME)
-            afd = fd
-            handle = GeocoderNative.open(fd.parcelFileDescriptor.fd, fd.startOffset, fd.length)
-        } catch (_: IOException) {
+        val fd = OfflineDatabases.openReadOnly(this, OfflineDatabases.GEOCODER) ?: return
+        pfd = fd
+        handle = GeocoderNative.open(fd.fd, 0L, fd.statSize)
+    }
+
+    @Synchronized
+    private fun closeDatabase() {
+        if (handle != 0L) {
+            GeocoderNative.close(handle)
             handle = 0L
         }
+        pfd?.close()
+        pfd = null
     }
 
     override fun onBind(intent: Intent?): IBinder? = provider.binder
 
     override fun onDestroy() {
-        if (handle != 0L) {
-            GeocoderNative.close(handle)
-            handle = 0L
-        }
-        afd?.close()
-        afd = null
+        closeDatabase()
         super.onDestroy()
     }
 
@@ -113,9 +140,5 @@ class GeocodeService : Service() {
         if (postcode.isNotEmpty()) a.postalCode = postcode
         if (country.isNotEmpty()) a.countryCode = country
         return a
-    }
-
-    private companion object {
-        const val ASSET_NAME = "geocoder.geodb"
     }
 }

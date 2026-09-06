@@ -859,10 +859,10 @@ fn prefill_layer(
 
     let ff_in = b.rms_norm(x, pre_ff, EPSILON);
     let both = point(b, gate_up, ff_in, inner * 2);
-    let gate = b.slice_channels(both, 0, inner);
-    let up = b.slice_channels(both, inner, inner);
-    let gate = b.activate(gate, Act::Gelu);
-    let gated = b.mul(gate, up);
+    // One op, not four. The two slices were copies whose only purpose was to hand each half to
+    // the next dispatch, and on a phone that overhead dwarfs the arithmetic - see
+    // `shaders/gated_activate.comp`.
+    let gated = b.gated_activate(both, Act::Gelu);
     let ff = point(b, down, gated, D_MODEL);
     let ff = b_rms(b, ff, post_ff);
     let x = b.add(x, ff);
@@ -984,10 +984,10 @@ fn layer(
     // Gated feed-forward. One fused projection to `2 * inner`, split, `gelu(gate) * up`.
     let ff_in = b.rms_norm(x, pre_ff, EPSILON);
     let both = point(b, gate_up, ff_in, inner * 2);
-    let gate = b.slice_channels(both, 0, inner);
-    let up = b.slice_channels(both, inner, inner);
-    let gate = b.activate(gate, Act::Gelu);
-    let gated = b.mul(gate, up);
+    // One op, not four. The two slices were copies whose only purpose was to hand each half to
+    // the next dispatch, and on a phone that overhead dwarfs the arithmetic - see
+    // `shaders/gated_activate.comp`.
+    let gated = b.gated_activate(both, Act::Gelu);
     let ff = point(b, down, gated, D_MODEL);
     let ff = b_rms(b, ff, post_ff);
     let x = b.add(x, ff);
@@ -1161,15 +1161,32 @@ mod tests {
 
     #[test]
     fn every_layer_gates_its_feed_forward() {
-        // `gelu(gate) * up` over one fused projection. The standalone activation is the tell:
-        // there is one per layer for the MLP gate and one for the per-layer input gate.
+        // Two gates a layer: the MLP's `gelu(gate) * up`, and the per-layer input's.
+        //
+        // They are different **kinds** because only the MLP's reads a fused `[gate | up]`
+        // projection, which `Kind::GatedActivate` takes whole; the per-layer gate multiplies
+        // against a slice of a separate tensor and stays an `Activate` plus a `Mul`. Counting
+        // both is the point - the property is that every layer gates twice, not that it does so
+        // with any particular op.
         let plan = build(&Shapes::new(TENSORS), Mode::DecodeStep.at(TEST_CONTEXT)).expect("builds");
-        let gelus = plan
-            .ops
-            .iter()
-            .filter(|op| matches!(op, Op::Dispatch { kind: Kind::Activate, .. }))
-            .count();
-        assert_eq!(gelus, LAYERS * 2, "the MLP gate and the per-layer gate, per layer");
+        let count = |want: Kind| {
+            plan.ops
+                .iter()
+                .filter(|op| matches!(op, Op::Dispatch { kind, .. } if *kind == want))
+                .count()
+        };
+        assert_eq!(count(Kind::GatedActivate), LAYERS, "the MLP gate, per layer");
+        assert_eq!(count(Kind::Activate), LAYERS, "the per-layer input gate, per layer");
+        // The fused form must not leave its slices behind: they were the reason for it.
+        //
+        // 135 before fusing and 65 after - exactly the two `[gate | up]` slices a layer gone.
+        // The rest are the per-layer input's slice and the head's splits, which are not this
+        // op's to remove.
+        assert_eq!(
+            plan.ops.iter().filter(|op| matches!(op, Op::Copy { .. })).count(),
+            65,
+            "the gated MLP's two slice copies a layer are gone"
+        );
         let caps = plan
             .ops
             .iter()

@@ -7,8 +7,8 @@ package com.vayunmathur.appstore.data.accrescent
  * anywhere in the repo was this one signature check.
  *
  * Takes already-extracted raw bytes: signify's base64 and framing are parsed by
- * [AccrescentSignify], which stays in Kotlin. Returns false for a bad signature
- * and for any malformed input, so the caller's fail-closed contract holds
+ * [com.vayunmathur.appstore.data.security.Signify], which stays in Kotlin. Returns false for
+ * a bad signature and for any malformed input, so the caller's fail-closed contract holds
  * without this ever throwing.
  */
 internal object SignifyNative {

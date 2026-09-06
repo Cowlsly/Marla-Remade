@@ -1,0 +1,38 @@
+#version 450
+//! Reads the same buffer through a `VK_FORMAT_R32G32B32A32_UINT` texel buffer view.
+//!
+//! # Why this might be faster than `probe_ssbo.comp`
+//!
+//! A texel buffer is the same memory, bound so that fetches go through the GPU's texture unit
+//! and its own cache rather than the general load path. On mobile parts that unit is often the
+//! better-provisioned of the two, which is why LiteRT-LM's Android default is
+//! `SetPreferTextureWeights(true)` and why its tensor taxonomy has `IMAGE_BUFFER` and
+//! `TEXTURE_2D` alongside `BUFFER`.
+//!
+//! Everything else here matches `probe_ssbo.comp` exactly - same launch, same stride, same fold -
+//! so any difference is the fetch path.
+layout(local_size_x = 64) in;
+
+layout(set = 0, binding = 0) uniform usamplerBuffer source;
+
+layout(set = 0, binding = 1) buffer Sink {
+    uint sink[];
+};
+
+layout(push_constant) uniform Push {
+    /// Texels in the source, each a `uvec4`.
+    uint quads;
+};
+
+void main() {
+    uint lane = gl_GlobalInvocationID.x;
+    uint stride = gl_NumWorkGroups.x * 64u;
+    uvec4 acc = uvec4(0u);
+    for (uint at = lane; at < quads; at += stride) {
+        acc ^= texelFetch(source, int(at));
+    }
+    uint folded = acc.x ^ acc.y ^ acc.z ^ acc.w;
+    if (folded == 0xFFFFFFFFu) {
+        sink[0] = folded;
+    }
+}

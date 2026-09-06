@@ -119,6 +119,36 @@ impl Camera {
             tx as f32, ty as f32, 0.0, 1.0,
         ]
     }
+
+    /// Column-major 4x4 taking a quad's local −1..1 coordinates to Vulkan clip space,
+    /// for a quad of `radius_dp` centred on `lon`/`lat`.
+    ///
+    /// The screen-anchored sibling of [`tile_to_clip`](Self::tile_to_clip). Same
+    /// derivation, but the extent is a fixed number of Dp instead of a tile span, so the
+    /// quad keeps its screen size as the camera zooms while staying glued to its ground
+    /// position. That is what an overlay wants and what a tile address cannot express:
+    /// the alternative is to find the tile containing the point and borrow its matrix,
+    /// which works for a POI icon because a POI *is* tile data, and is a fiction for
+    /// anything that is not.
+    ///
+    /// The y-sign note on [`tile_to_clip`](Self::tile_to_clip) applies here too: Vulkan
+    /// clip y and Mercator y both point down, so there is no flip.
+    pub fn screen_quad_to_clip(&self, lon: f64, lat: f64, radius_dp: f64) -> [f32; 16] {
+        let center = project(lon, lat, self.zoom);
+        let origin = self.viewport_origin();
+
+        let sx = 2.0 * radius_dp / self.width_dp as f64;
+        let sy = 2.0 * radius_dp / self.height_dp as f64;
+        let tx = 2.0 * (center.x - origin.x) / self.width_dp as f64 - 1.0;
+        let ty = 2.0 * (center.y - origin.y) / self.height_dp as f64 - 1.0;
+
+        [
+            sx as f32, 0.0, 0.0, 0.0, //
+            0.0, sy as f32, 0.0, 0.0, //
+            0.0, 0.0, 1.0, 0.0, //
+            tx as f32, ty as f32, 0.0, 1.0,
+        ]
+    }
 }
 
 #[cfg(test)]
@@ -276,6 +306,50 @@ mod tests {
             assert!(p.y.is_finite(), "y at lat {lat} is {}", p.y);
             assert!(p.y >= -1.0 && p.y <= size + 1.0, "y at lat {lat} is {}, off the map", p.y);
         }
+    }
+
+    #[test]
+    fn a_screen_quad_on_the_camera_centre_lands_on_the_clip_origin() {
+        // The puck's whole point is being glued to a ground position, and the camera
+        // centre is the one position whose clip coordinate is known without arithmetic.
+        let camera = Camera { center_lon: -122.4194, center_lat: 37.7749, ..camera(14.0) };
+        let m = camera.screen_quad_to_clip(-122.4194, 37.7749, 28.0);
+        let (x, y) = transform(&m, 0.0, 0.0);
+        assert!(x.abs() < 1e-5, "x {x}");
+        assert!(y.abs() < 1e-5, "y {y}");
+    }
+
+    #[test]
+    fn a_screen_quad_keeps_its_dp_size_across_zooms_and_grows_with_the_viewport() {
+        // A tile quad doubles on screen every zoom; this one must not, or the puck would
+        // swell into a blue disc the size of a city block at z18.
+        let close = Camera { center_lon: 0.0, center_lat: 0.0, ..camera(18.0) };
+        let far = Camera { center_lon: 0.0, center_lat: 0.0, ..camera(4.0) };
+        let (near_x, _) = transform(&close.screen_quad_to_clip(0.0, 0.0, 28.0), 1.0, 0.0);
+        let (wide_x, _) = transform(&far.screen_quad_to_clip(0.0, 0.0, 28.0), 1.0, 0.0);
+        assert!((near_x - wide_x).abs() < 1e-6, "{near_x} vs {wide_x}");
+        // 28 Dp of a 512 Dp viewport is 28/256 of the half-width of clip space.
+        assert!((near_x - 28.0 / 256.0).abs() < 1e-5, "{near_x}");
+    }
+
+    #[test]
+    fn a_screen_quad_is_the_same_size_at_every_density() {
+        // The radius is Dp, like `tile_span_dp`. Density enters only where a Dp becomes a
+        // device pixel, which for the puck is the shader's radii — not this matrix.
+        let one = Camera { density: 1.0, ..camera(14.0) };
+        let three = Camera { density: 3.0, ..camera(14.0) };
+        assert_eq!(one.screen_quad_to_clip(0.0, 0.0, 28.0), three.screen_quad_to_clip(0.0, 0.0, 28.0));
+    }
+
+    #[test]
+    fn a_screen_quad_far_off_screen_falls_outside_the_clip_cube() {
+        // A fix taken in another country must not smear a puck across the edge of the
+        // viewport: the whole quad has to clip out.
+        let camera = Camera { center_lon: -122.4194, center_lat: 37.7749, ..camera(14.0) };
+        let m = camera.screen_quad_to_clip(2.3522, 48.8566, 28.0);
+        let (left, _) = transform(&m, -1.0, 0.0);
+        let (right, _) = transform(&m, 1.0, 0.0);
+        assert!(left > 1.0 && right > 1.0, "Paris at {left}..{right} should be off to the right");
     }
 }
 

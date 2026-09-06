@@ -40,14 +40,20 @@
             </intent-filter>
         </service>
 
+        <!--
+          No launcher entry: the app is headless and its status screen is reached from
+          Settings -> Location -> Location services. Exported because Settings is another
+          package, but restricted to the platform, which is what Settings runs as.
+        -->
         <activity
             android:name=".MainActivity"
-            android:exported="true">
-            <intent-filter>
-                <action android:name="android.intent.action.MAIN" />
-                <category android:name="android.intent.category.LAUNCHER" />
-            </intent-filter>
-        </activity>
+            android:exported="true"
+            android:permission="android.permission.INSTALL_LOCATION_PROVIDER" />
+        <provider
+            android:name=".provider.DatabaseStatusProvider"
+            android:authorities="com.vayunmathur.networklocation.status"
+            android:exported="true"
+            android:readPermission="android.permission.INSTALL_LOCATION_PROVIDER" />
     </application>
 
 </manifest>

@@ -21,18 +21,20 @@ class FrameworkLocationManager(context: Context) : SensorEventListener {
     private val rotationMatrix = FloatArray(9)
     private val orientationAngles = FloatArray(3)
 
-    // Callback to pass both Position and Heading (Compass)
-    private var onUpdate: ((Position, Float) -> Unit)? = null
+    // Callback to pass both Position and Heading (Compass). The heading is null until a
+    // real one has been seen: "unknown" and "due north" are different things, and the map
+    // draws the puck's bearing cone only for the second.
+    private var onUpdate: ((Position, Float?) -> Unit)? = null
     // Callback for magnetometer accuracy so the UI can prompt for calibration.
     private var onAccuracy: ((Int) -> Unit)? = null
     private var lastLocation: Location? = null
-    private var currentHeading: Float = 0f
+    private var currentHeading: Float? = null
     /** Listener we registered with the OS so [stop] can unregister it. */
     private var registeredLocationListener: LocationListener? = null
 
     @SuppressLint("MissingPermission")
     fun startUpdates(
-        onUpdateReceived: (Position, Float) -> Unit,
+        onUpdateReceived: (Position, Float?) -> Unit,
         onAccuracyReceived: (Int) -> Unit = {},
     ): LocationListener {
         this.onUpdate = onUpdateReceived
@@ -97,8 +99,13 @@ class FrameworkLocationManager(context: Context) : SensorEventListener {
             val azimuth = Math.toDegrees(orientationAngles[0].toDouble()).toFloat()
             val newHeading = (azimuth + 360) % 360
 
-            // Simple Low-Pass Filter to smooth jitter
-            currentHeading = newHeading
+            // Low-pass filter, on the magnetometer path only: a GPS course is already
+            // smooth and filtering it would lag the puck behind a turn. This used to be a
+            // bare assignment under a comment claiming to smooth, which mattered less
+            // while the puck was drawn in Compose a frame behind the map — that latency
+            // was doing some incidental smoothing of its own, and drawing the puck in the
+            // renderer takes it away.
+            currentHeading = smoothHeading(currentHeading, newHeading)
 
             // Update UI if we have a location but the user is standing still
             lastLocation?.let {
@@ -116,3 +123,30 @@ class FrameworkLocationManager(context: Context) : SensorEventListener {
         }
     }
 }
+
+/**
+ * One low-pass step from [current] toward [target], both degrees clockwise from north.
+ *
+ * Interpolates along the **shortest arc**, so a compass crossing north moves 359° → 1° by
+ * two degrees rather than spinning the puck's cone 358° the other way. A null [current] is
+ * the first reading and is taken whole: easing in from an arbitrary starting angle would
+ * sweep the cone across the screen on every cold start.
+ */
+internal fun smoothHeading(
+    current: Float?,
+    target: Float,
+    alpha: Float = HEADING_SMOOTHING,
+): Float {
+    if (current == null) return target
+    // +540 before the modulo so the operand is positive: Kotlin's Float `%` keeps the
+    // sign of the dividend, which would leave this in -360..360 instead of -180..180.
+    val delta = (target - current + 540f) % 360f - 180f
+    return (current + delta * alpha + 360f) % 360f
+}
+
+/**
+ * How much of each new compass reading to take. The magnetometer is registered at
+ * `SENSOR_DELAY_UI` (~60 ms), so this is roughly a third of a second to settle — enough to
+ * kill the jitter without the cone visibly trailing a deliberate turn.
+ */
+private const val HEADING_SMOOTHING = 0.15f

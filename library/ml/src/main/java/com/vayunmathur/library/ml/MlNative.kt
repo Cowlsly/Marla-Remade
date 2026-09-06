@@ -634,6 +634,15 @@ internal object MlNative {
      */
     external fun loadPrefixGemma4(handle: Long, positions: Int, cache: ByteArray): Int
 
+    /** Log a storage-buffer read against a texel-buffer read of the same bytes. */
+    external fun imageProbeGemma4(): Int
+
+    /** Log how a gemv's achieved bandwidth varies with the size of the dispatch. */
+    external fun scalingGemma4(): Int
+
+    /** Log which GPU features this device offers that the shaders do not yet use. */
+    external fun capabilitiesGemma4(): Int
+
     /** Positions the KV cache currently holds, or -1. */
     external fun capacityGemma4(handle: Long): Int
 

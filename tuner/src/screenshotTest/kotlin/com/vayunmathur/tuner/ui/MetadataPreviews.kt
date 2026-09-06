@@ -83,7 +83,6 @@ class MetadataPreviews {
                         band = TuningBand.IN_TUNE,
                     ),
                 ),
-                onToggleListening = {},
             )
         }
     }
@@ -105,7 +104,6 @@ class MetadataPreviews {
                         band = TuningBand.OUT,
                     ),
                 ),
-                onToggleListening = {},
             )
         }
     }
@@ -127,7 +125,6 @@ class MetadataPreviews {
                         band = TuningBand.CLOSE,
                     ),
                 ),
-                onToggleListening = {},
             )
         }
     }

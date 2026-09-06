@@ -255,15 +255,21 @@ type Chunk = BTreeMap<(u64, u8), ChunkEntry>;
 /// A chunk entry's `names` is deduplicated in first-use order, so `name_idx == i` names
 /// `names[i - 1]` — the same convention as the body's table, which is what makes the merge's
 /// remap a pure index translation.
+///
+/// `ids` rides the same way and is simpler: it holds values rather than indices, so a merge
+/// concatenates it instead of remapping it. It is empty for every layer but `places` and `poi`,
+/// and dense-parallel to `layer.features` for those two — `ids[i]` is the OSM element that
+/// produced `features[i]`.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ChunkEntry {
     pub layer: BodyLayer,
     pub names: Vec<String>,
+    pub ids: Vec<u64>,
 }
 
 impl ChunkEntry {
     pub(crate) fn new(layer_id: u8) -> ChunkEntry {
-        ChunkEntry { layer: BodyLayer::new(layer_id), names: Vec::new() }
+        ChunkEntry { layer: BodyLayer::new(layer_id), names: Vec::new(), ids: Vec::new() }
     }
 
     /// The body's index for `name`, interning on first use. `None` in, `NAME_NONE` out.
@@ -988,6 +994,9 @@ fn concatenate(into: &mut ChunkEntry, from: ChunkEntry) {
         part
     }));
     into.layer.coords.extend_from_slice(&from.layer.coords);
+    // Ids are values, not indices into a table, so they concatenate with no remap. Appended in
+    // the same order the features were, which is what keeps the two parallel.
+    into.ids.extend_from_slice(&from.ids);
 }
 
 /// Stage C and body encoding for a batch of merged tiles, in parallel, results in tile order.
@@ -1160,10 +1169,38 @@ fn encode_batch(batch: Vec<(u64, Vec<ChunkEntry>)>) -> Result<Vec<Encoded>> {
                             }
                         }
                     }
+                    // Fuse the layers' id tables into the body's one. Unlike names these are
+                    // values rather than indices, so nothing is remapped and nothing is
+                    // deduplicated — the table is simply the surviving `places`/`poi` layers'
+                    // vectors, in layer order, which `Merged` already delivers ascending.
+                    //
+                    // Checked against the feature count rather than assumed. `coalesce_lines`
+                    // rebuilds a layer's features and `rings::normalise` retains over them, and
+                    // both leave a pure-point layer alone today — coalesce bails out below two
+                    // line features and a point always keeps its single part. That is emergent,
+                    // not enforced, so if either ever starts dropping a point this fails the build
+                    // instead of silently attributing every id after it to the wrong POI.
+                    let mut ids: Vec<(u8, Vec<u64>)> = Vec::new();
+                    for entry in &mut layers {
+                        if entry.ids.is_empty() {
+                            continue;
+                        }
+                        if entry.ids.len() != entry.layer.features.len() {
+                            return err(format!(
+                                "layer {} has {} id(s) for {} feature(s) after coalesce and \
+                                 stage C",
+                                entry.layer.layer_id,
+                                entry.ids.len(),
+                                entry.layer.features.len(),
+                            ));
+                        }
+                        ids.push((entry.layer.layer_id, std::mem::take(&mut entry.ids)));
+                    }
                     let body = Body {
                         extent: EXTENT as u16,
                         layers: layers.into_iter().map(|entry| entry.layer).collect(),
                         names,
+                        ids,
                     };
                     let encoded = timed(on, &SERIALIZE_NANOS, || {
                         tilecodec::mamaps::body::serialize_into(&body, scratch)
@@ -1191,6 +1228,10 @@ fn encode_batch(batch: Vec<(u64, Vec<ChunkEntry>)>) -> Result<Vec<Encoded>> {
 fn push(entry: &mut ChunkEntry, feature: &Feature, geometry: &IntGeometry) -> (u64, u64) {
     let layer = &mut entry.layer;
     let class = &feature.class;
+    // Only `places` and `poi` carry ids. Pushed in every branch rather than only in the point one
+    // so the two vectors cannot drift apart if a label layer ever emits something that is not a
+    // point — the encoder would refuse a mismatched pair, but this way there is nothing to refuse.
+    let track_ids = crate::extract::is_label(class.layer);
     let mut added = (0u64, 0u64);
     match geometry {
         IntGeometry::Polygons(polygons) => {
@@ -1236,6 +1277,9 @@ fn push(entry: &mut ChunkEntry, feature: &Feature, geometry: &IntGeometry) -> (u
                     transit_lanes: feature.transit_lanes,
                     transit_taper: feature.transit_taper,
                 });
+                if track_ids {
+                    entry.ids.push(feature.id);
+                }
                 added.0 += 1;
             }
         }
@@ -1262,6 +1306,9 @@ fn push(entry: &mut ChunkEntry, feature: &Feature, geometry: &IntGeometry) -> (u
                     transit_lanes: feature.transit_lanes,
                     transit_taper: feature.transit_taper,
                 });
+                if track_ids {
+                    entry.ids.push(feature.id);
+                }
                 added.0 += 1;
             }
         }
@@ -1287,6 +1334,9 @@ fn push(entry: &mut ChunkEntry, feature: &Feature, geometry: &IntGeometry) -> (u
                     transit_lanes: feature.transit_lanes,
                     transit_taper: feature.transit_taper,
                 });
+                if track_ids {
+                    entry.ids.push(feature.id);
+                }
                 added.0 += 1;
             }
         }
@@ -1372,8 +1422,46 @@ mod tests {
         Feature {
             class: Class::area(dict::LAYER_WATER, crate::schema::kind("lake"), min_zoom),
             geometry: square(lon, lat, size),
-            name: None, transit_color: 0, transit_ordinal: 0, transit_lanes: 0, transit_taper: 0,
+            name: None, id: tilecodec::mamaps::body::ID_NONE, transit_color: 0, transit_ordinal: 0, transit_lanes: 0, transit_taper: 0,
         }
+    }
+
+    /// **The end of the id path.** A `poi` node's OSM id survives classification, the spill, the
+    /// tiler's chunk merge and the body encoder, and comes back out of the archive attached to
+    /// the same feature. Every other layer's id table stays absent, which is the whole reason the
+    /// table is a side table.
+    #[test]
+    fn a_poi_carries_its_osm_id_into_the_archive() {
+        let osm = crate::extract::tagged_id(240_109_189, crate::extract::ELEMENT_NODE);
+        let poi = Feature {
+            class: Class::line(dict::LAYER_POI, crate::schema::kind("cafe"), 0),
+            geometry: Geometry::Points(vec![(-120.0, 35.0)]),
+            name: Some("Blue Bottle".to_string()),
+            id: osm,
+            transit_color: 0,
+            transit_ordinal: 0,
+            transit_lanes: 0,
+            transit_taper: 0,
+        };
+        let features = vec![poi, lake(-120.0, 35.0, 0.01, 0)];
+        let (bytes, _) = build(&spilled(&features), &settings(14, 14)).expect("build");
+        let entries = tilecodec::mamaps::read::read_all(&bytes).expect("read");
+        let mut seen = false;
+        for (_, _, body) in &entries {
+            let body = Body::parse(body).expect("parse");
+            let Some(layer) = body.layer(dict::LAYER_POI) else { continue };
+            for (index, feature) in layer.features.iter().enumerate() {
+                assert_eq!(body.feature_id(dict::LAYER_POI, index), Some(osm));
+                assert_eq!(feature.name(&body), Some("Blue Bottle"));
+                seen = true;
+            }
+            assert_eq!(
+                body.feature_id(dict::LAYER_WATER, 0),
+                None,
+                "the lake's layer carries no id table",
+            );
+        }
+        assert!(seen, "the poi should reach at least one tile");
     }
 
     fn settings(min_zoom: u8, max_zoom: u8) -> Settings {
@@ -1464,7 +1552,7 @@ mod tests {
             Feature {
                 class: Class::area(dict::LAYER_BUILDINGS, crate::schema::kind("building"), 0),
                 geometry: square(-120.1, 35.1, 0.02),
-                name: None, transit_color: 0, transit_ordinal: 0, transit_lanes: 0, transit_taper: 0,
+                name: None, id: tilecodec::mamaps::body::ID_NONE, transit_color: 0, transit_ordinal: 0, transit_lanes: 0, transit_taper: 0,
             },
         ];
         let first = build(&spilled(&features), &settings(0, 8)).expect("first").0;
@@ -1489,7 +1577,7 @@ mod tests {
             Feature {
                 class: Class::area(dict::LAYER_BUILDINGS, crate::schema::kind("building"), 0),
                 geometry: square(-120.005, 35.005, 0.002),
-                name: None, transit_color: 0, transit_ordinal: 0, transit_lanes: 0, transit_taper: 0,
+                name: None, id: tilecodec::mamaps::body::ID_NONE, transit_color: 0, transit_ordinal: 0, transit_lanes: 0, transit_taper: 0,
             },
         ];
         let (bytes, _) = build(&spilled(&features), &settings(14, 14)).expect("build");
@@ -1519,7 +1607,7 @@ mod tests {
         let features = vec![Feature {
             class: Class::line(dict::LAYER_WATER, crate::schema::kind("river"), 0),
             geometry: Geometry::Lines(vec![points]),
-            name: None, transit_color: 0, transit_ordinal: 0, transit_lanes: 0, transit_taper: 0,
+            name: None, id: tilecodec::mamaps::body::ID_NONE, transit_color: 0, transit_ordinal: 0, transit_lanes: 0, transit_taper: 0,
         }];
         let (_, stats) = build(&spilled(&features), &settings(6, 14)).expect("build");
         let at = |z: u8| stats.iter().find(|s| s.zoom == z).expect("zoom").points;
@@ -1537,7 +1625,7 @@ mod tests {
             features.push(Feature {
                 class: Class::area(dict::LAYER_BUILDINGS, crate::schema::kind("building"), 0),
                 geometry: square(lon + 0.004, lat + 0.004, 0.004),
-                name: None, transit_color: 0, transit_ordinal: 0, transit_lanes: 0, transit_taper: 0,
+                name: None, id: tilecodec::mamaps::body::ID_NONE, transit_color: 0, transit_ordinal: 0, transit_lanes: 0, transit_taper: 0,
             });
             // A line as well, so the merge has to rebase a `GEOM_LINE` feature's parts too, and a
             // long one so it crosses tiles rather than sitting inside one.
@@ -1546,7 +1634,7 @@ mod tests {
                 geometry: Geometry::Lines(vec![(0..40)
                     .map(|k| (lon + k as f64 * 0.002, lat + (k % 5) as f64 * 0.001))
                     .collect()]),
-                name: None, transit_color: 0, transit_ordinal: 0, transit_lanes: 0, transit_taper: 0,
+                name: None, id: tilecodec::mamaps::body::ID_NONE, transit_color: 0, transit_ordinal: 0, transit_lanes: 0, transit_taper: 0,
             });
         }
         features
@@ -1632,7 +1720,7 @@ mod tests {
                     ..Class::area(dict::LAYER_WATER, crate::schema::kind("lake"), 0)
                 },
                 geometry: square(-120.0 + i as f64 * 0.00005, 35.0, 0.004),
-                name: None, transit_color: 0, transit_ordinal: 0, transit_lanes: 0, transit_taper: 0,
+                name: None, id: tilecodec::mamaps::body::ID_NONE, transit_color: 0, transit_ordinal: 0, transit_lanes: 0, transit_taper: 0,
             })
             .collect();
         let store = spilled(&features);
@@ -1663,7 +1751,7 @@ mod tests {
     #[test]
     fn concatenating_two_chunks_of_a_layer_is_one_layer() {
         let class = Class::area(dict::LAYER_WATER, crate::schema::kind("lake"), 0);
-        let feature = Feature { class, geometry: square(0.0, 0.0, 1.0), name: None, transit_color: 0, transit_ordinal: 0, transit_lanes: 0, transit_taper: 0 };
+        let feature = Feature { class, geometry: square(0.0, 0.0, 1.0), name: None, id: tilecodec::mamaps::body::ID_NONE, transit_color: 0, transit_ordinal: 0, transit_lanes: 0, transit_taper: 0 };
         // Tile-local already, so the fixture is about the arenas rather than about projection, and
         // big enough that no minimum-area floor can drop it.
         let box_at = |x: i32| {
@@ -1778,7 +1866,7 @@ mod tests {
                 features.push(Feature {
                     class: Class::area(dict::LAYER_BUILDINGS, crate::schema::kind("building"), 14),
                     geometry: square(lon, lat, 0.0003),
-                    name: None, transit_color: 0, transit_ordinal: 0, transit_lanes: 0, transit_taper: 0,
+                    name: None, id: tilecodec::mamaps::body::ID_NONE, transit_color: 0, transit_ordinal: 0, transit_lanes: 0, transit_taper: 0,
                 });
             }
             let store = spilled(&features);

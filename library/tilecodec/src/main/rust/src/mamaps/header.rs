@@ -17,13 +17,12 @@ pub const MAGIC: &[u8; 7] = b"MAMAPS\0";
 /// Bumped only for a change a reader cannot ignore. The archive carries a
 /// [`build_id`](Header::build_id) for "same format, different data".
 ///
-/// v2 adds `places`, `poi` and `transit` layers, point geometry and per-layer name tables.
-/// Readers accept v1 **and** v2; v1 bodies simply have no points, no names and no new layers.
-pub const FORMAT_VERSION: u8 = 2;
-
-/// The last v1 version, still readable. v1 bodies carry 16-byte feature records, no point
-/// geometry and no name tables; anything the v2 fields would hold reads back as empty.
-pub const FORMAT_VERSION_V1: u8 = 1;
+/// v3 adds `fuel`, `hotel` and `atm` to [`dict::KINDS`](super::dict::KINDS) and an optional
+/// per-body feature id table. The kind additions alone force the bump: `read`'s
+/// `check_matches_schema` validates the whole dictionary on open, so an older reader would
+/// reject a v3 archive anyway. v1 is no longer read — the last v1 archive predates `places`,
+/// `poi` and `transit` entirely.
+pub const FORMAT_VERSION: u8 = 3;
 
 pub const HEADER_LEN: usize = 128;
 
@@ -132,9 +131,9 @@ impl Header {
         if &buf[0..7] != MAGIC {
             return err("not a .mamaps archive (bad magic)");
         }
-        if buf[7] != FORMAT_VERSION && buf[7] != FORMAT_VERSION_V1 {
+        if buf[7] != FORMAT_VERSION {
             return err(format!(
-                "unsupported .mamaps format version {} (this reader speaks v{FORMAT_VERSION_V1} and v{FORMAT_VERSION})",
+                "unsupported .mamaps format version {} (this reader speaks v{FORMAT_VERSION})",
                 buf[7],
             ));
         }

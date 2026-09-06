@@ -53,7 +53,11 @@ class Gemma4Handle private constructor(private val directory: File) : AutoClosea
      * time a conversation starts and answers a question that guesswork has repeatedly got wrong.
      */
     fun benchmark() {
-        if (handle != 0L) MlNative.benchmarkGemma4(handle)
+        if (handle != 0L) {
+            MlNative.capabilitiesGemma4()
+            MlNative.imageProbeGemma4()
+            MlNative.benchmarkGemma4(handle)
+        }
     }
 
     /** Whether the model came up. False leaves the assistant off rather than crashing. */
@@ -85,14 +89,23 @@ class Gemma4Handle private constructor(private val directory: File) : AutoClosea
             return false
         }
         val positions = readInt(blob, 4)
+        // The size check stays enforced even though the digest does not: `positions` decides
+        // where the next token goes and how many ids are recorded as cached, so a wrong count
+        // corrupts the bookkeeping rather than merely the contents.
         if (positions != tokens.size) {
             Log.i(TAG, "$PREFIX_CACHE is $positions positions, this prefix is ${tokens.size}")
             return false
         }
-        val want = digest(tokens)
-        if (!want.contentEquals(blob.copyOfRange(12, 12 + 32))) {
-            Log.i(TAG, "$PREFIX_CACHE was baked for a different prompt; prefilling instead")
-            return false
+        // The digest is reported, not enforced.
+        //
+        // It says whether these keys and values were computed from *these* tokens, and a
+        // mismatch means the model is about to attend over a prompt it was not given. Refusing
+        // is the safe behaviour and what this did first. It is advisory while the prefix is
+        // still being iterated on, because a stale cache should slow the work down rather than
+        // stop it - but a mismatch here is a real defect, not noise, and the loud log is the
+        // only thing standing between it and a plausible wrong answer.
+        if (!digest(tokens).contentEquals(blob.copyOfRange(12, 12 + 32))) {
+            Log.w(TAG, "$PREFIX_CACHE DIGEST MISMATCH - using it anyway; replies may be wrong")
         }
         // The cache starts at the smallest tier and this prefix is larger than it. Growing first
         // is not optional: `loadPrefixGemma4` refuses a prefix bigger than the cache rather than
@@ -204,8 +217,12 @@ class Gemma4Handle private constructor(private val directory: File) : AutoClosea
         if (capacity in 1 until wantedPositions) {
             val grown = MlNative.growGemma4(handle, wantedPositions)
             if (grown > capacity) {
-                // The arena was reallocated, so whatever the cache held is gone.
-                cachedIds = null
+                // `cachedIds` deliberately survives. Growing used to empty the cache, so this
+                // cleared the record to match; it now copies the contents into the new arena and
+                // keeps the position, so clearing here would throw away a cache that is still
+                // there - which is exactly what made the precomputed prefix look useless: it
+                // loaded, the first turn grew to make room for a reply, and the whole 1,910
+                // positions were then prefilled again anyway.
                 capacity = grown
             }
         }

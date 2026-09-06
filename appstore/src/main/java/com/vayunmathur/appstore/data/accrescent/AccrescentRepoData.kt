@@ -6,6 +6,7 @@ import androidx.datastore.preferences.core.edit
 import androidx.datastore.preferences.core.longPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
 import com.vayunmathur.library.network.NetworkClient
+import com.vayunmathur.appstore.data.security.Signify
 import kotlinx.coroutines.flow.first
 import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
@@ -62,7 +63,7 @@ class AccrescentRepoDataFetcher(private val context: Context) {
             }
 
             // Verify the signature over the exact bytes downloaded, before parsing them.
-            if (!AccrescentSignify.verify(jsonBytes, sig.body)) {
+            if (!Signify.verify(jsonBytes, sig.body, AccrescentRepo.REPODATA_PUBKEY)) {
                 return Result.failure(SecurityException("repodata signature did not verify"))
             }
 

@@ -175,9 +175,9 @@ enum class TrustProfile {
             // The whole F-Droid catalogue is listed; whether a given version was reproduced
             // is shown per-app as a badge (see UnifiedApp.reproducible).
             AppSource.FDROID -> FDROID
-            // GrapheneOS serves a hard-pinned, JAR-signed index with a publisher key and a
-            // per-APK hash this app checks the download against — the same trust story as
-            // F-Droid, so it shares that profile.
+            // GrapheneOS serves a hard-pinned, signify-signed index with a publisher key and a
+            // per-APK hash this app checks every downloaded file against — the same trust
+            // story as F-Droid, so it shares that profile.
             AppSource.GRAPHENEOS -> FDROID
             AppSource.PLAYSTORE -> PLAY
             // Accrescent apps are signed by their developers, not by Accrescent; trust is the

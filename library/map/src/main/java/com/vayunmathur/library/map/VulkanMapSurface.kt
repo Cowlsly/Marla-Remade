@@ -54,6 +54,7 @@ internal fun VulkanMapSurface(
     muted: Boolean,
     layerOptions: LayerOptions = LayerOptions(),
     archivePath: String? = null,
+    userPuck: UserPuck? = null,
     modifier: Modifier = Modifier,
     onFrame: () -> Unit = {},
     fallback: @Composable (MapRenderState.Unavailable) -> Unit = {},
@@ -106,6 +107,10 @@ internal fun VulkanMapSurface(
     // tessellation time, so a change re-tessellates the resident set. `setLayers` ignores
     // a call that changes nothing, which is what makes driving it from an effect safe.
     LaunchedEffect(layerOptions, host) { host.setLayers(layerOptions) }
+
+    // A setter rather than an argument on the frame loop: a fix arrives at about 1 Hz and
+    // `render` runs at 60, so the puck is state the renderer holds between frames.
+    LaunchedEffect(userPuck, host) { host.setUserPuck(userPuck) }
 
     // Live connectivity, replacing a single sample taken in onSurfaceTextureAvailable.
     // Collected here rather than inside the host so every MapNative call stays on the
@@ -199,6 +204,13 @@ private class MapSurfaceHost(
     private var online = true
 
     /**
+     * Remembered for the same reason as [layers]: a fix taken before the surface existed
+     * has to reach the renderer before its first frame, or the puck is missing until the
+     * next one arrives a second later.
+     */
+    private var userPuck: UserPuck? = null
+
+    /**
      * Where cached byte ranges live. External files rather than the cache dir: this is
      * large and expensive to rebuild, so it should not be the first thing the platform
      * reclaims, and external files are outside the 25 MB cloud-backup quota.
@@ -228,7 +240,8 @@ private class MapSurfaceHost(
             MapNative.setOnline(handle, online)
             // Before the first frame, so the very first resident set is tessellated with
             // the layers the host asked for instead of being built and then invalidated.
-            MapNative.setLayers(handle, layers.poi, layers.transit)
+            MapNative.setLayers(handle, layers.poi, layers.transit, layers.poiKinds.joinToString(","))
+            applyUserPuck()
             renderState = MapRenderState.Rendering
             syncFrameLoop()
         }
@@ -325,7 +338,7 @@ private class MapSurfaceHost(
             MapNative.pickLabels(h, box.left.value, box.top.value, box.right.value, box.bottom.value)
                 .asSequence()
                 .map { row -> row.split('') }
-                .filter { parts -> parts.size == 5 && (layerIds.isEmpty() || parts[0] in layerIds) }
+                .filter { parts -> parts.size == 6 && (layerIds.isEmpty() || parts[0] in layerIds) }
                 .map { parts ->
                     PlacedLabel(
                         layerId = parts[0],
@@ -335,6 +348,9 @@ private class MapSurfaceHost(
                             longitude = parts[3].toDoubleOrNull() ?: 0.0,
                             latitude = parts[4].toDoubleOrNull() ?: 0.0,
                         ),
+                        // Unsigned on the native side; ids never come close to the sign bit
+                        // (an OSM id shifted left two is ~36 bits), so a Long is roomy.
+                        featureId = parts[5].toLongOrNull() ?: 0L,
                     )
                 }
                 .toList()
@@ -351,12 +367,35 @@ private class MapSurfaceHost(
 
     fun setLayers(options: LayerOptions) {
         this.layers = options
-        if (handle != 0L) MapNative.setLayers(handle, options.poi, options.transit)
+        if (handle != 0L) {
+            MapNative.setLayers(handle, options.poi, options.transit, options.poiKinds.joinToString(","))
+        }
     }
 
     fun setOnline(online: Boolean) {
         this.online = online
         if (handle != 0L) MapNative.setOnline(handle, online)
+    }
+
+    fun setUserPuck(puck: UserPuck?) {
+        this.userPuck = puck
+        applyUserPuck()
+    }
+
+    private fun applyUserPuck() {
+        if (handle == 0L) return
+        val puck = userPuck
+        if (puck == null) {
+            MapNative.clearUserPuck(handle)
+        } else {
+            MapNative.setUserPuck(
+                handle,
+                puck.position.longitude.toFloat(),
+                puck.position.latitude.toFloat(),
+                puck.bearing ?: 0f,
+                puck.bearing != null,
+            )
+        }
     }
 
     private companion object {

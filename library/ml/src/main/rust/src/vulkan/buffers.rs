@@ -60,6 +60,19 @@ impl Buffer {
         )
     }
 
+    /// A device-local buffer with usage flags the caller chooses.
+    ///
+    /// [`Buffer::device_local`] fixes a usage set that suits every buffer this runtime allocates.
+    /// `vulkan::imageprobe` needs one more - `UNIFORM_TEXEL_BUFFER`, so the same allocation can
+    /// also be viewed through a format - and adding it to the common path would attach it to
+    /// every arena and weight buffer for the sake of one probe.
+    pub fn device_local_usage(
+        context: &Arc<Context>,
+        size: vk::DeviceSize,
+        usage: vk::BufferUsageFlags,
+    ) -> Result<Buffer, String> {
+        Buffer::new(context, size, usage, vk::MemoryPropertyFlags::DEVICE_LOCAL)
+    }
     /// A host-visible, host-coherent buffer for staging bytes in and out.
     pub fn staging(context: &Arc<Context>, size: vk::DeviceSize) -> Result<Buffer, String> {
         Buffer::new(

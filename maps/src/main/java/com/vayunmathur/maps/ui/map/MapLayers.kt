@@ -1,11 +1,8 @@
 package com.vayunmathur.maps.ui.map
 
-import androidx.compose.foundation.Canvas
-import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.remember
-import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import com.vayunmathur.library.map.CameraState
 import com.vayunmathur.maps.data.ParkingSpot
@@ -13,7 +10,6 @@ import com.vayunmathur.maps.data.SavedPlace
 import com.vayunmathur.maps.data.SpecificFeature
 import com.vayunmathur.maps.ipc.FamilyMember
 import com.vayunmathur.maps.ui.FamilyLocationLayer
-import com.vayunmathur.maps.ui.MaPoisLayer
 import com.vayunmathur.maps.ui.ParkingLayer
 import com.vayunmathur.maps.ui.RoadsLayer
 import com.vayunmathur.maps.ui.RouteLayer
@@ -22,7 +18,6 @@ import com.vayunmathur.maps.ui.SatelliteLayer
 import com.vayunmathur.maps.ui.SavedPlacesLayer
 import com.vayunmathur.maps.ui.SearchResultLayer
 import com.vayunmathur.maps.ui.TransitStopsLayer
-import com.vayunmathur.maps.ui.drawUserIcon
 import com.vayunmathur.maps.ui.theme.mapTokens
 import com.vayunmathur.maps.util.NavigationProgress
 import com.vayunmathur.maps.util.OfflineRouter
@@ -30,35 +25,40 @@ import com.vayunmathur.maps.util.RouteService
 import com.vayunmathur.maps.util.SearchResult
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
-import org.maplibre.spatialk.geojson.Position
 
 /**
- * The overlay layers over the Vulkan basemap: pins, the route polyline and the user puck.
+ * The overlay layers over the Vulkan basemap: pins and the route polyline.
  *
  * Everything here is plain Compose positioned through library:map's Projection — the
  * renderer has no vector/raster layer API, so native map layers have nowhere to go.
  * Per-pin hit-testing moved with them: MapSurface rebuilds the same features these draw
  * and feeds them to [MapFeaturePicker].
  *
- * What still draws: ambient POIs (from the offline index, not the `ma_pois` tile layer),
- * saved places, search results, family members, the parking pin, the route polyline and
- * the user puck with its bearing arc.
+ * What still draws: saved places, search results, family members, the parking pin and the
+ * route polyline.
+ *
+ * The user puck used to be here too and is now drawn by the renderer (see
+ * [com.vayunmathur.library.map.UserPuck]), which is what stopped it dragging behind a pan.
+ * The pins cannot follow it until their hit-testing can: they are picked against features
+ * [MapFeaturePicker] rebuilds in Compose, and moving the drawing without the picking would
+ * make them untappable. So during a pan they still lag the basemap, and so does the route.
  *
  * Deliberately NOT drawn (renderer gaps, reported to lead — symbol-renderer owns the
  * renderer API): the baked `roads` overlay (casing/surface/probe), the Google traffic
  * raster ([trafficEnabled] is kept so the toggle plumbing survives), the `safety` icons,
  * the `transit_lines` overlay and the `transit_stops` pins. The basemap itself still draws
  * its own road network; what is lost is the overlay styling plus the posted-limit probe.
- * Station POIs (type 50) still open the departure board via `openNearestStop`, so the
- * transit board itself keeps working.
+ *
+ * Ambient POIs are no longer here either, but for the opposite reason: the renderer draws
+ * them now, with icons, collision and per-kind zoom gating that a Compose overlay could not
+ * do. Their taps arrive as `MapClick.poi`, and a station still opens the departure board
+ * via `openNearestStop`.
  */
 @Composable
 fun MapLayers(
     selectedFeature: SpecificFeature?,
     route: RouteService.RouteType?,
     cameraState: CameraState,
-    userPosition: Position,
-    userBearing: Float,
     navProgress: NavigationProgress? = null,
     searchResults: List<SearchResult> = emptyList(),
     savedPlaces: List<SavedPlace> = emptyList(),
@@ -68,7 +68,6 @@ fun MapLayers(
     satelliteEnabled: Boolean = false,
     safetyEnabled: Boolean = false,
     transitEnabled: Boolean = false,
-    poiFilterTypes: Set<Int>? = null,
     // Which basemap palette is in play, for the route colours. Not derivable from a style
     // JSON any more: there is no style JSON — the renderer takes a dark flag directly.
     darkBasemap: Boolean = false,
@@ -107,9 +106,6 @@ fun MapLayers(
     @Suppress("UNUSED_EXPRESSION")
     transitEnabled
 
-    // Ambient POI pins, rendered from the offline index.
-    MaPoisLayer(cameraState, poiFilterTypes)
-
     // Saved-place pins (Home / Work / starred list). Tap re-selects the
     // place → PlaceSheet (Vela's SavedPin).
     SavedPlacesLayer(savedPlaces, cameraState)
@@ -130,11 +126,6 @@ fun MapLayers(
     // Search-result pins — drawn above the
     // ambient POI overlay so a query's hits stand out; tap re-selects.
     SearchResultLayer(searchResults, cameraState)
-
-    // User puck with the bearing arc.
-    Canvas(Modifier.fillMaxSize()) {
-        drawUserIcon(userPosition, userBearing, cameraState)
-    }
 
     if (selectedFeature is SpecificFeature.Route && route is RouteService.Route) {
         RouteLayer(route, navProgress, tokens, cameraState)

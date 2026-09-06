@@ -34,7 +34,7 @@ class SelectedFeatureViewModel(application: Application): AndroidViewModel(appli
     private val _userPosition = MutableStateFlow(Position(0.0, 0.0))
     val userPosition = _userPosition.asStateFlow()
 
-    private val _userBearing = MutableStateFlow(0f)
+    private val _userBearing = MutableStateFlow<Float?>(null)
     val userBearing = _userBearing.asStateFlow()
 
     // Magnetometer accuracy backing the compass calibration banner. Defaults to

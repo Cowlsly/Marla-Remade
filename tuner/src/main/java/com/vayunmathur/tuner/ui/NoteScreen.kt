@@ -2,10 +2,8 @@ package com.vayunmathur.tuner.ui
 
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.runtime.Composable
@@ -14,9 +12,6 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.style.TextAlign
 import com.vayunmathur.library.ui.AppScaffold
-import com.vayunmathur.library.ui.Button
-import com.vayunmathur.library.ui.IconMic
-import com.vayunmathur.library.ui.IconStop
 import com.vayunmathur.library.ui.MaterialTheme
 import com.vayunmathur.library.ui.Spacing
 import com.vayunmathur.library.ui.Text
@@ -37,7 +32,7 @@ import com.vayunmathur.tuner.platform.TunerUiState
  * Stateless so the store-listing previews can render it from literals.
  */
 @Composable
-fun NoteScreen(state: TunerUiState, onToggleListening: () -> Unit) {
+fun NoteScreen(state: TunerUiState) {
     AppScaffold(
         title = stringResource(R.string.tab_note),
         scrollBehavior = appBarScrollBehavior(),
@@ -111,18 +106,6 @@ fun NoteScreen(state: TunerUiState, onToggleListening: () -> Unit) {
                 Text(
                     text = stringResource(R.string.frequency_value, formatHz(readout.frequencyHz)),
                     style = MaterialTheme.typography.bodyLarge,
-                )
-            }
-
-            // The only way in, and the only way out. Kept on screen in every state so a capture
-            // that failed or was never started is always recoverable from here.
-            Button(onClick = onToggleListening) {
-                if (state.listening) IconStop() else IconMic()
-                Spacer(Modifier.width(Spacing.sm))
-                Text(
-                    stringResource(
-                        if (state.listening) R.string.stop_listening else R.string.start_listening,
-                    ),
                 )
             }
         }

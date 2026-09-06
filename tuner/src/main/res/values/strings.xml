@@ -9,12 +9,8 @@
 
     <!-- Shown while the microphone is open but nothing recognisable is being played. -->
     <string name="listening">Listening</string>
-    <!-- Shown when the microphone is closed, before the user has started tuning. -->
+    <!-- Shown in the moment before the microphone opens. -->
     <string name="not_listening">Not listening</string>
-    <!-- Button that opens the microphone and begins tuning. -->
-    <string name="start_listening">Start listening</string>
-    <!-- Button that closes the microphone. -->
-    <string name="stop_listening">Stop listening</string>
     <!-- Title of the screen asking for microphone access. -->
     <string name="permission_title">Microphone access needed</string>
     <!-- Explains why the app needs the microphone. -->

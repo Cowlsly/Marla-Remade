@@ -30,10 +30,14 @@
 //! 20..21  u8  layer_id
 //! 21..24  reserved, zero
 //! 24..28  u32 names (label strings in this entry's table)
-//! 28..32  reserved, zero
-//! 32..    packed features (14 B), then parts (10 B), then coords (4 B),
+//! 28..32  u32 ids (feature ids in this entry's table: 0, or one per feature)
+//! 32..    packed features (23 B), then parts (10 B), then coords (4 B), then ids (8 B),
 //!          then names (u32 length + UTF-8 bytes each)
 //! ```
+//!
+//! The id count took the second reserved word, which is what that word was for. Ids sit inside
+//! the fixed arenas rather than after the names so [`payload_bytes`] stays a pure function of the
+//! header — a reader still validates the whole fixed run before it allocates any of it.
 //!
 //! Packed field by field rather than cast wholesale from the in-memory struct. `body::Feature` is
 //! `kind`, `kind_detail`, `geom_type`, `flags`, `parts_offset`, `part_count` -- fourteen bytes of
@@ -88,6 +92,9 @@ const FEATURE_BYTES: usize = 23;
 const PART_BYTES: usize = 10;
 /// Packed width of one `(i16, i16)` coordinate.
 const COORD_BYTES: usize = 4;
+/// Packed width of one feature id. Fixed rather than varint for the same reason the body's id
+/// table is: unsorted OSM ids have no ordering to delta against.
+const ID_BYTES: usize = 8;
 
 /// An entry longer than this is corruption, not a large tile layer. A tile-layer is capped at 65,535
 /// features by the body format, so the largest plausible entry is orders of magnitude below this.
@@ -360,7 +367,8 @@ impl ChunkReader<'_> {
         // The fixed arenas first: their length is a pure function of the header, so one fill
         // covers them. Names follow with inline lengths and are pulled one at a time — their
         // byte length is known only once the previous one is read.
-        let fixed = payload_bytes(header.features, header.parts, header.coords) as usize;
+        let fixed =
+            payload_bytes(header.features, header.parts, header.coords, header.ids) as usize;
         self.fill(ENTRY_HEADER_BYTES + fixed)?;
         let body = self.used + ENTRY_HEADER_BYTES;
         let mut entry = decode_fixed(&header, &self.buf[body..body + fixed])?;
@@ -442,20 +450,22 @@ fn entry_bytes(entry: &ChunkEntry) -> Result<u64> {
     let features = count("feature(s)", layer.features.len())?;
     let parts = count("part(s)", layer.parts.len())?;
     let coords = count("coordinate(s)", layer.coords.len())?;
+    let ids = count("id(s)", entry.ids.len())?;
     let mut names_bytes = 0u64;
     for name in &entry.names {
         names_bytes += 4 + name.len() as u64;
     }
-    Ok(ENTRY_HEADER_BYTES as u64 + payload_bytes(features, parts, coords) + names_bytes)
+    Ok(ENTRY_HEADER_BYTES as u64 + payload_bytes(features, parts, coords, ids) + names_bytes)
 }
 
-/// The payload width implied by an entry's three counts. A pure function of the header, which is
-/// what lets a reader validate before it allocates. Names ride after the coords and are counted
-/// in the header's own `names` field.
-fn payload_bytes(features: usize, parts: usize, coords: usize) -> u64 {
+/// The payload width implied by an entry's four counts. A pure function of the header, which is
+/// what lets a reader validate before it allocates. Names ride after the fixed arenas and are
+/// counted in the header's own `names` field.
+fn payload_bytes(features: usize, parts: usize, coords: usize, ids: usize) -> u64 {
     features as u64 * FEATURE_BYTES as u64
         + parts as u64 * PART_BYTES as u64
         + coords as u64 * COORD_BYTES as u64
+        + ids as u64 * ID_BYTES as u64
 }
 
 fn encode_entry(tile: u64, layer_id: u8, entry: &ChunkEntry, out: &mut Vec<u8>) {
@@ -468,6 +478,7 @@ fn encode_entry(tile: u64, layer_id: u8, entry: &ChunkEntry, out: &mut Vec<u8>) 
     out[base + 16..base + 20].copy_from_slice(&(layer.coords.len() as u32).to_le_bytes());
     out[base + 20] = layer_id;
     out[base + 24..base + 28].copy_from_slice(&(entry.names.len() as u32).to_le_bytes());
+    out[base + 28..base + 32].copy_from_slice(&(entry.ids.len() as u32).to_le_bytes());
     for feature in &layer.features {
         // The spill carries the v2 index, not the v1 wire: name_idx, transit_color and the three
         // transit lane bytes ride the entry and are re-encoded by the body serializer, so the
@@ -493,6 +504,9 @@ fn encode_entry(tile: u64, layer_id: u8, entry: &ChunkEntry, out: &mut Vec<u8>) 
         out.extend_from_slice(&x.to_le_bytes());
         out.extend_from_slice(&y.to_le_bytes());
     }
+    for id in &entry.ids {
+        out.extend_from_slice(&id.to_le_bytes());
+    }
     for name in &entry.names {
         out.extend_from_slice(&(name.len() as u32).to_le_bytes());
         out.extend_from_slice(name.as_bytes());
@@ -506,13 +520,13 @@ struct EntryHeader {
     parts: usize,
     coords: usize,
     names: usize,
+    ids: usize,
 }
 
 fn entry_header(head: &[u8; ENTRY_HEADER_BYTES]) -> Result<EntryHeader> {
-    // Both reserved tails must be zero: a newer writer would use them, so a nonzero tail means
-    // the reader is the wrong version for the file. Guessing would decode a field that moved.
-    if head[21..24].iter().any(|v| *v != 0) || head[28..ENTRY_HEADER_BYTES].iter().any(|v| *v != 0)
-    {
+    // The reserved tail must be zero: a newer writer would use it, so a nonzero tail means the
+    // reader is the wrong version for the file. Guessing would decode a field that moved.
+    if head[21..24].iter().any(|v| *v != 0) {
         return err("a tile chunk entry has a nonzero reserved tail");
     }
     let u32_at =
@@ -524,9 +538,18 @@ fn entry_header(head: &[u8; ENTRY_HEADER_BYTES]) -> Result<EntryHeader> {
         coords: u32_at(16),
         layer_id: head[20],
         names: u32_at(24),
+        ids: u32_at(28),
     };
+    // A layer either has an id per feature or none at all. Checked before the length so a garbled
+    // count is refused as the desync it is rather than as a size that happens not to fit.
+    if header.ids != 0 && header.ids != header.features {
+        return err(format!(
+            "a tile chunk entry has {} id(s) for {} feature(s)",
+            header.ids, header.features,
+        ));
+    }
     let len = ENTRY_HEADER_BYTES as u64
-        + payload_bytes(header.features, header.parts, header.coords);
+        + payload_bytes(header.features, header.parts, header.coords, header.ids);
     if len > MAX_ENTRY_BYTES {
         return err(format!("a tile chunk entry is {len} byte(s), which is corruption"));
     }
@@ -581,11 +604,20 @@ fn decode_fixed(header: &EntryHeader, payload: &[u8]) -> Result<ChunkEntry> {
         coords.push((i16_at(b, 0), i16_at(b, 2)));
         at += COORD_BYTES;
     }
+    let mut ids = Vec::with_capacity(header.ids);
+    for _ in 0..header.ids {
+        let b = payload
+            .get(at..at + ID_BYTES)
+            .ok_or_else(|| Error("a tile chunk entry's ids run past its payload".to_string()))?;
+        ids.push(u64::from_le_bytes(b.try_into().expect("8 bytes")));
+        at += ID_BYTES;
+    }
     debug_assert_eq!(at, payload.len(), "the fixed arenas must consume their payload exactly");
     let names = Vec::with_capacity(header.names);
     Ok(ChunkEntry {
         layer: BodyLayer { layer_id: header.layer_id, features, parts, coords },
         names,
+        ids,
     })
 }
 
@@ -676,7 +708,7 @@ mod tests {
         for (i, feature) in layer.features.iter_mut().enumerate() {
             feature.parts_offset = i as u32;
         }
-        ChunkEntry { layer, names: names.iter().map(|s| s.to_string()).collect() }
+        ChunkEntry { layer, names: names.iter().map(|s| s.to_string()).collect(), ids: Vec::new() }
     }
 
     /// Every shape an entry can take, including the empty ones that a naive length check would let
@@ -686,6 +718,7 @@ mod tests {
         let plain = |layer_id: u8, features: Vec<BodyFeature>| ChunkEntry {
             layer: BodyLayer { layer_id, features, parts: Vec::new(), coords: Vec::new() },
             names: Vec::new(),
+            ids: Vec::new(),
         };
         vec![
             // Empty layer: no features, no parts, no coords.
@@ -707,6 +740,7 @@ mod tests {
                         coords: Vec::new(),
                     },
                     names: Vec::new(),
+                    ids: Vec::new(),
                 },
             ),
             // The extremes of every field: `u16::MAX` kinds, `i16` at both ends, a hole.
@@ -733,6 +767,7 @@ mod tests {
                         ],
                     },
                     names: Vec::new(),
+                    ids: Vec::new(),
                 },
             ),
             // Several layers on one tile, which is what the merge collapses.
@@ -751,11 +786,26 @@ mod tests {
                         coords: vec![(1, 2), (3, 4), (5, 6)],
                     },
                     names: Vec::new(),
+                    ids: Vec::new(),
                 },
             ),
             ((5, 10), ChunkEntry::new(10)),
             // A named entry: two point labels sharing one name plus an unnamed one.
             ((6, 8), entry(8, vec![named(3, 1), named(5, 1), named(7, 0)], &["Café"])),
+            // The id arena, which only `places` and `poi` carry: a real tagged OSM id, ID_NONE
+            // for a feature with no upstream element, and a value with its top bit set so a
+            // sign-extension bug in the u64 round trip cannot hide.
+            (
+                (7, 8),
+                ChunkEntry {
+                    ids: vec![
+                        crate::extract::tagged_id(240_109_189, crate::extract::ELEMENT_NODE),
+                        tilecodec::mamaps::body::ID_NONE,
+                        u64::MAX,
+                    ],
+                    ..entry(8, vec![named(3, 1), named(5, 0), named(7, 0)], &["Bar"])
+                },
+            ),
         ]
     }
 
@@ -816,7 +866,7 @@ mod tests {
             layer.coords.push((i as i16, 0));
         }
         let mut map: BTreeMap<(u64, u8), ChunkEntry> = BTreeMap::new();
-        map.insert((7, 8), ChunkEntry { layer, names: names.clone() });
+        map.insert((7, 8), ChunkEntry { layer, names: names.clone(), ids: Vec::new() });
         let at = spill.write_chunk(map).expect("write");
         // Window of one header: every name tops up (and compacts) mid-entry.
         let read = drain(&spill, &at, ENTRY_HEADER_BYTES);
@@ -921,9 +971,21 @@ mod tests {
         entry_header(&head).expect("a zero header is legal");
         head[23] = 1;
         assert!(entry_header(&head).is_err(), "a nonzero reserved tail decoded");
+    }
+
+    /// The word that was the second reserved tail is now the id count, and an id count that is
+    /// neither zero nor one-per-feature is a desynced side table — the one corruption that would
+    /// otherwise attribute every POI's id to its neighbour.
+    #[test]
+    fn an_id_count_that_does_not_match_the_features_errors() {
         let mut head = [0u8; ENTRY_HEADER_BYTES];
-        head[31] = 1;
-        assert!(entry_header(&head).is_err(), "a nonzero second reserved tail decoded");
+        head[8..12].copy_from_slice(&2u32.to_le_bytes());
+        head[28..32].copy_from_slice(&2u32.to_le_bytes());
+        entry_header(&head).expect("one id per feature is legal");
+        head[28..32].copy_from_slice(&0u32.to_le_bytes());
+        entry_header(&head).expect("no ids at all is legal");
+        head[28..32].copy_from_slice(&1u32.to_le_bytes());
+        assert!(entry_header(&head).is_err(), "one id for two features decoded");
     }
 
     #[test]

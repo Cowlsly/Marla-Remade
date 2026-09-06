@@ -7,53 +7,15 @@ package com.vayunmathur.maps.util
  * `scripts/maps/osm_ingest/src/tags.rs`
  * (0..49 categories, 255 = "other"); never renumber, only append.
  *
- * Kept in one place so the map render ([com.vayunmathur.maps.ui.MaPoisLayer],
- * icon colour + glyph) and the offline search ([PoiIndex], the result subtitle)
- * agree on how a numeric type maps to a colour / glyph / human label.
+ * Kept in one place so the offline search ([PoiIndex], the result subtitle) and the
+ * archive's own POI vocabulary ([typeOfKind]) agree on what a numeric type means.
+ *
+ * The map no longer renders from these numbers — the renderer draws POIs from the archive by
+ * kind name, with its own sprite sheet and per-kind zoom gating. The pin colour, glyph and
+ * per-category min-zoom that used to live here went with it; what is left is the vocabulary
+ * the offline index still speaks.
  */
 object PoiCategories {
-    /** Catch-all bucket for a recognised POI key with an unmapped value. */
-    const val TYPE_OTHER: Int = 255
-
-    /** Every type number the generator can emit, for building the icon switch. */
-    val ALL_TYPES: List<Int> = (0..50).toList() + TYPE_OTHER
-
-    /** Default min-zoom for any type not explicitly tiered below (least
-     *  prominent — only shown once zoomed well in). */
-    const val DEFAULT_MIN_ZOOM: Int = 16
-
-    /**
-     * Zoom level at which a POI category first appears on the map. Prominent,
-     * navigation-worthy categories (hospitals, transit, parks, museums, hotels…)
-     * surface early (low zoom); everyday retail surfaces progressively later.
-     *
-     * This staggers POIs across zoom so each urban zoom level stays roughly
-     * equally dense: at z12 only landmarks show over a wide area, and as you zoom
-     * in — showing less ground but more screen space per area — lower-tier
-     * categories fill in, instead of the whole set popping in at one zoom and
-     * decluttering (merging) away as you zoom out. Tiles start at z12, so 12 is
-     * the earliest possible value.
-     */
-    fun minZoom(type: Int): Int = when (type) {
-        // z12 — landmarks / orientation anchors, visible city-wide.
-        10, 50, 12, 15, 38, 8, 23 -> 12
-        //   hospital, station, park, attraction, museum, hotel, town hall
-        // z13 — civic + culture + big destinations.
-        14, 17, 18, 21, 22, 40, 11, 19, 33, 49 -> 13
-        //   worship, cinema, theatre, police, fire, tourist info, school,
-        //   library, department store, marketplace
-        // z14 — high-utility everyday stops.
-        0, 3, 5, 6, 7, 9, 13, 16, 20, 39 -> 14
-        //   restaurant, bar, grocery, gas, pharmacy, bank, gym, parking,
-        //   post office, office
-        // z15 — common retail / food / clinics.
-        1, 2, 4, 24, 25, 26, 28, 29, 30, 31, 32, 34, 35 -> 15
-        //   cafe, fast food, shop, clothing, electronics, hardware, car,
-        //   bakery, books, furniture, sports, dentist, doctor
-        // z16 — long-tail specialty retail + everything else (DEFAULT_MIN_ZOOM).
-        else -> DEFAULT_MIN_ZOOM
-    }
-
     /** Human-readable category label (used as the search-result subtitle). */
     fun label(type: Int): String = when (type) {
         0 -> "Restaurant"
@@ -110,43 +72,61 @@ object PoiCategories {
         else -> "Place"
     }
 
+
     /**
-     * Category pin colour (hex `#RRGGBB`, consumed by `Color.parseColor`).
-     * Grouped so related categories read as a family (food = warm, health =
-     * red, retail = blue, nature/green, civic = slate …).
+     * The numeric type an archive `kind` corresponds to, or `null` when nothing here means
+     * the same thing.
+     *
+     * The two vocabularies were designed independently — these numbers come from
+     * `osm_ingest`'s tag table and predate the archive's `poi` layer by a long way — so this
+     * is a best-effort join, not a bijection. Several archive kinds (`beach`, `peak`,
+     * `bench`, `artwork`, `building`) describe things this enum never had a bucket for, and
+     * several numbers here (`pharmacy`, `police`, `parking`) name things the archive does not
+     * draw. Both directions lose.
+     *
+     * It exists because the numeric type is still load-bearing downstream: `PoiCategories.label`
+     * writes the sheet's subtitle from it, and a tapped `station` opens a departure board by
+     * matching type 50. Mapping the kind back to a number keeps those working unchanged
+     * rather than making every consumer learn a second vocabulary.
      */
-    fun colorHex(type: Int): String = when (type) {
-        0, 2, 29, 49 -> "#E8590C"          // food: restaurant / fast food / bakery / marketplace
-        1 -> "#F9AB00"                      // cafe
-        3, 46 -> "#A142F4"                  // bar / liquor
-        5, 12, 37 -> "#34A853"             // grocery / park / charging (green)
-        6 -> "#0F9D58"                      // gas station
-        7, 10, 34, 35, 36 -> "#D93025"     // health: pharmacy / hospital / dentist / doctor / vet
-        8 -> "#4285F4"                      // hotel
-        9 -> "#188038"                      // bank
-        11, 19, 38 -> "#F29900"            // education/culture: school / library / museum
-        13 -> "#7E57C2"                     // gym
-        14 -> "#8D6E63"                     // place of worship
-        15, 40 -> "#FF6D00"                // attraction / tourist info
-        16, 20, 21, 22, 23, 39 -> "#5F6368" // civic/parking/office (slate)
-        50 -> "#3949AB"                      // transit station (indigo)
-        17, 18 -> "#AB47BC"                // cinema / theatre
-        24, 27, 41, 42, 47, 48 -> "#E91E63" // apparel/beauty/florist/jewelry/toys/gift
-        25, 43 -> "#1A73E8"                // electronics / optician
-        26, 31, 30, 45 -> "#795548"        // hardware / furniture / books / pet
-        28 -> "#455A64"                     // car
-        else -> "#1A73E8"                   // generic shop / department / sports / laundry / other
+    fun typeOfKind(kind: String): Int? = when (kind) {
+        "restaurant" -> 0
+        "cafe" -> 1
+        "fast_food" -> 2
+        "bar" -> 3
+        // The archive draws no separate grocery kind; a corner shop is the closest thing.
+        "supermarket", "convenience" -> 5
+        "fuel" -> 6
+        "hotel" -> 8
+        // An ATM is nearly always a bank's, and this enum has no separate number for one.
+        "bank", "atm" -> 9
+        // `university` folds into school: the enum has one education bucket.
+        "school", "university" -> 11
+        "park", "garden" -> 12
+        "attraction", "zoo" -> 15
+        "theatre" -> 18
+        "library" -> 19
+        "post_office" -> 20
+        "townhall" -> 23
+        "clothes" -> 24
+        "electronics" -> 25
+        "beauty" -> 27
+        "books" -> 30
+        "stadium" -> 32
+        "animal" -> 36
+        "museum" -> 38
+        // The one mapping with behaviour attached: a tapped station opens the departure
+        // board. `bus_stop` and `ferry_terminal` are deliberately NOT 50 — the board is
+        // resolved from baked rail stops, and sending a bus stop there would find the wrong
+        // thing or nothing.
+        "station" -> STATION_TYPE
+        else -> null
     }
 
-    /** Single-character glyph drawn in the pin (a hint, not unique per type). */
-    fun glyph(type: Int): String = when (type) {
-        0 -> "R"; 1 -> "C"; 2 -> "F"; 3 -> "B"; 4 -> "S"; 5 -> "G"; 6 -> "\u26FD"
-        7 -> "+"; 8 -> "H"; 9 -> "$"; 10 -> "H"; 11 -> "S"; 12 -> "P"; 13 -> "G"
-        14 -> "W"; 15 -> "A"; 16 -> "P"; 17 -> "C"; 18 -> "T"; 19 -> "L"; 20 -> "P"
-        21 -> "P"; 22 -> "F"; 23 -> "T"; 24 -> "C"; 25 -> "E"; 26 -> "H"; 27 -> "B"
-        28 -> "C"; 29 -> "B"; 30 -> "B"; 31 -> "F"; 32 -> "S"; 33 -> "D"; 34 -> "D"
-        35 -> "M"; 36 -> "V"; 37 -> "E"; 38 -> "M"; 39 -> "O"; 40 -> "i"; 41 -> "F"
-        42 -> "J"; 43 -> "O"; 44 -> "L"; 45 -> "P"; 46 -> "L"; 47 -> "T"; 48 -> "G"
-        49 -> "M"; else -> "\u2022"
-    }
+    /**
+     * The station type, whose taps open a departure board rather than a place sheet.
+     *
+     * Station POIs carry no stop id of their own; see `TransitStopsViewModel.openNearestStop`.
+     */
+    const val STATION_TYPE: Int = 50
 }

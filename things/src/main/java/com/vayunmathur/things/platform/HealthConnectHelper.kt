@@ -83,16 +83,23 @@ object HealthConnectHelper {
         boneMassKg: Double?,
         bodyWaterMassKg: Double?,
         bmrKcal: Int?,
+        clientRecordId: String? = null,
     ) {
         try {
             val off = zoneOffsetAt(instant)
+            // Client record IDs are scoped per record type, so one ID per measurement is enough to
+            // make a re-import of the same reading replace the previous rows rather than add to them.
+            val metadata = {
+                if (clientRecordId == null) Metadata.manualEntry()
+                else Metadata.manualEntryWithId(clientRecordId)
+            }
             val records = mutableListOf<androidx.health.connect.client.records.Record>()
             records.add(
                 WeightRecord(
                     time = instant,
                     zoneOffset = off,
                     weight = Mass.kilograms(weightKg),
-                    metadata = Metadata.manualEntry(),
+                    metadata = metadata(),
                 )
             )
             if (bodyFatPct != null && bodyFatPct > 0) {
@@ -101,7 +108,7 @@ object HealthConnectHelper {
                         time = instant,
                         zoneOffset = off,
                         percentage = Percentage(bodyFatPct),
-                        metadata = Metadata.manualEntry(),
+                        metadata = metadata(),
                     )
                 )
             }
@@ -111,7 +118,7 @@ object HealthConnectHelper {
                         time = instant,
                         zoneOffset = off,
                         mass = Mass.kilograms(leanMassKg),
-                        metadata = Metadata.manualEntry(),
+                        metadata = metadata(),
                     )
                 )
             }
@@ -121,7 +128,7 @@ object HealthConnectHelper {
                         time = instant,
                         zoneOffset = off,
                         mass = Mass.kilograms(boneMassKg),
-                        metadata = Metadata.manualEntry(),
+                        metadata = metadata(),
                     )
                 )
             }
@@ -131,7 +138,7 @@ object HealthConnectHelper {
                         time = instant,
                         zoneOffset = off,
                         mass = Mass.kilograms(bodyWaterMassKg),
-                        metadata = Metadata.manualEntry(),
+                        metadata = metadata(),
                     )
                 )
             }
@@ -141,7 +148,7 @@ object HealthConnectHelper {
                         time = instant,
                         zoneOffset = off,
                         basalMetabolicRate = Power.kilocaloriesPerDay(bmrKcal.toDouble()),
-                        metadata = Metadata.manualEntry(),
+                        metadata = metadata(),
                     )
                 )
             }

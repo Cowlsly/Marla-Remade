@@ -35,12 +35,12 @@ import kotlinx.coroutines.withContext
 /**
  * Owns the microphone, the pitch analyser and the state the Note tab renders.
  *
- * Capture is user-initiated and never implicit, but the intent outlives the microphone: leaving
- * the foreground releases the device (a tuner has no business holding a microphone open in the
- * background) while remembering that the user had it on, and coming back reopens it. Both halves
- * matter. Without the visible control the user has no way in at all; without the resume the
- * microphone dies on every interruption - a notification, the permission dialog - and the user
- * has to keep pressing start between adjustments.
+ * Capture is implicit: the tuner listens whenever it is on screen, because there is nothing else
+ * for it to be doing. The intent still outlives the microphone - leaving the foreground releases
+ * the device (a tuner has no business holding a microphone open in the background) while
+ * remembering that the tabs are still up, and coming back reopens it. Without that resume the
+ * microphone would die on every interruption and never come back, since nothing but the first
+ * composition would ask for it again.
  *
  * Both tabs share one microphone and one coroutine. The chord pipeline is an order of magnitude
  * more expensive than the pitch one - a five-octave CQT against a 128 ms window - so it runs
@@ -66,7 +66,7 @@ class TunerViewModel(application: Application) : AndroidViewModel(application) {
     private var captureJob: Job? = null
 
     /**
-     * Whether the user has asked to be listening, as opposed to whether the microphone happens to
+     * Whether the tuner is meant to be listening, as opposed to whether the microphone happens to
      * be open right now. Survives the foreground/background cycle so [onForeground] knows whether
      * to reopen; [state]`.listening` tracks the device instead.
      */
@@ -105,22 +105,25 @@ class TunerViewModel(application: Application) : AndroidViewModel(application) {
         )
     }
 
-    /** The user asked to start listening. */
+    /**
+     * The tuner came on screen, after the microphone permission was granted. Called from the
+     * composition rather than the activity so it lands on the far side of the permission gate.
+     */
     fun start() {
         wantsCapture = true
         openCapture()
     }
 
-    /** The user asked to stop listening. Releases the microphone and stays released. */
+    /** The tuner left the screen for good. Releases the microphone and stays released. */
     fun stop() {
         wantsCapture = false
         closeCapture()
     }
 
     /**
-     * The app came back to the foreground. Reopens the microphone only if it was open when the
-     * app left, so returning from a notification or the permission dialog does not cost the user
-     * a tap - and does not silently start recording for someone who had it stopped.
+     * The app came back to the foreground. Reopens the microphone only if the tuner was on screen
+     * when the app left, so returning from a notification costs the user nothing - and a capture
+     * that failed is not silently retried behind their back.
      */
     fun onForeground() {
         if (wantsCapture) openCapture()
@@ -139,9 +142,9 @@ class TunerViewModel(application: Application) : AndroidViewModel(application) {
         smoother.reset()
         noteHold.reset()
         resetChord()
-        // Flipped before the first frame arrives so the button reflects the tap immediately and
-        // a capture that never produces audio still looks different from one that was never asked
-        // for. The failure branch below puts it back.
+        // Flipped before the first frame arrives so a capture that never produces audio still
+        // looks different from one that was never asked for. The failure branch below puts it
+        // back.
         state = state.copy(listening = true, failure = null, captureSource = null)
         captureJob = viewModelScope.launch {
             capture.frames(NOTE_HOP).conflate().collect { result ->

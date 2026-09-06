@@ -44,7 +44,7 @@ use modelrunner::vulkan::run::StepParams;
 use modelrunner::weights::{graph, Weights};
 
 /// Positions one prefill submit covers. As the bridge's, for the same fence reasons.
-const CHUNK: usize = 16;
+const CHUNK: usize = 4096;
 
 /// The markers a rendered prompt may contain. Mirrors `Gemma4Handle.MARKERS`.
 const MARKERS: [&str; 11] = [
@@ -182,6 +182,18 @@ fn main() {
         }
         Err(why) => return println!("{why}"),
     }
+    // Continue for a while, not one token. One token agreeing only says export and import are
+    // each other's inverse; it says nothing about whether the numbers mean anything to a model
+    // that keeps reading them. A cache that is subtly wrong still produces *a* plausible first
+    // token and then falls apart, which is exactly what shipping this did.
+    let ask = table.encode_with_specials("<turn|>\n<|turn>user\nWhat is 2+2?<turn|>\n<|turn>model\n", &MARKERS);
+    let live = continue_with(&mut net, &reader, &local, &global, &ask, positions, 12);
+    let baked = continue_with(&mut fresh, &reader, &local, &global, &ask, positions, 12);
+    println!("  prefilled continues: {:?}", table.decode(&live));
+    println!("  imported  continues: {:?}", table.decode(&baked));
+    if live != baked {
+        println!("MISMATCH: the imported cache does not behave like the prefilled one");
+    }
     let got = argmax_next(&mut fresh, &reader, &local, &global, tokens[tokens.len() - 1], positions);
     match (expected, got) {
         (Some(a), Some(b)) if a == b => println!("round trip ok: both continue with token {a}"),
@@ -231,6 +243,71 @@ fn digest(tokens: &[u32]) -> [u8; 32] {
 
 /// The token this net would produce next, given `token` at `position`.
 fn argmax_next(
+    net: &mut Reshaped<gemma4::Pass>,
+    reader: &modelrunner::weights::Reader<'_>,
+    local: &[f32],
+    global: &[f32],
+    token: u32,
+    position: u32,
+) -> Option<u32> {
+    let (hidden, per_layer) = gemma4::gather(reader, token).ok()?;
+    let from = (position * gemma4::HEAD_DIM) as usize;
+    let al = local[from..from + gemma4::HEAD_DIM as usize].to_vec();
+    let from = (position * gemma4::GLOBAL_HEAD_DIM) as usize;
+    let ag = global[from..from + gemma4::GLOBAL_HEAD_DIM as usize].to_vec();
+    let at = net.at(gemma4::Mode::DecodeStep.at(gemma4::MAX_CONTEXT)).ok()?;
+    at.set_params(StepParams {
+        prefix: position,
+        window_start: position.saturating_sub(gemma4::WINDOW - 1),
+    })
+    .ok()?;
+    let out = at.infer_raw_many(&[&hidden, &per_layer, &al, &ag]).ok()?;
+    let mut best = (f32::NEG_INFINITY, 0u32);
+    let mut base = 0u32;
+    for split in out.iter().take(gemma4::HEAD_SPLITS) {
+        for (offset, &value) in split.iter().enumerate() {
+            if value > best.0 {
+                best = (value, base + offset as u32);
+            }
+        }
+        base += split.len() as u32;
+    }
+    Some(best.1)
+}
+
+/// Feed `ask` at `from`, then generate `limit` tokens greedily.
+fn continue_with(
+    net: &mut Reshaped<gemma4::Pass>,
+    reader: &modelrunner::weights::Reader<'_>,
+    local: &[f32],
+    global: &[f32],
+    ask: &[u32],
+    from: u32,
+    limit: usize,
+) -> Vec<u32> {
+    let mut out = Vec::new();
+    let mut at = from;
+    for &token in ask {
+        if argmax_at(net, reader, local, global, token, at).is_none() {
+            return out;
+        }
+        at += 1;
+    }
+    let mut next = *ask.last().unwrap_or(&2);
+    for _ in 0..limit {
+        let Some(token) = argmax_at(net, reader, local, global, next, at) else { break };
+        at += 1;
+        if token == 1 || token == 106 {
+            break;
+        }
+        out.push(token);
+        next = token;
+    }
+    out
+}
+
+/// One decode step, returning the argmax.
+fn argmax_at(
     net: &mut Reshaped<gemma4::Pass>,
     reader: &modelrunner::weights::Reader<'_>,
     local: &[f32],

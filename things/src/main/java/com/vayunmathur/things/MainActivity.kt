@@ -71,6 +71,8 @@ class MainActivity : ComponentActivity() {
         setContent {
             DynamicTheme {
                 Navigation(
+                    bottlePaired = DeviceController.bottlePaired.value,
+                    bottleLink = DeviceController.bottleLink.value,
                     connectionState = DeviceController.connectionState.value,
                     scanning = DeviceController.scanning.value,
                     discoveredDevices = DeviceController.discoveredDevices,
@@ -85,10 +87,12 @@ class MainActivity : ComponentActivity() {
                         DeviceService.start(this)
                         DeviceController.connectBottle(it.address)
                     },
-                    onDisconnectClick = {
+                    onForgetBottle = {
                         DeviceController.disconnectBottle()
                         if (!DeviceController.hasRememberedDevice()) DeviceService.stop(this)
                     },
+                    scalePaired = DeviceController.scalePaired.value,
+                    scaleLink = DeviceController.scaleLink.value,
                     scaleConnectionState = DeviceController.scaleConnectionState.value,
                     scaleScanning = DeviceController.scaleScanning.value,
                     scaleDevices = DeviceController.scaleDevices,
@@ -101,7 +105,7 @@ class MainActivity : ComponentActivity() {
                         DeviceService.start(this)
                         DeviceController.connectScale(it.address)
                     },
-                    onScaleDisconnectClick = {
+                    onForgetScale = {
                         DeviceController.disconnectScale()
                         if (!DeviceController.hasRememberedDevice()) DeviceService.stop(this)
                     },

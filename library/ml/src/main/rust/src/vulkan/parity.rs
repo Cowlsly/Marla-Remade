@@ -137,6 +137,23 @@ fn agrees(
     compare(what, plan, given.data().to_vec(), inputs);
 }
 
+/// Run an invented-weight net on the interpreter and return its single output.
+///
+/// For properties that compare two *different* plans against each other rather than a plan
+/// against the device - chunk invariance, for one - where the question is whether the maths is
+/// self-consistent, not whether the GPU matches it.
+fn run_invented(
+    shapes: &[Shape],
+    inputs: &[&[f32]],
+    record: impl FnOnce(&mut Builder, &[Id]) -> Id,
+) -> Vec<f32> {
+    let source = Invented::new(0);
+    let plan = build(&source, shapes, record);
+    let data = source.into_data();
+    let mut out = run_multi(&plan, &data, inputs).expect("the interpreter runs the plan");
+    out.pop().expect("one output")
+}
+
 /// [`agrees`], for a whole net whose weights are invented rather than given.
 fn agrees_invented(
     what: &str,
@@ -1245,6 +1262,78 @@ fn a_clamp_bounds_a_tensor_by_a_pair_from_the_weights() {
 
 #[test]
 #[ignore = "needs a Vulkan device"]
+fn a_prefill_split_into_chunks_matches_one_chunk() {
+    // Splitting a prefill must not change the answer.
+    //
+    // It did, and badly: `prefill_layer` attended each chunk against only its own keys, so a
+    // second chunk could not see the first. The same prompt then answered differently depending
+    // on where the split fell - and every result looked fluent, so nothing short of comparing
+    // two splits could reveal it. Short prompts fit one chunk and passed, which is why this
+    // survived a "verified" batched-prefill claim.
+    //
+    // Deliberately at the op level rather than through Gemma: the property belongs to the
+    // attention ops, and checking it here does not need 1.3 GB of weights.
+    const HEAD_DIM: u32 = 16;
+    const HEADS: u32 = 4;
+    const T: u32 = 24;
+    let q = spread((HEADS * HEAD_DIM * T) as usize, 0.4);
+    let k = spread((HEAD_DIM * T) as usize, 0.9);
+    let v = spread((HEAD_DIM * T) as usize, 1.3);
+    let whole = run_invented(
+        &[
+            Shape::new(HEADS * HEAD_DIM, 1, T),
+            Shape::new(HEAD_DIM, 1, T),
+            Shape::new(HEAD_DIM, 1, T),
+        ],
+        &[&q, &k, &v],
+        |b, ids| {
+            let scores = b.attn_scores_grouped_prescaled(ids[0], ids[1], HEADS, 1);
+            let probs = b.softmax_causal(scores);
+            b.attn_apply_grouped(probs, ids[2], HEADS, 1)
+        },
+    );
+    // The first half of the queries against the first half of the keys is the same computation
+    // as the first half of the whole, because attention is causal.
+    const HALF: u32 = T / 2;
+    let clip = |from: &[f32], channels: u32| {
+        let mut out = Vec::with_capacity((channels * HALF) as usize);
+        for channel in 0..channels {
+            for t in 0..HALF {
+                out.push(from[(channel * T + t) as usize]);
+            }
+        }
+        out
+    };
+    let qh = clip(&q, HEADS * HEAD_DIM);
+    let kh = clip(&k, HEAD_DIM);
+    let vh = clip(&v, HEAD_DIM);
+    let half = run_invented(
+        &[
+            Shape::new(HEADS * HEAD_DIM, 1, HALF),
+            Shape::new(HEAD_DIM, 1, HALF),
+            Shape::new(HEAD_DIM, 1, HALF),
+        ],
+        &[&qh, &kh, &vh],
+        |b, ids| {
+            let scores = b.attn_scores_grouped_prescaled(ids[0], ids[1], HEADS, 1);
+            let probs = b.softmax_causal(scores);
+            b.attn_apply_grouped(probs, ids[2], HEADS, 1)
+        },
+    );
+    for channel in 0..HEADS * HEAD_DIM {
+        for t in 0..HALF {
+            let a = whole[(channel * T + t) as usize];
+            let b = half[(channel * HALF + t) as usize];
+            assert!(
+                (a - b).abs() < 0.02,
+                "query {t} channel {channel}: {a} over {T} positions, {b} over {HALF}"
+            );
+        }
+    }
+}
+
+#[test]
+#[ignore = "needs a Vulkan device"]
 fn a_batched_prefill_attention_agrees_with_the_reference() {
     // The uncached attention path at multi-query, which is what a batched prefill runs. K and V
     // are an eighth of Q's width, so a shader that indexed them by query head would read past
@@ -1290,6 +1379,45 @@ fn a_windowed_causal_softmax_drops_what_is_behind_the_window() {
         &[&scores],
         |b, ids| b.softmax_causal_windowed(ids[0], WINDOW),
     );
+}
+
+#[test]
+#[ignore = "needs a Vulkan device"]
+fn an_int4_gemv_agrees_with_the_reference_on_a_wide_aligned_row() {
+    // `conv_vec_int4` has two paths, and the fixture below only reaches one.
+    //
+    // Where `in_c` is a multiple of 32 the shader loads a whole block as one `uvec4` - four
+    // times fewer memory instructions, which is the difference between 4.7 GB/s and something
+    // near the 19.6 a plain read achieves. The other fixture contracts over 100 taps, not a
+    // multiple of 32, so it takes the scalar fallback: it passed while the wide path was
+    // indexing the buffer wrongly, and only a full Gemma run against onnxruntime caught that.
+    //
+    // 128 taps is four whole blocks; 64 outputs span several workgroups.
+    let out_channels = 64u32;
+    let in_channels = 128u32;
+    let blocks = in_channels.div_ceil(32);
+    let kernel: Vec<i8> = (0..(out_channels * in_channels) as i32)
+        .map(|i| ((i * 7) % 16 - 8) as i8)
+        .collect();
+    let scales: Vec<f32> = (0..out_channels * blocks)
+        .map(|i| 0.007_812_5 * (1.0 + (i % 5) as f32))
+        .collect();
+    let biases: Vec<f32> = spread(out_channels as usize, 1.9);
+    let blob = write_mixed(
+        graph::SUPERTONIC_VE,
+        &[
+            Fixture::I4(vec![out_channels, in_channels, 1, 1], kernel),
+            Fixture::F16(vec![out_channels, blocks], scales),
+            Fixture::F16(vec![out_channels], biases),
+        ],
+    );
+    let weights = Weights::parse(&blob, graph::SUPERTONIC_VE).expect("the int4 fixture parses");
+    let input = spread(in_channels as usize, 0.7);
+    let mut builder = Builder::new(&weights);
+    let first = builder.input(Shape::new(in_channels, 1, 1));
+    let last = builder.conv_int4(first, 0, out_channels, Act::Relu);
+    let plan = builder.finish(&[last]).expect("the wide int4 gemv fixture plan builds");
+    compare("a wide-load int4 gemv", plan, weights.data().to_vec(), &[&input]);
 }
 
 #[test]

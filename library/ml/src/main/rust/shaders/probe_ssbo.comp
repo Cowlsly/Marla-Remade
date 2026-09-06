@@ -1,0 +1,37 @@
+#version 450
+//! Reads a buffer as a plain SSBO, for comparison against `probe_texel.comp`.
+//!
+//! The two shaders differ in exactly one respect - how the same bytes are fetched - so the gap
+//! between them is the value of the texture path and nothing else. See `vulkan::imageprobe`.
+//!
+//! The accumulator is xored rather than added so no arithmetic can be strength-reduced away, and
+//! is written out so the whole loop cannot be eliminated as dead.
+layout(local_size_x = 64) in;
+
+layout(set = 0, binding = 0) readonly buffer Source {
+    uvec4 data[];
+};
+
+layout(set = 0, binding = 1) buffer Sink {
+    uint sink[];
+};
+
+layout(push_constant) uniform Push {
+    /// `uvec4`s in the source.
+    uint quads;
+};
+
+void main() {
+    uint lane = gl_GlobalInvocationID.x;
+    uint stride = gl_NumWorkGroups.x * 64u;
+    uvec4 acc = uvec4(0u);
+    // Grid-stride so a fixed launch covers any size, and consecutive lanes read consecutive
+    // quads - the access pattern a weight sweep has.
+    for (uint at = lane; at < quads; at += stride) {
+        acc ^= data[at];
+    }
+    uint folded = acc.x ^ acc.y ^ acc.z ^ acc.w;
+    if (folded == 0xFFFFFFFFu) {
+        sink[0] = folded;
+    }
+}

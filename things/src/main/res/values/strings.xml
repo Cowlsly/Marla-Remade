@@ -4,10 +4,26 @@
 
     <!-- Devices screen title: device management (scan/connect/disconnect). Noun -->
     <string name="devices">Devices</string>
-    <!-- Home empty state when no device is connected. Sentence -->
-    <string name="no_devices">No devices connected</string>
-    <!-- Button on Home empty state that opens the Devices screen. Verb phrase -->
+    <!-- Home empty state when no device has been added yet. Sentence -->
+    <string name="no_devices">No devices added</string>
+    <!-- Button on Home empty state that opens the Add device screen. Verb phrase -->
     <string name="open_devices">Open Devices</string>
+    <!-- Add device screen title, and the button that opens it. Verb phrase -->
+    <string name="add_device">Add device</string>
+    <!-- Large button on the Add device screen, starts a scan for a smart water bottle. Verb phrase -->
+    <string name="connect_new_bottle">Connect new water bottle</string>
+    <!-- Large button on the Add device screen, starts a scan for a body scale. Verb phrase -->
+    <string name="connect_new_scale">Connect new scale</string>
+    <!-- Title of the dialog listing devices found by the scan. Verb phrase -->
+    <string name="select_device">Select a device</string>
+    <!-- Shown in the device picker while the scan is still running. Sentence -->
+    <string name="searching">Searching…</string>
+    <!-- Shown in the device picker when the scan finished with no results. Sentence -->
+    <string name="no_devices_found">No devices found</string>
+    <!-- Button on a device card that unpairs it and stops reconnecting. Verb phrase -->
+    <string name="forget_device">Forget device</string>
+    <!-- Dismiss button on the device picker dialog. Verb -->
+    <string name="cancel">Cancel</string>
     <!-- Scale note reassuring that measurements are saved to Health Connect. Sentence -->
     <string name="syncs_to_health_connect">Measurements sync to Health Connect</string>
 

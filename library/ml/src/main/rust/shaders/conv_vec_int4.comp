@@ -28,10 +28,24 @@
 //! table, `p.bias` the bias, `p.in_c` the taps, `p.out_c` the output channels and `p.count` the
 //! workgroup count, one per group of [`ROWS`] channels.
 
+// Reductions happen in registers across a subgroup rather than through shared memory across the
+// whole workgroup. See the tail of `main` for why that is worth an extension requirement.
+#extension GL_KHR_shader_subgroup_basic : require
+#extension GL_KHR_shader_subgroup_arithmetic : require
 #include "common.glsl"
 
 /// Output channels one workgroup owns. As `conv_vec_int8.comp`.
-#define ROWS 8u
+// Output channels one workgroup owns.
+//
+// # Why this is small
+//
+// Eight meant a 1,536-wide projection launched 192 workgroups - about 12k threads, barely over a
+// Mali G715's capacity, so there was nothing queued to run while a workgroup waited on memory.
+// The logits head launches 32,768 and reaches 14.9 GB/s; the per-layer projections reached 3.6.
+// Two gives four times the workgroups for the same weight traffic, at the cost of re-reading the
+// 3 KB activation vector four times more often - which is cache-resident and cheap beside the
+// megabytes of weights each one streams.
+#define ROWS 2u
 
 /// Per-lane partial sums, one row of 64 per output channel.
 shared float partial[ROWS][64];
@@ -75,6 +89,35 @@ void main() {
         //
         // A block is 32 nibbles at a 32-aligned start, so it is exactly four whole words and
         // no nibble straddles the boundary.
+        // A whole block in one 16-byte load, when the row lets us.
+        //
+        // `I4_BLOCK` is 32 nibbles, which is exactly one `uvec4`. Fetching it that way instead of
+        // four separate words is four times fewer memory instructions for identical bytes - and
+        // on a Tensor G4 that is close to four times the throughput: a gemv reading words
+        // reaches 4.7 GB/s where a shader reading `uvec4` reaches 19.6.
+        //
+        // Only when a row's blocks start 16-byte aligned, which needs `in_c` to be a multiple of
+        // 32 since a row begins at `channel * in_c`. Every projection in this model satisfies
+        // that; the scalar path below is kept for the ones that will not.
+        // `p.weight` counts 32-bit words, so a `uvec4` index is `p.weight / 4` plus the
+        // nibble offset over 32. Both divisions must be exact or the load straddles: hence the
+        // alignment checks rather than a bare shift.
+        bool wide = (p.in_c & 31u) == 0u && (p.weight & 3u) == 0u && (last - base) == I4_BLOCK;
+        if (wide) {
+            for (uint r = 0u; r < ROWS; r++) {
+                uvec4 packed = weights128[p.weight / 4u + ((channel_base + r) * p.in_c + base) / 32u];
+                float total = 0.0;
+                for (uint word = 0u; word < 4u; word++) {
+                    uint bits = packed[word];
+                    for (uint n = 0u; n < 8u; n++) {
+                        int code = bitfieldExtract(int(bits), int(n << 2u), 4);
+                        total += float(code) * float(arena[p.in0 + base + word * 8u + n]);
+                    }
+                }
+                acc[r] += total * scale[r];
+            }
+            continue;
+        }
         for (uint r = 0u; r < ROWS; r++) {
             uint row = (channel_base + r) * p.in_c;
             float total = 0.0;
@@ -100,8 +143,24 @@ void main() {
             acc[r] += total * scale[r];
         }
     }
+    // Reduce inside each subgroup first, then across the few subgroups a workgroup holds.
+    //
+    // This was 64 lanes writing to shared memory, a barrier, and then **eight** lanes each
+    // adding 64 floats in series while the other fifty-six idled. On a Mali G715 the subgroup is
+    // 16 wide, so a 64-lane workgroup is four of them and that barrier is a real cross-subgroup
+    // sync - paid once per output tile, inside all 245 weight kernels of a decode step.
+    //
+    // It showed up as bandwidth: the logits head, whose rows are enormous, reached 14.9 GB/s
+    // while the per-layer projections managed 3.6 GB/s. Same shader, same format - the
+    // difference was how much work there was to hide this tail behind.
+    //
+    // `subgroupAdd` does the first 16 in registers with no barrier, leaving `gl_NumSubgroups`
+    // values to combine instead of 64.
     for (uint r = 0u; r < ROWS; r++) {
-        partial[r][lane] = acc[r];
+        float summed = subgroupAdd(acc[r]);
+        if (subgroupElect()) {
+            partial[r][gl_SubgroupID] = summed;
+        }
     }
     barrier();
     if (lane >= ROWS) {
@@ -112,7 +171,7 @@ void main() {
         return;
     }
     float total = 0.0;
-    for (uint i = 0u; i < 64u; i++) {
+    for (uint i = 0u; i < gl_NumSubgroups; i++) {
         total += partial[lane][i];
     }
     // Already scaled inside the loop, so only the bias is left.

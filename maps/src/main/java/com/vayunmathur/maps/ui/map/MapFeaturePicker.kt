@@ -9,14 +9,12 @@ import com.vayunmathur.maps.data.Feature1
 import com.vayunmathur.maps.data.SpecificFeature
 import com.vayunmathur.maps.data.transit.TransitStop
 import com.vayunmathur.maps.ui.FAMILY_LOCATION_LAYER_ID
-import com.vayunmathur.maps.ui.MA_POIS_LAYER_ID
 import com.vayunmathur.maps.ui.PARKING_PIN_LAYER_ID
 import com.vayunmathur.maps.ui.SAVED_PLACE_LAYER_ID
 import com.vayunmathur.maps.ui.SEARCH_RESULT_LAYER_ID
 import com.vayunmathur.maps.ui.TRANSIT_STOP_LAYER_ID
 import com.vayunmathur.maps.ui.theme.MapChromeMetrics
 import com.vayunmathur.maps.ui.toSelectedFamilyMember
-import com.vayunmathur.maps.ui.toSelectedMaPoi
 import com.vayunmathur.maps.ui.toSelectedSavedPlace
 import com.vayunmathur.maps.ui.toSelectedSearchResult
 import com.vayunmathur.maps.ui.toTransitStop
@@ -59,11 +57,16 @@ fun interface FeatureSource {
  * be read and asserted on rather than the shape of a hundred-line chain of `?:` and early
  * `return`s.
  *
- * Not a composable. [pickPin] suspends: resolving a POI hit reads the `poi_attrs.bin` sidecar,
- * so that one probe does I/O and does it on [kotlinx.coroutines.Dispatchers.IO]. The admin-label
+ * Not a composable. [pickPin] suspends because a probe's resolver may do I/O. The admin-label
  * branch is the opposite arrangement — it used to make a Wikidata round-trip inside the gesture
  * handler, and now belongs to the ViewModel, which is why [ADMIN_LABEL_LAYER_IDS] hits come back
  * as raw features for the caller to resolve.
+ *
+ * Ambient POIs are **not** probed here. The renderer draws them, so the renderer picks them:
+ * a tap arrives as `MapClick.poi` already resolved against the collision pass that put the icon
+ * on screen. Rebuilding them as Compose features to hit-test in parallel is what this probe used
+ * to do, and it meant the same viewport query ran twice per tap and could disagree with what was
+ * drawn.
  */
 class MapFeaturePicker(
     private val source: FeatureSource,
@@ -96,9 +99,6 @@ class MapFeaturePicker(
         },
         Probe(FAMILY_LOCATION_LAYER_ID) { hits ->
             hits.firstNotNullOfOrNull { it.toSelectedFamilyMember() }?.let { MapHit.Place(it) }
-        },
-        Probe(MA_POIS_LAYER_ID) { hits ->
-            hits.firstNotNullOfOrNull { it.toSelectedMaPoi() }?.let { MapHit.Place(it) }
         },
     )
 

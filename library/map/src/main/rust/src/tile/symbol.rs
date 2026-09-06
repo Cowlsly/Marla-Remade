@@ -38,6 +38,7 @@ pub fn shape_label(
     name: &str,
     extent: u32,
     layer_index: usize,
+    feature_index: usize,
 ) -> Option<ShapedLabel> {
     if !fonts_staged() {
         return None;
@@ -73,6 +74,15 @@ pub fn shape_label(
         } else {
             0
         },
+        // The feature's own kind, so a pick can say `cafe` where the layer only knows it
+        // draws one of `poi-food`'s four.
+        kind: feature.kind,
+        // `feature_index` is the position in the *body* layer's feature vector, which is what
+        // the id table is parallel to — not the position among the features this style layer
+        // admitted. `ID_NONE` covers both "this layer has no id table" and "no OSM element".
+        feature_id: tile
+            .feature_id(layer.source_layer_id, feature_index)
+            .unwrap_or(tilecodec::mamaps::body::ID_NONE),
     })
 }
 
@@ -162,6 +172,7 @@ pub fn emit_label(
 pub fn emit_icon(
     label: &ShapedLabel,
     sprite: Sprite,
+    dark: bool,
     density: f32,
     tile_span_px: f32,
     vertices: &mut Vec<f32>,
@@ -176,11 +187,16 @@ pub fn emit_icon(
     let (x0, y0) = (cx - half_w, cy - half_h);
     let (x1, y1) = (cx + half_w, cy + half_h);
     let uv = sprite.uv;
+    // The sheet is the light half over the dark one, so the theme is one addition here
+    // rather than a second atlas or a second resolved `Sprite`. Applied at emit — which
+    // runs every frame — so switching palette stays free of re-tessellation.
+    let dv = if dark { crate::tile::sprite::atlas().dark_v_offset() } else { 0.0 };
+    let (v0, v1) = (uv.v0 + dv, uv.v1 + dv);
     let base = (vertices.len() / FLOATS_PER_VERTEX) as u32;
-    vertices.extend_from_slice(&[x0, y0, uv.u0, uv.v0]);
-    vertices.extend_from_slice(&[x1, y0, uv.u1, uv.v0]);
-    vertices.extend_from_slice(&[x1, y1, uv.u1, uv.v1]);
-    vertices.extend_from_slice(&[x0, y1, uv.u0, uv.v1]);
+    vertices.extend_from_slice(&[x0, y0, uv.u0, v0]);
+    vertices.extend_from_slice(&[x1, y0, uv.u1, v0]);
+    vertices.extend_from_slice(&[x1, y1, uv.u1, v1]);
+    vertices.extend_from_slice(&[x0, y1, uv.u0, v1]);
     indices.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
 }
 
@@ -327,7 +343,98 @@ mod tests {
             transit_lanes: 0,
             transit_taper: 0,
         };
-        let label = shape_label(&layer, &body, &feature, "Test", 4096, 7);
+        let label = shape_label(&layer, &body, &feature, "Test", 4096, 7, 0);
         assert!(label.is_none(), "no point, no anchor, no label");
+    }
+
+    /// **The bug this field exists to fix.** A shaped label reports the feature's own kind, not
+    /// its layer's first whitelist entry — the old pick path read `layer.kinds.first()`, so every
+    /// hit on `poi-food`'s four kinds came back as `restaurant`.
+    ///
+    /// Also pins the id: the index passed in is the position in the *body* layer, which is what
+    /// the archive's id table is parallel to.
+    #[test]
+    fn a_label_carries_its_own_kind_and_id_not_its_layers() {
+        let cafe = crate::style::kind_id_for_test("cafe");
+        let mut poi = tilecodec::mamaps::body::Layer::new(tilecodec::mamaps::dict::LAYER_POI);
+        poi.features.push(Feature {
+            kind: cafe,
+            kind_detail: 0,
+            geom_type: tilecodec::mamaps::body::GEOM_POINT,
+            flags: 0,
+            name_idx: 1,
+            parts_offset: 0,
+            part_count: 1,
+            transit_color: 0,
+            transit_ordinal: 0,
+            transit_lanes: 0,
+            transit_taper: 0,
+        });
+        poi.parts.push(tilecodec::mamaps::body::Part {
+            coord_start: 0,
+            point_count: 1,
+            winding: tilecodec::mamaps::body::WINDING_OUTER,
+        });
+        poi.coords = vec![(2048, 2048)];
+        let body = Body {
+            extent: 4096,
+            layers: vec![poi],
+            names: vec!["Blue Bottle".to_string()],
+            ids: vec![(tilecodec::mamaps::dict::LAYER_POI, vec![987_654_321])],
+        };
+        // A layer whose whitelist lists `restaurant` first, exactly as `poi-food` does.
+        let layer = food_layer();
+        // A reference *into* the body, not a copy: `tile_point` recovers the feature's layer by
+        // scanning for the pointer inside each layer's feature slice, so a copy anchors nowhere.
+        let feature = &body.layers[0].features[0];
+        // The staged TTFs are real, so shaping must succeed; a `None` here means the fixture
+        // broke, not that the test does not apply. Skipping silently would make the two
+        // assertions below vacuous.
+        assert!(fonts_staged(), "this test needs the staged Noto Sans");
+        let label =
+            shape_label(&layer, &body, feature, "Blue Bottle", 4096, 3, 0).expect("a shaped poi");
+        assert_eq!(label.kind, cafe, "the feature's kind, not the layer's first");
+        assert_ne!(label.kind, layer.kind_ids[0], "or this proves nothing");
+        assert_eq!(label.feature_id, 987_654_321);
+    }
+
+    fn food_layer() -> Layer {
+        let kinds = ["restaurant", "fast_food", "cafe", "bar"];
+        Layer {
+            id: "poi-food".to_string(),
+            source_layer: "poi".to_string(),
+            source_layer_id: tilecodec::mamaps::dict::LAYER_POI,
+            kind: crate::style::LayerKind::Symbol,
+            kinds: kinds.iter().map(|k| (*k).to_string()).collect(),
+            kind_ids: kinds.iter().map(|k| crate::style::kind_id_for_test(k)).collect(),
+            require_flags: 0,
+            forbid_flags: 0,
+            detail_ids: Vec::new(),
+            forbid_details: Vec::new(),
+            light: 0xFFCB6704,
+            dark: 0xFFCB6704,
+            opacity: crate::style::paint::Ramp::constant(1.0),
+            width: crate::style::paint::Ramp::constant(0.0),
+            gap_width: crate::style::paint::Ramp::constant(0.0),
+            spread: crate::style::paint::Ramp::constant(0.0),
+            lanes: crate::style::paint::Ramp::constant(1.0),
+            dash: (0.0, 0.0),
+            text_size: crate::style::paint::Ramp::constant(12.0),
+            text_size_large: None,
+            rank_threshold: None,
+            uppercase: false,
+            medium: false,
+            toggle: Some(crate::style::Toggle::Poi),
+            icon: true,
+            text_offset: (1.1, 0.0),
+            text_max_width: 8.0,
+            variable_anchor: Vec::new(),
+            halo_light: 0xFFE2DFDA,
+            halo_dark: 0xFF0D1B2A,
+            halo_width: 1.0,
+            min_zoom: 0,
+            max_zoom: 22,
+            authored: "pois".to_string(),
+        }
     }
 }

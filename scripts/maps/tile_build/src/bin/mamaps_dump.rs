@@ -124,7 +124,11 @@ fn run(
 ) -> tile_build::proto::Result<ExitCode> {
     let (header, dictionary, _root) = read::open_prefix(bytes)?;
     if mode == "header" {
-        println!("format_version\t{}", tile_build::mamaps::header::FORMAT_VERSION);
+        // The byte the archive actually carries, not the constant this binary was built with.
+        // `open_prefix` refuses anything but the current version, so the two agree by the time we
+        // get here — but printing the constant would report "3" for a v3 reader no matter what
+        // was on disk, which makes the line useless as a check on a freshly built archive.
+        println!("format_version\t{}", bytes[7]);
         println!("build_id\t{:#018x}", header.build_id);
         println!("flags\t{:#06x}", header.flags);
         println!("bodies_compressed\t{}", header.compressed());
@@ -166,7 +170,7 @@ fn run(
         }
         return Ok(ExitCode::SUCCESS);
     }
-    if !matches!(mode, "summary" | "tiles" | "geometry" | "rings" | "names") {
+    if !matches!(mode, "summary" | "tiles" | "geometry" | "rings" | "names" | "ids") {
         eprintln!("mamaps_dump: unknown mode '{mode}'");
         return Ok(ExitCode::from(2));
     }
@@ -210,6 +214,27 @@ fn run(
                                 "{z}/{x}/{y}\t{name}\tfeature={fi}\tkind={kind}\tlabel={label}"
                             );
                         }
+                    }
+                    continue;
+                }
+                if mode == "ids" {
+                    // One line per feature carrying an archive id. Only `places` and `poi`
+                    // have an id table at all, so an empty result on those two means the
+                    // build dropped the ids, while an empty result elsewhere is correct.
+                    for (fi, feature) in layer.features.iter().enumerate() {
+                        let Some(id) = body.feature_id(layer.layer_id, fi) else { break };
+                        let kind = dictionary.kind_name(feature.kind).unwrap_or("?");
+                        let label = feature.name(&body).unwrap_or("");
+                        // The low two bits are the OSM id space; see `extract::tagged_id`.
+                        let (space, osm) = match id & 0b11 {
+                            0 => ("none", 0),
+                            1 => ("node", id >> 2),
+                            2 => ("way", id >> 2),
+                            _ => ("relation", id >> 2),
+                        };
+                        println!(
+                            "{z}/{x}/{y}\t{name}\tfeature={fi}\tkind={kind}\tid={id}\t{space}/{osm}\tlabel={label}"
+                        );
                     }
                     continue;
                 }
@@ -413,6 +438,6 @@ fn join_counts_owned(m: &BTreeMap<String, usize>) -> String {
 
 fn usage() {
     eprintln!(
-        "usage: mamaps_dump IN.mamaps [--mode summary|tiles|geometry|rings|names|header|dict] [--layer NAME] [--tile Z/X/Y]"
+        "usage: mamaps_dump IN.mamaps [--mode summary|tiles|geometry|rings|names|ids|header|dict] [--layer NAME] [--tile Z/X/Y]"
     );
 }

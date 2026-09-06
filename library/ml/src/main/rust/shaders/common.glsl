@@ -64,6 +64,18 @@ layout(std430, binding = 2) readonly buffer Weights32 {
 //
 // Mirrors `StepParams` in `src/vulkan/run.rs` field for field. `std430` packs a struct of `uint`s
 // with no padding, so neither side has to restate an alignment rule.
+// The same buffer once more, as `uvec4`, for reads wide enough to use the memory system.
+//
+// A gemv fetching one 32-bit word per instruction reaches 4.7 GB/s on a Tensor G4; a shader
+// reading the same bytes 16 at a time reaches 19.6. The bytes and the buffer are identical - only
+// the width of each load differs, and four times the width is very nearly four times the rate.
+//
+// Reads through this view must be 16-byte aligned, which for int4 weights means the element index
+// must be a multiple of 32. Callers check; see `conv_vec_int4.comp`.
+layout(std430, binding = 4) readonly buffer Weights128 {
+    uvec4 weights128[];
+};
+
 layout(std430, binding = 3) readonly buffer Params {
     // Cache positions already written; a cached-attention op attends over `prefix + 1` keys.
     uint prefix;

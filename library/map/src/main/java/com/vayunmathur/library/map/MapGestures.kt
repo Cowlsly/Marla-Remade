@@ -25,12 +25,29 @@ import kotlin.math.abs
 import kotlin.math.sign
 
 /**
- * A tap on the map: the geographic position under the finger plus the screen
- * point (Dp from the viewport top-left) that produced it. The screen point is
- * what [MapFeaturePicker]-style hit-testing needs; the geo alone cannot
+ * A tap on the map: the geographic position under the finger, the screen
+ * point (Dp from the viewport top-left) that produced it, and the POI it
+ * landed on if it landed on one. The screen point is what
+ * [MapFeaturePicker]-style hit-testing needs; the geo alone cannot
  * recover it once the camera moves.
+ *
+ * [poi] rides on the same click rather than arriving through a callback of its own so a
+ * host sees one tap as one event. With two callbacks the host would have to guess whether
+ * the other had already claimed the tap, and a POI tap would both open the POI and fall
+ * through to whatever the host does with empty map.
  */
-data class MapClick(val position: GeoPoint, val screen: DpOffset)
+data class MapClick(
+    val position: GeoPoint,
+    val screen: DpOffset,
+    /**
+     * The topmost drawn POI under the finger, or null.
+     *
+     * Only ever set when [LayerOptions.poi] is on, and only for labels the collision pass
+     * actually placed last frame — a POI hidden behind another is not reported, because it
+     * is not on screen to be tapped.
+     */
+    val poi: PlacedLabel? = null,
+)
 /**
  * Viewport measurement and every pan/zoom/tap gesture the map supports.
  *

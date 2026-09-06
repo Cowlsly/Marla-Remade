@@ -90,17 +90,3 @@ fun familyPinFeature(member: FamilyMember): Feature1 = Feature1(
 
 private fun initialOf(name: String): String =
     name.trim().firstOrNull()?.uppercaseChar()?.toString() ?: "?"
-
-/**
- * An ambient POI as a feature, so [toSelectedMaPoi] resolves it exactly like a tapped
- * `ma_pois` tile feature did: name + point geometry + numeric `type`.
- */
-fun poiPinFeature(poi: PoiIndex.PoiRecord): Feature1 = Feature1(
-    Point(Position(poi.lon, poi.lat)),
-    JsonObject(
-        mapOf(
-            "name" to JsonPrimitive(poi.name),
-            "type" to JsonPrimitive(poi.type.toString()),
-        )
-    ),
-)

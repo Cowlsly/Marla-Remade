@@ -5,11 +5,11 @@ import android.view.Surface
 /**
  * The JNI surface of the Vulkan renderer in `library/map/src/main/rust`.
  *
- * Deliberately five methods and nothing per-feature: Kotlin creates and destroys the
- * renderer for a [Surface], resizes it, reports connectivity, and hands it **one
- * camera snapshot per frame**. Tile selection, fetching, decode, tessellation and
- * drawing all happen on the native side, so the boundary is crossed a handful of times
- * a frame rather than thousands.
+ * Deliberately narrow and nothing per-feature: Kotlin creates and destroys the renderer
+ * for a [Surface], resizes it, reports connectivity and theme, sets the handful of pieces
+ * of state the renderer draws from, and hands it **one camera snapshot per frame**. Tile
+ * selection, fetching, decode, tessellation and drawing all happen on the native side, so
+ * the boundary is crossed a handful of times a frame rather than thousands.
  *
  * [handle] values are opaque pointers owned by the native side. Every method tolerates
  * `0`, which is what [create] returns on failure — so a device without a working Vulkan
@@ -93,8 +93,11 @@ internal object MapNative {
      *
      * A call that changes nothing does nothing, so this is safe to drive from a
      * `LaunchedEffect` that may re-run for unrelated reasons.
+     *
+     * [kinds] is a comma-separated list of archive kind names narrowing POI to those kinds;
+     * empty draws them all. A name the schema does not know is ignored.
      */
-    external fun setLayers(handle: Long, poi: Boolean, transit: Boolean)
+    external fun setLayers(handle: Long, poi: Boolean, transit: Boolean, kinds: String)
 
     /**
      * Tell the renderer whether the device is online. When offline it serves stale cached
@@ -103,14 +106,43 @@ internal object MapNative {
     external fun setOnline(handle: Long, online: Boolean)
 
     /**
+     * Show the user-location puck at [lon]/[lat], drawn by the renderer inside the same
+     * frame as the basemap.
+     *
+     * Free in the same sense as [setPalette]: the quad is already on the GPU and
+     * everything that varies about the puck reaches it as a push constant, so nothing is
+     * re-tessellated or re-uploaded. That is why a fix is pushed in out of band rather
+     * than being an argument on [render] — a fix arrives at about 1 Hz while [render]
+     * runs at 60.
+     *
+     * [lon] and [lat] are `Float` for the same reason the camera's are (see [render]).
+     * [bearing] is degrees clockwise from north and is only read when [hasBearing] is
+     * true; without it the dot draws and the bearing cone does not.
+     */
+    external fun setUserPuck(
+        handle: Long,
+        lon: Float,
+        lat: Float,
+        bearing: Float,
+        hasBearing: Boolean,
+    )
+
+    /** Take the puck away: no fix, or a host that stopped asking for one. */
+    external fun clearUserPuck(handle: Long)
+
+    /**
      * Pick placed labels (task 17): the last frame's placed symbol labels
      * whose screen boxes intersect the query box, in placement order.
      *
      * All four box edges are Dp from the viewport top-left. Returns one
      * `String` per hit, fields joined by `\u0001`: `layerId \u0001 name \u0001
-     * kind \u0001 lon \u0001 lat`. A `\u0001`-joined string (not objects)
-     * keeps the boundary allocation-free on the native side and parse-trivial
-     * on the Kotlin side. Empty array when nothing was placed or nothing hits.
+     * kind \u0001 lon \u0001 lat \u0001 featureId`. A `\u0001`-joined string
+     * (not objects) keeps the boundary allocation-free on the native side and
+     * parse-trivial on the Kotlin side. Empty array when nothing was placed or
+     * nothing hits.
+     *
+     * `kind` is the feature's own kind, not its layer's first one. `featureId` is the
+     * archive's stable id, or `0` for a feature that has none.
      */
     external fun pickLabels(
         handle: Long,

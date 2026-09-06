@@ -32,6 +32,12 @@ import kotlinx.coroutines.launch
  */
 object DeviceController {
 
+    /**
+     * Link state as the UI needs it. The detailed [connectionState]/[scaleConnectionState] strings
+     * remain for diagnostics, but nothing branches on their contents any more.
+     */
+    enum class LinkState { Waiting, Connecting, Connected }
+
     private lateinit var appContextRef: Context
     val appContext: Context get() = appContextRef
 
@@ -51,6 +57,11 @@ object DeviceController {
 
     // Bottle state.
     val connectionState = mutableStateOf("Disconnected")
+    val bottleLink = mutableStateOf(LinkState.Waiting)
+    /** Whether an address is remembered, independent of whether the device is reachable now. */
+    val bottlePaired = mutableStateOf(false)
+    val scalePaired = mutableStateOf(false)
+    val scaleLink = mutableStateOf(LinkState.Waiting)
     val scanning = mutableStateOf(false)
     val discoveredDevices = mutableStateListOf<BleManager.BleDevice>()
     val waterTempC = mutableStateOf<Int?>(null)
@@ -82,7 +93,13 @@ object DeviceController {
         bleManager = BleManager()
         scaleBleManager = ScaleBleManager()
         loadScaleProfile()
+        refreshPaired()
         initialized = true
+    }
+
+    private fun refreshPaired() {
+        bottlePaired.value = prefs.getString(BOTTLE_ADDRESS_KEY, null) != null
+        scalePaired.value = prefs.getString(SCALE_ADDRESS_KEY, null) != null
     }
 
     /** Marshal onto the main thread; replaces the Activity's `runOnUiThread`. */
@@ -116,14 +133,14 @@ object DeviceController {
         weightKg: Double,
         r50: Int,
         r500: Int,
-        stable: Boolean,
         segmental: SegmentalImpedance? = null,
+        measuredAtMillis: Long = System.currentTimeMillis(),
     ) {
         scaleRealtimeWeight.value = null
         scaleWeight.value = weightKg
         scaleR50.value = if (r50 == 0) null else r50
         scaleR500.value = if (r500 == 0) null else r500
-        scaleConnectionState.value = if (stable) "Scale: %.1f kg".format(weightKg) else "Scale: %.1f kg".format(weightKg)
+        scaleConnectionState.value = "Scale: %.1f kg".format(weightKg)
         // Recompute metrics with current profile.
         val profile = ScaleProfile(
             sex = scaleSex.value,
@@ -142,7 +159,26 @@ object DeviceController {
                 putString("scale_athlete", profile.athlete.toString())
             }
         } catch (_: Exception) {}
-        writeBodyCompositionToHealthConnect(weightKg, metrics)
+        writeBodyCompositionToHealthConnect(weightKg, metrics, measuredAtMillis, clientRecordId = null)
+    }
+
+    /**
+     * A measurement the scale buffered while the phone was away. It is archived to Health Connect
+     * under its own timestamp but must not touch the live state, which describes right now. The
+     * scale replays its whole buffer on every connect, so the record ID lets Health Connect
+     * upsert instead of accumulating duplicates.
+     */
+    fun onScaleHistory(weightKg: Double, r50: Int, r500: Int, measuredAtMillis: Long) {
+        val metrics = BodyComposition.calculate(
+            scaleProfile.value,
+            ScaleMeasurement(weightKg, r50, r500, null),
+        )
+        writeBodyCompositionToHealthConnect(
+            weightKg = weightKg,
+            metrics = metrics,
+            measuredAtMillis = measuredAtMillis,
+            clientRecordId = "scale-$measuredAtMillis",
+        )
     }
 
     // --- Actions used by the UI / service ---
@@ -174,11 +210,29 @@ object DeviceController {
         scaleBleManager.disconnect()
     }
 
+    /**
+     * The scale's category and impedance-encryption flag only exist in its advertisement, so they
+     * are remembered for the launch-time reconnect, which connects straight to a saved address.
+     */
+    fun saveScaleAdvertisedTraits(category: Int, encryptsResistance: Boolean) {
+        prefs.edit {
+            putInt(SCALE_CATEGORY_KEY, category)
+            putBoolean(SCALE_ENCRYPT_RES_KEY, encryptsResistance)
+        }
+    }
+
+    fun savedScaleCategory(): Int? =
+        if (prefs.contains(SCALE_CATEGORY_KEY)) prefs.getInt(SCALE_CATEGORY_KEY, 0) else null
+
+    fun savedScaleEncryptsResistance(): Boolean = prefs.getBoolean(SCALE_ENCRYPT_RES_KEY, false)
+
     /** Reconnect to any remembered devices. No-op without permission or a powered-on adapter. */
     fun autoConnectSavedDevices() {
         if (!hasBluetoothConnectPermission() || !bluetoothEnabled()) return
         prefs.getString(BOTTLE_ADDRESS_KEY, null)?.let { bleManager.connect(it) }
-        prefs.getString(SCALE_ADDRESS_KEY, null)?.let { scaleBleManager.connect(it) }
+        // The scale is powered off between weigh-ins, so wait for it passively rather than
+        // burning a doomed active attempt on every launch.
+        prefs.getString(SCALE_ADDRESS_KEY, null)?.let { scaleBleManager.connect(it, passive = true) }
     }
 
     /** Whether at least one device is remembered (drives the service lifecycle). */
@@ -239,10 +293,12 @@ object DeviceController {
     // instead of making the user scan and tap every time it is reopened.
     private fun saveDeviceAddress(key: String, address: String) {
         prefs.edit { putString(key, address) }
+        refreshPaired()
     }
 
     private fun clearDeviceAddress(key: String) {
         prefs.edit { remove(key) }
+        refreshPaired()
     }
 
     private fun loadScaleProfile() {
@@ -278,14 +334,26 @@ object DeviceController {
         }
     }
 
-    private fun writeBodyCompositionToHealthConnect(weightKg: Double, metrics: BodyMetrics) {
+    private fun writeBodyCompositionToHealthConnect(
+        weightKg: Double,
+        metrics: BodyMetrics,
+        measuredAtMillis: Long,
+        clientRecordId: String?,
+    ) {
         val status = HealthConnectHelper.availabilityStatus(appContext)
         if (status != HealthConnectClient.SDK_AVAILABLE) return
         scope.launch {
             try {
                 val client = HealthConnectClient.getOrCreate(appContext)
-                if (!HealthConnectHelper.hasAllPermissions(client)) return@launch
-                val instant = java.time.Instant.now()
+                if (!HealthConnectHelper.hasAllPermissions(client)) {
+                    // Otherwise a missing grant looks identical to the scale not reporting at all.
+                    // Only surfaced for live readings, so a history replay can't spam it.
+                    if (clientRecordId == null) {
+                        AppMessages.show("Grant Health Connect permissions to save measurements")
+                    }
+                    return@launch
+                }
+                val instant = java.time.Instant.ofEpochMilli(measuredAtMillis)
                 val waterMassKg = if (metrics.waterPercent > 0) weightKg * metrics.waterPercent / 100.0 else null
                 HealthConnectHelper.writeBodyComposition(
                     client = client,
@@ -296,6 +364,7 @@ object DeviceController {
                     boneMassKg = metrics.boneKg.takeIf { it > 0 },
                     bodyWaterMassKg = waterMassKg,
                     bmrKcal = metrics.bmrKcal.takeIf { it > 0 },
+                    clientRecordId = clientRecordId,
                 )
             } catch (_: Exception) {}
         }
@@ -303,4 +372,6 @@ object DeviceController {
 
     private const val BOTTLE_ADDRESS_KEY = "bottle_address"
     private const val SCALE_ADDRESS_KEY = "scale_address"
+    private const val SCALE_CATEGORY_KEY = "scale_category"
+    private const val SCALE_ENCRYPT_RES_KEY = "scale_encrypt_resistance"
 }

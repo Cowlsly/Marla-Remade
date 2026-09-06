@@ -12,6 +12,8 @@ import android.bluetooth.le.ScanCallback
 import android.bluetooth.le.ScanResult
 import android.bluetooth.le.ScanSettings
 import android.os.Build
+import android.os.Handler
+import android.os.Looper
 import android.util.Log
 import java.util.Calendar
 import java.util.UUID
@@ -65,6 +67,10 @@ class BleManager {
         // Sent after the user confirms on the bottle (registration "Confirmed"); the bottle then
         // finalizes and replies "registration successful / clear data successful".
         private const val CMD_CLEAR_OFFLINE_DATA = "50540003021c05"
+
+        // The official app scans in a bounded 20s window (ConnectionViewModel.scanFor20Seconds)
+        // rather than leaving the radio running until something is found.
+        private const val SCAN_TIMEOUT_MS = 20_000L
     }
 
     data class BleDevice(val name: String, val address: String)
@@ -102,6 +108,15 @@ class BleManager {
     private var parsedRecords = 0
     private val collected = ArrayList<HydrationReading>()
 
+    private val handler = Handler(Looper.getMainLooper())
+
+    private val scanTimeout = Runnable {
+        stopScan()
+        if (DeviceController.connectionState.value == SCANNING_STATE) {
+            DeviceController.connectionState.value = "Disconnected"
+        }
+    }
+
     private val scanCallback = object : ScanCallback() {
         override fun onScanResult(callbackType: Int, result: ScanResult) {
             val name = result.device.name ?: return
@@ -109,6 +124,14 @@ class BleManager {
             val addr = result.device.address
             if (DeviceController.discoveredDevices.none { it.address == addr }) {
                 DeviceController.discoveredDevices.add(BleDevice(name, addr))
+            }
+        }
+
+        override fun onScanFailed(errorCode: Int) {
+            Log.e(TAG, "onScanFailed error=$errorCode")
+            DeviceController.runOnMain {
+                stopScan()
+                DeviceController.connectionState.value = "Scan failed ($errorCode)"
             }
         }
     }
@@ -121,7 +144,15 @@ class BleManager {
             .setScanMode(ScanSettings.SCAN_MODE_LOW_LATENCY)
             .build()
         scanner?.startScan(null, settings, scanCallback)
-        DeviceController.connectionState.value = "Scanning..."
+        DeviceController.connectionState.value = SCANNING_STATE
+        handler.removeCallbacks(scanTimeout)
+        handler.postDelayed(scanTimeout, SCAN_TIMEOUT_MS)
+    }
+
+    fun stopScan() {
+        handler.removeCallbacks(scanTimeout)
+        scanner?.stopScan(scanCallback)
+        DeviceController.scanning.value = false
     }
 
     @Suppress("DEPRECATION")
@@ -141,8 +172,8 @@ class BleManager {
     }
 
     private fun openGatt(address: String, autoConnect: Boolean) {
-        scanner?.stopScan(scanCallback)
-        DeviceController.scanning.value = false
+        stopScan()
+        DeviceController.bottleLink.value = DeviceController.LinkState.Connecting
         DeviceController.connectionState.value = "Connecting..."
         val device = adapter.getRemoteDevice(address)
         gatt = device.connectGatt(DeviceController.appContext, autoConnect, gattCallback, BluetoothDevice.TRANSPORT_LE)
@@ -227,10 +258,12 @@ class BleManager {
                 when (newState) {
                     BluetoothProfile.STATE_CONNECTED -> {
                         resetState()
+                        DeviceController.bottleLink.value = DeviceController.LinkState.Connected
                         DeviceController.connectionState.value = "Connected"
                         g.discoverServices()
                     }
                     BluetoothProfile.STATE_DISCONNECTED -> {
+                        DeviceController.bottleLink.value = DeviceController.LinkState.Waiting
                         DeviceController.connectionState.value = "Disconnected"
                         DeviceController.discoveredDevices.clear()
                         resetState()
@@ -310,6 +343,14 @@ class BleManager {
             Log.d(TAG, "<- notify ${value.toHex()}")
             DeviceController.runOnMain { dispatch(value) }
         }
+
+        // The (gatt, characteristic, value) overload only exists from API 33; below that the
+        // platform delivers notifications through this one, so without it nothing arrives on
+        // Android 12/12L (minSdk is 31).
+        @Suppress("DEPRECATION")
+        override fun onCharacteristicChanged(g: BluetoothGatt, char: BluetoothGattCharacteristic) {
+            onCharacteristicChanged(g, char, char.value ?: return)
+        }
     }
 
     private fun dispatch(value: ByteArray) {
@@ -334,10 +375,10 @@ class BleManager {
         val b3 = value[3].toInt() and 0xFF
         val b5 = value[5].toInt() and 0xFF
 
-        // Registration signature response (factory-fresh bottle): prompt for button press.
+        // Response to a written text/LED signature (BleGattCallback → onSignatureResponse). It
+        // has nothing to do with registration, and this app never writes a signature.
         if (b5 == 0x20) {
-            Log.d(TAG, "RP: signature/registration → press bottle button")
-            DeviceController.connectionState.value = "Press the bottle button"
+            Log.d(TAG, "RP: signature response, ignored")
             return
         }
 
@@ -368,9 +409,16 @@ class BleManager {
             enqueueCommand(CMD_REQUEST_LOGS)
             return
         }
-        // Water-log availability flag: value[6]==0 means no offline logs to drain.
+        // Water-log availability flag: value[6]==1 means PT packets follow, 0 means nothing to
+        // drain (the official app's onNoNewWaterLog).
         if (b5 == 0x06) {
-            Log.d(TAG, "RP: water-log availability=${if (value.size > 6) value[6].toInt() and 0xFF else -1}")
+            val available = if (value.size > 6) value[6].toInt() and 0xFF else -1
+            Log.d(TAG, "RP: water-log availability=$available")
+            if (available == 0) {
+                expectedLogs = 0
+                parsedRecords = 0
+                collected.clear()
+            }
             return
         }
         // Registration state: value[6]==2 = user must press the bottle button; ==6 = done.
@@ -552,3 +600,4 @@ class BleManager {
 }
 
 private const val RECORD_SIZE = 13
+private const val SCANNING_STATE = "Scanning..."

@@ -48,8 +48,9 @@ param(
     # selection or an already-present spill can make it wrong in either direction.
     [switch] $NoSpaceCheck,
     # A prepared land polygon (the OSMCoastline land-polygons .shp), passed through to
-    # mamaps_build as --coastline so `earth` carries the mainland. Without it the layer has
-    # islands only. Consumed in stage A, so it cannot combine with -ReuseStore.
+    # mamaps_build as --coastline so `earth` carries the mainland. The builder requires it
+    # whenever `earth` is selected and offers no way to decline, so this is required too unless
+    # -Layers leaves `earth` out. Consumed in stage A, so it cannot combine with -ReuseStore.
     [string] $Coastline,
     [string] $Exe,
     [string] $Dump

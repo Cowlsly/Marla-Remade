@@ -14,8 +14,24 @@ import androidx.compose.ui.unit.dp
 data class PlacedLabel(
     val layerId: String,
     val name: String,
+    /**
+     * The feature's **own** archive kind (`cafe`, `hotel`, `station`, …), not its layer's.
+     *
+     * A symbol layer filters on several kinds — `poi-food` draws four — so before this was
+     * read from the feature it reported the layer's first whitelist entry, and every food POI
+     * came back as `restaurant`.
+     */
     val kind: String,
     val position: GeoPoint,
+    /**
+     * The archive's stable id for the feature, or `0` when it has none.
+     *
+     * Only `places` and `poi` features carry one — they are the only pure points, and the
+     * tiler merges everything else. The low two bits say which OSM id space it came from
+     * (1 node, 2 way, 3 relation) because those three sequences overlap; the id itself is
+     * the remaining bits.
+     */
+    val featureId: Long = 0L,
 )
 
 /**

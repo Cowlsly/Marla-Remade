@@ -95,8 +95,61 @@ impl LayerToggles {
     }
 }
 
-/// The toggles plus a generation counter, in one atomic word, shared with the tile
-/// workers.
+/// Which POI kinds the map is narrowed to, or empty for "every kind the style draws".
+///
+/// The app's category chips (Food, Gas, Hotels, …) select a handful of kinds out of the six
+/// `poi-*` layers' thirty-nine. That is a *sub-layer* filter, so it cannot be expressed by
+/// turning layers off, and it cannot ride in [`SharedToggles`]' packed word either — there are
+/// more kinds than a `u32` has bits.
+///
+/// Interned ids rather than names, sorted, so the per-feature test is a binary search over a
+/// `u16` slice — the same shape [`Layer::matches_id`] already uses for the layer's own whitelist.
+/// An `Arc` because a worker holds it for the length of a tile build while the host may replace it.
+#[derive(Clone, Debug, Default)]
+pub struct KindFilter(std::sync::Arc<[u16]>);
+
+impl PartialEq for KindFilter {
+    fn eq(&self, other: &KindFilter) -> bool {
+        // By value, not by pointer: the host rebuilds this list on every recomposition, so a
+        // pointer comparison would report a change on every frame and re-tessellate forever.
+        self.0[..] == other.0[..]
+    }
+}
+
+impl Eq for KindFilter {}
+
+impl KindFilter {
+    /// Every kind. The default, and what an empty chip selection means.
+    pub fn all() -> KindFilter {
+        KindFilter(std::sync::Arc::from(Vec::new()))
+    }
+
+    /// A filter over interned kind ids. Sorted and deduplicated here so callers need not be.
+    pub fn new(mut kinds: Vec<u16>) -> KindFilter {
+        kinds.sort_unstable();
+        kinds.dedup();
+        KindFilter(std::sync::Arc::from(kinds))
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+
+    /// Does this filter admit `kind` on `layer`?
+    ///
+    /// Only POI layers are filtered. The chips narrow which *points of interest* are shown; a
+    /// road or a country label is not one, and hiding the basemap because the user tapped
+    /// "Coffee" would be absurd.
+    pub fn admits(&self, layer: &Layer, kind: u16) -> bool {
+        if self.0.is_empty() || layer.toggle != Some(Toggle::Poi) {
+            return true;
+        }
+        self.0.binary_search(&kind).is_ok()
+    }
+}
+
+/// The toggles, the POI kind filter and a generation counter, read as one snapshot and shared
+/// with the tile workers.
 ///
 /// Gating happens at **tessellation** time rather than at draw time, because that is
 /// where the cost is: with POI off, no label is shaped and no placement candidate is
@@ -107,44 +160,55 @@ impl LayerToggles {
 /// evicted — the same "re-decorate without reloading" shape as a palette switch, one step
 /// heavier.
 ///
-/// One word rather than three atomics so a worker's read is a consistent snapshot: a
-/// mesh tagged with one generation but built from another's flags would either never be
-/// refreshed or be refreshed forever.
+/// One snapshot rather than a field each so a worker's read is consistent: a mesh tagged with
+/// one generation but built from another's flags would either never be refreshed or be refreshed
+/// forever. This was a single `AtomicU32` while the state was two bits and a counter; the kind
+/// filter does not fit in a word, so it is a lock — taken once per tile build, not per feature.
 #[derive(Debug)]
-pub struct SharedToggles(std::sync::atomic::AtomicU32);
+pub struct SharedToggles(std::sync::RwLock<Snapshot>);
+
+#[derive(Clone, Debug)]
+struct Snapshot {
+    toggles: LayerToggles,
+    kinds: KindFilter,
+    generation: u32,
+}
 
 impl SharedToggles {
     /// Generations start at 1, so a mesh from a default-initialised 0 is always stale.
     pub fn new(toggles: LayerToggles) -> SharedToggles {
-        SharedToggles(std::sync::atomic::AtomicU32::new(Self::pack(toggles, 1)))
+        SharedToggles(std::sync::RwLock::new(Snapshot {
+            toggles,
+            kinds: KindFilter::all(),
+            generation: 1,
+        }))
     }
 
-    fn pack(toggles: LayerToggles, generation: u32) -> u32 {
-        (generation << 2) | (u32::from(toggles.poi) << 1) | u32::from(toggles.transit)
+    /// The current toggles, kind filter and the generation they belong to.
+    pub fn get(&self) -> (LayerToggles, KindFilter, u32) {
+        // A poisoned lock means another thread panicked mid-set. The state behind it is three
+        // plain values with no invariant between them beyond the generation, so reading it is
+        // sound; refusing to draw the map because a worker died is worse than drawing it.
+        let snapshot = self.0.read().unwrap_or_else(|e| e.into_inner());
+        (snapshot.toggles, snapshot.kinds.clone(), snapshot.generation)
     }
 
-    /// The current toggles and the generation they belong to.
-    pub fn get(&self) -> (LayerToggles, u32) {
-        let word = self.0.load(std::sync::atomic::Ordering::Acquire);
-        (
-            LayerToggles { poi: word & 0b10 != 0, transit: word & 0b01 != 0 },
-            word >> 2,
-        )
-    }
-
-    /// Set the toggles, bumping the generation. Returns `true` when anything changed.
+    /// Set the toggles and the kind filter, bumping the generation. Returns `true` when
+    /// anything changed.
+    ///
+    /// Both at once rather than one setter each: the host sets them from a single Compose
+    /// effect, and two bumps would re-tessellate the whole resident set twice for one change.
     ///
     /// A no-op set must not bump: the host may call this on every recomposition, and a
     /// bump there would re-tessellate the whole resident set for nothing.
-    pub fn set(&self, toggles: LayerToggles) -> bool {
-        let (current, generation) = self.get();
-        if current == toggles {
+    pub fn set(&self, toggles: LayerToggles, kinds: KindFilter) -> bool {
+        let mut snapshot = self.0.write().unwrap_or_else(|e| e.into_inner());
+        if snapshot.toggles == toggles && snapshot.kinds == kinds {
             return false;
         }
-        self.0.store(
-            Self::pack(toggles, generation.wrapping_add(1).max(1)),
-            std::sync::atomic::Ordering::Release,
-        );
+        snapshot.toggles = toggles;
+        snapshot.kinds = kinds;
+        snapshot.generation = snapshot.generation.wrapping_add(1).max(1);
         true
     }
 }
@@ -524,7 +588,7 @@ impl Layer {
 }
 
 /// A `kind` name's interned id, or `None` when the schema has no counterpart.
-fn kind_id(name: &str) -> Option<u16> {
+pub fn kind_id(name: &str) -> Option<u16> {
     dict::KINDS.iter().position(|k| *k == name).map(|i| i as u16 + 1)
 }
 
@@ -567,6 +631,53 @@ pub fn layers() -> &'static [Layer] {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The chips narrow POI and nothing else. A filter that hid roads and country labels
+    /// because the user tapped "Coffee" would be a blank map, not a filtered one.
+    #[test]
+    fn a_kind_filter_narrows_poi_layers_only() {
+        let poi = layers().iter().find(|l| l.id == "poi-food").expect("poi-food");
+        let road = layers().iter().find(|l| l.toggle.is_none()).expect("a basemap layer");
+        let cafe = kind_id("cafe").expect("cafe");
+        let bar = kind_id("bar").expect("bar");
+
+        let all = KindFilter::all();
+        assert!(all.is_empty());
+        assert!(all.admits(poi, cafe), "an empty filter admits everything");
+        assert!(all.admits(poi, bar));
+
+        let coffee = KindFilter::new(vec![cafe]);
+        assert!(coffee.admits(poi, cafe));
+        assert!(!coffee.admits(poi, bar), "a POI kind outside the filter is dropped");
+        assert!(coffee.admits(road, bar), "a basemap layer is never narrowed");
+    }
+
+    /// Equality is by value. The host rebuilds the chip list on every recomposition, so a
+    /// pointer comparison would report a change every frame and re-tessellate the resident set
+    /// forever — which is exactly what the no-op rule exists to prevent.
+    #[test]
+    fn setting_the_same_filter_twice_does_not_bump_the_generation() {
+        let cafe = kind_id("cafe").expect("cafe");
+        let bar = kind_id("bar").expect("bar");
+        let shared = SharedToggles::new(LayerToggles::default());
+        let (_, _, first) = shared.get();
+
+        let on = LayerToggles { poi: true, transit: false };
+        assert!(shared.set(on, KindFilter::new(vec![cafe, bar])));
+        let (toggles, kinds, second) = shared.get();
+        assert!(toggles.poi);
+        assert_ne!(second, first, "a real change bumps");
+
+        // A freshly built, separately allocated filter holding the same kinds in the other
+        // order — `new` sorts, so it must compare equal and bump nothing.
+        assert!(!shared.set(on, KindFilter::new(vec![bar, cafe])));
+        let (_, again, third) = shared.get();
+        assert_eq!(third, second, "an identical set must not bump");
+        assert_eq!(again, kinds);
+
+        assert!(shared.set(on, KindFilter::all()), "clearing the chips is a change");
+        assert_ne!(shared.get().2, third);
+    }
 
     /// Perceived luminance, for asserting a palette is actually light or dark.
     fn luminance(argb: u32) -> f32 {

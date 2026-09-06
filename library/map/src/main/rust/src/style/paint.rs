@@ -617,8 +617,17 @@ mod tests {
         drawn.sort_unstable();
         drawn.dedup();
         assert_eq!(before, drawn.len(), "a kind is claimed by two POI layers");
+        // Four kinds are ours, not the reference's. The `maps` app has always offered Gas,
+        // Hotels and ATM chips and the reference basemap draws none of those three, so the
+        // chips could only ever have filtered a set that did not contain their subject. Stated
+        // as an explicit extension rather than folded into the count, so this test still fails
+        // if a kind is added to a POI layer by accident.
+        const LOCAL: &[&str] = &["atm", "bank", "fuel", "hotel"];
+        let (local, reference): (Vec<String>, Vec<String>) =
+            drawn.into_iter().partition(|kind| LOCAL.contains(&kind.as_str()));
+        assert_eq!(local, LOCAL, "the local POI extension is exactly these four kinds");
         admitted.sort_unstable();
-        assert_eq!(drawn, admitted, "the POI layers do not cover the reference filter");
+        assert_eq!(reference, admitted, "the POI layers do not cover the reference filter");
     }
 
     #[test]

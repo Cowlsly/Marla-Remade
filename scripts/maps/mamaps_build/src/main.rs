@@ -203,7 +203,8 @@ fn main() -> ExitCode {
 /// Everything a run needs beyond its input and output paths.
 struct RunSettings {
     report: Option<PathBuf>,
-    /// A prepared land polygon for `earth`'s mainland. Without it the layer carries islands only.
+    /// A prepared land polygon for `earth`'s mainland. Required whenever `earth` is being
+    /// built — see [`check_coastline`].
     coastline: Option<PathBuf>,
     /// A prepared GTFS export for `transit`'s coloured rail lines. Without it the layer is empty:
     /// nothing in the `.osm.pbf` produces one.
@@ -232,14 +233,7 @@ fn run(
     // Features are spilled here rather than held: it was 4.9 GB of a measured 10.03 GB California
     // peak, and nothing reads them until the tiler does.
     let spill = out.with_extension("features.tmp");
-    if run.coastline.is_some() && !layers.earth {
-        return Err("--coastline was given but the earth layer is not selected".to_string());
-    }
-    if run.coastline.is_none() && layers.earth {
-        // Said out loud, because a map with no mainland is a striking thing to discover later. It is
-        // not an error: an island is real data and the renderer's backdrop is the water colour.
-        println!("no --coastline given, so `earth` carries islands only and there is no mainland");
-    }
+    check_coastline(run.coastline.as_deref(), layers.earth)?;
     // The same asymmetry, for the same reasons: the flag without the layer is a mistake worth
     // stopping for, the layer without the flag is a legitimate build of an archive with no transit.
     if run.transit_routes.is_some() && !layers.transit {
@@ -483,6 +477,10 @@ fn derive_build_id(
             h = h.wrapping_mul(0x100_0000_01b3);
         }
     };
+    // Revision 8: `.mamaps` v3. `places` and `poi` features carry a stable OSM id in a new body
+    // side table, `dict::KINDS` gains `fuel`, `hotel`, `atm` and `bank`, and v1 bodies are no
+    // longer read. Every byte offset in the archive moves, so a warm cache must miss.
+    //
     // Revision 7: a `transit` feature carries the lane *inputs* (ordinal, colour count, taper)
     // rather than a baked offset, so the same feeds yield different transit records again.
     //
@@ -500,7 +498,7 @@ fn derive_build_id(
     // Revision 3: road `min_zoom` is decided per corridor (`corridor`), and place
     // `kind_detail` carries the reference basemap's 0-15 population rank rather than a
     // three-step one (`schema::places::rank_of`).
-    eat(b"mamaps_build/7");
+    eat(b"mamaps_build/8");
     eat(input.to_string_lossy().as_bytes());
     if let Ok(meta) = std::fs::metadata(input) {
         eat(&meta.len().to_le_bytes());
@@ -590,7 +588,7 @@ fn usage() {
         "usage: mamaps_build --input IN.osm.pbf --out OUT.mamaps\n\
          \x20                   [--layers earth,water,buildings,roads,boundaries,landcover,landuse]\n\
          \x20                   [--min-zoom N] [--max-zoom N]\n\
-         \x20                   [--coastline LAND.geojsonseq]\n\
+         \x20                   [--coastline LAND.shp|LAND.geojsonseq]\n\
          \x20                   [--transit-routes ROUTES.geojsonseq]\n\
          \x20                   [--simplification F] [--build-id N] [--report FILE]\n\
          \x20                   [--keep-store] [--reuse-store]\n\
@@ -600,9 +598,55 @@ fn usage() {
     );
 }
 
+/// Whether this build is allowed to proceed given what it was told about land.
+///
+/// **The coastline is required, with no way to decline it.** It used to be a warning, which is
+/// how an archive ends up with islands and no mainland: the line scrolls past in a build that
+/// takes hours and nobody reads it until the map is on a phone. A `--no-coastline` escape hatch
+/// then replaced the warning and reintroduced the same failure a keystroke at a time — it existed
+/// for the determinism harness, which did not want to stream a 1.3 GB shapefile three times, and
+/// a flag that exists for a test is a flag a real build will eventually be run with. The harness
+/// passes a real coastline now.
+///
+/// Building without land is still reachable, but only by saying what you mean: leave `earth` out
+/// of `--layers`, which produces an archive that has no land layer rather than one whose land
+/// layer is quietly wrong.
+fn check_coastline(coastline: Option<&std::path::Path>, earth: bool) -> Result<(), String> {
+    if coastline.is_some() && !earth {
+        return Err("--coastline was given but the earth layer is not selected".to_string());
+    }
+    if coastline.is_none() && earth {
+        return Err(
+            "--coastline is required: without it `earth` carries islands only and the map has \
+             no mainland. Pass the OSMCoastline land-polygons shapefile (or GeoJSONSeq). To \
+             build with no land at all, drop `earth` from --layers."
+                .to_string(),
+        );
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The coastline is **required**, and there is no flag that says otherwise.
+    ///
+    /// It used to print a line and carry on, which is how an archive ships with islands and no
+    /// mainland: the warning scrolls past in a build that takes hours and nobody sees it until
+    /// the map is on a phone. `--no-coastline` replaced that warning and brought the same
+    /// failure back as a one-word opt-in, so it is gone. Dropping `earth` from `--layers` is
+    /// the only way to build without land, and it says so in the layer set.
+    #[test]
+    fn a_build_with_earth_cannot_proceed_without_land() {
+        let shp = std::path::Path::new("land_polygons.shp");
+        assert!(check_coastline(Some(shp), true).is_ok(), "the normal build");
+        // Not selecting `earth` at all: there is no land layer to be missing.
+        assert!(check_coastline(None, false).is_ok());
+
+        assert!(check_coastline(None, true).is_err(), "silently landless");
+        assert!(check_coastline(Some(shp), false).is_err(), "land with no earth layer");
+    }
 
     /// The schema's own floor for buildings and the style's have to agree, or the archive either
     /// carries what nothing draws or is asked for what it does not carry.

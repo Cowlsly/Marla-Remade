@@ -290,6 +290,7 @@ fn main() {
                 coords: vec![(2048, 2048)],
             }],
             names: vec!["Testland".to_string()],
+            ids: Vec::new(),
         };
         let mesh = geometry::build(&body, layers, 6, 32, 40, false);
         println!(

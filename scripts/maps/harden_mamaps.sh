@@ -5,7 +5,7 @@
 # Run before publishing.
 #
 # Usage:
-#   ./harden_mamaps.sh --pbf california.osm.pbf [--out DIR] [--max-zoom 14]
+#   ./harden_mamaps.sh --pbf california.osm.pbf --coastline land_polygons.shp [--out DIR] [--max-zoom 14]
 #
 # What it proves:
 #
@@ -25,12 +25,13 @@
 set -euo pipefail
 
 PBF=""
+COASTLINE=""
 OUT="${TMPDIR:-/tmp}/mamaps_harden"
 MAX_ZOOM=14
-
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --pbf) PBF="$2"; shift 2 ;;
+    --coastline) COASTLINE="$2"; shift 2 ;;
     --out) OUT="$2"; shift 2 ;;
     --max-zoom) MAX_ZOOM="$2"; shift 2 ;;
     -h|--help) sed -n '2,26p' "$0"; exit 0 ;;
@@ -39,6 +40,13 @@ while [[ $# -gt 0 ]]; do
 done
 [[ -n "$PBF" ]] || { echo "harden_mamaps: --pbf is required" >&2; exit 2; }
 [[ -f "$PBF" ]] || { echo "harden_mamaps: $PBF does not exist" >&2; exit 1; }
+# mamaps_build requires a coastline whenever `earth` is selected and has no way to decline one,
+# so the harness has to stream the real shapefile. It used to pass --no-coastline to keep three
+# rebuilds cheap; that flag existed only for this script and was a standing invitation to ship a
+# landless archive, so it is gone. The cost is real but bounded: the reader streams and clips to
+# the extract's bbox, so a state-sized extract keeps a few hundred polygons out of ~871k.
+[[ -n "$COASTLINE" ]] || { echo "harden_mamaps: --coastline is required" >&2; exit 2; }
+[[ -f "$COASTLINE" ]] || { echo "harden_mamaps: $COASTLINE does not exist" >&2; exit 1; }
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
 mkdir -p "$OUT"
@@ -58,7 +66,7 @@ echo "== 1. byte-identical rebuilds at 1, 3 and 32 threads =="
 HASHES=()
 for threads in 1 3 32; do
   RAYON_NUM_THREADS="$threads" "$BUILD" \
-    --input "$PBF" --out "$OUT/t$threads.mamaps" --max-zoom "$MAX_ZOOM" >/dev/null
+    --input "$PBF" --out "$OUT/t$threads.mamaps" --max-zoom "$MAX_ZOOM" --coastline "$COASTLINE" >/dev/null
   h="$(sha "$OUT/t$threads.mamaps")"
   echo "  $threads thread(s): ${h:0:16}"
   HASHES+=("$h")
@@ -75,7 +83,7 @@ echo
 echo "== 2. a build id that follows its inputs =="
 id_of() { "$DUMP" "$1" --mode header | awk -F'\t' '$1=="build_id"{print $2}'; }
 BASE_ID="$(id_of "$OUT/t1.mamaps")"
-"$BUILD" --input "$PBF" --out "$OUT/shallow.mamaps" --max-zoom "$((MAX_ZOOM - 1))" >/dev/null
+"$BUILD" --input "$PBF" --out "$OUT/shallow.mamaps" --max-zoom "$((MAX_ZOOM - 1))" --coastline "$COASTLINE" >/dev/null
 SHALLOW_ID="$(id_of "$OUT/shallow.mamaps")"
 echo "  z0-$MAX_ZOOM        $BASE_ID"
 echo "  z0-$((MAX_ZOOM - 1))        $SHALLOW_ID"

@@ -292,6 +292,22 @@ impl Net {
         // and recording another. Each old `Buffer` frees itself as it is replaced, after the wait
         // above.
         if let Some(arena) = grown_arena {
+            // Carry the old arena over first.
+            //
+            // A wider plan needs a bigger arena, and a fresh `Buffer` holds undefined memory -
+            // so swapping it in silently replaced every **persistent** tensor with rubbish. The
+            // KV caches live there, which made this a wrong answer rather than a crash: the
+            // model attended over noise and produced fluent nonsense, non-deterministically,
+            // and only once a prompt was long enough to make the prefill plan outgrow the
+            // decode plan's arena. Short prompts never tripped it, which is why it survived
+            // every test until a 1,900-position prefix.
+            //
+            // Copying the whole old arena is more than the persistent tensors strictly need, but
+            // offsets are assigned per plan and the scratch above them is written before it is
+            // read - so the correct-by-construction thing is to preserve all of it.
+            // SAFETY: both buffers are live and owned here, the copy is inside its own submit,
+            // and nothing else touches either until the fence is waited on.
+            unsafe { self.copy_arena(&arena)? };
             self.pipelines.rebind_arena(&self.context.device, arena.buffer, arena.size);
             self.arena = arena;
         }
@@ -891,6 +907,35 @@ impl Net {
     }
 
     /// The mask's dimensions, which is what the Kotlin wrapper reports to its caller.
+    /// Copy the current arena into `into`, which must be at least as large.
+    ///
+    /// # Safety
+    ///
+    /// `into` must be a live device-local buffer of at least `self.arena.size` bytes, and no
+    /// work may be in flight on this net.
+    unsafe fn copy_arena(&mut self, into: &Buffer) -> Result<(), String> {
+        if self.arena.size == 0 {
+            return Ok(());
+        }
+        let device = &self.context.device;
+        // SAFETY: the caller guarantees `into` is live and large enough, and the command buffer
+        // is recorded and waited on entirely within this call.
+        unsafe {
+            device
+                .begin_command_buffer(self.command_buffer, &vk::CommandBufferBeginInfo::default())
+                .map_err(|e| format!("begin: {e:?}"))?;
+            let region = vk::BufferCopy::default().src_offset(0).dst_offset(0).size(self.arena.size);
+            device.cmd_copy_buffer(
+                self.command_buffer,
+                self.arena.buffer,
+                into.buffer,
+                std::slice::from_ref(&region),
+            );
+            device.end_command_buffer(self.command_buffer).map_err(|e| format!("end: {e:?}"))?;
+            self.run_once()
+        }
+    }
+
     /// Copy arena ranges out, as raw fp16 bytes, concatenated in the order given.
     ///
     /// Its own submit rather than a hook in the inference path: this runs twice in a process at
@@ -988,12 +1033,24 @@ impl Net {
         }
     }
 
-    /// Submit the recorded command buffer and wait for it.
+    /// Submit the recorded command buffer and wait for it, then restore the plan's recording.
+    ///
+    /// # The restore is not optional
+    ///
+    /// `Net` records its plan into `command_buffer` **once** and re-submits it for every
+    /// inference. The transfer helpers above record into that same buffer, which resets it - so
+    /// without putting the plan back, the next `infer` submits a buffer holding nothing but a
+    /// `vkCmdCopyBuffer`. No shader runs, the outputs are whatever the arena already held, and
+    /// the model answers with fluent nonsense.
+    ///
+    /// That is exactly what shipping the precomputed cache did: the bake prefilled correctly,
+    /// exported, and every generation *after* the export was reading a net that no longer had a
+    /// plan recorded.
     ///
     /// # Safety
     ///
     /// The command buffer must be recorded and ended, and not already in flight.
-    unsafe fn run_once(&self) -> Result<(), String> {
+    unsafe fn run_once(&mut self) -> Result<(), String> {
         let device = &self.context.device;
         let submit =
             vk::SubmitInfo::default().command_buffers(std::slice::from_ref(&self.command_buffer));
@@ -1011,7 +1068,37 @@ impl Net {
                 .wait_for_fences(&[self.fence], true, FENCE_TIMEOUT_NS)
                 .map_err(|e| format!("wait_for_fences {e:?}"))?;
         }
-        Ok(())
+        // SAFETY: the transfer above is complete - the fence was waited on - so the buffer is
+        // free to re-record.
+        unsafe { self.record() }
+    }
+
+    /// Bytes a second, measured by copying the arena to a scratch buffer of the same size.
+    ///
+    /// # What this settles
+    ///
+    /// `vkCmdCopyBuffer` is the simplest thing a GPU can do with memory: no unpacking, no
+    /// arithmetic, no descriptors. Whatever rate it reaches is the ceiling every kernel here is
+    /// working under.
+    ///
+    /// The decode step reads 1.32 GB and takes 270 ms, which is 4.9 GB/s. If a plain copy also
+    /// sits near that, the shaders are already at the memory system's limit and no amount of
+    /// saved arithmetic - integer dot products, fewer dispatches, better occupancy - can help.
+    /// If the copy is several times faster, the gap is arithmetic and worth chasing.
+    ///
+    /// Three passes, best kept: the first pays for the allocation and any first-touch cost.
+    pub fn copy_bandwidth(&mut self) -> Result<f64, String> {
+        let scratch = Buffer::device_local(&self.context, self.arena.size)?;
+        let mut best = f64::MAX;
+        for _ in 0..3 {
+            let started = std::time::Instant::now();
+            // SAFETY: `scratch` is live, exactly the arena's size, and nothing is in flight -
+            // `copy_arena` waits on its own fence before returning.
+            unsafe { self.copy_arena(&scratch)? };
+            best = best.min(started.elapsed().as_secs_f64());
+        }
+        // Read and written, so twice the buffer.
+        Ok((self.arena.size as f64 * 2.0) / best)
     }
 
     /// The first `positions` of every pinned tensor, as raw fp16 bytes.
@@ -1106,7 +1193,7 @@ fn binding_elems(bindings: &[crate::nets::Binding]) -> usize {
 /// the net, so the retry fails too and the user sees two dead turns rather than a slow one.
 ///
 /// Twenty still bounds a genuine hang; it just no longer calls slow hardware broken.
-const FENCE_TIMEOUT_NS: u64 = 20_000_000_000;
+const FENCE_TIMEOUT_NS: u64 = 60_000_000_000;
 
 fn push_bytes(push: &crate::nets::Push) -> &[u8] {
     // SAFETY: `Push` is `repr(C)` and entirely `u32`, so it has no padding and no

@@ -102,7 +102,7 @@ mod tests {
         });
         roads.parts.push(Part { coord_start: 0, point_count: 2, winding: WINDING_OUTER });
         roads.coords = vec![(0, 0), (seed, seed)];
-        Body { extent: DEFAULT_EXTENT, layers: vec![roads], names: Vec::new() }
+        Body { extent: DEFAULT_EXTENT, layers: vec![roads], names: Vec::new(), ids: Vec::new() }
     }
 
     /// An archive of `(z, x, y, seed)` tiles, fed in ascending id order as the writer requires.
@@ -189,7 +189,7 @@ mod tests {
                 ((state >> 33) as i16, (state >> 17) as i16)
             })
             .collect();
-        Body { extent: DEFAULT_EXTENT, layers: vec![roads], names: Vec::new() }
+        Body { extent: DEFAULT_EXTENT, layers: vec![roads], names: Vec::new(), ids: Vec::new() }
     }
 
     #[test]
@@ -656,7 +656,7 @@ mod tests {
             l.parts.push(crate::mamaps::body::Part{coord_start:0,point_count:2,winding:0});
             l.coords = vec![(0,0),(seed,seed)];
             vec![l]
-        }, names: Vec::new() }).expect("append"); }
+        }, names: Vec::new(), ids: Vec::new() }).expect("append"); }
         let bytes = w.finish().expect("finish");
         let hdr = crate::mamaps::Header::parse(&bytes).expect("hdr");
         assert_eq!(hdr.leaf_count as usize, (5000+4096-1)/4096);

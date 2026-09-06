@@ -15,10 +15,10 @@ import kotlinx.serialization.json.putJsonObject
 /**
  * Native basemap layers suppressed at runtime.
  *
- * The base archive still carries Protomaps' own `pois`, but we draw POIs ourselves
- * from the baked `ma_pois` overlay (see MaPoisLayer), so leaving the base layer on
- * would double every pin. Keeping this in code (vs editing style.json) makes it
- * OTA-swappable per Decision D1.
+ * The base archive still carries Protomaps' own `pois`. This predates the Vulkan renderer,
+ * which draws POIs from the archive itself and needs no suppression; it survives for the
+ * MapLibre style path. Keeping it in code (vs editing style.json) makes it OTA-swappable
+ * per Decision D1.
  */
 private val SUPPRESSED_LAYERS = setOf("pois")
 

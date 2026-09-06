@@ -23,7 +23,7 @@ use crate::tile::source::{
     basemap_origin, CachingRangeReader, JniRangeFetcher, BASEMAP_ARCHIVE_URL,
 };
 use crate::vulkan::context::{ANativeWindow_acquire, ANativeWindow_fromSurface};
-use crate::vulkan::renderer::Renderer;
+use crate::vulkan::renderer::{Renderer, UserPuck};
 use jni::objects::{JClass, JObject, JString};
 use jni::sys::{jboolean, jfloat, jint, jlong};
 use jni::JNIEnv;
@@ -328,9 +328,9 @@ fn spawn_worker(
                 let key = tile.key();
 
                 // Read per tile, not once per worker: a toggle change has to reach the
-                // very next tile built, and both halves come from one atomic load so the
+                // very next tile built, and all three parts come from one snapshot so the
                 // stamp can never describe different flags than the mesh was built with.
-                let (enabled, generation) = toggles.get();
+                let (enabled, kinds, generation) = toggles.get();
                 let result = match archive.tile(tile.z, tile.x, tile.y) {
                     Ok(Some(body)) => TileResult::Ready(geometry::build_toggled(
                         &body,
@@ -340,6 +340,7 @@ fn spawn_worker(
                         tile.y,
                         rings_validated,
                         enabled,
+                        &kinds,
                         generation,
                     )),
                     Ok(None) => TileResult::Absent,
@@ -400,10 +401,10 @@ fn spawn_file_worker(
                 };
                 let Ok(tile) = next else { return };
                 let key = tile.key();
-                let (enabled, generation) = toggles.get();
+                let (enabled, kinds, generation) = toggles.get();
                 let result = match archive.tile(tile.z, tile.x, tile.y) {
                     Ok(Some(body)) => TileResult::Ready(geometry::build_toggled(
-                        &body, layers, tile.z, tile.x, tile.y, rings_validated, enabled,
+                        &body, layers, tile.z, tile.x, tile.y, rings_validated, enabled, &kinds,
                         generation,
                     )),
                     Ok(None) => TileResult::Absent,
@@ -527,7 +528,7 @@ pub extern "system" fn Java_com_vayunmathur_library_map_MapNative_render<'l>(
     // toggle change re-requests the resident set through this same loop rather than
     // needing a path of its own. The stale mesh keeps drawing until its replacement
     // arrives.
-    let (_, generation) = map.toggles.get();
+    let (_, _, generation) = map.toggles.get();
     let keep: Vec<u64> =
         select::resident_set(&camera, min_zoom, max_zoom).iter().map(|t| t.key()).collect();
     for tile in select::visible(&camera, min_zoom, max_zoom) {
@@ -613,7 +614,48 @@ pub extern "system" fn Java_com_vayunmathur_library_map_MapNative_setPalette<'l>
     }
 }
 
-/// Turn the optional layers on or off.
+/// Show the user-location puck at `lon`/`lat`, drawn inside the renderer's own frame.
+///
+/// Free in the same sense as
+/// [`setPalette`](Java_com_vayunmathur_library_map_MapNative_setPalette): pure state,
+/// nothing re-tessellated and nothing re-uploaded. The quad is already on the GPU and
+/// everything that varies about the puck is a push constant.
+///
+/// `bearing` is degrees clockwise from north and is only read when `has_bearing` is set;
+/// without it the dot draws and the cone does not, which is what a fix with no heading
+/// should look like rather than one pointing north.
+#[no_mangle]
+pub extern "system" fn Java_com_vayunmathur_library_map_MapNative_setUserPuck<'l>(
+    _env: JNIEnv<'l>,
+    _class: JClass<'l>,
+    handle: jlong,
+    lon: jfloat,
+    lat: jfloat,
+    bearing: jfloat,
+    has_bearing: jboolean,
+) {
+    if let Some(map) = handle_mut(handle) {
+        map.renderer.set_user_puck(Some(UserPuck {
+            lon: lon as f64,
+            lat: lat as f64,
+            bearing: (has_bearing != 0).then_some(bearing),
+        }));
+    }
+}
+
+/// Take the puck away: no fix, or a host that stopped asking for one.
+#[no_mangle]
+pub extern "system" fn Java_com_vayunmathur_library_map_MapNative_clearUserPuck<'l>(
+    _env: JNIEnv<'l>,
+    _class: JClass<'l>,
+    handle: jlong,
+) {
+    if let Some(map) = handle_mut(handle) {
+        map.renderer.set_user_puck(None);
+    }
+}
+
+/// Turn the optional layers on or off, and narrow POI to a set of kinds.
 ///
 /// Not free, unlike [`setPalette`](Java_com_vayunmathur_library_map_MapNative_setPalette):
 /// POI and transit are gated at tessellation time so that leaving them off costs nothing,
@@ -622,20 +664,37 @@ pub extern "system" fn Java_com_vayunmathur_library_map_MapNative_setPalette<'l>
 /// them through the existing worker pool, reading the archive it already has. Nothing is
 /// refetched, nothing is evicted, and the old meshes keep drawing until the new ones land.
 ///
+/// `kinds` is a comma-separated list of archive kind names — the app's category chips. Empty
+/// means every kind the style draws. A name the schema has no id for is skipped rather than
+/// refused: the chip list is app data and a typo there should narrow the map oddly, not blank it.
+///
 /// A call that changes nothing bumps nothing, because the host is expected to call this
 /// from a Compose effect that may re-run for unrelated reasons.
 #[no_mangle]
 pub extern "system" fn Java_com_vayunmathur_library_map_MapNative_setLayers<'l>(
-    _env: JNIEnv<'l>,
+    mut env: JNIEnv<'l>,
     _class: JClass<'l>,
     handle: jlong,
     poi: jboolean,
     transit: jboolean,
+    kinds: JString<'l>,
 ) {
+    let names: String = env.get_string(&kinds).map(Into::into).unwrap_or_default();
+    let filter = style::KindFilter::new(
+        names
+            .split(',')
+            .map(str::trim)
+            .filter(|name| !name.is_empty())
+            .filter_map(style::kind_id)
+            .collect(),
+    );
     if let Some(map) = handle_mut(handle) {
         let wanted = LayerToggles { poi: poi != 0, transit: transit != 0 };
-        if map.toggles.set(wanted) {
-            log_info(&format!("layers changed: poi={} transit={}", wanted.poi, wanted.transit));
+        if map.toggles.set(wanted, filter) {
+            log_info(&format!(
+                "layers changed: poi={} transit={} kinds=[{names}]",
+                wanted.poi, wanted.transit,
+            ));
         }
     }
 }
@@ -668,10 +727,14 @@ pub extern "system" fn Java_com_vayunmathur_library_map_MapNative_destroy<'l>(
 }
 
 /// Task-17 pick: placed labels intersecting the query box (Dp from the
-/// viewport top-left). Returns `\u{1}`-joined `layerId/name/kind/lon/lat`
-/// strings in placement order; empty when nothing hits. Dp→device-px via the
+/// viewport top-left). Returns `\u{1}`-joined `layerId/name/kind/lon/lat/featureId`
+/// strings in placement order (topmost first); empty when nothing hits. Dp→device-px via the
 /// last frame's density, remembered on the map handle (same density the
 /// boxes were built with — boxes are device px, the query arrives in Dp).
+///
+/// `kind` is the feature's own kind, not its layer's first one, so a `poi-food` hit says
+/// `cafe` rather than `restaurant`. `featureId` is the archive's stable id, or `0` for a
+/// feature that has none.
 #[no_mangle]
 pub extern "system" fn Java_com_vayunmathur_library_map_MapNative_pickLabels<'l>(
     mut env: JNIEnv<'l>,
@@ -702,7 +765,10 @@ pub extern "system" fn Java_com_vayunmathur_library_map_MapNative_pickLabels<'l>
     };
     for (i, h) in hits.iter().enumerate() {
         let layer_id = layers.get(h.layer_index).map(|l| l.id.as_str()).unwrap_or("");
-        let s = format!("{}\u{1}{}\u{1}{}\u{1}{}\u{1}{}", layer_id, h.name, h.kind, h.lon, h.lat);
+        let s = format!(
+            "{}\u{1}{}\u{1}{}\u{1}{}\u{1}{}\u{1}{}",
+            layer_id, h.name, h.kind, h.lon, h.lat, h.feature_id,
+        );
         let Ok(js) = env.new_string(s) else { continue };
         let _ = env.set_object_array_element(&out, i as i32, js);
     }

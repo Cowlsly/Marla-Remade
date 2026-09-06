@@ -62,6 +62,8 @@ const LINE_FRAG: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/line.frag.spv
 const SYMBOL_VERT: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/symbol.vert.spv"));
 const SYMBOL_FRAG: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/symbol.frag.spv"));
 const SPRITE_FRAG: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/sprite.frag.spv"));
+const PUCK_VERT: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/puck.vert.spv"));
+const PUCK_FRAG: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/puck.frag.spv"));
 
 pub struct Pipelines {
     pub layout: vk::PipelineLayout,
@@ -76,6 +78,14 @@ pub struct Pipelines {
     /// field. Sharing the layout is what lets the renderer swap atlases with a descriptor
     /// bind instead of a second pipeline layout.
     pub sprite: vk::Pipeline,
+    /// Screen-anchored overlay quads — today only the user puck. Takes the push-only
+    /// [`layout`](Self::layout), not [`symbol_layout`](Self::symbol_layout), because it
+    /// samples nothing: the puck is drawn analytically from a distance and an angle, so
+    /// there is no atlas and no descriptor set.
+    ///
+    /// Built here rather than bolted onto the renderer so it survives `Renderer::rebuild`,
+    /// which destroys and remakes every `Pipelines` on each resize and rotation.
+    pub puck: vk::Pipeline,
 }
 
 impl Pipelines {
@@ -108,6 +118,8 @@ impl Pipelines {
         let symbol_vert = shader_module(device, SYMBOL_VERT)?;
         let symbol_frag = shader_module(device, SYMBOL_FRAG)?;
         let sprite_frag = shader_module(device, SPRITE_FRAG)?;
+        let puck_vert = shader_module(device, PUCK_VERT)?;
+        let puck_frag = shader_module(device, PUCK_FRAG)?;
 
         let fill_attributes = [vk::VertexInputAttributeDescription::default()
             .location(0)
@@ -191,6 +203,8 @@ impl Pipelines {
                 device.destroy_shader_module(symbol_vert, None);
                 device.destroy_shader_module(symbol_frag, None);
                 device.destroy_shader_module(sprite_frag, None);
+                device.destroy_shader_module(puck_vert, None);
+                device.destroy_shader_module(puck_frag, None);
                 device.destroy_pipeline_layout(layout, None);
                 return Err("symbol pipeline needs an atlas descriptor set layout".into());
             }
@@ -216,6 +230,19 @@ impl Pipelines {
             &symbol_attributes,
         );
 
+        // The overlay quad is position-only in -1..1, so it shares the fill vertex
+        // format and its 8-byte stride.
+        let puck = build(
+            device,
+            layout,
+            render_pass,
+            samples,
+            puck_vert,
+            puck_frag,
+            (fill::FLOATS_PER_VERTEX * 4) as u32,
+            &fill_attributes,
+        );
+
         // The modules are only needed while the pipelines are being created.
         device.destroy_shader_module(fill_vert, None);
         device.destroy_shader_module(fill_frag, None);
@@ -224,13 +251,15 @@ impl Pipelines {
         device.destroy_shader_module(symbol_vert, None);
         device.destroy_shader_module(symbol_frag, None);
         device.destroy_shader_module(sprite_frag, None);
+        device.destroy_shader_module(puck_vert, None);
+        device.destroy_shader_module(puck_frag, None);
 
-        match (fill, line, symbol, sprite) {
-            (Ok(fill), Ok(line), Ok(symbol), Ok(sprite)) => {
-                Ok(Pipelines { layout, symbol_layout, fill, line, symbol, sprite })
+        match (fill, line, symbol, sprite, puck) {
+            (Ok(fill), Ok(line), Ok(symbol), Ok(sprite), Ok(puck)) => {
+                Ok(Pipelines { layout, symbol_layout, fill, line, symbol, sprite, puck })
             }
-            (fill, line, symbol, sprite) => {
-                for created in [fill, line, symbol, sprite].into_iter().flatten() {
+            (fill, line, symbol, sprite, puck) => {
+                for created in [fill, line, symbol, sprite, puck].into_iter().flatten() {
                     device.destroy_pipeline(created, None);
                 }
                 device.destroy_pipeline_layout(symbol_layout, None);
@@ -248,6 +277,7 @@ impl Pipelines {
         device.destroy_pipeline(self.line, None);
         device.destroy_pipeline(self.symbol, None);
         device.destroy_pipeline(self.sprite, None);
+        device.destroy_pipeline(self.puck, None);
         device.destroy_pipeline_layout(self.symbol_layout, None);
         device.destroy_pipeline_layout(self.layout, None);
     }

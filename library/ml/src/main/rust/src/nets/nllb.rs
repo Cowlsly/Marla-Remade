@@ -866,10 +866,14 @@ mod tests {
             assert_eq!(*kind, Kind::ConvPointInt8, "{push:?}");
             assert_eq!(push.out_w, LEN, "{push:?}");
         }
-        // One workgroup per group of eight output channels, 64 invocations each.
+        // One workgroup per group of `CONV_VEC_ROWS` output channels, 64 invocations each.
+        //
+        // Derived rather than written out: the group size is an occupancy tuning knob and was
+        // eight when this was written. Hard-coding it here meant tuning it failed a test about
+        // NLLB's decode shape, which is not what this is checking.
         for (_, push, invocations) in &vector {
             assert_eq!(push.out_h * push.out_w, 1, "{push:?}");
-            assert_eq!(push.count, push.out_c.div_ceil(8), "{push:?}");
+            assert_eq!(push.count, push.out_c.div_ceil(super::super::CONV_VEC_ROWS), "{push:?}");
             assert_eq!(*invocations, push.count * 64, "{push:?}");
         }
     }

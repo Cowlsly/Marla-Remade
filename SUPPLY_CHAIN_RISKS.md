@@ -172,6 +172,13 @@ Summed old per-crate locks (before workspace) = 712 total (641 excluding voxels)
 | `com.google.zxing:core` | `3.5.4` | `messages` (QR), `library:ocr`, `pdf` | Old, community fork `zxing-cpp` preferred | `libs.versions.toml:83` |
 | `com.google.ai.edge.litertlm:litertlm-android` | `0.14.0` experimental | `openassistant` | Google AI Edge experimental, GPU backend `libLiteRtTopKOpenClSampler.so`, requires `kotlinx-coroutines 1.11.0` conflict win | `openassistant/build.gradle.kts`, `libs.versions.toml:30` |
 
+### Vendored Assets (compiled in, no runtime fetch)
+
+| Asset | Source | Licence | Notes | File |
+|---|---|---|---|---|
+| POI sprite sheet, entries 1-53 | `protomaps/basemaps-assets` `sprites/v4/light@2x` | BSD-3-Clause | Vendored unchanged from upstream; also mirrored at `data.vayunmathur.com/basemaps-assets/`. Compiled into `libmap_renderer.so`, never fetched at runtime | `library/map/src/main/rust/assets/sprites/sprites@2x.{png,json}` |
+| POI sprite sheet, entries 54-57 (`fuel`, `hotel`, `bank`, `atm`) | `mapbox/maki` glyphs on a badge lifted from the Protomaps sheet | **CC0 1.0** (public domain, no attribution required) | Protomaps' style draws none of these four kinds, so no upstream sheet has ever carried an icon for them — but the `maps` app has offered Gas, Hotels and ATM chips all along. Regenerate with `analysis/spritepack/pack.py` | same as above |
+
 ### Low Risk / Platform (Google/JetBrains) — Not Critical
 
 Well-maintained: `androidx.*` (`core-ktx 1.19.0`, `lifecycle 2.11.0`, `room3 3.0.2`, `sqlite 2.7.0`, `work 2.11.2`, `datastore`, `camera`, `webkit`, `browser 1.9.0`, `biometric`, `glance`, `exifinterface`, `credentials`, `autofill`), `composeBom 2026.06.01`, `material3 1.5.0-alpha23`, `material 1.14.0`, `foundation 1.12.0-beta02`, `ink 1.1.0-alpha04`, `navigation3`, `media3-exoplayer 1.11.0-beta01`, `okhttp 4.12.0` + `okio 3.17.0`, `kotlin 2.4.0` + `coroutines 1.11.0` + `serialization-json 1.11.0` + `datetime 0.8.0`, `ksp 2.3.10`, `protobuf 4.36.0-RC1` / `protobuf-javalite 4.35.0`, `libphonenumber 9.0.34`, `fhir-model 1.0.0-beta02`, `health/connect-client 1.2.0-alpha04`, etc.

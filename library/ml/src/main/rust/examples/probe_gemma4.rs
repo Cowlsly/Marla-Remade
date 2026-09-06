@@ -63,6 +63,23 @@ fn main() {
             println!("  {:.1} MB of arena", f64::from(plan.arena_elems) * 2.0 / 1e6);
             let classes: u32 = plan.outputs.iter().map(|b| b.shape.c).sum();
             println!("  {classes} logits over {} splits", plan.outputs.len());
+            {
+                use std::collections::BTreeMap;
+                let mut tally: BTreeMap<String, usize> = BTreeMap::new();
+                for op in &plan.ops {
+                    let name = match op {
+                        modelrunner::nets::Op::Dispatch { kind, .. } => format!("{kind:?}"),
+                        modelrunner::nets::Op::Copy { .. } => "Copy".to_string(),
+                    };
+                    *tally.entry(name).or_default() += 1;
+                }
+                let mut rows: Vec<_> = tally.into_iter().collect();
+                rows.sort_by_key(|(_, n)| std::cmp::Reverse(*n));
+                println!("  ops by kind, {} total:", plan.ops.len());
+                for (name, n) in rows {
+                    println!("    {n:5}  {:6.2} per layer  {name}", n as f64 / 35.0);
+                }
+            }
             println!("  {} pinned", plan.pinned.len());
             for (i, b) in plan.pinned.iter().take(3).enumerate() {
                 println!("    pinned {i}: c={} h={} w={}", b.shape.c, b.shape.h, b.shape.w);

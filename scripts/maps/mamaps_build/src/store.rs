@@ -76,6 +76,13 @@ const LANE_KEY: &str = "s";
 /// so the spill pays nothing for the 190 M features that have no name.
 const NAME_KEY: &str = "n";
 
+/// The property key a label's tagged OSM element id travels under, as a `Uint`.
+///
+/// Only `places` and `poi` features set it, and only when the element had an id to carry. Absent
+/// (not zero) otherwise, so the spill pays nothing for the 190 M features that have none — the
+/// same bargain [`NAME_KEY`] makes.
+const ID_KEY: &str = "i";
+
 /// A [`Class`] as one integer, so a feature's classification costs one property rather than seven.
 ///
 /// | field | bits | width |
@@ -163,7 +170,7 @@ impl Sink {
     }
 
     pub fn push(&mut self, class: &Class, geometry: &Geometry) -> Result<()> {
-        self.push_named(class, geometry, None)
+        self.push_named(class, geometry, None, tilecodec::mamaps::body::ID_NONE)
     }
 
     /// Push a transit line: like [`Sink::push`], plus the route colour that becomes the body's
@@ -190,20 +197,37 @@ impl Sink {
         self.write_record(class, geometry)
     }
 
-    /// Push a feature with an optional display name (labels: `places` and `poi`).
+    /// Push a feature with an optional display name (labels: `places` and `poi`) and, for those
+    /// same two layers, the tagged OSM id it came from.
     ///
-    /// One prop on the wire for the nameless 190 M, two for the named few: the spill encodes a
-    /// per-record prop count, so variable shapes cost nothing. `feature_of` reads both back.
+    /// One prop on the wire for the nameless, idless 190 M and up to three for a label: the spill
+    /// encodes a per-record prop count, so variable shapes cost nothing. `feature_of` reads them
+    /// all back.
+    ///
+    /// An id on any layer but `places` or `poi` is refused rather than dropped. Those are the only
+    /// two the archive's id table carries, and a caller passing one elsewhere has misunderstood
+    /// which features have a stable identity — `coalesce` merges lines and areas, so theirs would
+    /// be whichever input happened to survive.
     pub fn push_named(
         &mut self,
         class: &Class,
         geometry: &Geometry,
         name: Option<&str>,
+        id: u64,
     ) -> Result<()> {
         self.props[0].1 = Value::Uint(pack(class)?);
         self.props.truncate(1);
         if let Some(name) = name.filter(|n| !n.is_empty()) {
             self.props.push((NAME_KEY.to_string(), Value::String(name.to_string())));
+        }
+        if id != tilecodec::mamaps::body::ID_NONE {
+            if !crate::extract::is_label(class.layer) {
+                return err(format!(
+                    "layer {} carries a feature id, which only places and poi may",
+                    class.layer,
+                ));
+            }
+            self.props.push((ID_KEY.to_string(), Value::Uint(id)));
         }
         self.write_record(class, geometry)
     }
@@ -362,13 +386,18 @@ impl Provenance {
 /// Magic and version of the sidecar index. Bumped whenever the layout below changes, so an index
 /// written by an older build is refused rather than misread.
 ///
+/// v4: `places` and `poi` features carry a tagged OSM id under the `i` property key. A v3 spill
+/// has none, and `--reuse-store` over one would feed idless features to a tiler that now builds
+/// an id table from them — producing an archive whose POIs are silently unidentifiable rather
+/// than a build that fails.
+///
 /// v3: `transit_routes` joins `coastline`, because the `transit` layer is now sourced from a GTFS
 /// export rather than the `.pbf` -- so a spill built without one is missing a whole layer.
 ///
 /// v2: `layers` widened to `u16` (ten layers) and the spill's packed class widened its layer
 /// field to 4 bits, so a v1 spill would misdecode every feature. Refused here, not there.
 const INDEX_MAGIC: &[u8; 8] = b"MAMASTOR";
-const INDEX_VERSION: u32 = 3;
+const INDEX_VERSION: u32 = 4;
 
 impl Store {
     /// Write the sidecar that lets [`Store::open`] skip stage A.
@@ -622,7 +651,7 @@ impl Store {
                     feature.transit_taper,
                 )?;
             } else {
-                sink.push_named(&feature.class, &feature.geometry, feature.name.as_deref())?;
+                sink.push_named(&feature.class, &feature.geometry, feature.name.as_deref(), feature.id)?;
             }
         }
         sink.finish(&path)
@@ -634,14 +663,15 @@ impl Store {
 /// A record whose class property is missing or is not an integer is a corrupt file rather than a
 /// feature to skip: everything in here was written by [`Sink::push`] one run ago, so anything else
 /// means the file is not the one we wrote. A `n` string property rides along as the display
-/// name, a `t` integer as the transit colour and an `s` integer as its packed lane inputs;
-/// anything else in there is corruption for the same reason.
+/// name, a `t` integer as the transit colour, an `s` integer as its packed lane inputs and an `i`
+/// integer as the tagged OSM id; anything else in there is corruption for the same reason.
 fn feature_of(record: tile_build::spill::NormalizedFeature) -> Result<Feature> {
     let bits = match record.props.iter().find(|(key, _)| key == CLASS_KEY) {
         Some((_, Value::Uint(bits))) => *bits,
         _ => return err("a spilled feature carries no packed class".to_string()),
     };
     let mut name: Option<String> = None;
+    let mut id: u64 = tilecodec::mamaps::body::ID_NONE;
     let mut transit_color: u32 = 0;
     let mut transit_ordinal: u8 = 0;
     let mut transit_lanes: u8 = 0;
@@ -668,6 +698,12 @@ fn feature_of(record: tile_build::spill::NormalizedFeature) -> Result<Feature> {
                 transit_lanes = (lane_bits >> 8) as u8;
                 transit_taper = *lane_bits as u8;
             }
+            (ID_KEY, Value::Uint(tagged)) => {
+                if id != tilecodec::mamaps::body::ID_NONE {
+                    return err("a spilled feature carries two ids".to_string());
+                }
+                id = *tagged;
+            }
             _ => {
                 return err(format!("a spilled feature carries an unknown property `{key}`"));
             }
@@ -677,6 +713,7 @@ fn feature_of(record: tile_build::spill::NormalizedFeature) -> Result<Feature> {
         class: unpack(bits),
         geometry: record.geometry,
         name,
+        id,
         transit_color,
         transit_ordinal,
         transit_lanes,

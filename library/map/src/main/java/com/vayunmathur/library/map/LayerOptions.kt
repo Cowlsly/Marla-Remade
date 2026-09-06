@@ -28,12 +28,29 @@ data class LayerOptions(
     /**
      * Points of interest: an icon plus a wrapped label per feature, at z17 and deeper.
      *
-     * Matches the reference basemap's `pois` layer — the same 36 kinds, the same sprite
-     * sheet, the same six-way colour split by kind, and the same left/right anchor flip at
-     * the screen edge. Density is governed by the archive, which drops each kind below its
+     * Matches the reference basemap's `pois` layer — the same sprite sheet, the same six-way
+     * colour split by kind, and the same left/right anchor flip at the screen edge. Forty
+     * kinds: the reference's thirty-six plus `fuel`, `hotel`, `bank` and `atm`, which it
+     * draws none of. Density is governed by the archive, which drops each kind below its
      * own minimum zoom, so this stays empty at world zoom whatever the flag says.
      */
     val poi: Boolean = false,
+    /**
+     * Narrow [poi] to these archive kind names (`cafe`, `fuel`, `hotel`, …). Empty draws
+     * every kind the style has, which is the default.
+     *
+     * This is what a category-chip row filters with. It is a *sub-layer* filter — the six
+     * `poi-*` layers hold forty kinds between them and a chip selects a handful — so it
+     * cannot be expressed by turning layers off. Basemap layers are never narrowed by it:
+     * selecting "Coffee" hides other POIs, not the roads.
+     *
+     * A name the archive schema does not know is ignored rather than treated as an error.
+     *
+     * Costs what [poi] costs: the filter is applied at tessellation time, so changing it
+     * re-tessellates the resident set. Order does not matter and duplicates are fine —
+     * equality is by content, so a freshly-built set each recomposition is a no-op.
+     */
+    val poiKinds: Set<String> = emptySet(),
     /**
      * Rail transit lines, coloured per route.
      *

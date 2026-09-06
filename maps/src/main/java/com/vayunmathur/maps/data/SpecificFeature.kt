@@ -87,10 +87,9 @@ fun JsonObject.string(key: String): String? = this[key]?.jsonPrimitive?.content
 /**
  * Resolve a tapped basemap feature into a [SpecificFeature].
  *
- * Amenities come from the baked `ma_pois` layer and are tapped there (see
- * [com.vayunmathur.maps.ui.toSelectedMaPoi]), so this no longer reads the amenities DB: it only
- * handles the country/region/city admin labels (Wikidata-backed). Everything else
- * returns null, since native POIs are suppressed in the style.
+ * Amenities are drawn by the renderer and picked there, arriving as `MapClick.poi`, so this
+ * no longer reads the amenities DB: it only handles the country/region/city admin labels
+ * (Wikidata-backed). Everything else returns null.
  */
 suspend fun parse(feature: Feature1): SpecificFeature? {
     val properties = feature.properties ?: return null

@@ -206,6 +206,14 @@ pub const KINDS: &[&str] = &[
     "museum",
     "theatre",
     "artwork",
+    // v3, append-only. The `maps` app's category chips have always offered Gas, Hotels and ATMs;
+    // the archive had no kind for any of them, so those three chips could only ever have filtered
+    // a POI set that did not contain their subject. `bank` comes along because `atm` alone misses
+    // the machines that are attached to a branch and tagged only as one.
+    "fuel",
+    "hotel",
+    "atm",
+    "bank",
 ];
 
 /// Every `kind_detail` value, id 1 upward. Index 0 is [`NONE`].

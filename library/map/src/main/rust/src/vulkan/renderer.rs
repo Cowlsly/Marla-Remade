@@ -67,6 +67,58 @@ struct Frame {
     render_finished: vk::Semaphore,
 }
 
+/// The user's own location, as the host last reported it.
+///
+/// `bearing` is degrees clockwise from north, and `None` when the fix carries no heading
+/// — which is what a cold start looks like before the compass has settled. That is a
+/// different thing from a heading of zero, and drawing them the same way points the cone
+/// spuriously north for the first second of every session.
+#[derive(Clone, Copy, Debug)]
+pub struct UserPuck {
+    pub lon: f64,
+    pub lat: f64,
+    pub bearing: Option<f32>,
+}
+
+/// Something drawn on top of every tile, from the same camera value as the tiles.
+///
+/// One variant today. It is an enum rather than an `Option<UserPuck>` field because the
+/// route line and the pins are the next things to move in here, and the pass below is
+/// written as "draw the overlays this frame has" so they can arrive one at a time.
+enum Overlay {
+    Puck(UserPuck),
+}
+
+/// The unit quad every screen-anchored overlay draws with: four vertices in −1..1 and the
+/// two triangles over them.
+///
+/// Uploaded once in [`Renderer::new`], because everything that varies about an overlay —
+/// where it is, how big, what colour, which way it points — rides in the matrix and the
+/// push constants. So the per-frame cost is one `cmd_push_constants` and one
+/// `cmd_draw_indexed`, not the pair of `vkAllocateMemory` calls a transient buffer pays.
+struct Quad {
+    vertices: Buffer,
+    indices: Buffer,
+}
+
+/// The four corners of the unit square, in the −1..1 the puck shaders read as a local
+/// coordinate.
+const QUAD_VERTICES: [f32; 8] = [-1.0, -1.0, 1.0, -1.0, 1.0, 1.0, -1.0, 1.0];
+const QUAD_INDICES: [u32; 6] = [0, 1, 2, 0, 2, 3];
+
+/// The puck's blue, from the `drawUserIcon` in `maps` this replaces.
+const PUCK_COLOR: u32 = 0xFF0E_35F1;
+/// The white rim's radius in Dp, and the blue dot's on top of it.
+const PUCK_RIM_DP: f32 = 9.5;
+const PUCK_DOT_DP: f32 = 8.0;
+/// The bearing cone: the radius its stroke is centred on, and half that stroke's width.
+const PUCK_CONE_DP: f32 = 20.0;
+const PUCK_CONE_HALF_STROKE_DP: f32 = 4.0;
+/// The quad's radius. The cone's outer edge is at 24 Dp, but its radial gradient only
+/// reaches zero at 28 — the radius the Compose original's `Brush.radialGradient` used —
+/// so a quad any tighter would clip the falloff.
+const PUCK_QUAD_DP: f32 = 28.0;
+
 pub struct Renderer {
     context: Context,
     swapchain: Swapchain,
@@ -112,6 +164,10 @@ pub struct Renderer {
     /// anchor lon/lat — so `pick_labels` answers without re-tessellating.
     /// Refreshed by `record_inner` every frame; read by the JNI pick path.
     placed: std::cell::RefCell<Vec<PlacedHit>>,
+    /// What this frame draws on top of every tile, in order. See [`Overlay`].
+    overlays: Vec<Overlay>,
+    /// The geometry every overlay shares, uploaded once.
+    quad: Quad,
 }
 
 /// One placed label as the pick path sees it: everything `pickLabels` needs
@@ -126,9 +182,26 @@ pub struct PlacedHit {
     pub name: String,
     /// Kind string (`country`/`region`/`locality`/…).
     pub kind: String,
+    /// The archive's stable id for the feature, or
+    /// [`ID_NONE`](tilecodec::mamaps::body::ID_NONE) when it has none. Lets the host rejoin the
+    /// hit against its own data without matching on name and position.
+    pub feature_id: u64,
     /// Anchor lon/lat in degrees.
     pub lon: f64,
     pub lat: f64,
+}
+
+/// The interned `kind`'s name, or empty when it is [`dict::NONE`] or past the table.
+///
+/// The archive stores kinds as ids into a frozen dictionary; the pick path reports names,
+/// because that is what the host filters and switches on.
+fn kind_name(kind: u16) -> String {
+    use tilecodec::mamaps::dict;
+    usize::from(kind)
+        .checked_sub(1)
+        .and_then(|at| dict::KINDS.get(at))
+        .map(|name| (*name).to_string())
+        .unwrap_or_default()
 }
 
 impl Renderer {
@@ -223,6 +296,26 @@ impl Renderer {
         let width = swapchain.extent.width;
         let height = swapchain.extent.height;
 
+        // The overlay geometry, uploaded once and never touched again. Unlike the
+        // atlases this is not optional: it is 32 bytes of vertices, and a device that
+        // cannot allocate that cannot draw a tile either.
+        let quad = Quad {
+            vertices: Buffer::upload(
+                &context.instance,
+                context.physical_device,
+                &context.device,
+                vk::BufferUsageFlags::VERTEX_BUFFER,
+                &QUAD_VERTICES,
+            )?,
+            indices: Buffer::upload(
+                &context.instance,
+                context.physical_device,
+                &context.device,
+                vk::BufferUsageFlags::INDEX_BUFFER,
+                &QUAD_INDICES,
+            )?,
+        };
+
         Ok(Renderer {
             context,
             swapchain,
@@ -244,7 +337,21 @@ impl Renderer {
             needs_rebuild: false,
             submitted_draws: Cell::new(0),
             placed: std::cell::RefCell::new(Vec::new()),
+            overlays: Vec::new(),
+            quad,
         })
+    }
+
+    /// Show the user-location puck, or take it away with `None`.
+    ///
+    /// Pure state, like [`set_palette`](crate::bridge): a fix arrives at about 1 Hz while
+    /// the frame loop runs at 60, so the puck is set out of band and read by whichever
+    /// frame happens next, rather than being an argument on [`render`](Self::render).
+    pub fn set_user_puck(&mut self, puck: Option<UserPuck>) {
+        self.overlays.retain(|overlay| !matches!(overlay, Overlay::Puck(_)));
+        if let Some(puck) = puck {
+            self.overlays.push(Overlay::Puck(puck));
+        }
     }
 
     pub fn resize(&mut self, width: u32, height: u32) {
@@ -768,9 +875,90 @@ impl Renderer {
             }
         }
 
+        // Overlays last, over every tile and inside the same render pass, so they are
+        // presented in the same frame and from the same camera value as the basemap under
+        // them. Binding the overlay pipeline invalidates `bound`, which is why this comes
+        // after the layer loop rather than anywhere inside it.
+        self.record_overlays(command_buffer, camera, &mut submitted);
+
         self.submitted_draws.set(submitted);
         device.cmd_end_render_pass(command_buffer);
         device.end_command_buffer(command_buffer).map_err(|e| format!("end_command_buffer {e:?}"))
+    }
+
+    /// Draw this frame's overlays on top of every tile.
+    ///
+    /// Called with the render pass still open: the viewport and scissor are already set
+    /// and blending is the same straight src-alpha-over the tile layers use, so an
+    /// overlay only has to bind its pipeline and push its own state. The geometry is the
+    /// shared unit quad, so nothing is allocated here.
+    unsafe fn record_overlays(
+        &self,
+        command_buffer: vk::CommandBuffer,
+        camera: &Camera,
+        submitted: &mut usize,
+    ) {
+        let device = &self.context.device;
+        for overlay in &self.overlays {
+            match overlay {
+                Overlay::Puck(puck) => {
+                    let density = camera.density;
+                    let push = Push {
+                        tile_to_clip: camera.screen_quad_to_clip(
+                            puck.lon,
+                            puck.lat,
+                            PUCK_QUAD_DP as f64,
+                        ),
+                        color: argb_to_rgba(PUCK_COLOR),
+                        line: [
+                            PUCK_RIM_DP * density,
+                            PUCK_DOT_DP * density,
+                            PUCK_CONE_DP * density,
+                            PUCK_CONE_HALF_STROKE_DP * density,
+                        ],
+                        misc: [
+                            puck.bearing.unwrap_or(0.0).to_radians(),
+                            f32::from(puck.bearing.is_some()),
+                            PUCK_QUAD_DP * density,
+                            0.0,
+                        ],
+                    };
+                    device.cmd_bind_pipeline(
+                        command_buffer,
+                        vk::PipelineBindPoint::GRAPHICS,
+                        self.pipelines.puck,
+                    );
+                    device.cmd_push_constants(
+                        command_buffer,
+                        self.pipelines.layout,
+                        vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT,
+                        0,
+                        push.as_bytes(),
+                    );
+                    device.cmd_bind_vertex_buffers(
+                        command_buffer,
+                        0,
+                        &[self.quad.vertices.buffer],
+                        &[0],
+                    );
+                    device.cmd_bind_index_buffer(
+                        command_buffer,
+                        self.quad.indices.buffer,
+                        0,
+                        vk::IndexType::UINT32,
+                    );
+                    device.cmd_draw_indexed(
+                        command_buffer,
+                        QUAD_INDICES.len() as u32,
+                        1,
+                        0,
+                        0,
+                        0,
+                    );
+                    *submitted += 1;
+                }
+            }
+        }
     }
 
     /// Draw one tile's one symbol layer: emit its shaped labels at the frame's
@@ -788,7 +976,7 @@ impl Renderer {
         layer: &Layer,
         camera: &Camera,
         palette: Palette,
-        accepted: &HashMap<u64, bool>,
+        accepted: &HashMap<u64, (bool, u32)>,
         submitted: &mut usize,
         bound: &mut Option<LayerKind>,
     ) {
@@ -831,7 +1019,7 @@ impl Renderer {
             tile_labels.iter().enumerate().filter(|(_, l)| l.layer_index == layer_index)
         {
             let id = placement::candidate_id(tile.z, tile.x, tile.y, layer_index, label_idx);
-            let Some(&flipped) = accepted.get(&id) else { continue };
+            let Some(&(flipped, _)) = accepted.get(&id) else { continue };
             // Draw at whichever anchor the placer actually accepted, or the label lands
             // on the side its box was rejected for.
             let anchor = if flipped { alternate.unwrap_or(primary) } else { primary };
@@ -843,6 +1031,7 @@ impl Renderer {
                 symbol::emit_icon(
                     label,
                     sprite,
+                    palette.variant == crate::style::Variant::Dark,
                     camera.density,
                     tile_span_px,
                     &mut icon_vertices,
@@ -998,7 +1187,7 @@ impl Renderer {
         layers: &[Layer],
         ordered: &[u64],
         extent: vk::Extent2D,
-    ) -> HashMap<u64, bool> {
+    ) -> HashMap<u64, (bool, u32)> {
         use crate::tile::placement;
         let mut candidates = Vec::new();
         for (index, layer) in layers.iter().enumerate() {
@@ -1061,7 +1250,15 @@ impl Renderer {
                 }
             }
         }
-        placement::place(&candidates).into_iter().collect()
+        // Keyed by candidate id, valued by the anchor the placer settled on and **where in
+        // acceptance order it landed**. `place` returns its winners in priority order and a
+        // `HashMap` would throw that away, which is what made `pick_labels`' "topmost first"
+        // a claim rather than a fact.
+        placement::place(&candidates)
+            .into_iter()
+            .enumerate()
+            .map(|(order, (id, flipped))| (id, (flipped, order as u32)))
+            .collect()
     }
 
     /// Task-17 pick: the placed labels of the last frame whose screen boxes
@@ -1087,11 +1284,11 @@ impl Renderer {
         &self,
         camera: &Camera,
         layers: &[Layer],
-        accepted: &HashMap<u64, bool>,
+        accepted: &HashMap<u64, (bool, u32)>,
         extent: vk::Extent2D,
     ) {
         use crate::tile::placement;
-        let mut placed = Vec::new();
+        let mut placed: Vec<(u32, PlacedHit)> = Vec::new();
         for tile in self.tiles.values() {
             // Tile origin in world px at the camera zoom: tile (x,y) at ITS
             // OWN zoom would misplace overzoomed ancestors, but every
@@ -1110,7 +1307,7 @@ impl Renderer {
                     label.layer_index,
                     label_idx,
                 );
-                let Some(&flipped) = accepted.get(&id) else { continue };
+                let Some(&(flipped, order)) = accepted.get(&id) else { continue };
                 let Some(layer) = layers.get(label.layer_index) else { continue };
                 // Device px, as in `place_symbols` — this rebuilds the same boxes for
                 // the pick path, so it has to agree with them, including which anchor
@@ -1134,17 +1331,29 @@ impl Renderer {
                 let wy = tile_wy + label.anchor.1 as f64 * span_dp;
                 let (lon, lat) = crate::camera::unproject(wx, wy, camera.zoom);
                 let _ = origin;
-                placed.push(PlacedHit {
-                    rect,
-                    layer_index: label.layer_index,
-                    name: label.name.clone(),
-                    kind: layer.kinds.first().cloned().unwrap_or_default(),
-                    lon,
-                    lat,
-                });
+                placed.push((
+                    order,
+                    PlacedHit {
+                        rect,
+                        layer_index: label.layer_index,
+                        name: label.name.clone(),
+                        // The feature's own kind, not the layer's first whitelist entry — that
+                        // reported `restaurant` for every `poi-food` hit, `stadium` for every
+                        // civic one, and so on for all four multi-kind layers.
+                        kind: kind_name(label.kind),
+                        feature_id: label.feature_id,
+                        lon,
+                        lat,
+                    },
+                ));
             }
         }
-        *self.placed.borrow_mut() = placed;
+        // `self.tiles` is a `HashMap`, so the walk above visits tiles in arbitrary order. Sorted
+        // back into the placer's acceptance order here, which is what makes "topmost first" true
+        // of what `pick_labels` returns — and therefore what makes a tap resolve to the label
+        // actually drawn on top rather than to whichever tile the hasher happened to yield first.
+        placed.sort_by_key(|(order, _)| *order);
+        *self.placed.borrow_mut() = placed.into_iter().map(|(_, hit)| hit).collect();
     }
 
     /// Rebuild the swapchain after a resize, rotation or out-of-date present.
@@ -1271,6 +1480,8 @@ impl Drop for Renderer {
             if let Some(image) = &self.sprite_atlas {
                 image.destroy(&self.context.device);
             }
+            self.quad.vertices.destroy(&self.context.device);
+            self.quad.indices.destroy(&self.context.device);
             self.atlas_set.destroy(&self.context.device);
             self.pipelines.destroy(&self.context.device);
             self.swapchain.destroy(&self.context.device);

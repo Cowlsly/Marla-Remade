@@ -48,6 +48,8 @@ const SOFTMAX_PREFIX: &[u8] =
 const CACHE_WRITE: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/cache_write.comp.spv"));
 const SOFTCAP: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/softcap.comp.spv"));
 const ACTIVATE: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/activate.comp.spv"));
+const GATED_ACTIVATE: &[u8] =
+    include_bytes!(concat!(env!("OUT_DIR"), "/gated_activate.comp.spv"));
 const MUL_SCALAR: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/mul_scalar.comp.spv"));
 const CLAMP: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/clamp.comp.spv"));
 const ATTN_APPLY: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/attn_apply.comp.spv"));
@@ -80,7 +82,7 @@ const CONV_POINT_INT4: &[u8] =
     include_bytes!(concat!(env!("OUT_DIR"), "/conv_point_int4.comp.spv"));
 
 /// Every shader, in the order [`Pipelines::create`] destructures them.
-const SPIRV: [&[u8]; 39] = [
+const SPIRV: [&[u8]; 40] = [
     CONV,
     CONV_TRANSPOSE,
     MAXPOOL,
@@ -116,6 +118,7 @@ const SPIRV: [&[u8]; 39] = [
     CACHE_WRITE,
     SOFTCAP,
     ACTIVATE,
+    GATED_ACTIVATE,
     CONV_VEC_INT4,
     CONV_POINT_INT4,
     MUL_SCALAR,
@@ -125,7 +128,7 @@ const SPIRV: [&[u8]; 39] = [
 /// Descriptors in one set: the arena, the weights as fp16, the weights as words, the step params.
 ///
 /// Named so the pool size and the write count cannot drift apart from the layout above.
-const BINDINGS: u32 = 4;
+const BINDINGS: u32 = 5;
 
 /// `local_size_x` in `shaders/common.glsl`. A dispatch covers `ceil(invocations / this)`
 /// workgroups, and each shader bails on the over-dispatched tail.
@@ -187,6 +190,7 @@ pub struct Pipelines {
     cache_write: vk::Pipeline,
     softcap: vk::Pipeline,
     activate: vk::Pipeline,
+    gated_activate: vk::Pipeline,
     conv_vec_int4: vk::Pipeline,
     conv_point_int4: vk::Pipeline,
     mul_scalar: vk::Pipeline,
@@ -269,6 +273,17 @@ impl Pipelines {
             // without `VK_KHR_8bit_storage`. Same buffer as binding 1; see `common.glsl`.
             vk::DescriptorSetLayoutBinding::default()
                 .binding(2)
+                .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
+                .descriptor_count(1)
+                .stage_flags(vk::ShaderStageFlags::COMPUTE),
+            // The weights a third time, as `uvec4`.
+            //
+            // A gemv reading one 32-bit word at a time reaches 4.7 GB/s on a Tensor G4 while a
+            // shader reading the same bytes as `uvec4` reaches 19.6 - four times the bytes per
+            // load instruction, and very nearly four times the throughput. Same buffer, same
+            // memory; only the width of each fetch differs.
+            vk::DescriptorSetLayoutBinding::default()
+                .binding(4)
                 .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
                 .descriptor_count(1)
                 .stage_flags(vk::ShaderStageFlags::COMPUTE),
@@ -362,6 +377,13 @@ impl Pipelines {
                     .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
                     .buffer_info(std::slice::from_ref(info)),
             );
+            writes.push(
+                vk::WriteDescriptorSet::default()
+                    .dst_set(*set)
+                    .dst_binding(4)
+                    .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
+                    .buffer_info(std::slice::from_ref(info)),
+            );
             // The same params buffer on every set: which segment an op is dispatched through
             // says nothing about the step it belongs to.
             writes.push(
@@ -445,6 +467,7 @@ impl Pipelines {
             cache_write,
             softcap,
             activate,
+            gated_activate,
             conv_vec_int4,
             conv_point_int4,
             mul_scalar,
@@ -500,6 +523,7 @@ impl Pipelines {
             cache_write,
             softcap,
             activate,
+            gated_activate,
             conv_vec_int4,
             conv_point_int4,
             mul_scalar,
@@ -529,6 +553,7 @@ impl Pipelines {
             Kind::CacheWrite => self.cache_write,
             Kind::Softcap => self.softcap,
             Kind::Activate => self.activate,
+            Kind::GatedActivate => self.gated_activate,
             Kind::ConvVecInt4 => self.conv_vec_int4,
             Kind::ConvPointInt4 => self.conv_point_int4,
             Kind::MulScalar => self.mul_scalar,

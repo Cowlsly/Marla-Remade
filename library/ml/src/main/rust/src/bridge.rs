@@ -2573,21 +2573,45 @@ impl Gemma4Handle {
                 self.ceiling
             ));
         };
-        let rebuilt = Reshaped::streamed(
+        // Carry the cache across rather than dropping it.
+        //
+        // A bigger arena is a different allocation, so nothing moves by itself - and the first
+        // version of this simply reset to zero and let the caller re-feed. That is very
+        // expensive and, worse, silently undoes the precomputed prefix: `loadPrefix` grows to
+        // fit 1,910 positions, then the first turn needs room for a reply, grows again, and the
+        // cache that was just loaded from disk is gone.
+        //
+        // Copying it out and back costs one staging round trip - tens of milliseconds against
+        // the tens of seconds of prefill it saves.
+        let carried = if self.position > 0 {
+            let at = self.net.at(gemma4::Mode::DecodeStep.at(self.context))?;
+            Some(at.export_pinned(gemma4::CACHE_TENSORS, self.position)?)
+        } else {
+            None
+        };
+        let mut rebuilt = Reshaped::streamed(
             context::shared()?,
             self.weights.offsets(),
             &self.weights,
             gemma4::Mode::DecodeStep.at(tier),
             gemma4_plan,
         )?;
+        if let Some(bytes) = &carried {
+            let at = rebuilt.at(gemma4::Mode::DecodeStep.at(tier))?;
+            at.import_pinned(gemma4::CACHE_TENSORS, self.position, bytes)?;
+        }
         log(&format!(
             "gemma4 cache grew {} -> {tier} positions ({} MB), so the prompt is re-fed",
             self.context,
             (u64::from(tier) * u64::from(gemma4::BYTES_PER_POSITION)) / 1_000_000,
         ));
+        log(&format!(
+            "gemma4 carried {} positions into the new cache",
+            if carried.is_some() { self.position } else { 0 }
+        ));
         self.net = rebuilt;
         self.context = tier;
-        self.position = 0;
+        // `self.position` is deliberately kept: the cache came with it.
         Ok(tier)
     }
 
@@ -2663,37 +2687,23 @@ impl Gemma4Handle {
     }
 }
 
-/// Positions one prefill submit covers.
+/// Positions one prefill submit covers. Large enough that a prompt is **one** submit.
 ///
-/// # This is bounded by the fence, not by the arena
+/// # Splitting a prefill is wrong, not merely slower
 ///
-/// The obvious constraint is memory - attention is quadratic in this - and it is not the binding
-/// one. `FENCE_TIMEOUT_NS` gives a submit five seconds, and a phone GPU is some thirty times
-/// slower than the desktop one these numbers were taken on. Measured there, a submit costs about
-/// 76 ms at 8 positions and 167 ms at 128: mostly a fixed cost, because the pass streams 1.30 GB
-/// of weights whatever T is. Thirty times 167 ms is over five seconds, which is exactly the
-/// `wait_for_fences TIMEOUT` a real device reported.
+/// `prefill_layer` attends T queries against the chunk's own T keys. Positions in a second chunk
+/// therefore never see the first chunk's keys at all, and the answer depends on where the split
+/// fell - the same 31-token prompt gives "Paris", "Berlin" or "Rome" at chunk 8, 16 and 64.
+/// Only the last is right, and it is right because it is a single chunk.
 ///
-/// A timeout is not a soft failure. The submission is still in flight, nothing can cancel it, so
-/// the net is **poisoned** and every later call on it fails too - which is why the retry in
-/// `InferenceService` failed as well and the user saw two dead turns rather than one.
+/// Verified against the sequential path, which is the decode path and unambiguously correct: a
+/// single chunk agrees with it exactly at 100, 400, 900 and 1,907 positions.
 ///
-/// # Re-raised after the barrier fix
-///
-/// 16 was chosen when a 128-wide submit blew the fence, and that was *before* barriers were
-/// narrowed from the whole arena to each op's own output. Measured on a Tensor G4 afterwards, a
-/// submit is about **1,058 ms fixed plus 4.7 ms a position** - almost all fixed, because the
-/// pass streams the same 1.30 GB of weights whatever T is.
-///
-/// So the chunk is nearly free to raise and enormously expensive to keep small: a 1,910-position
-/// prompt is 136 seconds at 16 and 20 at 192. At 192 a submit is ~1.96 s against the 5 s fence,
-/// which leaves room for a device rather slower than the one measured.
-
-/// Measured, not extrapolated: 16 works at 1,133 ms and 192 times out past five seconds. The
-/// slope between T=6 and T=16 is 4.7 ms a position, and projecting it to 192 predicted 1.96 s -
-/// wrong, because attention is **quadratic** in T and both of those samples were inside a single
-/// 16-wide tile. 64 is four times the throughput of 16 with a wide margin on the fence.
-const CHUNK: u32 = 64;
+/// The real repair is to attend over the cache rather than the chunk, as decode does, which
+/// makes any chunking correct. Until then the chunk must cover the prompt, and that is
+/// affordable here because the fixed prefix arrives precomputed - a turn prefills only the new
+/// tokens, not the 1,900 before them.
+const CHUNK: u32 = 4096;
 
 /// Write one position's `values` into column `column` of a `[C, 1, width]` block.
 ///
@@ -3037,6 +3047,223 @@ pub unsafe extern "system" fn Java_com_vayunmathur_library_ml_MlNative_positionG
     jint::try_from(handle.position).unwrap_or(-1)
 }
 
+/// A weight source for the scaling probe: every tensor at offset zero.
+///
+/// They alias, which would be nonsense for inference and is right here - the probe asks how fast
+/// a given volume of weights can be pulled through, not what the numbers mean.
+struct ProbeSource;
+
+impl crate::nets::WeightSource for ProbeSource {
+    fn shaped(&self, _index: usize, _dims: &[u32]) -> Result<u32, String> {
+        Ok(0)
+    }
+    fn shaped_words(&self, _index: usize, _dims: &[u32]) -> Result<u32, String> {
+        Ok(0)
+    }
+    fn count(&self) -> usize {
+        3
+    }
+}
+
+/// A blob of identical bytes with a table whose three tensors all span it.
+struct ProbeBlob {
+    bytes: Vec<u8>,
+    table: Vec<crate::weights::Tensor>,
+}
+
+impl crate::weights::Blob for ProbeBlob {
+    fn data_len(&self) -> u64 {
+        self.bytes.len() as u64
+    }
+    fn tensors(&self) -> &[crate::weights::Tensor] {
+        &self.table
+    }
+    fn read_at(&self, offset: u64, into: &mut [u8]) -> Result<(), String> {
+        let from = offset as usize;
+        let span = self.bytes.get(from..from + into.len()).ok_or_else(|| {
+            format!("a read of {} at {offset} past {}", into.len(), self.bytes.len())
+        })?;
+        into.copy_from_slice(span);
+        Ok(())
+    }
+}
+
+/// Compare a storage-buffer read against a texel-buffer read of the same bytes. Returns -1.
+///
+/// The standing hypothesis for the remaining 3x, and the last one left: every buffer path on this
+/// device sits near 5 GB/s, LiteRT needs about 15 to reach its published 89 ms a token, and its
+/// Android default is `SetPreferTextureWeights(true)`. If the texture unit is faster here, moving
+/// the weights is the whole job. If it is not, a 1.3 GB model simply costs what it costs.
+///
+/// # Safety
+///
+/// Called only by the JVM.
+#[no_mangle]
+pub unsafe extern "system" fn Java_com_vayunmathur_library_ml_MlNative_imageProbeGemma4<'l>(
+    _env: JNIEnv<'l>,
+    _class: JClass<'l>,
+) -> jint {
+    let Ok(context) = context::shared() else {
+        return -1;
+    };
+    match crate::vulkan::imageprobe::compare(&context) {
+        Ok((buffer, texel)) => log(&format!(
+            "gemma4 read path: storage buffer {:.2} GB/s, texel buffer {:.2} GB/s ({:.2}x)",
+            buffer / 1e9,
+            texel / 1e9,
+            texel / buffer.max(1.0)
+        )),
+        Err(why) => log(&format!("gemma4 read path probe failed: {why}")),
+    }
+    -1
+}
+
+/// Log how a gemv's achieved bandwidth varies with the size of the dispatch. Returns -1 always.
+///
+/// # The question this answers
+///
+/// On desktop the same shader reaches 12.3 GB/s on a 1.2 MB projection and 33.3 on a 50 MB one.
+/// If that curve holds here, the per-layer projections are slow because they are *small*, and
+/// merging the ones that share an input - q, k and v all read the same normed vector - is worth
+/// a converter change. If the curve is flat, size is not the story and merging buys nothing.
+///
+/// # Safety
+///
+/// Called only by the JVM.
+#[no_mangle]
+pub unsafe extern "system" fn Java_com_vayunmathur_library_ml_MlNative_scalingGemma4<'l>(
+    _env: JNIEnv<'l>,
+    _class: JClass<'l>,
+) -> jint {
+    let Ok(context) = context::shared() else {
+        return -1;
+    };
+    for out in [1536u32, 2560, 6144, 12288, 24576, 65536] {
+        match probe_gemv(&context, out, 1536) {
+            Ok((bytes, rate)) => log(&format!(
+                "gemma4 scaling {out:>6} x 1536: {:>6.1} MB, {:>6.2} GB/s",
+                bytes as f64 / 1e6,
+                rate / 1e9
+            )),
+            Err(why) => log(&format!("gemma4 scaling {out} failed: {why}")),
+        }
+    }
+    -1
+}
+
+/// Time one int4 gemv, returning its weight bytes and the rate reached.
+fn probe_gemv(
+    context: &std::sync::Arc<context::Context>,
+    out: u32,
+    inputs: u32,
+) -> Result<(u64, f64), String> {
+    use crate::nets::{Act, Builder, Shape};
+    let source = ProbeSource;
+    let mut builder = Builder::new(&source);
+    let input = builder.input(Shape::new(inputs, 1, 1));
+    let projected = builder.conv_int4(input, 0, out, Act::None);
+    let plan = builder.finish(&[projected])?;
+    let blocks = inputs.div_ceil(32);
+    let weight_bytes = (u64::from(out) * u64::from(inputs)) / 2;
+    let total = weight_bytes + u64::from(out) * u64::from(blocks) * 2 + u64::from(out) * 2 + 4096;
+    let table = vec![
+        crate::weights::Tensor {
+            rank: 1,
+            dims: [(total / 2) as u32, 0, 0, 0],
+            offset: 0,
+            len: (total / 2) as u32,
+            dtype: crate::weights::Dtype::F16,
+        };
+        3
+    ];
+    let data = ProbeBlob { bytes: vec![0x11u8; total as usize], table };
+    let mut net = Net::new(
+        std::sync::Arc::clone(context),
+        plan,
+        &data,
+        crate::preprocess::RESCALE_ONLY,
+    )?;
+    let feed = vec![0.5f32; inputs as usize];
+    net.infer_raw(&feed)?;
+    let mut best = f64::MAX;
+    for _ in 0..5 {
+        let started = std::time::Instant::now();
+        net.infer_raw(&feed)?;
+        best = best.min(started.elapsed().as_secs_f64());
+    }
+    Ok((weight_bytes, weight_bytes as f64 / best))
+}
+
+/// Log what this GPU can do that the shaders are not yet using. Returns -1 always.
+///
+/// # Why bother
+///
+/// Strings in `liblitertlm_jni.so` name `cl_arm_integer_dot_product_accumulate_int8` and
+/// `VK_KHR_shader_integer_dot_product` - so LiteRT reaches for a hardware int8 dot product on
+/// Mali, and for subgroup reductions, where this runtime uses plain fp32 multiply-accumulate and
+/// a shared-memory reduction across 64 lanes.
+///
+/// Whether either is worth adopting depends on what the device in hand actually reports, and
+/// guessing that from a vendor name has already cost this project several wrong turns.
+///
+/// # Safety
+///
+/// Called only by the JVM.
+#[no_mangle]
+pub unsafe extern "system" fn Java_com_vayunmathur_library_ml_MlNative_capabilitiesGemma4<'l>(
+    _env: JNIEnv<'l>,
+    _class: JClass<'l>,
+) -> jint {
+    let Ok(context) = context::shared() else {
+        return -1;
+    };
+    let wanted = [
+        "VK_KHR_shader_integer_dot_product",
+        "VK_KHR_cooperative_matrix",
+        "VK_KHR_16bit_storage",
+        "VK_KHR_shader_float16_int8",
+        "VK_KHR_zero_initialize_workgroup_memory",
+    ];
+    // SAFETY: the physical device outlives the context, which is shared and alive here.
+    let found = unsafe {
+        context
+            .instance
+            .enumerate_device_extension_properties(context.physical_device)
+    };
+    let Ok(found) = found else {
+        return -1;
+    };
+    let names: Vec<String> = found
+        .iter()
+        .filter_map(|e| e.extension_name_as_c_str().ok())
+        .map(|c| c.to_string_lossy().into_owned())
+        .collect();
+    for want in wanted {
+        log(&format!(
+            "gemma4 capability {want}: {}",
+            if names.iter().any(|n| n == want) { "yes" } else { "no" }
+        ));
+    }
+    // Subgroup width decides whether a shared-memory reduction over 64 lanes can become a
+    // `subgroupAdd`, which is the cheapest of the wins the strings point at.
+    let mut subgroup = ash::vk::PhysicalDeviceSubgroupProperties::default();
+    let mut props = ash::vk::PhysicalDeviceProperties2::default().push_next(&mut subgroup);
+    // SAFETY: as above.
+    unsafe {
+        context
+            .instance
+            .get_physical_device_properties2(context.physical_device, &mut props)
+    };
+    log(&format!(
+        "gemma4 subgroup size {}, arithmetic {}",
+        subgroup.subgroup_size,
+        subgroup
+            .supported_operations
+            .contains(ash::vk::SubgroupFeatureFlags::ARITHMETIC)
+    ));
+    -1
+}
+
 /// Time one decode pass and one head-free pass, and log both. Returns -1 always.
 ///
 /// # What this settles
@@ -3070,6 +3297,16 @@ pub unsafe extern "system" fn Java_com_vayunmathur_library_ml_MlNative_benchmark
     };
     let local = handle.local[..gemma4::HEAD_DIM as usize].to_vec();
     let global = handle.global[..gemma4::GLOBAL_HEAD_DIM as usize].to_vec();
+    // The memory ceiling first, so the two numbers below can be read against it.
+    if let Ok(at) = handle.net.at(gemma4::Mode::DecodeStep.at(handle.context)) {
+        match at.copy_bandwidth() {
+            Ok(rate) => log(&format!(
+                "gemma4 benchmark plain copy: {:.1} GB/s, the ceiling for every kernel",
+                rate / 1e9
+            )),
+            Err(why) => log(&format!("gemma4 benchmark copy failed: {why}")),
+        }
+    }
     for (label, mode) in [
         ("with head   ", gemma4::Mode::DecodeStep),
         ("without head", gemma4::Mode::Prefill { tokens: 1 }),

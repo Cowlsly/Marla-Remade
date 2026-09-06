@@ -1,21 +1,22 @@
 package com.vayunmathur.networklocation.provider
 
 import android.content.Context
-import android.content.res.AssetFileDescriptor
+import android.os.ParcelFileDescriptor
 import com.vayunmathur.networklocation.BeaconFix
 import com.vayunmathur.networklocation.BeaconId
+import com.vayunmathur.networklocation.OfflineDatabases
 import com.vayunmathur.networklocation.WpsStoreNative
-import java.io.IOException
 
 /**
- * Offline beacon → coordinate resolver over the two bundled WPSDB stores
- * (`wifi.wpsdb`, `cells.wpsdb`), opened straight from their APK asset fds via
- * [WpsStoreNative] (native Rust reader, no copy to disk) — the same pattern as the
- * offline geocoder in `GeocodeService`.
+ * Offline beacon → coordinate resolver over the two WPSDB stores (`wifi.wpsdb`,
+ * `cells.wpsdb`), read by [WpsStoreNative] (native Rust reader) from device-protected
+ * storage — see [OfflineDatabases]. They are downloaded rather than bundled, the same as
+ * the offline geocoder in `GeocodeService`.
  *
- * Degrades gracefully: if an asset is missing or the native library did not load, the
- * corresponding handle stays 0 and every lookup misses, so the provider falls back to
- * pure-online behaviour and a DB-less dev build still works.
+ * Degrades gracefully: if a store has not been downloaded or the native library did not
+ * load, the corresponding handle stays 0 and every lookup misses, so the provider falls back
+ * to pure-online behaviour and a DB-less dev build still works. A store that arrives later is
+ * picked up on the next lookup ([reopenIfArrived]) rather than at the next process start.
  *
  * The 48-bit MAC packing and 64-bit cell-key packing here MUST stay byte-for-byte identical
  * to `wtfps-experiment/store.py` (`parse_mac` / `pack_cell`), which builds the stores — see
@@ -24,8 +25,8 @@ import java.io.IOException
 class OfflineBeaconStore(context: Context) {
     private val appContext = context.applicationContext
 
-    private var wifiAfd: AssetFileDescriptor? = null
-    private var cellAfd: AssetFileDescriptor? = null
+    private var wifiPfd: ParcelFileDescriptor? = null
+    private var cellPfd: ParcelFileDescriptor? = null
     private var wifiHandle = 0L
     private var cellHandle = 0L
 
@@ -34,23 +35,50 @@ class OfflineBeaconStore(context: Context) {
     private val lock = Any()
 
     init {
-        if (WpsStoreNative.available) {
-            wifiHandle = openAsset(WIFI_ASSET) { wifiAfd = it }
-            cellHandle = openAsset(CELL_ASSET) { cellAfd = it }
+        open()
+    }
+
+    /**
+     * (Re)open both stores. Call again once a download completes; existing handles are
+     * released first, and a store that is still absent simply leaves its handle at 0.
+     */
+    fun open() {
+        synchronized(lock) {
+            closeLocked()
+            if (!WpsStoreNative.available) return
+            wifiHandle = openStore(OfflineDatabases.WIFI) { wifiPfd = it }
+            cellHandle = openStore(OfflineDatabases.CELL) { cellPfd = it }
         }
     }
 
-    private fun openAsset(name: String, keep: (AssetFileDescriptor) -> Unit): Long = try {
-        val fd = appContext.assets.openFd(name)
+    private fun openStore(name: String, keep: (ParcelFileDescriptor) -> Unit): Long {
+        val fd = OfflineDatabases.openReadOnly(appContext, name) ?: return 0L
         keep(fd)
-        WpsStoreNative.open(fd.parcelFileDescriptor.fd, fd.startOffset, fd.length)
-    } catch (_: IOException) {
-        0L
+        // Standalone file: the reader's base offset is 0, unlike the old APK-asset path.
+        return WpsStoreNative.open(fd.fd, 0L, fd.statSize)
+    }
+
+    /**
+     * Reopen both stores if either handle is still 0 and its file has since appeared.
+     *
+     * The stores are downloaded on demand and nothing signals completion, so without this a
+     * provider bound at boot keeps missing until the process restarts. Costs one stat per
+     * absent store on the lookup path.
+     */
+    private fun reopenIfArrived() {
+        synchronized(lock) {
+            val wifiArrived =
+                wifiHandle == 0L && OfflineDatabases.isPresent(appContext, OfflineDatabases.WIFI)
+            val cellArrived =
+                cellHandle == 0L && OfflineDatabases.isPresent(appContext, OfflineDatabases.CELL)
+            if (wifiArrived || cellArrived) open()
+        }
     }
 
     /** Resolve WiFi APs present in the offline store. Absent MACs are simply omitted. */
     fun resolveWifi(bssids: List<BeaconId.Wifi>): Map<BeaconId.Wifi, BeaconFix> {
         if (bssids.isEmpty()) return emptyMap()
+        reopenIfArrived()
         synchronized(lock) {
             if (wifiHandle == 0L) return emptyMap()
             val out = HashMap<BeaconId.Wifi, BeaconFix>()
@@ -66,6 +94,7 @@ class OfflineBeaconStore(context: Context) {
     /** Resolve cell towers present in the offline store. Absent towers are omitted. */
     fun resolveCell(cells: List<BeaconId.Cell>): Map<BeaconId.Cell, BeaconFix> {
         if (cells.isEmpty()) return emptyMap()
+        reopenIfArrived()
         synchronized(lock) {
             if (cellHandle == 0L) return emptyMap()
             val out = HashMap<BeaconId.Cell, BeaconFix>()
@@ -83,25 +112,26 @@ class OfflineBeaconStore(context: Context) {
      */
     fun close() {
         synchronized(lock) {
-            if (wifiHandle != 0L) {
-                WpsStoreNative.close(wifiHandle)
-                wifiHandle = 0L
-            }
-            if (cellHandle != 0L) {
-                WpsStoreNative.close(cellHandle)
-                cellHandle = 0L
-            }
-            wifiAfd?.close()
-            wifiAfd = null
-            cellAfd?.close()
-            cellAfd = null
+            closeLocked()
         }
     }
 
-    private companion object {
-        const val WIFI_ASSET = "wifi.wpsdb"
-        const val CELL_ASSET = "cells.wpsdb"
+    private fun closeLocked() {
+        if (wifiHandle != 0L) {
+            WpsStoreNative.close(wifiHandle)
+            wifiHandle = 0L
+        }
+        if (cellHandle != 0L) {
+            WpsStoreNative.close(cellHandle)
+            cellHandle = 0L
+        }
+        wifiPfd?.close()
+        wifiPfd = null
+        cellPfd?.close()
+        cellPfd = null
+    }
 
+    private companion object {
         // The stores quantize coordinates to a ~20 m global grid (see quantize.py); use a
         // fixed accuracy radius matching that precision for every offline fix.
         const val OFFLINE_ACCURACY_METERS = 20.0

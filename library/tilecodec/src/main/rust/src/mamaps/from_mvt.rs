@@ -141,7 +141,7 @@ pub fn from_tile(tile: &Tile) -> Result<(Body, Stats)> {
     let extent = u16::try_from(extent).map_err(|_| {
         crate::proto::Error(format!("an MVT extent of {extent} does not fit a .mamaps body"))
     })?;
-    Ok((Body { extent, layers, names: Vec::new() }, stats))
+    Ok((Body { extent, layers, names: Vec::new(), ids: Vec::new() }, stats))
 }
 
 /// Append one feature and its parts, skipping degenerate paths.

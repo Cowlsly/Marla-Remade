@@ -120,5 +120,5 @@ fn tile(z: u8, x: u64, _y: u64) -> Body {
         roads.coords = vec![(0, e / 2), (e / 2, e / 2 + 64), (e, e / 2)];
         layers.push(roads);
     }
-    Body { extent: DEFAULT_EXTENT, layers, names: Vec::new() }
+    Body { extent: DEFAULT_EXTENT, layers, names: Vec::new(), ids: Vec::new() }
 }

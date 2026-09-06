@@ -3,141 +3,149 @@ package com.vayunmathur.things.ui
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.runtime.Composable
-import androidx.compose.ui.Alignment
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
+import com.vayunmathur.library.ui.AlertDialog
 import com.vayunmathur.library.ui.AppScaffold
 import com.vayunmathur.library.ui.Button
-import com.vayunmathur.library.ui.Card
 import com.vayunmathur.library.ui.ExperimentalMaterial3Api
-import com.vayunmathur.library.ui.HorizontalDivider
+import com.vayunmathur.library.ui.ListItem
 import com.vayunmathur.library.ui.MaterialTheme
-import com.vayunmathur.library.ui.OutlinedButton
 import com.vayunmathur.library.ui.Text
+import com.vayunmathur.library.ui.TextButton
 import com.vayunmathur.library.ui.appBarScrollBehavior
 import com.vayunmathur.things.R
 import com.vayunmathur.things.platform.BleManager
 import com.vayunmathur.things.platform.ScaleBleManager
 
 /**
- * Device management: scan for, connect to, and disconnect both BLE devices, plus the Health Connect
- * permission setup. Shows a back arrow only when it was pushed over [HomePage] (i.e. a device is
- * connected); as the cold-start root it shows none.
+ * Purely an "add a device" screen: one button per supported device type. Everything about a device
+ * you already own — status, readings, forgetting it — lives on [HomePage] instead, so this screen
+ * has nothing to say once both devices are paired.
+ *
+ * Picking happens in a dialog rather than inline, so the page itself stays two buttons.
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun DevicesPage(
-    connectionState: String,
     scanning: Boolean,
     discoveredDevices: List<BleManager.BleDevice>,
-    onScanClick: () -> Unit,
-    onDeviceClick: (BleManager.BleDevice) -> Unit,
-    onDisconnectClick: () -> Unit,
-    scaleConnectionState: String,
     scaleScanning: Boolean,
     scaleDevices: List<ScaleBleManager.ScaleBleDevice>,
+    onScanClick: () -> Unit,
+    onDeviceClick: (BleManager.BleDevice) -> Unit,
     onScaleScanClick: () -> Unit,
     onScaleDeviceClick: (ScaleBleManager.ScaleBleDevice) -> Unit,
-    onScaleDisconnectClick: () -> Unit,
-    onHealthConnectClick: () -> Unit,
     onNavigateBack: (() -> Unit)?,
 ) {
+    // Which picker is open, if any. Null closes both.
+    var picking by remember { mutableStateOf<String?>(null) }
+
     AppScaffold(
-        title = stringResource(R.string.devices),
+        title = stringResource(R.string.add_device),
         onNavigateBack = onNavigateBack,
         scrollBehavior = appBarScrollBehavior(),
     ) { padding ->
-        LazyColumn(
+        Column(
             modifier = Modifier
                 .fillMaxSize()
                 .padding(padding)
-                .padding(horizontal = 16.dp),
-            verticalArrangement = Arrangement.spacedBy(12.dp)
+                .padding(horizontal = 16.dp, vertical = 24.dp),
+            verticalArrangement = Arrangement.spacedBy(16.dp),
         ) {
-            // Bottle
-            item { Text(stringResource(R.string.bottle_status), style = MaterialTheme.typography.titleMedium) }
-            item {
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Text(connectionState, style = MaterialTheme.typography.titleSmall)
-                    if (connectionState == "Connected") {
-                        OutlinedButton(onClick = onDisconnectClick) { Text(stringResource(R.string.disconnect)) }
-                    } else {
-                        Button(onClick = onScanClick, enabled = !scanning) { Text(stringResource(R.string.scan)) }
-                    }
-                }
+            Button(
+                onClick = {
+                    picking = PICK_BOTTLE
+                    onScanClick()
+                },
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .heightIn(min = 72.dp),
+            ) {
+                Text(stringResource(R.string.connect_new_bottle), style = MaterialTheme.typography.titleMedium)
             }
-            if (discoveredDevices.isNotEmpty() && connectionState != "Connected") {
-                item { Text(stringResource(R.string.devices_found), style = MaterialTheme.typography.labelLarge) }
-                items(discoveredDevices) { device ->
-                    Card(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .clickable { onDeviceClick(device) }
-                    ) {
-                        Column(modifier = Modifier.padding(12.dp)) {
-                            Text(device.name, style = MaterialTheme.typography.bodyLarge)
-                            Text(device.address, style = MaterialTheme.typography.bodySmall)
-                        }
-                    }
-                }
-            }
-
-            item { HorizontalDivider() }
-
-            // Scale
-            item { Text(stringResource(R.string.scale_title), style = MaterialTheme.typography.titleMedium) }
-            item { Text(stringResource(R.string.scale_subtitle), style = MaterialTheme.typography.bodySmall) }
-            item {
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Text(scaleConnectionState, style = MaterialTheme.typography.titleSmall)
-                    if (scaleConnected(scaleConnectionState)) {
-                        OutlinedButton(onClick = onScaleDisconnectClick) { Text(stringResource(R.string.disconnect)) }
-                    } else {
-                        Button(onClick = onScaleScanClick, enabled = !scaleScanning) { Text(stringResource(R.string.scan_scale)) }
-                    }
-                }
-            }
-            if (scaleDevices.isNotEmpty() && !scaleConnected(scaleConnectionState)) {
-                item { Text(stringResource(R.string.devices_found), style = MaterialTheme.typography.labelLarge) }
-                items(scaleDevices) { device ->
-                    Card(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .clickable { onScaleDeviceClick(device) }
-                    ) {
-                        Column(modifier = Modifier.padding(12.dp)) {
-                            Text(device.name, style = MaterialTheme.typography.bodyLarge)
-                            Text(device.address, style = MaterialTheme.typography.bodySmall)
-                        }
-                    }
-                }
-            }
-
-            item { HorizontalDivider() }
-            item {
-                OutlinedButton(onClick = onHealthConnectClick, modifier = Modifier.fillMaxWidth()) {
-                    Text(stringResource(R.string.health_connect))
-                }
+            Button(
+                onClick = {
+                    picking = PICK_SCALE
+                    onScaleScanClick()
+                },
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .heightIn(min = 72.dp),
+            ) {
+                Text(stringResource(R.string.connect_new_scale), style = MaterialTheme.typography.titleMedium)
             }
         }
     }
+
+    when (picking) {
+        PICK_BOTTLE -> DevicePickerDialog(
+            searching = scanning,
+            entries = discoveredDevices.map { it.name to it.address },
+            onPick = { address ->
+                discoveredDevices.firstOrNull { it.address == address }?.let(onDeviceClick)
+                picking = null
+            },
+            onDismiss = { picking = null },
+        )
+        PICK_SCALE -> DevicePickerDialog(
+            searching = scaleScanning,
+            entries = scaleDevices.map { it.name to it.address },
+            onPick = { address ->
+                scaleDevices.firstOrNull { it.address == address }?.let(onScaleDeviceClick)
+                picking = null
+            },
+            onDismiss = { picking = null },
+        )
+    }
 }
 
-private fun scaleConnected(state: String): Boolean =
-    state.startsWith("Scale: ") || state.contains("step on") || state.startsWith("Weighing")
+@Composable
+private fun DevicePickerDialog(
+    searching: Boolean,
+    entries: List<Pair<String, String>>,
+    onPick: (String) -> Unit,
+    onDismiss: () -> Unit,
+) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text(stringResource(R.string.select_device)) },
+        text = {
+            if (entries.isEmpty()) {
+                Text(
+                    stringResource(if (searching) R.string.searching else R.string.no_devices_found),
+                    style = MaterialTheme.typography.bodyMedium,
+                )
+            } else {
+                LazyColumn(modifier = Modifier.heightIn(max = 320.dp)) {
+                    itemsIndexed(entries) { _, entry ->
+                        val (name, address) = entry
+                        ListItem(
+                            headlineContent = { Text(name) },
+                            supportingContent = { Text(address) },
+                            modifier = Modifier.clickable { onPick(address) },
+                        )
+                    }
+                }
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = onDismiss) { Text(stringResource(R.string.cancel)) }
+        },
+    )
+}
+
+private const val PICK_BOTTLE = "bottle"
+private const val PICK_SCALE = "scale"

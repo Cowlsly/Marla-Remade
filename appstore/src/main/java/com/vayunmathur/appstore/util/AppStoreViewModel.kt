@@ -15,11 +15,14 @@ import com.vayunmathur.appstore.data.CatalogRepository
 import com.vayunmathur.appstore.data.InstalledAppsRepository
 import com.vayunmathur.appstore.data.InstalledInfo
 import com.vayunmathur.appstore.data.PlayStoreLinks
+import com.vayunmathur.appstore.data.RestrictedPackages
 import com.vayunmathur.appstore.data.SandboxedGooglePlay
 import com.vayunmathur.appstore.data.SettingsRepository
 import com.vayunmathur.appstore.data.SyncStep
 import com.vayunmathur.appstore.data.UnifiedApp
 import com.vayunmathur.appstore.data.accrescent.AccrescentRepository
+import com.vayunmathur.appstore.data.grapheneos.GrapheneOSRepository
+import com.vayunmathur.appstore.data.grapheneos.toUnifiedApp
 import com.vayunmathur.appstore.data.installer.InstallCoordinator
 import com.vayunmathur.appstore.data.installer.InstallStage
 import com.vayunmathur.appstore.data.play.PlayAuthState
@@ -54,9 +57,11 @@ class AppStoreViewModel(
     private val catalog = CatalogRepository(context, db, viewModelScope)
     private val play = PlayRepository(context)
     private val accrescent = AccrescentRepository(context, db)
+    private val grapheneOS = GrapheneOSRepository(context)
     private val installedRepo = InstalledAppsRepository(context)
     private val settings = SettingsRepository(context, viewModelScope)
-    private val installer = InstallCoordinator(context, db, play, accrescent) { ownSigningCertificates }
+    private val installer =
+        InstallCoordinator(context, db, play, accrescent, grapheneOS) { ownSigningCertificates }
 
     /** Off-by-default: the periodic check may also download and install updates unattended. */
     val autoInstallUpdates: StateFlow<Boolean> = settings.autoInstallUpdates
@@ -91,12 +96,18 @@ class AppStoreViewModel(
 
     /**
      * The Sandboxed Google Play bundle rows. Seeded with stand-ins so the section is on
-     * screen immediately; [loadHome] swaps in richer catalogue rows when a sync has cached
-     * them. These install from GrapheneOS's release server, never Play.
+     * screen immediately; [loadHome] replaces them with rows built from GrapheneOS's signed
+     * index. These install from GrapheneOS's release server, never Play.
      * Kept in [SandboxedGooglePlay.PACKAGES] order so the ordered install reads straight off it.
+     *
+     * Empty on stock Android. These packages only work alongside the gmscompat layer, which
+     * is part of the OS, so on a device without it the section would offer three installs
+     * that cannot function.
      */
-    private val _sandboxedGooglePlay =
-        MutableStateFlow(SandboxedGooglePlay.placeholders())
+    private val _sandboxedGooglePlay = MutableStateFlow(
+        if (RestrictedPackages.isGrapheneOS(context)) SandboxedGooglePlay.placeholders()
+        else emptyList()
+    )
     private val _categories = MutableStateFlow<List<String>>(emptyList())
     private val _selectedCategory = MutableStateFlow<String?>(null)
     private val _categoryApps = MutableStateFlow<List<UnifiedApp>>(emptyList())
@@ -113,6 +124,7 @@ class AppStoreViewModel(
     private val _catalogUpdates = MutableStateFlow<List<UnifiedApp>>(emptyList())
     private val _playUpdates = MutableStateFlow<List<UnifiedApp>>(emptyList())
     private val _accrescentUpdates = MutableStateFlow<List<UnifiedApp>>(emptyList())
+    private val _grapheneOSUpdates = MutableStateFlow<List<UnifiedApp>>(emptyList())
 
     private val _libraryFilter = MutableStateFlow(SourceFilter.ALL)
 
@@ -144,10 +156,11 @@ class AppStoreViewModel(
         _catalogUpdates,
         _playUpdates,
         _accrescentUpdates,
+        _grapheneOSUpdates,
         installedRepo.apps,
-    ) { catalogUpdates, playUpdates, accrescentUpdates, installed ->
+    ) { catalogUpdates, playUpdates, accrescentUpdates, grapheneOSUpdates, installed ->
         val installedVersions = installed.associate { it.packageName to it.versionCode }
-        (catalogUpdates + playUpdates + accrescentUpdates)
+        (catalogUpdates + playUpdates + accrescentUpdates + grapheneOSUpdates)
             // The surviving row's source decides which download-and-verify path the update
             // takes, so it has to be the same precedence search and the library use.
             .sortedBy { it.source.priority }
@@ -405,12 +418,16 @@ class AppStoreViewModel(
         _recentlyUpdated.value = catalog.recentlyUpdated(RECENT_LIMIT)
 
         // The Sandboxed Google Play components come from GrapheneOS's release server, not
-        // Play. Enrich the stand-ins with richer catalogue rows (icon, size, signer, hash)
-        // when a sync has cached them; keep the stand-ins, and the section, when it hasn't.
-        val cached = catalog.byPackages(SandboxedGooglePlay.PACKAGES).associateBy { it.packageName }
-        if (cached.isNotEmpty()) {
-            _sandboxedGooglePlay.value =
-                _sandboxedGooglePlay.value.map { cached[it.packageName] ?: it }
+        // Play. Refreshing its signed index is what turns the stand-ins into installable
+        // rows: the version, file list, signer digests and per-APK hashes all come from
+        // there. A failed refresh leaves the stand-ins, and the section, exactly as they were.
+        if (_sandboxedGooglePlay.value.isNotEmpty()) {
+            grapheneOS.refresh(SandboxedGooglePlay.PACKAGES).getOrNull()?.let { packages ->
+                val byPackage = packages.associateBy { it.packageName }
+                _sandboxedGooglePlay.value = _sandboxedGooglePlay.value.map { row ->
+                    byPackage[row.packageName]?.toUnifiedApp() ?: row
+                }
+            }
         }
 
         val clusters = play.homeClusters()
@@ -621,11 +638,9 @@ class AppStoreViewModel(
             // Play lists the Sandboxed Google Play components too, so a search hit for one can
             // arrive carrying AppSource.PLAYSTORE. Describe it from GrapheneOS regardless: that
             // is the row an install would actually use, and the Play build is the wrong
-            // artifact for the device even though Play would happily deliver it. Prefer the
-            // cached row — the stand-in carries no version, size, signer or hash, and on a cold
-            // start nothing has enriched it yet.
+            // artifact for the device even though Play would happily deliver it.
             sandboxedGooglePlayRow(app.packageName)?.let { sandboxed ->
-                _selectedApp.value = catalog.byPackage(app.packageName) ?: sandboxed
+                _selectedApp.value = sandboxed
                 return@launch
             }
             // The catalogue row wins whenever there is one, even if the user tapped a Play
@@ -795,8 +810,8 @@ class AppStoreViewModel(
             // Only ask Play about packages neither offline source lists — for the rest the
             // catalogue already answered, and Play would just re-answer it over the network.
             // The Sandboxed Google Play components are held back too: Play hosts newer builds
-            // of all three, but only GrapheneOS's are the ones this device can use, so no
-            // update is better than the wrong one until its release metadata is synced.
+            // of all three, but only GrapheneOS's are the ones this device can use, so their
+            // updates come from its signed index below instead.
             val index = catalog.packageIndex.value
             val installed = installedRepo.updatable.value
             val playCandidates = installed
@@ -822,6 +837,14 @@ class AppStoreViewModel(
             _accrescentUpdates.value = installed
                 .filter { it.packageName in accrescentIds }
                 .mapNotNull { inst -> accrescentUpdate(inst.packageName, inst.versionCode) }
+
+            // GrapheneOS: its signed index is the only place a Sandboxed Google Play update
+            // can come from, which is why the three are held back from the Play list above.
+            _grapheneOSUpdates.value = grapheneOS.packages.mapNotNull { entry ->
+                val current = installed.firstOrNull { it.packageName == entry.packageName }
+                    ?: return@mapNotNull null
+                entry.toUnifiedApp().takeIf { it.versionCode > current.versionCode }
+            }
 
             _lastUpdateCheck.value = System.currentTimeMillis()
             _statusMessage.value = ""

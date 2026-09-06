@@ -11,6 +11,7 @@ import androidx.work.OneTimeWorkRequestBuilder
 import androidx.work.WorkManager
 import androidx.work.WorkerParameters
 import com.vayunmathur.library.util.DataStoreUtils
+import java.io.File
 import java.util.concurrent.TimeUnit
 
 /**
@@ -34,9 +35,10 @@ class ModelDownloadWorker(context: Context, params: WorkerParameters) :
         val specs = readSpecs(inputData)
         if (specs.isEmpty()) return Result.failure()
 
+        val targetDir = inputData.getString(KEY_TARGET_DIR)?.let(::File)
         val ds = DataStoreUtils.getInstance(applicationContext)
         return when {
-            runDownloadsCore(applicationContext, ds, specs) -> Result.success()
+            runDownloadsCore(applicationContext, ds, specs, targetDir) -> Result.success()
             // Keep retrying transient problems (flaky network, mirror hiccup) but eventually stop so
             // the screen can offer a retry rather than backing off forever.
             runAttemptCount + 1 >= MAX_RUN_ATTEMPTS -> Result.failure()
@@ -49,6 +51,8 @@ class ModelDownloadWorker(context: Context, params: WorkerParameters) :
         private const val KEY_FILE_NAMES = "fileNames"
         private const val KEY_DESCRIPTIONS = "descriptions"
         private const val KEY_HASHES = "hashes"
+        private const val KEY_TARGET_DIR = "targetDir"
+        private const val KEY_UNMETERED = "unmetered"
 
         /** Absent SHA-256, encoded as an empty string because [Data] holds no nulls. */
         private const val NO_HASH = ""
@@ -73,23 +77,58 @@ class ModelDownloadWorker(context: Context, params: WorkerParameters) :
         internal fun retry(context: Context, specs: List<DownloadSpec>) =
             enqueue(context, specs, ExistingWorkPolicy.REPLACE)
 
+        /**
+         * Enqueues a download that writes outside the app's external files dir, and optionally
+         * only over an unmetered network.
+         *
+         * Used by networklocation, whose multi-gigabyte offline databases go to device-protected
+         * storage so the always-on provider can read them before first unlock, and which must not
+         * pull gigabytes over cellular.
+         */
+        fun enqueueTo(
+            context: Context,
+            models: List<ModelDownloadItem>,
+            targetDir: File,
+            requireUnmetered: Boolean = false,
+            replaceExisting: Boolean = false,
+        ) = enqueue(
+            context = context,
+            specs = models.map {
+                DownloadSpec(
+                    fileName = it.fileName,
+                    description = it.description,
+                    url = it.url,
+                    sha256 = it.sha256,
+                )
+            },
+            policy = if (replaceExisting) ExistingWorkPolicy.REPLACE else ExistingWorkPolicy.KEEP,
+            targetDir = targetDir,
+            requireUnmetered = requireUnmetered,
+        )
+
         private fun enqueue(
             context: Context,
             specs: List<DownloadSpec>,
             policy: ExistingWorkPolicy,
+            targetDir: File? = null,
+            requireUnmetered: Boolean = false,
         ) {
             val data = Data.Builder()
                 .putStringArray(KEY_URLS, specs.map { it.url }.toTypedArray())
                 .putStringArray(KEY_FILE_NAMES, specs.map { it.fileName }.toTypedArray())
                 .putStringArray(KEY_DESCRIPTIONS, specs.map { it.description }.toTypedArray())
                 .putStringArray(KEY_HASHES, specs.map { it.sha256 ?: NO_HASH }.toTypedArray())
+                .apply { targetDir?.let { putString(KEY_TARGET_DIR, it.absolutePath) } }
+                .putBoolean(KEY_UNMETERED, requireUnmetered)
                 .build()
 
             val request = OneTimeWorkRequestBuilder<ModelDownloadWorker>()
                 .setInputData(data)
                 .setConstraints(
                     Constraints.Builder()
-                        .setRequiredNetworkType(NetworkType.CONNECTED)
+                        .setRequiredNetworkType(
+                            if (requireUnmetered) NetworkType.UNMETERED else NetworkType.CONNECTED
+                        )
                         .build()
                 )
                 .setBackoffCriteria(BackoffPolicy.EXPONENTIAL, BACKOFF_SECONDS, TimeUnit.SECONDS)

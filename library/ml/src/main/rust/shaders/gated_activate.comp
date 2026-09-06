@@ -1,0 +1,39 @@
+#version 450
+//! `activate(gate) * up` over a fused `[gate | up]` projection, in one dispatch.
+//!
+//! # Why this is its own shader
+//!
+//! A gated feed-forward was four dispatches: two `SliceChannels` copies to split the projection,
+//! an `Activate` on the gate half, and a `Mul` against the up half. Three of those move data
+//! only to hand it to the next one.
+//!
+//! That is cheap on a desktop and is not on a phone. A Gemma 4 decode step is 1,094 dispatches
+//! of which only 245 carry weights; the rest are elementwise work over a few kilobytes, and each
+//! costs far more in dispatch and barrier overhead than in arithmetic. Two gated feed-forwards
+//! per layer across 35 layers is 210 dispatches spent on something expressible as one.
+//!
+//! The slices disappear entirely: the halves are contiguous, so this reads both directly by
+//! offset instead of copying each into scratch first.
+//!
+//! # Push fields
+//!
+//! `p.in0` is the `[2 * inner, 1, T]` projection and `p.out_at` the `[inner, 1, T]` result.
+//! `p.count` is the output's element count. `p.in_c` is `inner`, the distance from a gate element
+//! to its up partner. `p.act` is the [`nets::Act`] code and `p.act_weight` the slope tensor when
+//! it is `PRelu`. `p.out_h` and `p.out_w` give the spatial size, so a per-channel activation can
+//! recover its channel.
+#include "common.glsl"
+void main() {
+    uint index = global_index();
+    if (index >= p.count) {
+        return;
+    }
+    // Both halves come from one tensor, so the up element is a fixed stride from the gate one.
+    // `p.in_c` is that stride in elements, which is `inner * spatial` - the whole gate half -
+    // rather than `inner`, because the layout is channel-major and T may exceed one.
+    uint spatial = max(p.out_h * p.out_w, 1u);
+    uint channel = index / spatial;
+    float gate = float(arena[p.in0 + index]);
+    float up = float(arena[p.in0 + p.in_c + index]);
+    arena[p.out_at + index] = float16_t(activate(gate, p.act, channel) * up);
+}

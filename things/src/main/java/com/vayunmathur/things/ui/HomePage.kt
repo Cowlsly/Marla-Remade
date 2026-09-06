@@ -24,32 +24,38 @@ import com.vayunmathur.library.ui.FilterChip
 import com.vayunmathur.library.ui.IconButton
 import com.vayunmathur.library.ui.IconWidgets
 import com.vayunmathur.library.ui.MaterialTheme
+import com.vayunmathur.library.ui.OutlinedButton
 import com.vayunmathur.library.ui.OutlinedTextField
 import com.vayunmathur.library.ui.Text
 import com.vayunmathur.library.ui.appBarScrollBehavior
 import com.vayunmathur.things.R
+import com.vayunmathur.things.platform.DeviceController.LinkState
 import com.vayunmathur.things.platform.Sex
 
 /**
- * The landing screen once a device is connected: non-health device telemetry only.
+ * The landing screen. Cards are shown for every *paired* device, not just the reachable ones — a
+ * body scale is powered off between weigh-ins, so hiding it whenever it sleeps would mean the app
+ * looked empty almost all the time.
  *
- * Health data (hydration volume, weight, body composition) is written to Health Connect by
- * [com.vayunmathur.things.MainActivity] and read by the Health app; this app deliberately does not
- * display any of it. What remains here is device/water telemetry (battery, charging, temperature,
- * purity) and the scale profile inputs, which are *inputs* to the body-composition calc rather than
- * health readouts.
+ * Health data (hydration volume, weight, body composition) is written to Health Connect and read by
+ * the Health app; this app deliberately does not display any of it. What remains here is device
+ * telemetry and the scale profile inputs, which feed the body-composition calc rather than being
+ * health readouts themselves.
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun HomePage(
-    bottleConnected: Boolean,
+    bottlePaired: Boolean,
+    bottleLink: LinkState,
+    bottleConnectionState: String,
     tempC: Int?,
     tds: Int?,
     batteryPct: Int?,
     charging: Boolean,
     volumePct: Int?,
     lastUpdatedMillis: Long?,
-    scaleConnected: Boolean,
+    scalePaired: Boolean,
+    scaleLink: LinkState,
     scaleConnectionState: String,
     scaleSex: Sex,
     scaleAge: String,
@@ -59,6 +65,9 @@ fun HomePage(
     onScaleAgeChange: (String) -> Unit,
     onScaleHeightChange: (String) -> Unit,
     onScaleAthleteChange: (Boolean) -> Unit,
+    onForgetBottle: () -> Unit,
+    onForgetScale: () -> Unit,
+    onHealthConnectClick: () -> Unit,
     onOpenDevices: () -> Unit,
 ) {
     AppScaffold(
@@ -75,22 +84,26 @@ fun HomePage(
                 .padding(horizontal = 16.dp),
             verticalArrangement = Arrangement.spacedBy(12.dp)
         ) {
-            if (bottleConnected) {
+            if (bottlePaired) {
                 item {
                     BottleStatusCard(
+                        link = bottleLink,
+                        connectionState = bottleConnectionState,
                         tempC = tempC,
                         tds = tds,
                         batteryPct = batteryPct,
                         charging = charging,
                         volumePct = volumePct,
                         lastUpdatedMillis = lastUpdatedMillis,
+                        onForget = onForgetBottle,
                     )
                 }
             }
 
-            if (scaleConnected) {
+            if (scalePaired) {
                 item {
-                    ScaleTelemetryCard(
+                    ScaleCard(
+                        link = scaleLink,
                         connectionState = scaleConnectionState,
                         sex = scaleSex,
                         age = scaleAge,
@@ -100,11 +113,12 @@ fun HomePage(
                         onAgeChange = onScaleAgeChange,
                         onHeightChange = onScaleHeightChange,
                         onAthleteChange = onScaleAthleteChange,
+                        onForget = onForgetScale,
                     )
                 }
             }
 
-            if (!bottleConnected && !scaleConnected) {
+            if (!bottlePaired && !scalePaired) {
                 item {
                     Column(
                         modifier = Modifier
@@ -117,8 +131,14 @@ fun HomePage(
                             stringResource(R.string.no_devices),
                             style = MaterialTheme.typography.bodyLarge
                         )
-                        Button(onClick = onOpenDevices) { Text(stringResource(R.string.open_devices)) }
+                        Button(onClick = onOpenDevices) { Text(stringResource(R.string.add_device)) }
                     }
+                }
+            }
+
+            item {
+                OutlinedButton(onClick = onHealthConnectClick, modifier = Modifier.fillMaxWidth()) {
+                    Text(stringResource(R.string.health_connect))
                 }
             }
         }
@@ -126,13 +146,30 @@ fun HomePage(
 }
 
 @Composable
+private fun LinkStatusText(link: LinkState, connectionState: String) {
+    // The technical string is kept verbatim; only the emphasis is derived from the link state.
+    Text(
+        connectionState,
+        style = MaterialTheme.typography.bodyMedium,
+        color = if (link == LinkState.Connected) {
+            MaterialTheme.colorScheme.onSurface
+        } else {
+            MaterialTheme.colorScheme.onSurfaceVariant
+        },
+    )
+}
+
+@Composable
 private fun BottleStatusCard(
+    link: LinkState,
+    connectionState: String,
     tempC: Int?,
     tds: Int?,
     batteryPct: Int?,
     charging: Boolean,
     volumePct: Int?,
     lastUpdatedMillis: Long?,
+    onForget: () -> Unit,
 ) {
     Card(modifier = Modifier.fillMaxWidth()) {
         Column(
@@ -145,6 +182,7 @@ private fun BottleStatusCard(
                 stringResource(R.string.bottle_status),
                 style = MaterialTheme.typography.titleSmall
             )
+            LinkStatusText(link, connectionState)
             val hasData = tempC != null || tds != null || batteryPct != null || volumePct != null
             if (!hasData) {
                 Text(
@@ -177,6 +215,7 @@ private fun BottleStatusCard(
                     style = MaterialTheme.typography.labelSmall
                 )
             }
+            OutlinedButton(onClick = onForget) { Text(stringResource(R.string.forget_device)) }
         }
     }
 }
@@ -196,7 +235,8 @@ private fun formatClockTime(millis: Long): String =
         .format(java.time.format.DateTimeFormatter.ofPattern("HH:mm:ss"))
 
 @Composable
-private fun ScaleTelemetryCard(
+private fun ScaleCard(
+    link: LinkState,
     connectionState: String,
     sex: Sex,
     age: String,
@@ -206,12 +246,15 @@ private fun ScaleTelemetryCard(
     onAgeChange: (String) -> Unit,
     onHeightChange: (String) -> Unit,
     onAthleteChange: (Boolean) -> Unit,
+    onForget: () -> Unit,
 ) {
     Card(modifier = Modifier.fillMaxWidth()) {
         Column(modifier = Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
             Text(stringResource(R.string.scale_title), style = MaterialTheme.typography.titleSmall)
-            Text(connectionState, style = MaterialTheme.typography.bodyMedium)
+            LinkStatusText(link, connectionState)
 
+            // The profile drives the body-composition maths, so it stays editable whether or not
+            // the scale happens to be awake.
             Text(stringResource(R.string.scale_profile), style = MaterialTheme.typography.titleSmall)
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 FilterChip(selected = sex == Sex.Male, onClick = { onSexChange(Sex.Male) }, label = { Text(stringResource(R.string.sex_male)) })
@@ -243,6 +286,7 @@ private fun ScaleTelemetryCard(
                 stringResource(R.string.syncs_to_health_connect),
                 style = MaterialTheme.typography.bodySmall
             )
+            OutlinedButton(onClick = onForget) { Text(stringResource(R.string.forget_device)) }
         }
     }
 }

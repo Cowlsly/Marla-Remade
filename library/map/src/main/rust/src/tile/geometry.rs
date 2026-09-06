@@ -10,7 +10,7 @@
 //! geometry-command walk. Nothing downstream of here changed — fills are still 2 floats a vertex,
 //! strokes 7, and the shaders never saw any of it.
 
-use crate::style::{Layer, LayerKind, LayerToggles};
+use crate::style::{KindFilter, Layer, LayerKind, LayerToggles};
 use crate::tess::{fill, stroke};
 use crate::tile::symbol;
 use crate::tile::select::ANCESTOR_DEPTH;
@@ -75,6 +75,17 @@ pub struct ShapedLabel {
     /// carries. `None` for every place label, and for the one POI kind (`townhall`) the
     /// sheet has no picture of.
     pub sprite: Option<crate::tile::sprite::Sprite>,
+    /// The feature's **own** interned `kind`, not its layer's whitelist.
+    ///
+    /// A symbol layer filters on several kinds — `poi-food` draws `restaurant`, `fast_food`,
+    /// `cafe` and `bar` — so the layer cannot say which one a given label is. A pick that
+    /// reports the layer's first kind reports `restaurant` for every food POI, which is what
+    /// this field exists to stop.
+    pub kind: u16,
+    /// The archive's stable id for this feature, or
+    /// [`ID_NONE`](tilecodec::mamaps::body::ID_NONE) when its layer carries no id table (every
+    /// layer but `places` and `poi`) or the generator could not attribute it to an OSM element.
+    pub feature_id: u64,
 }
 
 /// Every layer's geometry for one tile, ready to upload.
@@ -119,7 +130,17 @@ pub fn build(
     y: u32,
     rings_validated: bool,
 ) -> TileMesh {
-    build_toggled(tile, layers, z, x, y, rings_validated, LayerToggles::default(), 0)
+    build_toggled(
+        tile,
+        layers,
+        z,
+        x,
+        y,
+        rings_validated,
+        LayerToggles::default(),
+        &KindFilter::all(),
+        0,
+    )
 }
 
 /// [`build`] with the optional layers the host has turned on.
@@ -128,8 +149,8 @@ pub fn build(
 /// tests use, so adding an optional layer does not touch a dozen call sites that have no
 /// opinion about POI.
 ///
-/// `generation` is stamped onto the result unchanged; the caller reads it and the toggles
-/// from the same [`crate::style::SharedToggles`] snapshot so the two cannot disagree.
+/// `generation` is stamped onto the result unchanged; the caller reads it, the toggles and
+/// `kinds` from the same [`crate::style::SharedToggles`] snapshot so the three cannot disagree.
 #[allow(clippy::too_many_arguments)]
 pub fn build_toggled(
     tile: &Body,
@@ -139,6 +160,7 @@ pub fn build_toggled(
     y: u32,
     rings_validated: bool,
     toggles: LayerToggles,
+    kinds: &KindFilter,
     generation: u32,
 ) -> TileMesh {
     let mut meshes = Vec::with_capacity(layers.len());
@@ -167,12 +189,18 @@ pub fn build_toggled(
         #[allow(clippy::type_complexity)]
         let mut coloured: Vec<((u32, u8, u8, u8), Vec<f32>, Vec<u32>)> = Vec::new();
 
-        for feature in &source.features {
+        for (feature_index, feature) in source.features.iter().enumerate() {
             // Kind, then the road flag/detail filters: one call, so a surface layer never
             // draws the ramps, bridges, tunnels and service streets its `kind` alone would
             // admit. This used to be a `String` allocation and a property-map lookup per
             // feature per tile; now it is integer compares against sorted slices.
             if !layer.matches_feature(feature) {
+                continue;
+            }
+            // The app's category chips, when it has narrowed the map to a few POI kinds. A
+            // second sorted-slice test beside the layer's own, and an empty filter admits
+            // everything, so the common case is one branch.
+            if !kinds.admits(layer, feature.kind) {
                 continue;
             }
             let parts = source.parts_of(feature);
@@ -237,9 +265,15 @@ pub fn build_toggled(
                     if name.is_empty() {
                         continue;
                     }
-                    if let Some(label) =
-                        symbol::shape_label(layer, tile, feature, name, extent, index)
-                    {
+                    if let Some(label) = symbol::shape_label(
+                        layer,
+                        tile,
+                        feature,
+                        name,
+                        extent,
+                        index,
+                        feature_index,
+                    ) {
                         labels.push(label);
                     }
                 }
@@ -596,7 +630,7 @@ mod tests {
         );
 
         let on = LayerToggles { poi: false, transit: true };
-        let mesh = build_toggled(&body, only, 14, 0, 0, false, on, 7);
+        let mesh = build_toggled(&body, only, 14, 0, 0, false, on, &KindFilter::all(), 7);
         assert_eq!(mesh.generation, 7, "the mesh records the generation it was built at");
         let colours: Vec<Option<u32>> = mesh.meshes.iter().map(|m| m.color_override).collect();
         assert_eq!(
@@ -649,7 +683,7 @@ mod tests {
         let at = all.iter().position(|l| l.id == "transit-rail").expect("the transit layer");
         let Some(only) = all.get(at..=at) else { panic!("a one-layer slice") };
         let on = LayerToggles { poi: false, transit: true };
-        let mesh = build_toggled(&body, only, 14, 0, 0, false, on, 0);
+        let mesh = build_toggled(&body, only, 14, 0, 0, false, on, &KindFilter::all(), 0);
         assert_eq!(
             mesh.meshes.iter().map(|m| m.lane).collect::<Vec<(u8, u8, u8)>>(),
             vec![(0, 2, 255), (1, 2, 255)],

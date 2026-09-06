@@ -239,8 +239,9 @@ internal suspend fun runDownloadsCore(
     context: Context,
     ds: DataStoreUtils,
     specs: List<DownloadSpec>,
+    targetDir: File? = null,
 ): Boolean = withContext(Dispatchers.IO) {
-    val dir = context.getExternalFilesDir(null)
+    val dir = targetDir ?: context.getExternalFilesDir(null)
     var allDownloaded = true
     for (spec in specs) {
         // Sever any legacy DownloadManager claim on an already-present file before

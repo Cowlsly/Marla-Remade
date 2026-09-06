@@ -19,6 +19,7 @@
 
 pub mod buffers;
 pub mod context;
+pub mod imageprobe;
 pub mod pipeline;
 pub mod reshape;
 pub mod run;

@@ -53,6 +53,9 @@
 //! `p.weight` is a **32-bit word** offset and `p.act_weight` the scale as an fp16 element index,
 //! which is why `Act::PRelu` cannot ride along.
 
+// See the tail of `main`, and `conv_vec_int4.comp` which does the same.
+#extension GL_KHR_shader_subgroup_basic : require
+#extension GL_KHR_shader_subgroup_arithmetic : require
 #include "common.glsl"
 
 /// Output channels per workgroup.
@@ -61,7 +64,17 @@
 /// dot product and reduce 64 partials for one number; eight amortises the reduction's barrier over
 /// eight outputs while keeping [`partial`] at 2 KB. It also bounds the register pressure at eight
 /// accumulators, which is what lets the activation stay in a register across the row loop.
-#define ROWS 8u
+// Output channels one workgroup owns.
+//
+// # Why this is small
+//
+// Eight meant a 1,536-wide projection launched 192 workgroups - about 12k threads, barely over a
+// Mali G715's capacity, so there was nothing queued to run while a workgroup waited on memory.
+// The logits head launches 32,768 and reaches 14.9 GB/s; the per-layer projections reached 3.6.
+// Two gives four times the workgroups for the same weight traffic, at the cost of re-reading the
+// 3 KB activation vector four times more often - which is cache-resident and cheap beside the
+// megabytes of weights each one streams.
+#define ROWS 2u
 
 /// Per-lane partial sums, one row of 64 per output channel.
 shared float partial[ROWS][64];
@@ -88,13 +101,21 @@ void main() {
             acc[r] += float(int8_at(p.weight, (channel_base + r) * p.in_c + k)) * x;
         }
     }
+    // Reduce within each subgroup in registers, then across the handful a workgroup holds.
+    //
+    // The comment that stood here reasoned a log-step tree would cost six barriers to save 56
+    // adds, so the serial tail was fine. That weighed the wrong things: the cost was never the
+    // adds but the **one** cross-subgroup barrier and the 56 idle lanes behind it, and a
+    // subgroup reduction needs no barrier at all. Measured on a Mali G715, whose subgroup is 16
+    // wide, the per-layer projections reached 3.6 GB/s against the logits head's 14.9 - the head
+    // being the one kernel with enough work per tile to hide this.
     for (uint r = 0u; r < ROWS; r++) {
-        partial[r][lane] = acc[r];
+        float summed = subgroupAdd(acc[r]);
+        if (subgroupElect()) {
+            partial[r][gl_SubgroupID] = summed;
+        }
     }
     barrier();
-
-    // One lane per row finishes its 64 partials. A log-step tree would cost six barriers to save
-    // 56 adds on eight lanes, against an inner loop that just did `in_c` of them on all 64.
     if (lane >= ROWS) {
         return;
     }
@@ -103,7 +124,7 @@ void main() {
         return;
     }
     float total = 0.0;
-    for (uint i = 0u; i < 64u; i++) {
+    for (uint i = 0u; i < gl_NumSubgroups; i++) {
         total += partial[lane][i];
     }
     float scale = float(weights[p.act_weight + channel]);

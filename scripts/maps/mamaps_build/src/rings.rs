@@ -555,6 +555,7 @@ mod tests {
             extent: 4096,
             layers: vec![layer],
             names: Vec::new(),
+            ids: Vec::new(),
         };
         // The encoder's own contiguity check, which is the real proof.
         assert!(tilecodec::mamaps::body::serialize(&body).is_ok());
@@ -583,7 +584,7 @@ mod tests {
                     // A hole, wound the same way as its exterior, which stage C has to reverse.
                     ring(-120.2, 35.2, 0.3),
                 ]]),
-                name: None, transit_color: 0, transit_ordinal: 0, transit_lanes: 0, transit_taper: 0,
+                name: None, id: tilecodec::mamaps::body::ID_NONE, transit_color: 0, transit_ordinal: 0, transit_lanes: 0, transit_taper: 0,
             },
             crate::extract::Feature {
                 class: Class::area(dict::LAYER_WATER, crate::schema::kind("water"), 0),
@@ -592,7 +593,7 @@ mod tests {
                     // A hole nowhere near its exterior, which stage C has to drop.
                     ring(-100.0, 20.0, 0.1),
                 ]]),
-                name: None, transit_color: 0, transit_ordinal: 0, transit_lanes: 0, transit_taper: 0,
+                name: None, id: tilecodec::mamaps::body::ID_NONE, transit_color: 0, transit_ordinal: 0, transit_lanes: 0, transit_taper: 0,
             },
         ];
         let settings = crate::tiler::Settings {

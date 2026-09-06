@@ -11,6 +11,7 @@ import androidx.compose.ui.unit.DpSize
 import com.vayunmathur.library.map.CameraState
 import com.vayunmathur.library.map.LayerOptions
 import com.vayunmathur.library.map.MapOptions
+import com.vayunmathur.library.map.UserPuck
 import com.vayunmathur.library.map.VectorMap
 import com.vayunmathur.library.ui.FreeHeightSheetState
 import com.vayunmathur.maps.BuildConfig
@@ -18,9 +19,9 @@ import com.vayunmathur.maps.data.Feature1
 import com.vayunmathur.maps.data.ParkingSpot
 import com.vayunmathur.maps.data.SavedPlace
 import com.vayunmathur.maps.data.SpecificFeature
+import com.vayunmathur.maps.data.osmPlace
 import com.vayunmathur.maps.ipc.FamilyMember
 import com.vayunmathur.maps.ui.FAMILY_LOCATION_LAYER_ID
-import com.vayunmathur.maps.ui.MA_POIS_LAYER_ID
 import com.vayunmathur.maps.ui.PARKING_PIN_LAYER_ID
 import com.vayunmathur.maps.ui.SAVED_PLACE_LAYER_ID
 import com.vayunmathur.maps.ui.SEARCH_RESULT_LAYER_ID
@@ -29,11 +30,12 @@ import com.vayunmathur.maps.ui.map.MapFeaturePicker.Companion.toFeature1
 import com.vayunmathur.maps.util.MapsSearchViewModel
 import com.vayunmathur.maps.util.NavigationProgress
 import com.vayunmathur.maps.util.PoiCategories
-import com.vayunmathur.maps.util.PoiIndex
 import com.vayunmathur.maps.util.RouteService
 import com.vayunmathur.maps.util.SearchResult
 import com.vayunmathur.maps.util.SelectedFeatureViewModel
 import com.vayunmathur.maps.util.TransitStopsViewModel
+import com.vayunmathur.maps.util.toGeoPoint
+import com.vayunmathur.maps.util.toPosition
 import kotlinx.coroutines.launch
 import org.maplibre.spatialk.geojson.Position
 
@@ -41,8 +43,10 @@ import org.maplibre.spatialk.geojson.Position
  * The map surface: the renderer, its overlay layers, and what a tap on it means.
  *
  * Renders with library:map's [VectorMap] (Vulkan basemap, phone-side only). The overlay
- * pins/routes/puck are plain Compose in [MapLayers], hit-tested in-memory - the renderer
- * has no vector-layer API for them. Tile-baked place labels resolve through the native pick
+ * pins and route are plain Compose in [MapLayers], hit-tested in-memory - the renderer
+ * has no vector-layer API for them. The user puck is the exception: it has no hit-testing,
+ * so it moved into the renderer as a [UserPuck] and no longer drags behind a pan.
+ * Tile-baked place labels resolve through the native pick
  * ([queryRenderedLabels][com.vayunmathur.library.map.Projection.queryRenderedLabels]).
  *
  * The transit toggle is the one layer the renderer draws itself, via [LayerOptions]; see
@@ -59,7 +63,7 @@ fun MapSurface(
     selectedFeature: SpecificFeature?,
     route: RouteService.RouteType?,
     userPosition: Position,
-    userBearing: Float,
+    userBearing: Float?,
     navProgress: NavigationProgress?,
     searchResults: List<SearchResult>,
     savedPlaces: List<SavedPlace>,
@@ -74,8 +78,8 @@ fun MapSurface(
 ) {
     val coroutineScope = rememberCoroutineScope()
     // DEBUG-only dev override so device-verifier can point the smoke test at a
-    // local v2 archive (prod planet.mamaps is v1 and won't open with the v2
-    // reader). Release builds always use the prod default (null).
+    // locally built archive (e.g. a freshly tiled california.mamaps). Release
+    // builds always use the prod default (null).
     val context = LocalContext.current
     val archivePath = remember(context) { resolveDevArchivePath(context) }
 
@@ -83,8 +87,26 @@ fun MapSurface(
     // so flipping the layers switch drew nothing but Compose stops. Remembered because
     // VulkanMapSurface keys a LaunchedEffect on this by equality and a fresh instance every
     // recomposition would churn it.
-    val mapOptions = remember(transitEnabled) {
-        MapOptions(layerOptions = LayerOptions(transit = transitEnabled))
+    val selectedCategory = chrome.selectedCategory
+    val mapOptions = remember(transitEnabled, selectedCategory) {
+        MapOptions(
+            layerOptions = LayerOptions(
+                poi = true,
+                poiKinds = selectedCategory?.kinds.orEmpty(),
+                transit = transitEnabled,
+            ),
+        )
+    }
+
+    // The library takes a nullable GeoPoint, so :maps' two sentinels are converted here
+    // and go no further: Position(0, 0) is this app's "no fix" and means null, and a null
+    // bearing means no heading yet rather than due north.
+    val userPuck = remember(userPosition, userBearing) {
+        if (userPosition.latitude == 0.0 && userPosition.longitude == 0.0) {
+            null
+        } else {
+            UserPuck(userPosition.toGeoPoint(), userBearing)
+        }
     }
 
     VectorMap(
@@ -93,6 +115,7 @@ fun MapSurface(
         darkBasemap = darkBasemap,
         archivePath = archivePath,
         options = mapOptions,
+        userPuck = userPuck,
         // GAP (deferred, renderer has no raster-layer API): the Google traffic tiles
         // have nothing to mount on. [trafficEnabled] is kept so the toggle plumbing
         // survives; see also the no-op branch in [MapLayers].
@@ -105,13 +128,10 @@ fun MapSurface(
                 // remembered) so a pin added while the map is open is tappable on the
                 // next tap, not the next recomposition.
                 val pins = pinFeatures(
-                    projection = projection,
                     searchResults = searchResults,
                     savedPlaces = savedPlaces,
                     parkingSpot = parkingSpot,
                     familyMembers = familyMembers,
-                    poiFilterTypes = chrome.selectedCategory?.types,
-                    zoom = camera.position.zoom,
                 )
                 val picker = MapFeaturePicker(
                     source = FeatureSource { box, layerIds ->
@@ -152,6 +172,31 @@ fun MapSurface(
                     null -> Unit
                 }
 
+                // A POI the renderer actually drew, from the same collision pass that put
+                // it on screen. Ranked below the app's own pins deliberately: a saved place
+                // or a search result the user put there outranks ambient map furniture
+                // underneath it, which is the order the old probe chain had too.
+                val poi = click.poi
+                if (poi != null) {
+                    val type = PoiCategories.typeOfKind(poi.kind)
+                    // A station carries no stop id, so its tap opens the nearest baked
+                    // stop's departure board rather than a place sheet.
+                    if (type == PoiCategories.STATION_TYPE) {
+                        transitViewModel.openNearestStop(
+                            poi.position.latitude,
+                            poi.position.longitude,
+                        )
+                        return@launch
+                    }
+                    // The archive carries a POI's kind, name and point and nothing else, so
+                    // phone, website, hours and address are still joined from the offline
+                    // index on IO inside `osmPlace`.
+                    viewModel.stashRouteSelection()
+                    viewModel.set(osmPlace(poi.name, poi.position.toPosition(), poiType = type))
+                    sheetState.partialExpand()
+                    return@launch
+                }
+
                 // Fall back to the basemap's own place labels from the native pick.
                 // Resolving one may make a Wikidata round-trip, so the ViewModel owns
                 // that rather than this handler. Empty until the renderer registers
@@ -186,8 +231,6 @@ fun MapSurface(
             selectedFeature = selectedFeature,
             route = route,
             cameraState = camera,
-            userPosition = userPosition,
-            userBearing = userBearing,
             navProgress = navProgress,
             searchResults = searchResults,
             savedPlaces = savedPlaces,
@@ -197,7 +240,6 @@ fun MapSurface(
             satelliteEnabled = satelliteEnabled,
             safetyEnabled = safetyEnabled,
             transitEnabled = transitEnabled,
-            poiFilterTypes = chrome.selectedCategory?.types,
             darkBasemap = darkBasemap,
         )
     }
@@ -207,7 +249,7 @@ fun MapSurface(
  * Intent extra carrying a dev-only archive URL/path for the map renderer.
  *
  * DEBUG builds only (see [resolveDevArchivePath]): lets device-verifier point the
- * smoke test at a locally served v2 archive without touching the prod default.
+ * smoke test at a locally served archive without touching the prod default.
  */
 const val EXTRA_ARCHIVE_PATH = "maps.intent.extra.ARCHIVE_PATH"
 
@@ -228,7 +270,7 @@ private fun resolveDevArchivePath(context: android.content.Context): String? {
  * OSM station-ish POI type whose taps open the departure board. Station POIs carry no
  * stop id of their own; see `TransitStopsViewModel.openNearestStop`.
  */
-private const val STATION_POI_TYPE = 50
+private const val STATION_POI_TYPE = PoiCategories.STATION_TYPE
 
 /** A pin feature tagged with the probe layer it belongs to. */
 private data class TaggedFeature(val layerId: String, val feature: Feature1)
@@ -250,13 +292,10 @@ private data class TaggedFeature(val layerId: String, val feature: Feature1)
  * stop pins are unaffected: those are Compose-drawn and still probe normally.
  */
 private fun pinFeatures(
-    projection: com.vayunmathur.library.map.Projection,
     searchResults: List<SearchResult>,
     savedPlaces: List<SavedPlace>,
     parkingSpot: ParkingSpot?,
     familyMembers: List<FamilyMember>,
-    poiFilterTypes: Set<Int>?,
-    zoom: Double,
 ): List<TaggedFeature> = buildList {
     if (parkingSpot != null) {
         add(TaggedFeature(PARKING_PIN_LAYER_ID, parkingPinFeature(parkingSpot)))
@@ -269,13 +308,5 @@ private fun pinFeatures(
     }
     for (member in familyMembers) {
         add(TaggedFeature(FAMILY_LOCATION_LAYER_ID, familyPinFeature(member)))
-    }
-    // Ambient POIs come from the offline index viewport with the same category
-    // filter + min-zoom gating MaPoisLayer draws, so the hit-test matches the screen.
-    val bounds = projection.queryVisibleBoundingBox()
-    for (poi in PoiIndex.inViewport(bounds.west, bounds.south, bounds.east, bounds.north)
-        .filter { hit -> (poiFilterTypes.isNullOrEmpty() || hit.type in poiFilterTypes) &&
-            zoom >= PoiCategories.minZoom(hit.type) }) {
-        add(TaggedFeature(MA_POIS_LAYER_ID, poiPinFeature(poi)))
     }
 }

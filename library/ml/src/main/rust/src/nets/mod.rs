@@ -293,6 +293,9 @@ pub enum Kind {
     /// this exists for wants `Gelu`. Passing it here silently uses a zero slope, which is a
     /// plain `Relu` - so [`Builder::activate`] refuses it rather than letting that happen.
     Activate,
+    /// `activate(gate) * up` over a fused `[gate | up]` projection, replacing two slices, an
+    /// activation and a multiply. See `shaders/gated_activate.comp`.
+    GatedActivate,
     /// Multiply by a scalar held in the weights. See `shaders/mul_scalar.comp`.
     MulScalar,
     /// Clamp to a `[min, max]` pair held in the weights. See `shaders/clamp.comp`.
@@ -667,7 +670,8 @@ impl Kind {
             | Kind::SoftmaxPrefix
             | Kind::CacheWrite
             | Kind::Softcap
-            | Kind::Activate
+            | Kind::GatedActivate => {}
+            Kind::Activate
             | Kind::MulScalar
             | Kind::Clamp
             | Kind::AttnApply
@@ -935,6 +939,12 @@ enum Node {
         out: Id,
         act: Act,
     },
+    /// `activate(gate) * up` over a fused projection. See [`Kind::GatedActivate`].
+    GatedActivate {
+        input: Id,
+        out: Id,
+        act: Act,
+    },
     /// Multiply by a scalar held in the weights. See [`Kind::MulScalar`].
     MulScalar {
         input: Id,
@@ -1070,7 +1080,10 @@ const CONV_POINT_TILE: u32 = 16;
 ///
 /// That shader is dispatched one workgroup per group of this many channels, so [`Builder::emit`]
 /// has to know it to compute [`Push::count`], exactly as it does for [`CONV_POINT_TILE`].
-const CONV_VEC_ROWS: u32 = 8;
+/// **Must equal `ROWS` in `conv_vec_int4.comp` and `conv_vec_int8.comp`.** The two are separate
+/// declarations in separate languages and nothing checks them against each other; a mismatch
+/// leaves most output channels never dispatched, which parity catches as zeros.
+const CONV_VEC_ROWS: u32 = 2;
 
 /// `erf`, to about 1.5e-7 — Abramowitz and Stegun 7.1.26.
 ///
@@ -2038,6 +2051,22 @@ impl<'a> Builder<'a> {
         out
     }
 
+    /// `activate(gate) * up` for a fused `[gate | up]` projection, in one op.
+    ///
+    /// Replaces `slice_channels` twice, an `activate` and a `mul`: four dispatches where three
+    /// exist only to hand data to the next. See `shaders/gated_activate.comp`.
+    pub fn gated_activate(&mut self, input: Id, act: Act) -> Id {
+        let shape = self.shape_of(input);
+        if shape.c % 2 != 0 {
+            self.fail(format!("a gated activation over {shape:?}, whose channels are not a pair"));
+        }
+        if matches!(act, Act::PRelu(_)) {
+            self.fail("a gated PRelu, whose per-channel slope this does not carry".to_string());
+        }
+        let out = self.tensor(Shape::new(shape.c / 2, shape.h, shape.w));
+        self.nodes.push(Node::GatedActivate { input, out, act });
+        out
+    }
     /// `tanh(x / cap) * cap`, elementwise. See [`Kind::Softcap`].
     pub fn softcap(&mut self, input: Id, cap: f32) -> Id {
         if !(cap > 0.0) {
@@ -3234,6 +3263,28 @@ impl<'a> Builder<'a> {
                     invocations: so.len(),
                 });
             }
+            Node::GatedActivate { input, out, act } => {
+                let so = shape(*out);
+                ops.push(Op::Dispatch {
+                    kind: Kind::GatedActivate,
+                    push: Push {
+                        in0: at(*input)?,
+                        out: at(*out)?,
+                        // The distance from a gate element to its up partner: the whole gate
+                        // half, which is the output's element count.
+                        in_c: so.len(),
+                        in_h: so.h,
+                        in_w: so.w,
+                        out_c: so.c,
+                        out_h: so.h,
+                        out_w: so.w,
+                        act: act.code(),
+                        count: so.len(),
+                        ..Push::default()
+                    },
+                    invocations: so.len(),
+                });
+            }
             Node::Softcap { input, out, cap } => {
                 let so = shape(*out);
                 ops.push(Op::Dispatch {
@@ -3399,7 +3450,8 @@ impl Node {
             | Node::ConcatPositions { out, .. }
             | Node::Concat { out, .. } => *out,
             | Node::Softcap { out, .. } => *out,
-            | Node::Activate { out, .. } => *out,
+            | Node::Activate { out, .. }
+            | Node::GatedActivate { out, .. } => *out,
             | Node::MulScalar { out, .. } => *out,
             | Node::Clamp { out, .. } => *out,
             // The cache is the destination, and it is pinned, so `finish` finds it already
@@ -3419,6 +3471,7 @@ impl Node {
             | Node::RmsNorm { input, .. }
             | Node::Softmax { input, .. }
             | Node::Softcap { input, .. }
+            | Node::GatedActivate { input, .. }
             | Node::Activate { input, .. }
             | Node::MulScalar { input, .. }
             | Node::Clamp { input, .. }
@@ -3547,6 +3600,36 @@ fn round_up(len: u32) -> u32 {
 
 #[cfg(test)]
 pub(crate) mod tests {
+
+    /// `CONV_VEC_ROWS` must equal `ROWS` in both gemv shaders.
+    ///
+    /// The same number is declared three times across two languages and nothing connects them:
+    /// Rust uses it to decide how many workgroups to dispatch, each shader to decide which
+    /// channels a workgroup owns. Disagreeing does not fail to build - it dispatches too few
+    /// workgroups and leaves most output channels never written, which reads as a plausible
+    /// wrong answer rather than an error. That happened while tuning occupancy, and only the
+    /// device parity fixtures caught it.
+    #[test]
+    fn the_gemv_row_count_matches_both_shaders() {
+        for shader in ["conv_vec_int4.comp", "conv_vec_int8.comp"] {
+            let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("shaders").join(shader);
+            let source = std::fs::read_to_string(&path)
+                .unwrap_or_else(|e| panic!("cannot read {}: {e}", path.display()));
+            let line = source
+                .lines()
+                .find(|line| line.trim_start().starts_with("#define ROWS"))
+                .unwrap_or_else(|| panic!("{shader} declares no ROWS"));
+            let declared: u32 = line
+                .split_whitespace()
+                .nth(2)
+                .and_then(|word| word.trim_end_matches('u').parse().ok())
+                .unwrap_or_else(|| panic!("{shader} has an unreadable ROWS: {line}"));
+            assert_eq!(
+                declared, CONV_VEC_ROWS,
+                "{shader} owns {declared} channels a workgroup, Rust dispatches for {CONV_VEC_ROWS}"
+            );
+        }
+    }
     use super::*;
 
     /// A [`WeightSource`] that knows only shapes.

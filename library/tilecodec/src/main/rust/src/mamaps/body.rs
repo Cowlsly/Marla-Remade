@@ -50,22 +50,33 @@ use crate::proto::{err, Result};
 
 pub const BODY_HEADER_LEN: usize = 16;
 pub const LAYER_INDEX_LEN: usize = 12;
-/// v1 records: kind, kind_detail, geom_type, flags, 2 reserved, parts_offset, part_count.
-pub const FEATURE_RECORD_LEN_V1: usize = 16;
-/// v2 records: v1's 16 plus name_idx (u16), transit_color (u32) and the three transit lane
-/// bytes (ordinal, lanes, taper) — 24, with the last byte still reserved zero.
+/// Feature records: kind, kind_detail, geom_type, flags, name_idx (u16), parts_offset,
+/// part_count, transit_color (u32) and the three transit lane bytes (ordinal, lanes, taper) —
+/// 24, with the last byte still reserved zero.
 pub const FEATURE_RECORD_LEN: usize = 24;
 pub const PART_ENTRY_LEN: usize = 12;
 pub const BODY_FLAG_EXTENDED_COUNTS: u8 = 0x01;
+/// A feature id table follows the name table. See [`Body::ids`].
+pub const BODY_FLAG_ID_TABLE: u8 = 0x02;
+/// A name table follows the layer payloads.
+///
+/// Stated rather than inferred from "are there bytes left", which is how v2 found it. That
+/// inference only worked while the name table was the *only* optional trailing section; with the
+/// id table chaining onto it, an omitted name table and a present id table are indistinguishable
+/// without a flag.
+pub const BODY_FLAG_NAME_TABLE: u8 = 0x04;
+
+const KNOWN_BODY_FLAGS: u8 =
+    BODY_FLAG_EXTENDED_COUNTS | BODY_FLAG_ID_TABLE | BODY_FLAG_NAME_TABLE;
 
 /// A feature whose geometry is one or more open paths.
 pub const GEOM_LINE: u8 = 1;
 /// A feature whose geometry is one exterior ring plus its holes.
 pub const GEOM_POLYGON: u8 = 2;
-/// A feature whose geometry is one or more labelled points (v2: `places` and `poi`).
+/// A feature whose geometry is one or more labelled points (`places` and `poi`).
 ///
 /// Points decode like lines: each part holds that point's tile-local coordinates and the arena
-/// walk is identical. A v1 reader never sees this value — v1 bodies carry no points.
+/// walk is identical.
 pub const GEOM_POINT: u8 = 3;
 
 pub const FLAG_IS_TUNNEL: u8 = 1 << 0;
@@ -91,11 +102,8 @@ pub const DEFAULT_EXTENT: u16 = 4096;
 
 /// One feature.
 ///
-/// `name_idx`, `transit_color` and the three transit lane fields are v2 fields. A v1 body
-/// carries none of them: parsing one leaves `name_idx` at [`NAME_NONE`] and every transit field
-/// at zero, so old code that never reads them behaves exactly as before. Adding fields here is
-/// safe for `library/map`: it never constructs a `Feature` literally, it only reads `kind` and
-/// `geom_type`.
+/// Adding fields here is safe for `library/map`: it never constructs a `Feature` literally, it
+/// only reads `kind` and `geom_type`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Feature {
     /// An id into [`dict::KINDS`](super::dict::KINDS), or
@@ -107,13 +115,11 @@ pub struct Feature {
     pub geom_type: u8,
     pub flags: u8,
     /// Index into the body's per-tile name table, or [`NAME_NONE`] for "no name".
-    ///
-    /// v2 only; a v1 parse always yields [`NAME_NONE`].
     pub name_idx: u16,
     /// Where this feature's parts start in the layer's part table.
     pub parts_offset: u32,
     pub part_count: u32,
-    /// A transit line's colour as `0xRRGGBB` (v2, reserved: zero until transit lands).
+    /// A transit line's colour as `0xRRGGBB`.
     ///
     /// Carried per feature rather than interned because colours are data, not vocabulary.
     pub transit_color: u32,
@@ -214,25 +220,53 @@ impl Layer {
 /// [`dict::NONE`] is: most features are unnamed, and the common value should be zero bytes.
 pub const NAME_NONE: u16 = 0;
 
+/// `id` for "this feature has no stable identity", for the same reason [`NAME_NONE`] is zero:
+/// a layer's id vector is dense, and features the generator could not attribute an OSM element
+/// to should cost zero bytes of entropy rather than a sentinel the reader has to know about.
+pub const ID_NONE: u64 = 0;
+
 /// A whole tile.
 ///
-/// `names` is the v2 per-tile string table: `names[i - 1]` is the text for `name_idx == i`,
-/// deduplicated in first-use order. Empty on a v1 parse and on any v2 tile with nothing named.
-/// A renderer that ignores names ignores this field and draws exactly what v1 drew.
+/// `names` is the per-tile string table: `names[i - 1]` is the text for `name_idx == i`,
+/// deduplicated in first-use order. Empty on any tile with nothing named. A renderer that
+/// ignores names ignores this field.
+///
+/// `ids` is the optional per-layer feature id table, keyed by `layer_id` and ascending by it.
+/// Each vector is dense and parallel to that layer's `features`, so `ids[k].1[i]` is the id of
+/// `layer(ids[k].0).features[i]`.
+///
+/// It is a side table rather than a field on [`Feature`] because widening the 24-byte feature
+/// record to 32 would cost eight bytes on every road and building in the archive — roughly 17 GB
+/// on a 68 GB planet — to carry an id that a line feature cannot even have: `coalesce` merges
+/// lines hard and deliberately relies on them having no identity, so a merged road's id would be
+/// whichever input happened to win. Only `poi` and `places` are pure, never-coalesced points, and
+/// giving ids to those two alone costs roughly 320 MB.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Body {
     pub extent: u16,
     pub layers: Vec<Layer>,
     pub names: Vec<String>,
+    pub ids: Vec<(u8, Vec<u64>)>,
 }
 
 impl Body {
     pub fn new(extent: u16) -> Body {
-        Body { extent, layers: Vec::new(), names: Vec::new() }
+        Body { extent, layers: Vec::new(), names: Vec::new(), ids: Vec::new() }
     }
 
     pub fn layer(&self, layer_id: u8) -> Option<&Layer> {
         self.layers.iter().find(|l| l.layer_id == layer_id)
+    }
+
+    /// The stable feature id for the `index`-th feature of `layer_id`.
+    ///
+    /// `None` when the layer carries no id table at all; [`ID_NONE`] when it does but the
+    /// generator could not attribute this feature to an OSM element.
+    pub fn feature_id(&self, layer_id: u8, index: usize) -> Option<u64> {
+        self.ids
+            .iter()
+            .find(|(id, _)| *id == layer_id)
+            .and_then(|(_, ids)| ids.get(index).copied())
     }
 
     /// The display name for a `name_idx`, or `None` for [`NAME_NONE`] and anything past the table.
@@ -254,11 +288,8 @@ impl Body {
     }
 
     /// Body header: `0..4` magic-and-version, `4..8` raw_len, `8..10` extent, `10` layer_count,
-    /// `11` flags, `12..16` reserved. Flag `0x01` means extended feature counts follow the layer index.
-    ///
-    /// v1 (`buf[3] == 1`) parses with 16-byte feature records, no [`GEOM_POINT`] and no name
-    /// table: every feature yields [`NAME_NONE`] and zero transit fields. Rejected: a v1 body
-    /// claiming point geometry or a nonzero v2 field (bytes that version never wrote).
+    /// `11` flags, `12..16` reserved. Flag `0x01` means extended feature counts follow the layer
+    /// index; `0x02` an id table and `0x04` a name table trail the payloads, in that order.
     pub fn parse(buf: &[u8]) -> Result<Body> {
         if buf.len() < BODY_HEADER_LEN {
             return err("a .mamaps body is shorter than its own header");
@@ -267,12 +298,9 @@ impl Body {
             return err("not a .mamaps tile body (bad magic)");
         }
         let version = buf[3];
-        if version != super::header::FORMAT_VERSION && version != super::header::FORMAT_VERSION_V1
-        {
+        if version != super::header::FORMAT_VERSION {
             return err(format!("unsupported .mamaps body version {version}"));
         }
-        let v1 = version == super::header::FORMAT_VERSION_V1;
-        let record_len = if v1 { FEATURE_RECORD_LEN_V1 } else { FEATURE_RECORD_LEN };
         let raw_len = u32::from_le_bytes([buf[4], buf[5], buf[6], buf[7]]) as usize;
         if raw_len != buf.len() {
             return err(format!(
@@ -286,7 +314,7 @@ impl Body {
         }
         let layer_count = buf[10] as usize;
         let body_flags = buf[11];
-        if body_flags & !BODY_FLAG_EXTENDED_COUNTS != 0 {
+        if body_flags & !KNOWN_BODY_FLAGS != 0 {
             return err(format!("unknown body flags {:#04x}", body_flags));
         }
         // Reserved word must be zero unless extended flag is set; extended uses it as spill for counts.
@@ -339,38 +367,48 @@ impl Body {
             if offset < index_end || end > buf.len() {
                 return err("a .mamaps layer's payload is outside the body");
             }
-            layers.push(parse_layer(layer_id, feature_count, &buf[offset..end], record_len, v1)?);
+            layers.push(parse_layer(layer_id, feature_count, &buf[offset..end])?);
         }
-        // v2 name table: at the aligned end of the last layer payload (serialize aligns
-        // before writing it, and omits it entirely when no feature names anything). v1 has none.
-        // A count that overruns the body or a non-UTF-8 entry is corruption, refused here.
+        // The optional trailing sections, in order: the name table then the id table, each at the
+        // aligned end of the last layer payload. Both are announced by a flag rather than
+        // inferred from leftover bytes, because with two of them "there are bytes left" no longer
+        // says which one they are.
         let mut names = Vec::new();
-        if !v1 {
-            let mut at = names_at(buf, layer_count, index_end)?;
-            if at > buf.len() {
-                // The payloads end mid-alignment with no table after them: the body is exactly
-                // its payloads, unpadded. Anything else is trailing garbage.
-                if names_end(buf, layer_count, index_end)? != buf.len() {
-                    return err(format!(
-                        "a .mamaps body has {} trailing byte(s) past its payloads",
-                        buf.len(),
-                    ));
-                }
-                at = buf.len();
+        let mut ids = Vec::new();
+        let payloads_end = payloads_end(buf, layer_count, index_end)?;
+        let has_names = body_flags & BODY_FLAG_NAME_TABLE != 0;
+        let has_ids = body_flags & BODY_FLAG_ID_TABLE != 0;
+        if !has_names && !has_ids {
+            // The body is exactly its payloads, unpadded. Anything else is trailing garbage.
+            if payloads_end != buf.len() {
+                return err(format!(
+                    "a .mamaps body has {} trailing byte(s) past its payloads",
+                    buf.len().saturating_sub(payloads_end),
+                ));
             }
-            if at < buf.len() {
+        } else {
+            let mut at = align4(payloads_end);
+            if at > buf.len() {
+                return err("a .mamaps body's trailing sections start past its end");
+            }
+            if has_names {
                 let (table, used) = parse_names(&buf[at..])?;
                 at += used;
                 names = table;
             }
+            if has_ids {
+                let (table, used) = parse_ids(&buf[at..], &layers)?;
+                at += used;
+                ids = table;
+            }
             if at != buf.len() {
                 return err(format!(
-                    "a .mamaps body has {} trailing byte(s) past its name table",
+                    "a .mamaps body has {} trailing byte(s) past its trailing sections",
                     buf.len() - at,
                 ));
             }
         }
-        Ok(Body { extent, layers, names })
+        Ok(Body { extent, layers, names, ids })
     }
 }
 
@@ -378,24 +416,15 @@ impl Body {
 ///
 /// Every count is bounded by the slice it is read from before anything is allocated, so a corrupt
 /// body cannot ask for a gigabyte of `Vec`.
-///
-/// `record_len` is 16 for v1 bodies and 24 for v2; `v1` additionally rejects point geometry and
-/// any nonzero byte where the v2 fields would be.
-fn parse_layer(
-    layer_id: u8,
-    feature_count: usize,
-    buf: &[u8],
-    record_len: usize,
-    v1: bool,
-) -> Result<Layer> {
-    let features_len = feature_count * record_len;
+fn parse_layer(layer_id: u8, feature_count: usize, buf: &[u8]) -> Result<Layer> {
+    let features_len = feature_count * FEATURE_RECORD_LEN;
     if features_len > buf.len() {
         return err("a .mamaps layer's features run past its payload");
     }
     let mut features = Vec::with_capacity(feature_count);
     let mut parts_needed = 0usize;
     for i in 0..feature_count {
-        let at = i * record_len;
+        let at = i * FEATURE_RECORD_LEN;
         let u16_at = |o: usize| u16::from_le_bytes([buf[at + o], buf[at + o + 1]]);
         let u32_at = |o: usize| {
             u32::from_le_bytes([buf[at + o], buf[at + o + 1], buf[at + o + 2], buf[at + o + 3]])
@@ -404,35 +433,22 @@ fn parse_layer(
         if !matches!(geom_type, GEOM_LINE | GEOM_POLYGON | GEOM_POINT) {
             return err(format!("a .mamaps feature has geometry type {geom_type}, which this format does not carry"));
         }
-        if v1 && geom_type == GEOM_POINT {
-            return err("a v1 .mamaps body carries point geometry it never wrote");
-        }
         let flags = buf[at + 5];
         if flags & !KNOWN_FEATURE_FLAGS != 0 {
             return err("a .mamaps feature sets unknown flags");
         }
-        let (name_idx, transit_color, transit_ordinal, transit_lanes, transit_taper) = if v1 {
-            // v1 records are 16 bytes with bytes 6..8 reserved zero; nonzero means the bytes are
-            // not what that version wrote.
-            if u16_at(6) != 0 {
-                return err("a v1 .mamaps feature has a nonzero reserved half-word");
-            }
-            (NAME_NONE, 0, 0, 0, 0)
-        } else {
-            (u16_at(6), u32_at(16), buf[at + 20], buf[at + 21], buf[at + 22])
-        };
         let feature = Feature {
             kind: u16_at(0),
             kind_detail: u16_at(2),
             geom_type,
             flags,
-            name_idx,
+            name_idx: u16_at(6),
             parts_offset: u32_at(8),
             part_count: u32_at(12),
-            transit_color,
-            transit_ordinal,
-            transit_lanes,
-            transit_taper,
+            transit_color: u32_at(16),
+            transit_ordinal: buf[at + 20],
+            transit_lanes: buf[at + 21],
+            transit_taper: buf[at + 22],
         };
         if feature.part_count == 0 {
             return err("a .mamaps feature has no geometry");
@@ -510,20 +526,15 @@ fn zigzag(v: u64) -> i32 {
     crate::proto::zigzag_decode(v) as i32
 }
 
-/// Where the v2 name table starts: the end of the last layer payload.
+/// The unaligned end of the last layer payload, as the index declares it.
 ///
 /// Payload offsets and lengths live in the body's layer index (`index_end` is where the index
 /// itself — plus extended counts — ends). Payloads are laid out in index order from the aligned
-/// `index_end`, so the table starts at the aligned maximum of their ends.
-fn names_at(buf: &[u8], layer_count: usize, index_end: usize) -> Result<usize> {
-    Ok(align4(names_end(buf, layer_count, index_end)?))
-}
-
-/// The unaligned end of the last layer payload, as the index declares it.
+/// `index_end`, so the trailing sections start at the aligned maximum of their ends.
 ///
-/// Floored at `index_end`: an empty body (no layers) is header-only, and the name table — when
-/// present — starts past the index, never inside it.
-fn names_end(buf: &[u8], layer_count: usize, index_end: usize) -> Result<usize> {
+/// Floored at `index_end`: an empty body (no layers) is header-only, and a trailing section —
+/// when present — starts past the index, never inside it.
+fn payloads_end(buf: &[u8], layer_count: usize, index_end: usize) -> Result<usize> {
     let mut end = index_end;
     for i in 0..layer_count {
         let at = BODY_HEADER_LEN + i * LAYER_INDEX_LEN;
@@ -619,6 +630,104 @@ fn serialize_names(names: &[String]) -> Vec<u8> {
 /// Round up to the next 4-byte boundary, so every section starts where a reader can slice it.
 pub(crate) fn align4(at: usize) -> usize {
     (at + 3) & !3
+}
+
+/// Parse the feature id table: `u32` entry count, then per entry a `u8` layer id, three reserved
+/// bytes, a `u32` id count and that many `u64` ids. Returns the table and the bytes consumed
+/// (including 4-byte alignment padding).
+///
+/// Ids are fixed-width rather than varint because they are unsorted OSM element ids: within one
+/// tile there is no ordering to delta against, and a varint over a ~35-bit tagged id averages
+/// five bytes to save three off eight.
+///
+/// Validated against `layers`, which is already parsed by the time this runs: an entry must name
+/// a layer the body actually carries, entries must be ascending and distinct by layer id, and a
+/// layer's id vector must be exactly as long as its feature vector. A short or long vector would
+/// silently misattribute every id after the first mismatch.
+fn parse_ids(buf: &[u8], layers: &[Layer]) -> Result<(Vec<(u8, Vec<u64>)>, usize)> {
+    if buf.len() < 4 {
+        return err("a .mamaps id table ends before its count");
+    }
+    let count = u32::from_le_bytes([buf[0], buf[1], buf[2], buf[3]]) as usize;
+    if count > layers.len() {
+        return err(format!(
+            "a .mamaps id table has {count} entries for a body with {} layer(s)",
+            layers.len(),
+        ));
+    }
+    let mut at = 4usize;
+    let mut table = Vec::with_capacity(count);
+    let mut previous: Option<u8> = None;
+    for _ in 0..count {
+        if at + 8 > buf.len() {
+            return err("a .mamaps id table ends inside an entry header");
+        }
+        let layer_id = buf[at];
+        if buf[at + 1] != 0 || u16::from_le_bytes([buf[at + 2], buf[at + 3]]) != 0 {
+            return err("a .mamaps id table entry has non-zero reserved bytes");
+        }
+        let ids_len =
+            u32::from_le_bytes([buf[at + 4], buf[at + 5], buf[at + 6], buf[at + 7]]) as usize;
+        at += 8;
+        if previous.is_some_and(|p| layer_id <= p) {
+            return err("a .mamaps id table's entries are not ordered by layer id");
+        }
+        previous = Some(layer_id);
+        let Some(layer) = layers.iter().find(|l| l.layer_id == layer_id) else {
+            return err(format!("a .mamaps id table names layer {layer_id}, which the body does not carry"));
+        };
+        if ids_len != layer.features.len() {
+            return err(format!(
+                "a .mamaps id table gives layer {layer_id} {ids_len} id(s) for {} feature(s)",
+                layer.features.len(),
+            ));
+        }
+        // Bounded against the slice before allocating, so a corrupt count cannot ask for a
+        // gigabyte of `Vec` — the same discipline `parse_layer` applies to its counts.
+        let bytes = ids_len.checked_mul(8).ok_or_else(|| {
+            crate::proto::Error("a .mamaps id table's entry overflows".to_string())
+        })?;
+        if at + bytes > buf.len() {
+            return err("a .mamaps id table's ids run past the table");
+        }
+        let mut ids = Vec::with_capacity(ids_len);
+        for i in 0..ids_len {
+            let o = at + i * 8;
+            ids.push(u64::from_le_bytes([
+                buf[o],
+                buf[o + 1],
+                buf[o + 2],
+                buf[o + 3],
+                buf[o + 4],
+                buf[o + 5],
+                buf[o + 6],
+                buf[o + 7],
+            ]));
+        }
+        at += bytes;
+        table.push((layer_id, ids));
+    }
+    let aligned = align4(at);
+    if aligned > buf.len() {
+        return err("a .mamaps id table's padding runs past the body");
+    }
+    Ok((table, aligned))
+}
+
+/// Serialise a feature id table, 4-byte aligned. The inverse of [`parse_ids`].
+fn serialize_ids(ids: &[(u8, Vec<u64>)], out: &mut Vec<u8>) {
+    out.extend_from_slice(&(ids.len() as u32).to_le_bytes());
+    for (layer_id, entries) in ids {
+        out.push(*layer_id);
+        out.extend_from_slice(&[0u8; 3]);
+        out.extend_from_slice(&(entries.len() as u32).to_le_bytes());
+        for id in entries {
+            out.extend_from_slice(&id.to_le_bytes());
+        }
+    }
+    while out.len() % 4 != 0 {
+        out.push(0);
+    }
 }
 
 /// Serialise a body.
@@ -719,6 +828,30 @@ pub fn serialize_into<'s>(body: &Body, scratch: &'s mut Scratch) -> Result<&'s [
         }
     }
 
+    // The id table is keyed by layer id and parallel to that layer's features, so a caller that
+    // built it against a different layer set would produce a body that reads back with every id
+    // attributed to the wrong feature. Checked here rather than trusted, for the same reason the
+    // parts contiguity above is.
+    let mut previous: Option<u8> = None;
+    for (layer_id, entries) in &body.ids {
+        if previous.is_some_and(|p| *layer_id <= p) {
+            return err("a .mamaps body's id table is not ordered by layer id");
+        }
+        previous = Some(*layer_id);
+        let Some(layer) = layers.iter().find(|l| l.layer_id == *layer_id) else {
+            return err(format!(
+                "a .mamaps id table names layer {layer_id}, which the body does not carry"
+            ));
+        };
+        if entries.len() != layer.features.len() {
+            return err(format!(
+                "a .mamaps id table gives layer {layer_id} {} id(s) for {} feature(s)",
+                entries.len(),
+                layer.features.len(),
+            ));
+        }
+    }
+
     let mut index_end = BODY_HEADER_LEN + layers.len() * LAYER_INDEX_LEN;
     if needs_extended {
         index_end += layers.len() * 4;
@@ -799,7 +932,14 @@ pub fn serialize_into<'s>(body: &Body, scratch: &'s mut Scratch) -> Result<&'s [
     assembled.extend_from_slice(&0u32.to_le_bytes());
     assembled.extend_from_slice(&body.extent.to_le_bytes());
     assembled.push(layers.len() as u8);
-    assembled.push(if needs_extended { BODY_FLAG_EXTENDED_COUNTS } else { 0 });
+    let mut body_flags = if needs_extended { BODY_FLAG_EXTENDED_COUNTS } else { 0 };
+    if !body.names.is_empty() {
+        body_flags |= BODY_FLAG_NAME_TABLE;
+    }
+    if !body.ids.is_empty() {
+        body_flags |= BODY_FLAG_ID_TABLE;
+    }
+    assembled.push(body_flags);
     assembled.extend_from_slice(&0u32.to_le_bytes());
     for (i, (layer_id, feature_count)) in meta.iter().enumerate() {
         assembled.push(*layer_id);
@@ -829,13 +969,18 @@ pub fn serialize_into<'s>(body: &Body, scratch: &'s mut Scratch) -> Result<&'s [
     for payload in &payloads[..layers.len()] {
         assembled.extend_from_slice(payload);
     }
-    // The v2 name table, when the tile names anything. Omitted when empty, so a tile with no
-    // names is payloads-then-end exactly as the parser expects.
-    if !body.names.is_empty() {
+    // The trailing sections, each omitted when empty so a tile with neither is payloads-then-end
+    // exactly as the parser expects. Both are announced in `body_flags` above.
+    if !body.names.is_empty() || !body.ids.is_empty() {
         while assembled.len() % 4 != 0 {
             assembled.push(0);
         }
+    }
+    if !body.names.is_empty() {
         assembled.extend_from_slice(&serialize_names(&body.names));
+    }
+    if !body.ids.is_empty() {
+        serialize_ids(&body.ids, assembled);
     }
     let raw_len = assembled.len() as u32;
     assembled[4..8].copy_from_slice(&raw_len.to_le_bytes());
@@ -914,7 +1059,7 @@ mod tests {
         roads.parts.push(Part { coord_start: 0, point_count: 3, winding: WINDING_OUTER });
         roads.coords = vec![(-64, 10), (2048, 2048), (4160, 4000)];
 
-        Body { extent: DEFAULT_EXTENT, layers: vec![roads, water], names: Vec::new() }
+        Body { extent: DEFAULT_EXTENT, layers: vec![roads, water], names: Vec::new(), ids: Vec::new() }
     }
 
     #[test]
@@ -943,8 +1088,6 @@ mod tests {
         assert_eq!(Body::raw_len(&bytes).expect("raw_len"), bytes.len() as u32);
         // Two layers: header, two index entries, then payloads.
         assert_eq!(BODY_HEADER_LEN + 2 * LAYER_INDEX_LEN, 40);
-        // v1's 16-byte record is kept as a constant for the v1 parse path; v2's is 24.
-        assert_eq!(FEATURE_RECORD_LEN_V1, 16);
         assert_eq!(FEATURE_RECORD_LEN, 24);
         assert_eq!(PART_ENTRY_LEN, 12);
     }
@@ -993,7 +1136,7 @@ mod tests {
         let points: Vec<(i16, i16)> = (0..1000).map(|i| (i * 3, i * 2)).collect();
         roads.parts.push(Part { coord_start: 0, point_count: 1000, winding: WINDING_OUTER });
         roads.coords = points.clone();
-        let body = Body { extent: DEFAULT_EXTENT, layers: vec![roads], names: Vec::new() };
+        let body = Body { extent: DEFAULT_EXTENT, layers: vec![roads], names: Vec::new(), ids: Vec::new() };
         let bytes = serialize(&body).expect("serialize");
         // Two bytes a point rather than four: each delta is (3, 2), a single varint byte each.
         assert!(
@@ -1028,7 +1171,7 @@ mod tests {
         // The second part starts far from where the first ended; if deltas carried over, the
         // round trip would place it somewhere else entirely.
         layer.coords = vec![(0, 0), (10, 10), (3000, 3000), (3010, 3010)];
-        let body = Body { extent: DEFAULT_EXTENT, layers: vec![layer], names: Vec::new() };
+        let body = Body { extent: DEFAULT_EXTENT, layers: vec![layer], names: Vec::new(), ids: Vec::new() };
         let parsed = Body::parse(&serialize(&body).expect("serialize")).expect("parse");
         assert_eq!(parsed, body);
     }
@@ -1054,15 +1197,15 @@ mod tests {
         });
         layer.parts.push(Part { coord_start: 1, point_count: 2, winding: WINDING_OUTER });
         layer.coords = vec![(0, 0), (1, 1), (2, 2)];
-        let gapped = Body { extent: DEFAULT_EXTENT, layers: vec![layer.clone()], names: Vec::new() };
+        let gapped = Body { extent: DEFAULT_EXTENT, layers: vec![layer.clone()], names: Vec::new(), ids: Vec::new() };
         assert!(serialize(&gapped).is_err(), "a part starting past the front");
 
         layer.parts[0].coord_start = 0;
-        let over = Body { extent: DEFAULT_EXTENT, layers: vec![layer.clone()], names: Vec::new() };
+        let over = Body { extent: DEFAULT_EXTENT, layers: vec![layer.clone()], names: Vec::new(), ids: Vec::new() };
         assert!(serialize(&over).is_err(), "an arena longer than its parts cover");
 
         layer.coords.pop();
-        assert!(serialize(&Body { extent: DEFAULT_EXTENT, layers: vec![layer], names: Vec::new() }).is_ok());
+        assert!(serialize(&Body { extent: DEFAULT_EXTENT, layers: vec![layer], names: Vec::new(), ids: Vec::new() }).is_ok());
     }
 
     #[test]
@@ -1083,7 +1226,7 @@ mod tests {
         });
         layer.parts.push(Part { coord_start: 0, point_count: 2, winding: WINDING_OUTER });
         layer.coords = vec![(0, 0), (1, 1)];
-        assert!(serialize(&Body { extent: DEFAULT_EXTENT, layers: vec![layer], names: Vec::new() }).is_err());
+        assert!(serialize(&Body { extent: DEFAULT_EXTENT, layers: vec![layer], names: Vec::new(), ids: Vec::new() }).is_err());
     }
 
     #[test]
@@ -1127,7 +1270,7 @@ mod tests {
         });
         boundaries.parts.push(Part { coord_start: 0, point_count: 2, winding: WINDING_OUTER });
         boundaries.coords = vec![(0, 0), (100, 100)];
-        let bytes = serialize(&Body { extent: DEFAULT_EXTENT, layers: vec![boundaries], names: Vec::new() })
+        let bytes = serialize(&Body { extent: DEFAULT_EXTENT, layers: vec![boundaries], names: Vec::new(), ids: Vec::new() })
             .expect("serialize");
         let body = Body::parse(&bytes).expect("parse");
         let feature = &body.layer(dict::LAYER_BOUNDARIES).expect("boundaries").features[0];
@@ -1145,7 +1288,7 @@ mod tests {
 
     #[test]
     fn a_layer_with_no_features_still_round_trips() {
-        let body = Body { extent: DEFAULT_EXTENT, layers: vec![Layer::new(dict::LAYER_EARTH)], names: Vec::new() };
+        let body = Body { extent: DEFAULT_EXTENT, layers: vec![Layer::new(dict::LAYER_EARTH)], names: Vec::new(), ids: Vec::new() };
         let parsed = Body::parse(&serialize(&body).expect("serialize")).expect("parse");
         assert_eq!(parsed, body);
     }
@@ -1156,6 +1299,7 @@ mod tests {
             extent: DEFAULT_EXTENT,
             layers: vec![Layer::new(dict::LAYER_WATER), Layer::new(dict::LAYER_WATER)],
             names: Vec::new(),
+            ids: Vec::new(),
         };
         assert!(serialize(&body).is_err());
     }
@@ -1188,10 +1332,10 @@ mod tests {
         }
     }
 
-    /// Points are carried in v2 (`places` and `poi` labels); a v1 body claiming one is a body
-    /// written by something that misunderstood the format.
+    /// Geometry type is validated on parse, and points genuinely round-trip (`places` and `poi`
+    /// labels are the only features that carry them).
     #[test]
-    fn a_v1_point_geometry_is_refused_but_v2_carries_points() {
+    fn an_unknown_geometry_type_is_refused_but_points_round_trip() {
         let mut bytes = serialize(&sample()).expect("serialize");
         // The first layer's first feature record: water, at the aligned payload start.
         let at = align4(BODY_HEADER_LEN + 2 * LAYER_INDEX_LEN);
@@ -1202,7 +1346,7 @@ mod tests {
         bytes[at + 4] = GEOM_POLYGON;
         assert!(Body::parse(&bytes).is_ok(), "and the sample is otherwise fine");
 
-        // v2 genuinely carries a point: one feature, one single-point part, and a name.
+        // A point genuinely round-trips: one feature, one single-point part, and a name.
         let mut poi = Layer::new(dict::LAYER_POI);
         poi.features.push(Feature {
             kind: 1,
@@ -1220,77 +1364,123 @@ mod tests {
         poi.parts.push(Part { coord_start: 0, point_count: 1, winding: WINDING_OUTER });
         poi.coords = vec![(100, 200)];
         let body =
-            Body { extent: DEFAULT_EXTENT, layers: vec![poi], names: vec!["Cafe".to_string()] };
+            Body { extent: DEFAULT_EXTENT, layers: vec![poi], names: vec!["Cafe".to_string()], ids: Vec::new() };
         let parsed = Body::parse(&serialize(&body).expect("serialize")).expect("parse");
         assert_eq!(parsed, body);
         let feature = &parsed.layer(dict::LAYER_POI).expect("poi").features[0];
         assert_eq!(feature.name(&parsed), Some("Cafe"));
     }
 
-    /// A v1 body still parses: 16-byte records, no points, no name table. Built by hand because
-    /// the writer only emits v2 — this is what a prod planet.mamaps tile looks like on the wire.
+    /// v1 is gone. A body carrying that version byte is a body from an archive this reader no
+    /// longer speaks, and reading it with 24-byte records would silently misparse every field.
     #[test]
-    fn a_v1_body_reads_as_geometry_without_names() {
-        let mut payload = Vec::new();
-        // One line feature, 16-byte v1 record (bytes 6..8 reserved zero).
-        payload.extend_from_slice(&45u16.to_le_bytes());
-        payload.extend_from_slice(&4u16.to_le_bytes());
-        payload.push(GEOM_LINE);
-        payload.push(0);
-        payload.extend_from_slice(&0u16.to_le_bytes());
-        payload.extend_from_slice(&0u32.to_le_bytes());
-        payload.extend_from_slice(&1u32.to_le_bytes());
-        // One part, two points.
-        payload.extend_from_slice(&0u32.to_le_bytes());
-        payload.extend_from_slice(&2u32.to_le_bytes());
-        payload.extend_from_slice(&WINDING_OUTER.to_le_bytes());
-        payload.extend_from_slice(&0u16.to_le_bytes());
-        while payload.len() % 4 != 0 {
-            payload.push(0);
-        }
-        // Arena: (0,0) -> (10,10), deltas restart per part.
-        for (dx, dy) in [(0i64, 0i64), (10, 10)] {
-            for v in [dx, dy] {
-                let mut v = crate::proto::zigzag_encode(v);
-                while v >= 0x80 {
-                    payload.push((v as u8) | 0x80);
-                    v >>= 7;
-                }
-                payload.push(v as u8);
-            }
-        }
+    fn a_v1_body_is_refused_outright() {
+        let mut bytes = serialize(&sample()).expect("serialize");
+        bytes[3] = 1;
+        assert!(Body::parse(&bytes).is_err(), "a v1 body version");
+        bytes[3] = 2;
+        assert!(Body::parse(&bytes).is_err(), "a v2 body version");
+        bytes[3] = crate::mamaps::header::FORMAT_VERSION;
+        assert!(Body::parse(&bytes).is_ok(), "and v3 is otherwise fine");
+    }
 
-        let index_end = align4(BODY_HEADER_LEN + LAYER_INDEX_LEN);
-        let mut body = vec![0u8; BODY_HEADER_LEN];
-        body[0..3].copy_from_slice(b"MBD");
-        body[3] = crate::mamaps::header::FORMAT_VERSION_V1;
-        // Layer index: id, 0, count=1, offset, length.
-        body.push(dict::LAYER_ROADS);
-        body.push(0);
-        body.extend_from_slice(&1u16.to_le_bytes());
-        body.extend_from_slice(&(index_end as u32).to_le_bytes());
-        body.extend_from_slice(&(payload.len() as u32).to_le_bytes());
-        while body.len() % 4 != 0 {
-            body.push(0);
+    /// The id table is parallel to a layer's features and survives a round trip alongside the
+    /// name table, which is the case that matters: `poi` carries both.
+    #[test]
+    fn the_id_table_round_trips_beside_the_name_table() {
+        let mut poi = Layer::new(dict::LAYER_POI);
+        for name_idx in 1..=2u16 {
+            poi.features.push(Feature {
+                kind: 1,
+                kind_detail: dict::NONE,
+                geom_type: GEOM_POINT,
+                flags: 0,
+                name_idx,
+                parts_offset: u32::from(name_idx) - 1,
+                part_count: 1,
+                transit_color: 0,
+                transit_ordinal: 0,
+                transit_lanes: 0,
+                transit_taper: 0,
+            });
+            poi.parts.push(Part {
+                coord_start: u32::from(name_idx) - 1,
+                point_count: 1,
+                winding: WINDING_OUTER,
+            });
         }
-        assert_eq!(body.len(), index_end);
-        body.extend_from_slice(&payload);
-        let raw_len = body.len() as u32;
-        body[4..8].copy_from_slice(&raw_len.to_le_bytes());
-        body[8..10].copy_from_slice(&DEFAULT_EXTENT.to_le_bytes());
-        body[10] = 1;
+        poi.coords = vec![(10, 20), (30, 40)];
+        let body = Body {
+            extent: DEFAULT_EXTENT,
+            layers: vec![poi],
+            names: vec!["Cafe".to_string(), "Bar".to_string()],
+            // A real OSM id and ID_NONE for a feature the generator could not attribute.
+            ids: vec![(dict::LAYER_POI, vec![12_345_678_901, ID_NONE])],
+        };
+        let bytes = serialize(&body).expect("serialize");
+        let parsed = Body::parse(&bytes).expect("parse");
+        assert_eq!(parsed, body);
+        assert_eq!(parsed.feature_id(dict::LAYER_POI, 0), Some(12_345_678_901));
+        assert_eq!(parsed.feature_id(dict::LAYER_POI, 1), Some(ID_NONE));
+        assert_eq!(parsed.feature_id(dict::LAYER_POI, 2), None, "past the table");
+        assert_eq!(parsed.feature_id(dict::LAYER_ROADS, 0), None, "a layer with no ids");
+    }
 
-        let parsed = Body::parse(&body).expect("a v1 body must still parse");
-        assert!(parsed.names.is_empty(), "v1 has no name table");
-        let layer = parsed.layer(dict::LAYER_ROADS).expect("roads");
-        let feature = &layer.features[0];
-        assert_eq!(feature.name_idx, NAME_NONE);
-        assert_eq!(feature.transit_color, 0);
-        assert_eq!(feature.transit_ordinal, 0, "a v1 record has no lane bytes to read");
-        assert_eq!(feature.transit_lanes, 0, "a v1 record has no lane bytes to read");
-        assert_eq!(feature.transit_taper, 0, "a v1 record has no lane bytes to read");
-        assert_eq!(feature.name(&parsed), None);
-        assert_eq!(layer.coords, vec![(0, 0), (10, 10)]);
+    /// An id table with no name table beside it still parses. This is the case the v2 layout
+    /// could not express: it found the name table by "are there bytes left", which an id table
+    /// alone would have been mistaken for.
+    #[test]
+    fn an_id_table_parses_without_a_name_table() {
+        let mut poi = Layer::new(dict::LAYER_POI);
+        poi.features.push(Feature {
+            kind: 1,
+            kind_detail: dict::NONE,
+            geom_type: GEOM_POINT,
+            flags: 0,
+            name_idx: NAME_NONE,
+            parts_offset: 0,
+            part_count: 1,
+            transit_color: 0,
+            transit_ordinal: 0,
+            transit_lanes: 0,
+            transit_taper: 0,
+        });
+        poi.parts.push(Part { coord_start: 0, point_count: 1, winding: WINDING_OUTER });
+        poi.coords = vec![(1, 2)];
+        let body = Body {
+            extent: DEFAULT_EXTENT,
+            layers: vec![poi],
+            names: Vec::new(),
+            ids: vec![(dict::LAYER_POI, vec![7])],
+        };
+        let parsed = Body::parse(&serialize(&body).expect("serialize")).expect("parse");
+        assert_eq!(parsed, body);
+        assert!(parsed.names.is_empty());
+    }
+
+    /// An id vector that is not exactly as long as its layer's features would misattribute every
+    /// id past the mismatch, so it is refused on the way in and on the way out.
+    #[test]
+    fn an_id_table_that_does_not_match_its_layer_is_refused() {
+        let body = |ids| Body {
+            extent: DEFAULT_EXTENT,
+            layers: vec![Layer::new(dict::LAYER_EARTH)],
+            names: Vec::new(),
+            ids,
+        };
+        assert!(
+            serialize(&body(vec![(dict::LAYER_EARTH, vec![1])])).is_err(),
+            "one id for a layer with no features"
+        );
+        assert!(
+            serialize(&body(vec![(dict::LAYER_POI, Vec::new())])).is_err(),
+            "an entry for a layer the body does not carry"
+        );
+        assert!(
+            serialize(&body(vec![(dict::LAYER_EARTH, Vec::new()), (dict::LAYER_EARTH, Vec::new())]))
+                .is_err(),
+            "two entries for one layer"
+        );
     }
 
     /// The lane inputs ride in bytes the v2 record already reserved, so they round-trip with no
@@ -1424,7 +1614,7 @@ mod tests {
             layer.coords.push((0, 0));
             layer.coords.push((1, 1));
         }
-        let body = Body { extent: DEFAULT_EXTENT, layers: vec![layer], names: Vec::new() };
+        let body = Body { extent: DEFAULT_EXTENT, layers: vec![layer], names: Vec::new(), ids: Vec::new() };
         let bytes = serialize(&body).expect("extended tile must serialize");
         assert_eq!(bytes[11], BODY_FLAG_EXTENDED_COUNTS, "extended flag set");
         let parsed = Body::parse(&bytes).expect("must parse extended");
@@ -1441,6 +1631,7 @@ mod tests {
             l
             }],
             names: Vec::new(),
+            ids: Vec::new(),
         };
         let small_bytes = serialize(&small_body).expect("small tile");
         assert_eq!(small_bytes[11], 0, "common path no flag, byte-identical");

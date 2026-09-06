@@ -68,10 +68,35 @@ pub struct Feature {
     pub class: Class,
     pub geometry: Geometry,
     pub name: Option<String>,
+    /// The OSM element this came from, tagged by id space — see [`tagged_id`].
+    ///
+    /// [`ID_NONE`](tilecodec::mamaps::body::ID_NONE) for every layer but `places` and `poi`.
+    /// Only those two reach the archive's id table, and only those two are pure points that
+    /// `coalesce` never merges, so only those two have an id that means anything.
+    pub id: u64,
     pub transit_color: u32,
     pub transit_ordinal: u8,
     pub transit_lanes: u8,
     pub transit_taper: u8,
+}
+
+/// The id space an [`Feature::id`] came from, in the low two bits.
+///
+/// OSM numbers nodes, ways and relations independently and the three sequences overlap freely,
+/// so a bare id does not identify an element. Tags start at one rather than zero so that a fully
+/// zero id stays reserved for [`ID_NONE`](tilecodec::mamaps::body::ID_NONE).
+pub const ELEMENT_NODE: u64 = 1;
+pub const ELEMENT_WAY: u64 = 2;
+pub const ELEMENT_RELATION: u64 = 3;
+
+/// An OSM id tagged with its id space, or `ID_NONE` for an id OSM would never issue.
+pub fn tagged_id(id: i64, element: u64) -> u64 {
+    // OSM element ids start at 1. A zero or negative one is a synthetic element (a coastline
+    // polygon, a GTFS shape) with no upstream identity to carry.
+    if id <= 0 {
+        return tilecodec::mamaps::body::ID_NONE;
+    }
+    ((id as u64) << 2) | element
 }
 
 /// What a run of stage A did, for the build report.
@@ -115,6 +140,8 @@ struct Relation {
     area: bool,
     /// The display label for a `places` relation (a country, a region), `None` otherwise.
     name: Option<String>,
+    /// The relation's own OSM id, tagged — see [`tagged_id`]. Only read for label relations.
+    id: i64,
 }
 
 /// Read `input` and spill every feature the schema classifies to `spill_path`.
@@ -228,7 +255,7 @@ pub fn extract(
                             // distinction `Class::area` exists to make.
                             let area = class.area;
                             let name = schema::display_name(&relation.tags, class.layer);
-                            state.1.push(Relation { class, members, area, name });
+                            state.1.push(Relation { class, members, area, name, id: relation.id });
                         }
                     }
                     Element::Node(_) => {}
@@ -361,7 +388,7 @@ pub fn extract(
             Some(&blob_kinds),
             KIND_NODES,
             "Pass 4: nodes",
-            Vec::<(Class, f64, f64, Option<String>)>::new,
+            Vec::<(Class, f64, f64, Option<String>, u64)>::new,
             |state, block| {
                 let mut kinds = 0u8;
                 visit_block(block, KIND_NODES, &mut kinds, &mut |el| {
@@ -377,6 +404,7 @@ pub fn extract(
                                     node.lon_e7 as f64 * 1e-7,
                                     node.lat_e7 as f64 * 1e-7,
                                     name,
+                                    tagged_id(node.id, ELEMENT_NODE),
                                 ));
                             }
                         }
@@ -386,8 +414,13 @@ pub fn extract(
                 Ok(kinds)
             },
             |hits| {
-                for (class, lon, lat, name) in hits {
-                    sink.push_named(&class, &Geometry::Points(vec![(lon, lat)]), name.as_deref())?;
+                for (class, lon, lat, name, id) in hits {
+                    sink.push_named(
+                        &class,
+                        &Geometry::Points(vec![(lon, lat)]),
+                        name.as_deref(),
+                        id,
+                    )?;
                     stats.features += 1;
                     stats.nodes_classified += 1;
                 }
@@ -416,7 +449,8 @@ pub fn extract(
     // 64 Ki ways at ~10 nodes each is a few tens of MB of geometry in flight, against a build that
     // peaks near 7 GB.
     const MATERIALISE_BATCH: usize = 64 * 1024;
-    let mut batch: Vec<(Class, Option<String>, Vec<i64>)> = Vec::with_capacity(MATERIALISE_BATCH);
+    let mut batch: Vec<(Class, Option<String>, Vec<i64>, u64)> =
+        Vec::with_capacity(MATERIALISE_BATCH);
     let mut built: Vec<Option<Geometry<(f64, f64)>>> = Vec::with_capacity(MATERIALISE_BATCH);
     loop {
         let more = reader.next(&mut refs)?;
@@ -426,7 +460,15 @@ pub fn extract(
             if let Ok(at) = promoted.binary_search_by_key(id, |(id, _)| *id) {
                 class.min_zoom = promoted[at].1;
             }
-            batch.push((class, name.clone(), std::mem::take(&mut refs)));
+            // Only a label way carries its id onward. A road or a building is merged with its
+            // neighbours by `coalesce`, which leaves the survivor's id arbitrary, and the id
+            // table exists for `poi` and `places` alone.
+            let id = if is_label(class.layer) {
+                tagged_id(*id, ELEMENT_WAY)
+            } else {
+                tilecodec::mamaps::body::ID_NONE
+            };
+            batch.push((class, name.clone(), std::mem::take(&mut refs), id));
         }
         // Flushed when full, and once more at the end with whatever is left.
         if batch.len() >= MATERIALISE_BATCH || (more.is_none() && !batch.is_empty()) {
@@ -434,7 +476,7 @@ pub fn extract(
             par::install(|| {
                 batch
                     .par_iter()
-                    .map(|(class, _, refs)| {
+                    .map(|(class, _, refs, _)| {
                         let line = table.line(refs);
                         // A label layer's ways are centroided to points: a town mapped as an area
                         // is still one label, not a loop. Everything else keeps its geometry.
@@ -446,10 +488,10 @@ pub fn extract(
                     })
                     .collect_into_vec(&mut built);
             });
-            for ((class, name, _), geometry) in batch.iter().zip(built.drain(..)) {
+            for ((class, name, _, id), geometry) in batch.iter().zip(built.drain(..)) {
                 match geometry {
                     Some(geometry) => {
-                        sink.push_named(class, &geometry, name.as_deref())?;
+                        sink.push_named(class, &geometry, name.as_deref(), *id)?;
                         stats.features += 1;
                     }
                     None => stats.geometry_failed += 1,
@@ -491,6 +533,7 @@ pub fn extract(
                         &relation.class,
                         &Geometry::Points(vec![point]),
                         relation.name.as_deref(),
+                        tagged_id(relation.id, ELEMENT_RELATION),
                     )?;
                     stats.features += 1;
                 }
@@ -744,7 +787,7 @@ fn locate(table: &NodeLocations, id: i64) -> Option<(f64, f64)> {
 
 /// Is this a label layer (`places`/`poi`)? Labels are points with names: ways mapped as areas
 /// are centroided to one, relations likewise, and nodes spill directly.
-fn is_label(layer: u8) -> bool {
+pub(crate) fn is_label(layer: u8) -> bool {
     use tilecodec::mamaps::dict::{LAYER_PLACES, LAYER_POI};
     layer == LAYER_PLACES || layer == LAYER_POI
 }

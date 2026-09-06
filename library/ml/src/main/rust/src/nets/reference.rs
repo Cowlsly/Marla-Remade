@@ -231,6 +231,7 @@ impl Reference {
                     Kind::CacheWrite => self.cache_write(push),
                     Kind::Softcap => self.softcap(push),
                     Kind::Activate => self.activate(push),
+                    Kind::GatedActivate => self.gated_activate(push),
                     Kind::MulScalar => self.mul_scalar(push),
                     Kind::Clamp => self.clamp(push),
                     Kind::AttnApply => self.attn_apply(push),
@@ -1009,6 +1010,18 @@ impl Reference {
     }
 
     /// An activation on its own. See `shaders/activate.comp`.
+    /// `activate(gate) * up`, the fused form. See `shaders/gated_activate.comp`.
+    fn gated_activate(&mut self, p: &Push) -> Result<(), String> {
+        let spatial = (p.out_h * p.out_w).max(1);
+        for index in 0..p.count {
+            let gate = self.load(p.in0, index)?;
+            // `in_c` is the whole gate half, so this is the same element in the up half.
+            let up = self.load(p.in0 + p.in_c, index)?;
+            let slope = self.weight(p.act_weight, index / spatial).unwrap_or(0.0);
+            self.store(p.out, index, activate(gate, p.act, slope) * up)?;
+        }
+        Ok(())
+    }
     fn activate(&mut self, p: &Push) -> Result<(), String> {
         let spatial = (p.out_h * p.out_w).max(1);
         for index in 0..p.count {
