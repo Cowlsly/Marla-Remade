@@ -2,4 +2,5 @@
 <resources>
     <string name="action_update">Yeniləmə</string>
     <string name="off">Söndürülüb</string>
+    <string name="label_description">Təsvir</string>
 </resources>
