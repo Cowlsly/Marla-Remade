@@ -1,3 +1,74 @@
 <?xml version="1.0" encoding="utf-8"?>
-<resources>
+<resources xmlns:xliff="urn:oasis:names:tc:xliff:document:1.2">
+    <string name="app_name">Təqvim</string>
+    <string name="layout_agenda">Gündəm</string>
+    <string name="layout_day">Gün</string>
+    <string name="layout_work_week">İş Həftəsi</string>
+    <string name="layout_full_week">Tam Həftə</string>
+    <string name="layout_month">Ay</string>
+    <string name="layout_work_week_summary">İş Həftəsinin Xülasəsi</string>
+    <string name="layout_full_week_summary">Tam Həftə Xülasəsi</string>
+    <string name="layout_work_week_compact">İş Həftəsi Kompaktı</string>
+    <string name="layout_full_week_compact">Tam Həftəlik Kompakt</string>
+    <string name="layout_short_agenda">A</string>
+    <string name="layout_short_day">D</string>
+    <string name="layout_short_work_week">W5</string>
+    <string name="layout_short_full_week">W7</string>
+    <string name="layout_short_month">M</string>
+    <string name="layout_short_work_week_summary">W5S</string>
+    <string name="layout_short_full_week_summary">W7S</string>
+    <string name="layout_short_work_week_compact">W5C</string>
+    <string name="layout_short_full_week_compact">W7C</string>
+    <string name="theme_system_default">Sistem standartı</string>
+    <string name="theme_light">İşıq</string>
+    <string name="theme_dark">Qaranlıq</string>
+    <string name="calendar_widget_description">Qarşıdan gələn tədbirlərə qısa baxış - Təqvimi açmaq üçün toxunun</string>
+    <string name="calendar_month_widget_description">Ay cədvəlinə qısa baxış - Təqvimi açmaq üçün toxunun</string>
+    <plurals name="month_widget_more_events">
+        <item quantity="one">+<xliff:g id="count" example="1">%1$d</xliff:g> daha çox</item>
+        <item quantity="other">+<xliff:g id="count" example="1">%1$d</xliff:g> daha çox</item>
+    </plurals>
+    <string name="create">Yarat</string>
+    <string name="add_reminder">Xatırlatma əlavə edin</string>
+    <string name="search">Axtarış</string>
+    <string name="no_title">(Başlıq yoxdur)</string>
+    <string name="event_not_found">Tədbir tapılmadı</string>
+    <string name="month_year_format"><xliff:g id="ay_adı" nümunəsi="Yanvar">%1$s</xliff:g> <xliff:g id="il" nümunəsi="2025">%2$d</xliff:g></string>
+    <string name="date_range_format"><xliff:g id="başlanğıc_tarixi" nümunəsi="Yan 1">%1$s</xliff:g> - <xliff:g id="son_tarixi" nümunəsi="Yan 2">%2$s</xliff:g></string>
+    <string name="date_time_range_format"><xliff:g id="date" example="1 Yanvar">%1$s</xliff:g> • <xliff:g id="başlanğıc_vaxtı" example="9:00 AM">%2$s</xliff:g> - <xliff:g id="bitmə_vaxtı" example="10:00 AM">%3$s</xliff:g></string>
+    <string name="full_date_time_range_format"><xliff:g id="başlanğıc_tarixi" nümunəsi="1 Yanvar">%1$s</xliff:g>, <xliff:g id="başlanğıc_tarixi" nümunəsi="9:00 AM">%2$s</xliff:g> - <xliff:g id="son_tarixi" nümunəsi="2 Yanvar">%3$s</xliff:g>, <xliff:g id="son_tarixi" nümunəsi="10:00 AM">%4$s</xliff:g></string>
+    <string name="twelve_am">12:00</string>
+    <string name="hour_am"><xliff:g id="hour" example="9">%1$d</xliff:g> AM</string>
+    <string name="twelve_pm">Saat 12:00</string>
+    <string name="hour_pm"><xliff:g id="hour" example="3">%1$d</xliff:g> PM</string>
+    <string name="label_title">Başlıq</string>
+    <string name="label_description">Təsvir</string>
+    <string name="label_location">Yer</string>
+    <string name="select_calendar">Təqvim seçin</string>
+    <string name="all_day">Bütün gün</string>
+    <string name="does_not_repeat">Təkrarlanmır</string>
+    <string name="repeats">Təkrarlamalar</string>
+    <string name="no_account">(Hesab yoxdur)</string>
+    <string name="calendar_id_label">ID: <xliff:g id="calendar_id" example="1">%1$d</xliff:g></string>
+    <string name="choose_calendar">Təqvim seçin</string>
+    <string name="local_account">(Yerli)</string>
+    <string name="go_to_date">Tarixə keçin</string>
+    <string name="repeat">Təkrarlayın</string>
+    <string name="every">Hər</string>
+    <string name="dropdown_freq_format"><xliff:g id="tezlik" example="Həftəlik">%1$s</xliff:g> ▼</string>
+    <string name="on_days_of_week">Həftənin günlərində</string>
+    <string name="on_label">Aktiv</string>
+    <string name="month_option_day_of_month">Ayın <xliff:g id="day" example="15">%1$d</xliff:g> günü</string>
+    <string name="month_option_nth_weekday"><xliff:g id="ordinal" example="second">%1$s</xliff:g> <xliff:g id="weekday" example="Monday">%2$s</xliff:g> üzərində</string>
+    <string name="month_option_last_weekday">Son <xliff:g id="həftə içi" example="Cümə">%1$s</xliff:g> tarixində</string>
+    <string name="year_option_month_day"><xliff:g id="month" example="March">%1$s</xliff:g> <xliff:g id="day" example="15">%2$d</xliff:g> tarixində</string>
+    <string name="year_option_week">İlin <xliff:g id="week_num" example="12">%1$d</xliff:g> həftəsində, <xliff:g id="weekday" example="Monday">%2$s</xliff:g> tarixində</string>
+    <string name="year_option_day_of_year">İlin <xliff:g id="day_of_year" example="100">%1$d</xliff:g> günündə</string>
+    <string name="end">Son</string>
+    <string name="never">Heç vaxt</string>
+    <string name="count">Saymaq</string>
+    <string name="until">Ta ki</string>
+    <string name="until_date">Qədər: <xliff:g id="date" example="31 Dekabr 2025">%1$s</xliff:g></string>
+    <string name="repeat_mode_pattern">Nümunə</string>
+    <string name="repeat_mode_dates">Xüsusi tarixlər</string>
 </resources>
