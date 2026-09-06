@@ -18,4 +18,19 @@
     <string name="converter_to">-a/-ə</string>
     <string name="converter_result">Nəticə</string>
     <string name="converter_swap">Vahidlərin yerini dəyişdirin</string>
+    <string name="key_date">Tarix</string>
+    <string name="key_time">Vaxt</string>
+    <string name="key_datetime">Tarix və vaxt</string>
+    <string name="select_time">Vaxt seçin</string>
+    <string name="ok">Yaxşı</string>
+    <string name="currency_loading">Valyuta məzənnələri əldə edilir…</string>
+    <string name="currency_unavailable">Valyuta məzənnələri mövcud deyil</string>
+    <string name="currency_retry">Təkrar cəhd edin</string>
+    <string name="calculator_widget_label">Kalkulyator</string>
+    <string name="calculator_widget_description">Ana ekranda işləyən klaviatura - Kalkulyatoru açmaq üçün ekrana toxunun</string>
+    <string name="calculator_widget_transparent">Şəffaf fon</string>
+    <string name="calculator_widget_transparent_summary">Klaviaturanın arxasındakı divar kağızını göstərin. Düymələr oxunaqlı qalması üçün doldurulmuş qalır.</string>
+    <string name="units_widget_label">Vahid Çeviricisi</string>
+    <string name="units_widget_description">Vahidlər arasında bir baxışda çevirin - çeviricini açmaq üçün toxunun</string>
+    <string name="units_widget_choose_category">Vahid kateqoriyası seçin</string>
 </resources>
