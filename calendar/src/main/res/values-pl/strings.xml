@@ -184,4 +184,11 @@
     <string name="default_reminders">Domyślne przypomnienia</string>
     <string name="default_reminders_description">Przypomnienia dodawane automatycznie do nowych wydarzeń w: <xliff:g id="calendar_name" example="Work">%1$s</xliff:g>.</string>
     <string name="apply_to_existing_events">Zastosuj do istniejących wydarzeń</string>
+    <string name="calendar_month_widget_description">Szybki podgląd miesiąca – dotknij, aby otworzyć Kalendarz</string>
+    <plurals name="month_widget_more_events">
+        <item quantity="one">+<xliff:g id="count" example="1">%1$d</xliff:g> więcej</item>
+        <item quantity="few">+<xliff:g id="count" example="3">%1$d</xliff:g> więcej</item>
+        <item quantity="many">+<xliff:g id="count" example="5">%1$d</xliff:g> więcej</item>
+        <item quantity="other">+<xliff:g id="count" example="5">%1$d</xliff:g> więcej</item>
+    </plurals>
 </resources>
