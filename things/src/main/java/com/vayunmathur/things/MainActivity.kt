@@ -71,17 +71,6 @@ class MainActivity : ComponentActivity() {
         setContent {
             DynamicTheme {
                 Navigation(
-                    bottlePaired = DeviceController.bottlePaired.value,
-                    bottleLink = DeviceController.bottleLink.value,
-                    connectionState = DeviceController.connectionState.value,
-                    scanning = DeviceController.scanning.value,
-                    discoveredDevices = DeviceController.discoveredDevices,
-                    tempC = DeviceController.waterTempC.value,
-                    tds = DeviceController.tds.value,
-                    batteryPct = DeviceController.batteryPct.value,
-                    charging = DeviceController.charging.value,
-                    volumePct = DeviceController.bottleVolumePct.value,
-                    lastUpdatedMillis = DeviceController.bottleLastUpdated.value,
                     onScanClick = { requestScan { DeviceController.startBottleScan() } },
                     onDeviceClick = {
                         DeviceService.start(this)
@@ -91,15 +80,6 @@ class MainActivity : ComponentActivity() {
                         DeviceController.disconnectBottle()
                         if (!DeviceController.hasRememberedDevice()) DeviceService.stop(this)
                     },
-                    scalePaired = DeviceController.scalePaired.value,
-                    scaleLink = DeviceController.scaleLink.value,
-                    scaleConnectionState = DeviceController.scaleConnectionState.value,
-                    scaleScanning = DeviceController.scaleScanning.value,
-                    scaleDevices = DeviceController.scaleDevices,
-                    scaleSex = DeviceController.scaleSex.value,
-                    scaleAge = DeviceController.scaleAge.value,
-                    scaleHeight = DeviceController.scaleHeight.value,
-                    scaleAthlete = DeviceController.scaleAthlete.value,
                     onScaleScanClick = { requestScan { DeviceController.startScaleScan() } },
                     onScaleDeviceClick = {
                         DeviceService.start(this)
@@ -109,10 +89,6 @@ class MainActivity : ComponentActivity() {
                         DeviceController.disconnectScale()
                         if (!DeviceController.hasRememberedDevice()) DeviceService.stop(this)
                     },
-                    onScaleSexChange = { DeviceController.scaleSex.value = it; DeviceController.recalcScaleMetrics() },
-                    onScaleAgeChange = { DeviceController.scaleAge.value = it; DeviceController.recalcScaleMetrics() },
-                    onScaleHeightChange = { DeviceController.scaleHeight.value = it; DeviceController.recalcScaleMetrics() },
-                    onScaleAthleteChange = { DeviceController.scaleAthlete.value = it; DeviceController.recalcScaleMetrics() },
                     onHealthConnectClick = { requestHealthConnectPermissions() },
                 )
             }

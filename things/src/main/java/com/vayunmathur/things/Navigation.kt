@@ -5,44 +5,27 @@ import com.vayunmathur.library.util.MainNavigation
 import com.vayunmathur.library.util.SiblingPage
 import com.vayunmathur.library.util.rememberNavBackStack
 import com.vayunmathur.things.platform.BleManager
-import com.vayunmathur.things.platform.DeviceController.LinkState
+import com.vayunmathur.things.platform.DeviceController
 import com.vayunmathur.things.platform.ScaleBleManager
-import com.vayunmathur.things.platform.Sex
 import com.vayunmathur.things.ui.DevicesPage
 import com.vayunmathur.things.ui.HomePage
 
+/**
+ * Device state is read inside each `entry` block rather than passed in from the Activity.
+ *
+ * [MainNavigation]'s `NavDisplay` caches a `NavEntry` per route, so its content lambda is captured
+ * once and anything read in an enclosing scope and passed down is frozen at that first composition
+ * — the screen then only refreshes when the entry is rebuilt by navigating. Reading
+ * [DeviceController] here subscribes the entry's own recompose scope, so live BLE updates land.
+ */
 @Composable
 fun Navigation(
-    bottlePaired: Boolean,
-    bottleLink: LinkState,
-    connectionState: String,
-    scanning: Boolean,
-    discoveredDevices: List<BleManager.BleDevice>,
-    tempC: Int?,
-    tds: Int?,
-    batteryPct: Int?,
-    charging: Boolean,
-    volumePct: Int?,
-    lastUpdatedMillis: Long?,
     onScanClick: () -> Unit,
     onDeviceClick: (BleManager.BleDevice) -> Unit,
     onForgetBottle: () -> Unit,
-    scalePaired: Boolean,
-    scaleLink: LinkState,
-    scaleConnectionState: String,
-    scaleScanning: Boolean,
-    scaleDevices: List<ScaleBleManager.ScaleBleDevice>,
-    scaleSex: Sex,
-    scaleAge: String,
-    scaleHeight: String,
-    scaleAthlete: Boolean,
     onScaleScanClick: () -> Unit,
     onScaleDeviceClick: (ScaleBleManager.ScaleBleDevice) -> Unit,
     onForgetScale: () -> Unit,
-    onScaleSexChange: (Sex) -> Unit,
-    onScaleAgeChange: (String) -> Unit,
-    onScaleHeightChange: (String) -> Unit,
-    onScaleAthleteChange: (Boolean) -> Unit,
     onHealthConnectClick: () -> Unit,
 ) {
     // Home is always the root. Devices are powered off most of the time, so gating the landing
@@ -52,26 +35,38 @@ fun Navigation(
     MainNavigation(backStack) {
         entry<Route.Home>(SiblingPage()) {
             HomePage(
-                bottlePaired = bottlePaired,
-                bottleLink = bottleLink,
-                bottleConnectionState = connectionState,
-                tempC = tempC,
-                tds = tds,
-                batteryPct = batteryPct,
-                charging = charging,
-                volumePct = volumePct,
-                lastUpdatedMillis = lastUpdatedMillis,
-                scalePaired = scalePaired,
-                scaleLink = scaleLink,
-                scaleConnectionState = scaleConnectionState,
-                scaleSex = scaleSex,
-                scaleAge = scaleAge,
-                scaleHeight = scaleHeight,
-                scaleAthlete = scaleAthlete,
-                onScaleSexChange = onScaleSexChange,
-                onScaleAgeChange = onScaleAgeChange,
-                onScaleHeightChange = onScaleHeightChange,
-                onScaleAthleteChange = onScaleAthleteChange,
+                bottlePaired = DeviceController.bottlePaired.value,
+                bottleLink = DeviceController.bottleLink.value,
+                bottleConnectionState = DeviceController.connectionState.value,
+                tempC = DeviceController.waterTempC.value,
+                tds = DeviceController.tds.value,
+                batteryPct = DeviceController.batteryPct.value,
+                charging = DeviceController.charging.value,
+                volumePct = DeviceController.bottleVolumePct.value,
+                lastUpdatedMillis = DeviceController.bottleLastUpdated.value,
+                scalePaired = DeviceController.scalePaired.value,
+                scaleLink = DeviceController.scaleLink.value,
+                scaleConnectionState = DeviceController.scaleConnectionState.value,
+                scaleSex = DeviceController.scaleSex.value,
+                scaleAge = DeviceController.scaleAge.value,
+                scaleHeight = DeviceController.scaleHeight.value,
+                scaleAthlete = DeviceController.scaleAthlete.value,
+                onScaleSexChange = {
+                    DeviceController.scaleSex.value = it
+                    DeviceController.recalcScaleMetrics()
+                },
+                onScaleAgeChange = {
+                    DeviceController.scaleAge.value = it
+                    DeviceController.recalcScaleMetrics()
+                },
+                onScaleHeightChange = {
+                    DeviceController.scaleHeight.value = it
+                    DeviceController.recalcScaleMetrics()
+                },
+                onScaleAthleteChange = {
+                    DeviceController.scaleAthlete.value = it
+                    DeviceController.recalcScaleMetrics()
+                },
                 onForgetBottle = onForgetBottle,
                 onForgetScale = onForgetScale,
                 onHealthConnectClick = onHealthConnectClick,
@@ -80,10 +75,10 @@ fun Navigation(
         }
         entry<Route.Devices>(SiblingPage()) {
             DevicesPage(
-                scanning = scanning,
-                discoveredDevices = discoveredDevices,
-                scaleScanning = scaleScanning,
-                scaleDevices = scaleDevices,
+                scanning = DeviceController.scanning.value,
+                discoveredDevices = DeviceController.discoveredDevices,
+                scaleScanning = DeviceController.scaleScanning.value,
+                scaleDevices = DeviceController.scaleDevices,
                 onScanClick = onScanClick,
                 onDeviceClick = onDeviceClick,
                 onScaleScanClick = onScaleScanClick,
