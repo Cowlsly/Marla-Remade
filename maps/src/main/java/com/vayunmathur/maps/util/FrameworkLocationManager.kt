@@ -28,6 +28,8 @@ class FrameworkLocationManager(context: Context) : SensorEventListener {
     // Callback for magnetometer accuracy so the UI can prompt for calibration.
     private var onAccuracy: ((Int) -> Unit)? = null
     private var lastLocation: Location? = null
+    /** What [acceptsFix] compares against. Kept beside [lastLocation] so the two never disagree. */
+    private var lastFix: Fix? = null
     private var currentHeading: Float? = null
     /** Listener we registered with the OS so [stop] can unregister it. */
     private var registeredLocationListener: LocationListener? = null
@@ -43,6 +45,13 @@ class FrameworkLocationManager(context: Context) : SensorEventListener {
         // 1. Setup GPS Updates
         val locationListener = object : LocationListener {
             override fun onLocationChanged(location: Location) {
+                val incoming = Fix(
+                    fromGps = location.provider == LocationManager.GPS_PROVIDER,
+                    accuracyM = if (location.hasAccuracy()) location.accuracy else 0f,
+                    elapsedRealtimeNanos = location.elapsedRealtimeNanos,
+                )
+                if (!acceptsFix(lastFix, incoming)) return
+                lastFix = incoming
                 lastLocation = location
                 // If location has a GPS bearing, we prioritize it while moving
                 val heading = if (location.hasBearing()) location.bearing else currentHeading
@@ -82,6 +91,11 @@ class FrameworkLocationManager(context: Context) : SensorEventListener {
         runCatching { sensorManager.unregisterListener(this) }
         onUpdate = null
         onAccuracy = null
+        // Otherwise a restart compares the first fix against one from the previous session and
+        // can reject it: `elapsedRealtimeNanos` keeps counting while updates are unregistered,
+        // so the old fix would look fresh enough to keep winning.
+        lastFix = null
+        lastLocation = null
     }
 
     override fun onSensorChanged(event: SensorEvent) {
@@ -150,3 +164,64 @@ internal fun smoothHeading(
  * kill the jitter without the cone visibly trailing a deliberate turn.
  */
 private const val HEADING_SMOOTHING = 0.15f
+
+/**
+ * The part of a fix that decides whether it is worth taking, independent of `android.location`
+ * so the policy can be tested without a device.
+ */
+internal data class Fix(
+    val fromGps: Boolean,
+    /** Horizontal accuracy in metres, or `0` when the provider did not supply one. */
+    val accuracyM: Float,
+    /** Monotonic, unlike wall-clock time, so it survives a clock correction mid-drive. */
+    val elapsedRealtimeNanos: Long,
+)
+
+/**
+ * Whether [incoming] should replace [current] as the shown position.
+ *
+ * GPS and network are registered on the *same* listener, so without this every network fix
+ * overwrote the GPS one that arrived a moment earlier. For a navigation app that is backwards:
+ * network positions are typically hundreds of metres out against GPS's few, so the puck jumped
+ * between the road and somewhere near the road, roughly once a second.
+ *
+ * The policy is therefore GPS-first rather than newest-wins, with two ways for a network fix to
+ * still get through — otherwise a phone that loses sky view keeps showing the last rooftop it saw:
+ *
+ *  - **GPS has gone quiet** for [staleAfterNanos]. A stale fix is worse than a coarse one.
+ *  - **Network is [ACCURACY_MARGIN]× more accurate**, which happens indoors where GPS degrades to
+ *    a wide multipath estimate while wifi trilateration stays tight.
+ *
+ * Ages are measured between the two fixes rather than against "now", so this stays a pure
+ * function of its arguments and a caller cannot get a different answer by asking later.
+ */
+internal fun acceptsFix(
+    current: Fix?,
+    incoming: Fix,
+    staleAfterNanos: Long = GPS_STALE_NANOS,
+): Boolean {
+    if (current == null) return true
+    if (incoming.fromGps) return true
+    // Network replacing network: nothing to prefer, so take the fresher one.
+    if (!current.fromGps) return true
+    if (incoming.elapsedRealtimeNanos - current.elapsedRealtimeNanos >= staleAfterNanos) return true
+    // `0` means the provider declined to say, which is not evidence of being better.
+    if (incoming.accuracyM <= 0f || current.accuracyM <= 0f) return false
+    return incoming.accuracyM * ACCURACY_MARGIN < current.accuracyM
+}
+
+/**
+ * How long GPS may be silent before a network fix is taken instead.
+ *
+ * Both providers are requested at one second, so this is ten missed updates — long enough not to
+ * flip providers on a single dropped fix under a bridge, short enough that walking into a building
+ * updates the puck rather than stranding it at the door.
+ */
+private const val GPS_STALE_NANOS = 10_000_000_000L
+
+/**
+ * How much better a network fix must be to displace a fresh GPS one. Twice, not marginally: at
+ * comparable accuracy GPS is the more trustworthy of the two, and swapping between providers of
+ * similar quality would make the puck jitter for no gain.
+ */
+private const val ACCURACY_MARGIN = 2f

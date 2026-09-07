@@ -908,6 +908,11 @@ fun AlertDialog(
     dismissButton = dismissButton, icon = icon, title = title, text = text, shape = shape, properties = properties,
 )
 
+// --- Time picker ---
+@Composable
+fun TimePicker(state: TimePickerState, modifier: Modifier = Modifier) =
+    androidx.compose.material3.TimePicker(state = state, modifier = modifier)
+
 // --- Date picker ---
 @Composable
 fun DatePicker(state: DatePickerState, modifier: Modifier = Modifier) =

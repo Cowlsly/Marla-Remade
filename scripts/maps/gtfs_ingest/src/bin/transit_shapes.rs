@@ -33,6 +33,20 @@
 use gtfs_ingest::bundle;
 use gtfs_ingest::gtfs::{self, Csv};
 use gtfs_ingest::manifest::{parse_feed_spec, read_manifest, FeedSpec};
+
+/// How many distinct services may draw over one stretch of track before the rest are dropped.
+///
+/// Four, because that is what the renderer can show: `Layer::lane_offset_px` clamps the drawn
+/// lanes to the style's `lanes` ramp, which tops out at 4 at z13. A fifth service over the same
+/// track gets squashed onto a lane it shares with another and adds nothing but over-draw.
+///
+/// The cap exists because the dedup gates above it are colour-scoped on purpose — two services
+/// sharing a track are two real services and both should draw. That reasoning holds for one city
+/// and fails for a planet, where one alignment is republished by a city feed, the regional feed
+/// containing it and a national feed on top, each under its own `route_color` and often its own
+/// `route_type`. Fifteen lines over one railway is not fifteen services; it is one service seen
+/// fifteen times.
+const MAX_SERVICES_PER_TRACK: usize = 4;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};
@@ -340,6 +354,7 @@ fn run(out_path: &Path, specs: &[FeedSpec]) -> Result<(), String> {
     let mut by_mode: BTreeMap<&'static str, bundle::Covered> = BTreeMap::new();
     let (mut kept, mut without_shape, mut deduped, mut fell_back) = (0usize, 0usize, 0usize, 0usize);
     let (mut shapes_read, mut merged) = (0usize, 0usize);
+    let mut crowded = 0usize;
 
     // Feeds are parsed in parallel and folded in sequentially.
     //
@@ -406,7 +421,20 @@ fn run(out_path: &Path, specs: &[FeedSpec]) -> Result<(), String> {
                     merged += 1;
                     continue;
                 }
-                mode_cover.add(&line.points);
+                // The gates above are colour-scoped, deliberately: two services sharing a track
+                // are two real services and both should draw. On a planet that stops being true.
+                // One alignment is republished by a city feed, the regional feed containing it and
+                // a national feed on top, each with its own `route_color` and often its own
+                // `route_type`, so each reads as a distinct service and claims its own lane. That
+                // is what makes one railway render as fifteen jagged parallel lines.
+                //
+                // A ceiling rather than a ban, so the two-services-on-one-track case the tests
+                // pin still works. Above it the track is already saying everything it can.
+                if mode_cover.crowd_reaches(&line.points, MAX_SERVICES_PER_TRACK) {
+                    crowded += 1;
+                    continue;
+                }
+                mode_cover.add_tagged(&line.points, line.color);
                 by_color.entry((line.mode, line.color)).or_default().add(&line.points);
                 if line.fallback {
                     fell_back += 1;
@@ -471,6 +499,7 @@ fn run(out_path: &Path, specs: &[FeedSpec]) -> Result<(), String> {
         "transit_shapes: wrote {} ({} feed(s), {kept} rail route(s) kept, \
          {without_shape} with no usable shape, {shapes_read} shape(s) read, \
          {deduped} republished byte-for-byte, {merged} already drawn in their colour, \
+         {crowded} over track already carrying {MAX_SERVICES_PER_TRACK} services, \
          {} line(s), {bundled} in a shared corridor, \
          {fell_back} on a per-mode fallback colour)",
         out_path.display(),

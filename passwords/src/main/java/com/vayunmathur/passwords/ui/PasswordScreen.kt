@@ -38,6 +38,7 @@ import com.vayunmathur.library.ui.IconButton
 import com.vayunmathur.library.ui.IconCopy
 import com.vayunmathur.library.ui.IconDelete
 import com.vayunmathur.library.ui.IconEdit
+import com.vayunmathur.library.ui.IconKey
 import com.vayunmathur.library.ui.IconLink
 import com.vayunmathur.library.ui.IconNavigation
 import com.vayunmathur.library.ui.IconVisibilityOff
@@ -51,6 +52,7 @@ import com.vayunmathur.library.ui.TopAppBar
 import com.vayunmathur.library.ui.appBarScrollBehavior
 import com.vayunmathur.passwords.R
 import com.vayunmathur.passwords.data.Password
+import com.vayunmathur.passwords.data.Passkey
 import com.vayunmathur.passwords.domain.TOTP
 import com.vayunmathur.passwords.platform.PasswordUiState
 import com.vayunmathur.passwords.platform.PasswordsActions
@@ -61,6 +63,7 @@ fun PasswordScreen(
     actions: PasswordsActions,
     onBack: () -> Unit = {},
     onEdit: () -> Unit = {},
+    onOpenPasskey: (Long) -> Unit = {},
     /**
      * Seed for the screen's own UI-only state. The app always takes the default; a preview
      * can set it to capture the revealed form without driving the reveal button.
@@ -68,7 +71,6 @@ fun PasswordScreen(
     initialShowPassword: Boolean = false,
 ) {
     val password = state.password
-    val now = state.now
     val context = LocalContext.current
     var showPassword by remember { mutableStateOf(initialShowPassword) }
     val snackbarHostState = remember { SnackbarHostState() }
@@ -214,14 +216,11 @@ fun PasswordScreen(
                     if (secret.isNullOrBlank()) {
                         Text(stringResource(R.string.totp_not_configured))
                     } else {
-                        val timeStep = now / 1000 / 30
+                        val timeStep = state.now() / 1000 / 30
                         val currentCode = remember(secret, timeStep) {
                             TOTP.generate(secret, timeStep * 30)
                         }
-                        val millisIntoStep = now % 30000
-                        val millisRemaining = 30000 - millisIntoStep
-                        val secondsRemaining = (millisRemaining / 1000).toInt()
-                        val progress = millisRemaining / 30000f
+                        val secondsRemaining = ((30000 - state.now() % 30000) / 1000).toInt()
 
                         Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.SpaceBetween, modifier = Modifier.fillMaxWidth()) {
                             Column {
@@ -232,13 +231,31 @@ fun PasswordScreen(
 
                             // Circular progress showing proportion of time remaining
                             Box(contentAlignment = Alignment.Center) {
-                                CircularProgressIndicator({ progress }, Modifier.size(56.dp))
+                                CircularProgressIndicator(
+                                    { (30000L - state.now() % 30000L) / 30000f },
+                                    Modifier.size(56.dp),
+                                )
                                 IconButton({
                                     actions.copyToClipboard("totp", currentCode, "TOTP copied")
                                 }) {
                                     IconCopy()
                                 }
                             }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Passkeys merged into this entry
+        if (state.passkeys.isNotEmpty()) {
+            item {
+                Card(shape = RoundedCornerShape(8.dp), modifier = Modifier.fillMaxWidth()) {
+                    Column(Modifier.padding(12.dp)) {
+                        Text(stringResource(R.string.section_passkeys), style = MaterialTheme.typography.titleMedium)
+                        Spacer(Modifier.height(8.dp))
+                        for (passkey in state.passkeys) {
+                            PasskeyRow(passkey) { onOpenPasskey(passkey.id) }
                         }
                     }
                 }
@@ -287,6 +304,34 @@ fun PasswordScreen(
                         }
                     }
                 }
+            }
+        }
+    }
+}
+
+@Composable
+private fun PasskeyRow(passkey: Passkey, onClick: () -> Unit) {
+    Row(
+        verticalAlignment = Alignment.CenterVertically,
+        modifier = Modifier.fillMaxWidth().clickable(onClick = onClick).padding(vertical = 6.dp),
+    ) {
+        IconKey(Modifier.size(20.dp))
+        Spacer(Modifier.width(12.dp))
+        Column(Modifier.weight(1f)) {
+            Text(
+                passkey.rpName.ifBlank { passkey.rpId },
+                style = MaterialTheme.typography.bodyLarge,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+            if (passkey.userName.isNotBlank()) {
+                Text(
+                    passkey.userName,
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
             }
         }
     }

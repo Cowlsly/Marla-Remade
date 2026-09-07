@@ -5,8 +5,10 @@ import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
 import android.app.Service
+import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
+import android.content.IntentFilter
 import android.content.pm.PackageManager
 import android.content.pm.ServiceInfo
 import android.location.Address
@@ -24,6 +26,7 @@ import android.os.BatteryManager
 import android.os.Build
 import android.os.IBinder
 import android.os.PowerManager
+import android.os.UserManager
 import android.util.Log
 import androidx.core.app.NotificationCompat
 import androidx.core.content.ContextCompat
@@ -34,18 +37,24 @@ import androidx.work.ExistingPeriodicWorkPolicy
 import androidx.work.ExistingWorkPolicy
 import androidx.work.WorkerParameters
 import com.vayunmathur.findfamily.data.Coord
+import com.vayunmathur.findfamily.data.DirectBootStore
 import com.vayunmathur.findfamily.data.FindFamilyRepository
+import com.vayunmathur.findfamily.data.LocationSource
 import com.vayunmathur.findfamily.data.LocationValue
 import com.vayunmathur.findfamily.data.RequestStatus
 import com.vayunmathur.findfamily.data.TemporaryLink
 import com.vayunmathur.findfamily.data.User
 import com.vayunmathur.findfamily.data.Waypoint
 import com.vayunmathur.findfamily.data.havershine
+import com.vayunmathur.findfamily.platform.FinalLocationReporter
 import com.vayunmathur.findfamily.uwb.UwbEnvelope
 import com.vayunmathur.findfamily.uwb.UwbEnvelopeKind
 import com.vayunmathur.findfamily.uwb.UwbInbox
 import com.vayunmathur.findfamily.BuildConfig
 import com.vayunmathur.findfamily.data.UserKind
+import com.vayunmathur.findfamily.tracker.PoweredOffKeyStore
+import com.vayunmathur.findfamily.tracker.PoweredOffReporting
+import com.vayunmathur.findfamily.tracker.PoweredOffScanner
 import com.vayunmathur.findfamily.tracker.TrackerBeaconScanner
 import com.vayunmathur.findfamily.tracker.TrackerReporting
 import com.vayunmathur.findfamily.tracker.TrackerStore
@@ -58,6 +67,7 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
@@ -105,6 +115,27 @@ class LocationTrackingService : Service(), SensorEventListener {
     private var heartbeatJob: Job? = null
     private var trackingInitialized = false
 
+    /** The pre-unlock publish loop; null once the user unlocks and the normal path takes over. */
+    private var directBootJob: Job? = null
+
+    /**
+     * Guards against double-registering listeners when the pre-unlock path has already
+     * registered them and [startTracking] then runs after unlock.
+     */
+    private var sensorsRegistered = false
+
+    /** Signature of the roster last written to [DirectBootStore], to avoid rewriting it every tick. */
+    private var lastSeededMirror: String? = null
+
+    /**
+     * Who a publish would go to right now, sharing switches already applied.
+     *
+     * Kept in memory purely so [FinalLocationReporter] can read it without a disk round-trip on
+     * the shutdown path, where the whole budget is a couple of seconds.
+     */
+    @Volatile
+    private var publishRoster: List<DirectBootStore.Target> = emptyList()
+
     /** Serializes the off-reader enrichment batches (see [processIncomingLocations]). */
     private val enrichmentMutex = Mutex()
 
@@ -112,6 +143,12 @@ class LocationTrackingService : Service(), SensorEventListener {
     // secrets/private keys, and the finder-side beacon scan job.
     private var trackerStore: TrackerStore? = null
     private var trackerScanJob: Job? = null
+
+    // Powered-off finding. Not DEV_BUILD gated: the finder half is ordinary BLE and is meant to
+    // work on any phone with findfamily installed.
+    private var poweredOffKeys: PoweredOffKeyStore? = null
+    private var poweredOffScanJob: Job? = null
+    private var lastPoweredOffPollMs = 0L
 
     private val networkListener = LocationListener { location ->
         recordFix(location)
@@ -256,12 +293,54 @@ class LocationTrackingService : Service(), SensorEventListener {
     }
 
     /**
+     * Mirror the identity, switches and sharing roster into device-protected storage so the
+     * next reboot can report before the passcode is entered.
+     *
+     * Reads its own state rather than borrowing the heartbeat's, because the heartbeat gives
+     * up early when there is no fix yet — and a device that has never had a fix still needs a
+     * seeded mirror. Rewritten only when the result would differ, since this runs every tick.
+     */
+    private suspend fun seedDirectBootMirror() {
+        val sharingOut = LocationServiceController.isGlobalSharingEnabled(this)
+        val trackingEnabled = LocationServiceController.isTrackingEnabled(this)
+        val targets = repository.getAllUsers()
+            .filter { it.id != Networking.userid && it.sendingEnabled }
+            .mapNotNull { u -> u.pqcEncryptionKey?.let { DirectBootStore.Target(u.id, it) } }
+        val signature = "$sharingOut|$trackingEnabled|" + targets.joinToString(",") { "${it.id}:${it.bundle.length}" }
+        publishRoster = if (sharingOut) targets else emptyList()
+        if (signature == lastSeededMirror) return
+        DirectBootStore.seed(
+            this,
+            targets,
+            trackingEnabled = trackingEnabled,
+            globalSharingEnabled = sharingOut,
+        )
+        lastSeededMirror = signature
+        Log.i(TAG_DIRECT_BOOT, "mirror seeded: ${targets.size} target(s) sharing=$sharingOut tracking=$trackingEnabled")
+    }
+
+    /**
      * Persists a batch of freshly-decrypted peer locations and inserts unknown senders.
      * Runs on the live WebSocket reader coroutine, so it only does fast, durable work;
      * the slow best-effort part is handed to [enrichIncomingLocations]. Self-contained
      * (re-reads users) so it can be driven by any inbound path.
      */
-    private suspend fun processIncomingLocations(locList: List<LocationValue>) {
+    private suspend fun processIncomingLocations(incoming: List<LocationValue>) {
+        // A category this build cannot interpret is dropped rather than stored. Marking it is not
+        // enough: getLatest() ranks on reportedAt, so it would still become the newest row for
+        // that person and be drawn as their position — and at least one such category
+        // (NETWORK_SIGHTING) carries someone ELSE's coordinate.
+        //
+        // The log names who was dropped, not just how many. This is the one failure mode that is
+        // otherwise invisible: if a future build ever emits a new source as someone's primary
+        // stream, that person silently disappears from this map, and "Alice was dropped" is the
+        // only thread anyone will have to pull on. See the note on LocationSource before adding
+        // a value that could cause it.
+        val locList = incoming.filter { it.source != LocationSource.UNKNOWN }
+        if (locList.size != incoming.size) {
+            val dropped = incoming.filter { it.source == LocationSource.UNKNOWN }.map { it.userid.toULong() }.distinct()
+            Log.w("FF-Heartbeat", "dropped ${incoming.size - locList.size} fix(es) from newer peer(s) with an unrecognised source: $dropped")
+        }
         if (locList.isEmpty()) return
         val currentUsers = repository.getAllUsers()
         val userIDs = currentUsers.map { it.id }
@@ -461,6 +540,81 @@ class LocationTrackingService : Service(), SensorEventListener {
         if (locs.isNotEmpty()) processIncomingLocations(locs)
     }
 
+    /**
+     * Finder path for powered-off devices. Unlike the tracker scanner above this is **not**
+     * DEV_BUILD gated and needs no privileged permission — the whole point is that any phone
+     * with findfamily on it can contribute sightings. It is gated on the user having opted in.
+     *
+     * Collecting [LocationServiceController.crowdFindingEnabledFlow] rather than reading the
+     * flag once means flipping the switch off actually stops the radio, instead of leaving it
+     * scanning until the service happens to restart.
+     */
+    private fun startPoweredOffScanner() {
+        if (poweredOffScanJob?.isActive == true) return
+        poweredOffScanJob = serviceScope.launch {
+            LocationServiceController.crowdFindingEnabledFlow(this@LocationTrackingService)
+                .collectLatest { enabled ->
+                    if (!enabled) return@collectLatest
+                    runCatching {
+                        PoweredOffScanner(this@LocationTrackingService).sightings().collect { sighting ->
+                            val loc = lastKnownLocation
+                            if (loc == null) {
+                                Log.i(TAG_POWERED_OFF, "sighting dropped: no location fix yet")
+                                return@collect
+                            }
+                            // A sighting is only ever "the finder was near here". Reporting one
+                            // from a 500m-accurate fix would add noise the owner cannot tell
+                            // apart from a good one, so drop it rather than dilute the answer.
+                            if (loc.accuracy > 100f) {
+                                Log.i(TAG_POWERED_OFF, "sighting dropped: accuracy ${loc.accuracy}m > 100m")
+                                return@collect
+                            }
+                            val lv = LocationValue(
+                                Networking.userid,
+                                Coord(loc.latitude, loc.longitude),
+                                0f,
+                                loc.accuracy,
+                                Clock.System.now(),
+                                // The finder's own battery is none of the owner's business, and
+                                // sending it would leak a little about who did the finding.
+                                0f,
+                            )
+                            runCatching { PoweredOffReporting.reportSighting(sighting, lv) }
+                                .onFailure { Log.w(TAG_POWERED_OFF, "reportSighting failed", it) }
+                        }
+                    }.onFailure { Log.w(TAG_POWERED_OFF, "powered-off scan collect failed", it) }
+                }
+        }
+    }
+
+    /**
+     * Owner path for powered-off devices: for every peer whose powered-off keys we hold, drain
+     * and decrypt any sightings and feed them through the normal incoming pipeline. Finding
+     * nothing is the ordinary case and is not worth logging at anything above debug.
+     *
+     * Rate-limited to [POWERED_OFF_POLL_INTERVAL_MS] rather than running on the 30s heartbeat.
+     * A query carries one handle per armed slot — 258 of them, about 4KB — and an EID only
+     * rotates every 1024s, so polling every 30s would send that 34 times before there could
+     * possibly be a new handle to ask about.
+     */
+    private suspend fun pollPoweredOffSightings() {
+        val store = poweredOffKeys ?: return
+        val now = System.currentTimeMillis()
+        if (now - lastPoweredOffPollMs < POWERED_OFF_POLL_INTERVAL_MS) return
+        lastPoweredOffPollMs = now
+        val users = runCatching { repository.getAllUsers() }.getOrDefault(emptyList())
+        val locs = ArrayList<LocationValue>()
+        for (u in users) {
+            if (!store.canRead(u.id)) continue
+            locs += runCatching { PoweredOffReporting.fetchSightings(u.id, store) }
+                .getOrDefault(emptyList())
+        }
+        if (locs.isNotEmpty()) {
+            Log.i(TAG_POWERED_OFF, "retrieved ${locs.size} network sighting(s)")
+            processIncomingLocations(locs)
+        }
+    }
+
     override fun onSensorChanged(event: SensorEvent?) {
         if (event?.sensor?.type == Sensor.TYPE_LINEAR_ACCELERATION) {
             val x = event.values[0]
@@ -495,6 +649,9 @@ class LocationTrackingService : Service(), SensorEventListener {
     override fun onCreate() {
         super.onCreate()
         setupNotificationChannels()
+        // Runtime registration is not a style choice: neither ACTION_SHUTDOWN nor
+        // ACTION_BATTERY_LOW reaches a manifest-declared receiver.
+        FinalLocationReporter.start(this, { lastKnownLocation }, { publishRoster })
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -528,8 +685,121 @@ class LocationTrackingService : Service(), SensorEventListener {
             return START_NOT_STICKY
         }
 
-        startTracking()
+        if (isUserUnlocked()) startTracking() else startDirectBootTracking()
         return START_STICKY
+    }
+
+    /**
+     * Before the first unlock after a reboot, Room and the default DataStore are
+     * credential-encrypted and unreadable, so the normal path cannot run at all. Publish from
+     * the device-protected mirror instead and hand over the moment the user unlocks.
+     */
+    private fun isUserUnlocked(): Boolean =
+        getSystemService(UserManager::class.java)?.isUserUnlocked ?: true
+
+    private val unlockReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context, intent: Intent) {
+            if (intent.action == Intent.ACTION_USER_UNLOCKED) onUserUnlocked()
+        }
+    }
+    private var unlockReceiverRegistered = false
+
+    private fun startDirectBootTracking() {
+        if (directBootJob?.isActive == true) return
+        if (!unlockReceiverRegistered) {
+            registerReceiver(
+                unlockReceiver,
+                IntentFilter(Intent.ACTION_USER_UNLOCKED),
+                RECEIVER_NOT_EXPORTED,
+            )
+            unlockReceiverRegistered = true
+        }
+        directBootJob = serviceScope.launch {
+            val ctx = this@LocationTrackingService
+            // Expected on the first boot after this ships, and after a factory reset: there is
+            // nothing to publish with yet. Seeding happens below once the user unlocks.
+            if (!DirectBootStore.isSeeded(ctx)) {
+                Log.i(TAG_DIRECT_BOOT, "no device-protected mirror yet; idle until first unlock")
+                return@launch
+            }
+            if (!DirectBootStore.isTrackingEnabled(ctx)) {
+                Log.i(TAG_DIRECT_BOOT, "tracking switched off by the user; staying idle")
+                return@launch
+            }
+            if (!Networking.initDirectBoot(DirectBootStore.store(ctx))) {
+                Log.w(TAG_DIRECT_BOOT, "identity unavailable from the mirror; staying idle")
+                return@launch
+            }
+
+            withContext(Dispatchers.Main) {
+                registerSensors()
+                isMoving = true
+                lastMovementTime = System.currentTimeMillis()
+                setupLocationUpdates()
+            }
+            // Inbound delivery needs Room to persist anything, so the pre-unlock socket is
+            // publish-only. Peers' locations are picked up on reconnect after unlock.
+            Networking.startLive(serviceScope, onLocations = {}, onUwb = {})
+
+            val sharing = DirectBootStore.isGlobalSharingEnabled(ctx)
+            val targets = if (sharing) DirectBootStore.roster(ctx) else emptyList()
+            publishRoster = targets
+            Log.i(TAG_DIRECT_BOOT, "running pre-unlock, sharing=$sharing targets=${targets.size}")
+            while (isActive) {
+                publishDirectBoot(targets)
+                delay(30.seconds)
+            }
+        }
+    }
+
+    /** The pre-unlock equivalent of [syncHeartbeat]: publish only, no database, no enrichment. */
+    private suspend fun publishDirectBoot(targets: List<DirectBootStore.Target>) {
+        val location = lastKnownLocation ?: run {
+            Log.d(TAG_DIRECT_BOOT, "no fix yet")
+            return
+        }
+        if (targets.isEmpty()) return
+        val battery = runCatching {
+            bm.getIntProperty(BatteryManager.BATTERY_PROPERTY_CAPACITY).toFloat()
+        }.getOrDefault(0f)
+        val lv = LocationValue(
+            Networking.userid,
+            Coord(location.latitude, location.longitude),
+            0f,
+            location.accuracy,
+            Clock.System.now(),
+            battery,
+        )
+        Log.d(TAG_DIRECT_BOOT, "publishing ${location.latitude},${location.longitude} acc=${location.accuracy} to ${targets.size} peer(s)")
+        targets.forEach {
+            try {
+                Networking.publishLocation(lv, it.id, it.bundle)
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                Log.w(TAG_DIRECT_BOOT, "publish to ${it.id.toULong()} failed", e)
+            }
+        }
+    }
+
+    private fun onUserUnlocked() {
+        serviceScope.launch {
+            Log.i(TAG_DIRECT_BOOT, "user unlocked; handing over to the normal path")
+            directBootJob?.cancelAndJoin()
+            directBootJob = null
+            try {
+                Networking.promoteToUnlocked(
+                    repository,
+                    DataStoreUtils.getInstance(this@LocationTrackingService),
+                    getString(R.string.me_label),
+                )
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                Log.w(TAG_DIRECT_BOOT, "handover failed", e)
+            }
+            startTracking()
+        }
     }
 
     private fun startTracking() {
@@ -548,6 +818,14 @@ class LocationTrackingService : Service(), SensorEventListener {
                 if (BuildConfig.DEV_BUILD) {
                     trackerStore = TrackerStore(DataStoreUtils.getInstance(this@LocationTrackingService))
                 }
+                // Device-protected, and it MUST match PoweredOffBeacon.keys(). The beacon half
+                // arms from a shutdown broadcast that can fire before first unlock — a flat
+                // battery does not wait for a passcode — so it writes the beacon secret and the
+                // ML-KEM private bundle to the direct-boot store. Reading them back from the
+                // ordinary credential-protected store would find nothing, canRead() would be
+                // false for every user forever, and retrieval would return zero sightings with
+                // no error anywhere. Keep these two constructions pointing at the same store.
+                poweredOffKeys = PoweredOffKeyStore(DirectBootStore.store(this@LocationTrackingService))
 
                 withContext(Dispatchers.Main) {
                     registerSensors()
@@ -577,7 +855,15 @@ class LocationTrackingService : Service(), SensorEventListener {
                         break
                     }
                     syncHeartbeat()
+                    try {
+                        seedDirectBootMirror()
+                    } catch (e: CancellationException) {
+                        throw e
+                    } catch (e: Exception) {
+                        Log.w(TAG_DIRECT_BOOT, "mirror seed failed", e)
+                    }
                     if (BuildConfig.DEV_BUILD) runCatching { pollTrackerReports() }
+                    runCatching { pollPoweredOffSightings() }
                     delay(30.seconds)
                 }
             }
@@ -594,10 +880,15 @@ class LocationTrackingService : Service(), SensorEventListener {
             // Finder side of the crowd-finding network: scan for tracker beacons and
             // report each sighting with our own GPS. DEV_BUILD only.
             if (BuildConfig.DEV_BUILD) startTrackerScanner()
+
+            // Powered-off finding, finder half. Opt-in, and available on any build.
+            startPoweredOffScanner()
         }
     }
 
     private fun registerSensors() {
+        if (sensorsRegistered) return
+        sensorsRegistered = true
         bm = getSystemService(BATTERY_SERVICE) as BatteryManager
         locationManager = getSystemService(LOCATION_SERVICE) as LocationManager
         sensorManager = getSystemService(SENSOR_SERVICE) as SensorManager
@@ -663,6 +954,11 @@ class LocationTrackingService : Service(), SensorEventListener {
         private const val ENTRY_EXIT_CHANNEL_ID = "entry_exit_channel"
         private const val UWB_REQUEST_CHANNEL_ID = "uwb_request_channel"
         private const val NOTIFICATION_ID = 101
+        private const val TAG_DIRECT_BOOT = "FF-DirectBoot"
+        private const val TAG_POWERED_OFF = "FF-PoweredOff"
+
+        /** How often to drain powered-off sightings. See [pollPoweredOffSightings]. */
+        private const val POWERED_OFF_POLL_INTERVAL_MS = 5 * 60 * 1000L
 
         /**
          * How stale the held fix has to be before a less accurate one replaces it.
@@ -835,6 +1131,11 @@ class LocationTrackingService : Service(), SensorEventListener {
 
     override fun onDestroy() {
         super.onDestroy()
+        FinalLocationReporter.stop(this)
+        if (unlockReceiverRegistered) {
+            runCatching { unregisterReceiver(unlockReceiver) }
+            unlockReceiverRegistered = false
+        }
         serviceScope.cancel()
         Networking.stopLive()
         // These are only initialized once startTracking()/registerSensors() runs.
@@ -936,6 +1237,16 @@ object LocationServiceController {
      */
     const val GLOBAL_SHARING_ENABLED_KEY = "global_sharing_enabled"
 
+    /**
+     * Whether this phone acts as a finder for other people's powered-off devices.
+     *
+     * **Opt-in, unlike everything else here**, and it stays that way. Turning it on means the
+     * phone scans for and reports strangers' devices, which is a thing done on someone else's
+     * behalf rather than the user's own, so it cannot be a default and it cannot be enabled
+     * quietly. See `R.string.crowd_finding_explanation` for what the user is told.
+     */
+    const val CROWD_FINDING_ENABLED_KEY = "crowd_finding_enabled"
+
     fun hasFineLocationPermission(context: Context): Boolean =
         ContextCompat.checkSelfPermission(
             context,
@@ -967,6 +1278,18 @@ object LocationServiceController {
     suspend fun setGlobalSharingEnabled(context: Context, enabled: Boolean) {
         DataStoreUtils.getInstance(context).setBoolean(GLOBAL_SHARING_ENABLED_KEY, enabled)
         SharingTileService.requestRefresh(context)
+    }
+
+    /** Whether the user has agreed to act as a finder. Defaults to **false** — opt-in. */
+    suspend fun isCrowdFindingEnabled(context: Context): Boolean =
+        DataStoreUtils.getInstance(context).getBooleanAwait(CROWD_FINDING_ENABLED_KEY, false)
+
+    /** [isCrowdFindingEnabled] as a stream, so the scanner starts and stops with the switch. */
+    fun crowdFindingEnabledFlow(context: Context): Flow<Boolean> =
+        DataStoreUtils.getInstance(context).booleanFlow(CROWD_FINDING_ENABLED_KEY, false)
+
+    suspend fun setCrowdFindingEnabled(context: Context, enabled: Boolean) {
+        DataStoreUtils.getInstance(context).setBoolean(CROWD_FINDING_ENABLED_KEY, enabled)
     }
 
     /**
@@ -1006,6 +1329,28 @@ object LocationServiceController {
         context.applicationContext.stopService(
             Intent(context.applicationContext, LocationTrackingService::class.java)
         )
+    }
+
+    /**
+     * Boot-time start for the window before the first unlock.
+     *
+     * Deliberately does not consult [isTrackingEnabled] — that reads the credential-encrypted
+     * DataStore, which is unreadable until the passcode is entered. Eligibility comes from the
+     * device-protected mirror instead, and an unseeded mirror means we stay off rather than
+     * guess. Never stops the service, since "not eligible yet" here only means "cannot tell".
+     */
+    suspend fun syncServiceStateLocked(context: Context) {
+        val appContext = context.applicationContext
+        if (!hasFineLocationPermission(appContext)) return
+        if (!DirectBootStore.isSeeded(appContext)) return
+        if (!DirectBootStore.isTrackingEnabled(appContext)) return
+        withContext(Dispatchers.Main) {
+            runCatching {
+                appContext.startForegroundService(
+                    Intent(appContext, LocationTrackingService::class.java)
+                )
+            }
+        }
     }
 }
 

@@ -31,6 +31,9 @@ dependencies {
     implementation(project(":library:image"))
 
     implementation(project(":library:map"))
+    // @SystemApi android.nearby.NearbyManager, for powered-off finding. Present at runtime,
+    // absent from the public SDK, and must NOT be packaged. See :library:nearby-stubs.
+    compileOnly(project(":library:nearby-stubs"))
 }
 
 // The Compose screenshot renderer draws previews from the compiled `screenshotTest` classes

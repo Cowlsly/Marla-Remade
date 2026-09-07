@@ -115,6 +115,7 @@
         <receiver
             android:name=".util.ReminderReceiver"
             android:enabled="true"
+            android:directBootAware="true"
             android:exported="false" />
         <receiver
             android:name=".util.BootReceiver"

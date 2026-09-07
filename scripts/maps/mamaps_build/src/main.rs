@@ -327,6 +327,10 @@ fn run(
         build_id,
         // Beside the archive, as the feature spill is. One zoom at a time, removed as each finishes.
         scratch: scratch_path(out),
+        // Only when `earth` is being built, because deriving the sea from the absence of land is
+        // only sound if land is authoritative. `check_coastline` already guarantees that selecting
+        // `earth` means a real coastline was supplied.
+        ocean: layers.earth,
     };
     let (bytes, per_zoom) = tiler::build(&store, &settings).map_err(|e| e.to_string())?;
     tiler::check_not_empty(&per_zoom).map_err(|e| e.to_string())?;
@@ -477,6 +481,11 @@ fn derive_build_id(
             h = h.wrapping_mul(0x100_0000_01b3);
         }
     };
+    // Revision 9: administrative boundary *relations* are areas rather than lines, so the same
+    // `.pbf` yields different boundary records in the spill. The sea is also synthesised per tile
+    // now, but that happens at encode time and is not in the spill — the boundary change alone is
+    // what makes a warm cache wrong.
+    //
     // Revision 8: `.mamaps` v3. `places` and `poi` features carry a stable OSM id in a new body
     // side table, `dict::KINDS` gains `fuel`, `hotel`, `atm` and `bank`, and v1 bodies are no
     // longer read. Every byte offset in the archive moves, so a warm cache must miss.
@@ -498,7 +507,7 @@ fn derive_build_id(
     // Revision 3: road `min_zoom` is decided per corridor (`corridor`), and place
     // `kind_detail` carries the reference basemap's 0-15 population rank rather than a
     // three-step one (`schema::places::rank_of`).
-    eat(b"mamaps_build/8");
+    eat(b"mamaps_build/9");
     eat(input.to_string_lossy().as_bytes());
     if let Ok(meta) = std::fs::metadata(input) {
         eat(&meta.len().to_le_bytes());

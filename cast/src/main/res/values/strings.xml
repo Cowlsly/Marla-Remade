@@ -89,4 +89,8 @@
     <string name="cast_picker_title">Cast %1$s to</string>
     <string name="cast_picker_title_generic">Choose a television</string>
     <string name="cast_picker_cancel">Cancel</string>
+
+    <!-- The secondary line on the row in Settings' Cast page. The primary line is the TV's own
+         name, so this says what kind of thing it is rather than repeating it. -->
+    <string name="cast_route_description">MA Cast receiver</string>
 </resources>

@@ -2,7 +2,6 @@
 
 package com.vayunmathur.passwords.ui
 
-import kotlin.uuid.Uuid
 import android.content.Intent
 import android.os.Bundle
 import android.util.Base64
@@ -16,7 +15,6 @@ import com.vayunmathur.library.util.AppMessages
 import com.vayunmathur.library.biometric.unlockDatabaseWithBiometrics
 import com.vayunmathur.library.util.DatabaseHelper
 import com.vayunmathur.passwords.platform.cable.WebAuthnAuthenticator
-import com.vayunmathur.passwords.data.Passkey
 import com.vayunmathur.passwords.data.PasswordRepository
 import com.vayunmathur.passwords.domain.Cbor
 import com.vayunmathur.passwords.platform.PasskeyCredentialService
@@ -25,10 +23,7 @@ import com.vayunmathur.passwords.platform.buildGetCredentialResponse
 import kotlinx.coroutines.runBlocking
 import org.json.JSONArray
 import org.json.JSONObject
-import java.security.KeyPairGenerator
 import java.security.MessageDigest
-import java.security.interfaces.ECPublicKey
-import java.security.spec.ECGenParameterSpec
 
 class PasskeyAuthActivity : FragmentActivity() {
 
@@ -107,43 +102,28 @@ class PasskeyAuthActivity : FragmentActivity() {
         val origin = privilegedOrigin ?: PasskeyUtils.getAndroidOrigin(callingAppInfo)
         Log.d(TAG, "Create passkey for rpId=$rpId, origin=$origin, privileged=$isPrivileged")
 
-        // Generate EC P-256 key pair
-        val keyPairGenerator = KeyPairGenerator.getInstance("EC")
-        keyPairGenerator.initialize(ECGenParameterSpec("secp256r1"))
-        val keyPair = keyPairGenerator.generateKeyPair()
-        val ecPublicKey = keyPair.public as ECPublicKey
+        // Generate the credential and persist it; both transports share this.
+        val created = runBlocking {
+            WebAuthnAuthenticator.createCredential(
+                rpId = rpId,
+                rpName = rpName,
+                // The request JSON carries the user handle already base64url-encoded; the shared
+                // helper works in raw bytes and re-encodes when storing.
+                userId = PasskeyUtils.decodeB64Url(userId),
+                userName = userName,
+                userDisplayName = userDisplayName,
+                aaguid = PasskeyUtils.SAME_DEVICE_AAGUID,
+                store = repository,
+            )
+        }
+        val credentialIdB64 = PasskeyUtils.encodeB64Url(created.credentialId)
 
-        val credentialId = PasskeyUtils.generateCredentialId()
-        val credentialIdB64 = b64Url(credentialId)
-
-        // Build COSE public key
-        val xBytes = toFixedBytes(ecPublicKey.w.affineX, 32)
-        val yBytes = toFixedBytes(ecPublicKey.w.affineY, 32)
-        val coseKeyMap = linkedMapOf<Any, Any>(
-            1L to 2L,    // kty: EC2
-            3L to -7L,   // alg: ES256
-            -1L to 1L,   // crv: P-256
-            -2L to xBytes as Any, // x
-            -3L to yBytes as Any, // y
-        )
-        val coseKeyBytes = Cbor.encode(coseKeyMap)
-
-        // Build authenticator data with attested credential data
-        val authDataBase = PasskeyUtils.buildAuthenticatorData(
-            rpId = rpId,
-            attestedCredentialData = true,
-        )
-        val authData = authDataBase +
-            AAGUID +
-            byteArrayOf((credentialId.size shr 8).toByte(), credentialId.size.toByte()) +
-            credentialId +
-            coseKeyBytes
-
-        // Build attestation object using CBOR
+        // WebAuthn wraps the authenticator data in an attestationObject. Over CTAP the browser
+        // builds this itself from the response fields, which is why the helper returns neither.
         val attestationObject = Cbor.encode(linkedMapOf<String, Any>(
             "fmt" to "none",
             "attStmt" to emptyMap<Any, Any>(),
-            "authData" to authData,
+            "authData" to created.authenticatorData,
         ))
 
         // For privileged browsers: use placeholder clientDataJSON (browser replaces it)
@@ -170,28 +150,11 @@ class PasskeyAuthActivity : FragmentActivity() {
                 put("attestationObject", b64Url(attestationObject))
                 put("transports", JSONArray(listOf("internal", "hybrid")))
                 put("publicKeyAlgorithm", -7)
-                put("publicKey", b64Url(keyPair.public.encoded))
-                put("authenticatorData", b64Url(authData))
+                put("publicKey", b64Url(created.publicKeySpki))
+                put("authenticatorData", b64Url(created.authenticatorData))
             })
             put("clientExtensionResults", JSONObject())
         }.toString()
-
-        runBlocking {
-            repository.upsertPasskey(
-                Passkey(
-                    rpId = rpId,
-                    rpName = rpName,
-                    credentialId = credentialIdB64,
-                    userId = userId,
-                    userName = userName,
-                    userDisplayName = userDisplayName,
-                    privateKeyBytes = keyPair.private.encoded,
-                    creationTime = System.currentTimeMillis(),
-                    lastUsedTime = System.currentTimeMillis(),
-                    signCount = 0,
-                )
-            )
-        }
 
         Log.d(TAG, "Passkey created successfully for rpId=$rpId, credId=$credentialIdB64")
         val credentialResponse = androidx.credentials.CreatePublicKeyCredentialResponse(responseJson)
@@ -289,17 +252,7 @@ class PasskeyAuthActivity : FragmentActivity() {
         setResult(RESULT_OK, result)
     }
 
-    private fun b64Url(data: ByteArray): String =
-        Base64.encodeToString(data, Base64.URL_SAFE or Base64.NO_PADDING or Base64.NO_WRAP)
-
-    private fun toFixedBytes(value: java.math.BigInteger, length: Int): ByteArray {
-        val bytes = value.toByteArray()
-        return when {
-            bytes.size == length -> bytes
-            bytes.size > length -> bytes.copyOfRange(bytes.size - length, bytes.size)
-            else -> ByteArray(length - bytes.size) + bytes
-        }
-    }
+    private fun b64Url(data: ByteArray): String = PasskeyUtils.encodeB64Url(data)
 
     private fun handlePassword() {
         val providerRequest = PendingIntentHandler.retrieveProviderGetCredentialRequest(intent) ?: run {
@@ -358,6 +311,5 @@ class PasskeyAuthActivity : FragmentActivity() {
         const val FLOW_PASSWORD = "password"
         const val FLOW_UNLOCK = "unlock"
         private const val TAG = "PasskeyAuthActivity"
-        private val AAGUID = Uuid.parse("a1b2c3d4-e5f6-7890-abcd-ef1234567890").toByteArray()
     }
 }

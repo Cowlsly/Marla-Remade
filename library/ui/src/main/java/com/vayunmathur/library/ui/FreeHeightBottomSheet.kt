@@ -86,6 +86,17 @@ class FreeHeightSheetState(private val initialValue: SheetValue) {
      */
     private var measured by mutableStateOf(false)
 
+    /**
+     * True from the moment [hide] is asked for until it settles or is superseded.
+     *
+     * The sheet's height alone cannot express "on the way out": a sheet at 300 px is
+     * indistinguishable from one that will rest there, so [armBounds] would install a peek floor
+     * under a running hide and `Animatable` would end it at that floor. Every path that names a
+     * height instead — [expand], [partialExpand], and the drag and fling paths — clears this,
+     * because asking for a height supersedes the intent to dismiss.
+     */
+    private var hiding = false
+
     internal val offsetPx: Float
         get() = offset.value
 
@@ -180,9 +191,19 @@ class FreeHeightSheetState(private val initialValue: SheetValue) {
         }
     }
 
-    /** Clamp drags and fling decay at the peek, unless the sheet is hidden. */
+    /**
+     * Clamp drags and fling decay at the peek, unless the sheet is hidden or on its way there.
+     *
+     * [hiding] rather than `offset.value <= 0f` alone, because a sheet animating *towards* zero is
+     * not yet at zero and would otherwise have a peek floor installed underneath it mid-flight.
+     * `Animatable` re-clamps to its bounds every frame and ends the animation with `BoundReached`
+     * when it does, so that floor does not merely slow the hide — it stops it dead and leaves the
+     * sheet parked at the peek showing empty content. Two callers re-arm during exactly those
+     * frames: [resetContentCap], fired by the host swapping content out, and [onContentHeight],
+     * fired by the layout pass once that content measures smaller.
+     */
     private fun armBounds() {
-        val floor = if (offset.value <= 0f) 0f else peekPx
+        val floor = if (hiding || offset.value <= 0f) 0f else peekPx
         offset.updateBounds(floor.coerceAtMost(expandedPx), expandedPx)
     }
 
@@ -198,8 +219,16 @@ class FreeHeightSheetState(private val initialValue: SheetValue) {
      */
     suspend fun hide() {
         awaitMeasured()
-        offset.updateBounds(0f, expandedPx)
-        offset.animateTo(0f)
+        hiding = true
+        try {
+            offset.updateBounds(0f, expandedPx)
+            offset.animateTo(0f)
+        } finally {
+            // Cleared even on cancellation — a hide interrupted by the user grabbing the handle
+            // must hand a normal peek floor back to the drag path.
+            hiding = false
+            armBounds()
+        }
     }
 
     /**
@@ -208,6 +237,9 @@ class FreeHeightSheetState(private val initialValue: SheetValue) {
      */
     private suspend fun animateToHeight(target: () -> Float) {
         awaitMeasured()
+        // Any of these supersedes a hide in flight: the sheet is being asked for a height, so the
+        // intent that was taking it to zero no longer holds.
+        hiding = false
         // Widen the floor so the animation can leave a hidden sheet, then re-arm it
         // on the way out — including on cancellation, when the user grabs the handle
         // mid-flight and the drag path takes over.
@@ -226,6 +258,11 @@ class FreeHeightSheetState(private val initialValue: SheetValue) {
      */
     internal fun growBy(growth: Float, scope: CoroutineScope): Float {
         if (!measured || offset.value <= 0f) return 0f
+        // Synchronously, before the launch below: the user has taken hold of the sheet, so any
+        // hide in flight is superseded now rather than whenever the coroutine happens to run.
+        // The `snapTo` will cancel that animation and its `finally` would clear this too, but not
+        // until it is scheduled, and `armBounds` can be called in between.
+        hiding = false
         val target = (offset.value + growth).coerceIn(peekPx, expandedPx)
         val applied = target - offset.value
         if (applied != 0f) {
@@ -243,6 +280,7 @@ class FreeHeightSheetState(private val initialValue: SheetValue) {
      */
     internal suspend fun flingBy(velocity: Float): Float {
         if (!measured || offset.value <= 0f) return velocity
+        hiding = false
         armBounds()
         return offset.animateDecay(velocity, exponentialDecay()).endState.velocity
     }

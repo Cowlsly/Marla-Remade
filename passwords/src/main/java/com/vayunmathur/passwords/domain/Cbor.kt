@@ -16,7 +16,8 @@ object Cbor {
             else createArg(TYPE_NEGATIVE_INT, -1 - value)
         }
         is ByteArray -> createArg(TYPE_BYTE_STRING, data.size.toLong()) + data
-        is String -> createArg(TYPE_TEXT_STRING, data.length.toLong()) + data.encodeToByteArray()
+        // Length is the UTF-8 byte count, not String.length, which counts UTF-16 units.
+        is String -> data.encodeToByteArray().let { createArg(TYPE_TEXT_STRING, it.size.toLong()) + it }
         is List<*> -> data.fold(createArg(TYPE_ARRAY, data.size.toLong())) { acc, i -> acc + encode(i!!) }
         is Map<*, *> -> {
             val byteMap = data.entries.associate { (k, v) -> encode(k!!) to encode(v!!) }

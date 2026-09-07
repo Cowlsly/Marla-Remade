@@ -59,6 +59,8 @@ data class PersonUiState(
     val waypoints: List<Waypoint> = emptyList(),
     /** False while the Quick Settings sharing tile has sharing paused (GitHub #648). */
     val sharingGloballyEnabled: Boolean = true,
+    /** Whether this phone has opted in to finding other people's powered-off devices. */
+    val crowdFindingEnabled: Boolean = false,
 )
 
 /** Person-sheet callbacks. Same no-op-default arrangement as [FamilyListActions]. */
@@ -73,6 +75,9 @@ interface PersonActions {
 
     /** Re-pick which device contact this connection is named after. */
     fun changeConnectedContact() {}
+
+    /** Opt in or out of acting as a finder for other people's powered-off devices. */
+    fun setCrowdFinding(enabled: Boolean) {}
 
     companion object {
         val Noop: PersonActions = object : PersonActions {}

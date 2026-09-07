@@ -1,0 +1,92 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources xmlns:xliff="urn:oasis:names:tc:xliff:document:1.2">
+    <!-- Name of the app, shown in Settings and on the permission screens. It has no launcher
+         entry. -->
+    <string name="app_name">Log Viewer</string>
+
+    <!-- Title bar of the error report screen. %1$s is the crashed app's name, e.g. "Camera". -->
+    <string name="error_report_title">Error in <xliff:g id="app_name" example="Camera">%1$s</xliff:g></string>
+    <!-- Title bar when viewing the whole system log rather than one app's. -->
+    <string name="system_log_title">System log</string>
+    <!-- Title bar when viewing one app's log. %1$s is that app's name, e.g. "Camera". -->
+    <string name="app_log_title"><xliff:g id="app_name" example="Camera">%1$s</xliff:g> log</string>
+
+    <!-- Bottom button on the log screen: puts the log on the clipboard. -->
+    <string name="action_copy">Copy</string>
+    <!-- Message after the Copy button succeeds. -->
+    <string name="copied_to_clipboard">Copied to clipboard</string>
+    <!-- Message after Copy when the log was too large and only the tail was copied. -->
+    <string name="copied_to_clipboard_truncated">Copied truncated text to clipboard</string>
+
+    <!-- Bottom button and overflow item on the log screen: writes the log to a file the user
+         picks. -->
+    <string name="action_save">Save</string>
+    <!-- Message after the log has been written. %1$s is the file name that was created. -->
+    <string name="toast_saved">Saved “<xliff:g id="file_name" example="System log a1b2c3d4e5f6.txt">%1$s</xliff:g>”</string>
+    <!-- Message when the file the user picked could not be opened for writing. -->
+    <string name="toast_unable_to_open_file">Unable to open file</string>
+    <!-- Title of the error dialog shown when writing the log to the picked file failed. -->
+    <string name="unable_to_save_file">Unable to save file</string>
+
+    <!-- Confirm button of the filter, description and log-level dialogs. -->
+    <string name="action_apply">Apply</string>
+    <!-- Dismiss button of the filter, description, log-level and log-buffer dialogs. -->
+    <string name="action_cancel">Cancel</string>
+
+    <!-- Bottom button on the log screen: hands the log to another app. -->
+    <string name="action_share">Share</string>
+    <!-- Bottom button on the error report screen: copies the report and opens the issue
+         tracker. -->
+    <string name="action_report">Report</string>
+
+    <!-- Bottom button on the error report screen: reloads the report from the fuller text
+         tombstone on disk. -->
+    <string name="action_more_info">More info</string>
+    <!-- Message when the text tombstone backing "More info" could not be read. -->
+    <string name="toast_unable_to_show_more_info">Unable to show more info</string>
+    <!-- Bottom button on the error report screen: opens the crashed app's log. -->
+    <string name="action_show_log">Show log</string>
+    <!-- Bottom button when viewing one app's log: switches to the whole system log. -->
+    <string name="action_show_system_log">Show system log</string>
+
+    <!-- Overflow item and dialog title: which logcat ring buffers to read. -->
+    <string name="log_buffers">Log buffers</string>
+    <!-- Top bar action and dialog title: the minimum severity of the lines shown. -->
+    <string name="log_level">Log level</string>
+
+    <!-- Top bar action and dialog title: filter the log with a regular expression. -->
+    <string name="set_filter">Set filter</string>
+    <!-- Hint inside the empty "Set filter" text field. -->
+    <string name="set_filter_editor_hint">Regex</string>
+
+    <!-- Top bar action, when the log has no description yet. -->
+    <string name="add_description">Add description</string>
+    <!-- Top bar action, when the log already has a description. -->
+    <string name="update_description">Update description</string>
+
+    <!-- Shown instead of the device log when a secondary user or work profile asks for it. The
+         device log contains other users' activity, so only the primary user may read it. -->
+    <string name="error_system_log_secondary_user">The device log is only available to the primary user</string>
+
+    <!-- Log level, least severe: show every line. -->
+    <string name="log_level_verbose">Verbose</string>
+    <!-- Log level: show debug lines and above. -->
+    <string name="log_level_debug">Debug</string>
+    <!-- Log level: show informational lines and above. -->
+    <string name="log_level_info">Info</string>
+    <!-- Log level: show warnings and above. -->
+    <string name="log_level_warn">Warn</string>
+    <!-- Log level: show errors and above. -->
+    <string name="log_level_error">Error</string>
+    <!-- Log level, most severe: show assertion failures only. -->
+    <string name="log_level_assert">Assert</string>
+
+    <!-- Name of the permission that lets another system app open the log viewer. -->
+    <string name="permission_show_logcat_label">show the device log</string>
+    <!-- Explanation of the permission that lets another system app open the log viewer. -->
+    <string name="permission_show_logcat_desc">Allows a system app to open the device log in Log Viewer.</string>
+    <!-- Name of the permission that lets another preinstalled app show a crash report. -->
+    <string name="permission_show_error_report_label">show an error report</string>
+    <!-- Explanation of the permission that lets another preinstalled app show a crash report. -->
+    <string name="permission_show_error_report_desc">Allows a preinstalled app to show an error report in Log Viewer.</string>
+</resources>

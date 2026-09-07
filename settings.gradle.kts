@@ -114,6 +114,8 @@ include(":appstore")
 include(":library:locationprovider")
 include(":library:euicc-stubs")
 include(":library:backup-stubs")
+include(":library:remotedisplay-stubs")
+include(":library:nearby-stubs")
 include(":networklocation")
 include(":fooddelivery")
 include(":musicbrainz")
@@ -129,6 +131,8 @@ include(":cast:protocol")
 include(":cast:tv")
 include(":mapcompare")
 include(":tuner")
+include(":setupwizard")
+include(":logviewer")
 
 // Personal / private app modules live under personal/ (gitignored). Included only
 // when present so the public repo still configures without them.

@@ -10,6 +10,22 @@
 //! A `kind` is carried too, for the differential harness and for a future style that wants a county
 //! line dashed differently from a state line. It is derivable from the level, which is exactly why
 //! the level is what the style reads.
+//!
+//! # A boundary is a line, and cannot be an area
+//!
+//! Carrying the region as an area was tried, so that tapping a city could dim everything outside
+//! it, and it has to be reverted: **clipping a polygon to a tile adds segments along the tile
+//! edge** to close the ring, and the style's boundary layers are `line`, which strokes a polygon's
+//! outline. Those synthetic edges are then drawn, and the map is covered in a grid of tile borders.
+//! Clipping a *line* merely truncates it, which is why the line form has never had this problem.
+//!
+//! There is no way to opt out from the style side either: the `boundaries` entry declares no
+//! `kinds`, so it matches every feature in the layer and would stroke a polygon whatever kind it
+//! carried.
+//!
+//! Whatever eventually feeds a region mask therefore needs somewhere the boundary style does not
+//! reach — a kind the layer excludes, or a layer of its own — decided together with the mask
+//! rather than guessed at here.
 
 use tilecodec::mamaps::body::FLAG_DETAIL_NUMERIC;
 use tilecodec::mamaps::dict::LAYER_BOUNDARIES;
@@ -48,8 +64,10 @@ pub fn classify(tags: &(impl TagSource + ?Sized)) -> Option<Class> {
         // The level itself, not an id. This is the only field in the format that is a number.
         kind_detail: level,
         flags: FLAG_DETAIL_NUMERIC,
-        // A border is a line even when it closes: the style strokes it, and filling it would paint
-        // over every layer inside the country.
+        // A border is a line even when it closes. Filling it would paint over every layer inside
+        // the country, and — the reason an attempt to make it an area had to be reverted — a
+        // polygon clipped to a tile grows edges along the tile boundary, which the style's `line`
+        // layers then stroke as a grid across the whole map. See the module docs.
         area: false,
         min_zoom: min_zoom_for(level),
         min_area_px: 0.0,
@@ -123,7 +141,9 @@ mod tests {
     }
 
     /// A border is a line even when it closes. Filling it would paint over every layer inside the
-    /// country.
+    /// country — and a polygon clipped to a tile grows edges along the tile boundary, which the
+    /// style's `line` layers stroke as a grid across the map. That is not theoretical: it was
+    /// tried, and the tile grid was immediately visible.
     #[test]
     fn a_boundary_is_never_an_area() {
         let class = classify_tags(&[("boundary", "administrative"), ("admin_level", "2")])

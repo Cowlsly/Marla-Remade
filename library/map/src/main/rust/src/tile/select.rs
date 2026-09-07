@@ -29,6 +29,49 @@ impl TileId {
     pub fn key(&self) -> u64 {
         ((self.z as u64) << 44) | ((self.x as u64) << 22) | self.y as u64
     }
+
+    /// Unpack a [`key`](Self::key). The residency map is keyed by integer, so this is what
+    /// lets a tile's position be recovered without storing the id alongside it.
+    pub fn from_key(key: u64) -> TileId {
+        TileId {
+            z: (key >> 44) as u8,
+            x: ((key >> 22) & 0x3F_FFFF) as u32,
+            y: (key & 0x3F_FFFF) as u32,
+        }
+    }
+
+    /// Whether this tile lies within `depth` levels *beneath* `other` — that is, `other` is
+    /// an ancestor of it, or the same tile.
+    pub fn descends_from(&self, other: &TileId, depth: u8) -> bool {
+        if self.z < other.z || self.z - other.z > depth {
+            return false;
+        }
+        let shift = self.z - other.z;
+        self.x >> shift == other.x && self.y >> shift == other.y
+    }
+}
+
+/// How many levels of descendant to *keep* when they are already resident.
+///
+/// The mirror of [`ANCESTOR_DEPTH`], and the reason zooming out no longer blanks the map. An
+/// ancestor stands in while a finer tile loads; nothing stood in while a *coarser* one loaded,
+/// because the tiles on screen were the new tile's descendants and were evicted the moment the
+/// camera moved. The map then drew nothing for as long as the fetch took.
+///
+/// Two rather than four: a descendant set grows as 4^depth where an ancestor set is linear, and
+/// two levels already covers a 4x zoom-out — more than one pinch produces. This is a bound on GPU
+/// memory, not a lookahead.
+pub const DESCENDANT_DEPTH: u8 = 2;
+
+/// Whether a resident tile is worth keeping as a stand-in for a visible one that has not arrived.
+///
+/// Deliberately a predicate over what is *already resident*, rather than something
+/// [`resident_set`] could enumerate: naming every descendant means 4^[`DESCENDANT_DEPTH`] keys per
+/// visible tile, most of which were never fetched, and the keep list is asserted to stay
+/// proportional to the viewport.
+pub fn stands_in_for_visible(key: u64, visible: &[TileId], depth: u8) -> bool {
+    let tile = TileId::from_key(key);
+    visible.iter().any(|v| tile.descends_from(v, depth))
 }
 
 /// The tiles covering `camera`'s viewport, clamped to the archive's zoom range.
@@ -76,8 +119,13 @@ pub const ANCESTOR_DEPTH: u8 = 4;
 /// first, spent all that latency *before* requesting the tiles the user is actually looking
 /// at. MapLibre renders the parent it happens to have cached; it does not go and fetch one.
 ///
-/// Ancestors are returned **before** the tiles they stand in for, which is the order the
-/// renderer draws them in, so a child covers its parent rather than the reverse.
+/// Nor is it the whole keep list. Descendants are the other half of the fallback — see
+/// [`stands_in_for_visible`] — and cannot be named here without enumerating tiles that were
+/// never fetched.
+///
+/// Ancestors are returned **before** the tiles they stand in for. The renderer sorts by zoom
+/// before drawing, so this is for the residency cap rather than for draw order: coarser tiles
+/// are the cheaper, more widely useful stand-ins and should be the last thing evicted.
 pub fn resident_set(camera: &Camera, min_zoom: u8, max_zoom: u8) -> Vec<TileId> {
     let exact = visible(camera, min_zoom, max_zoom);
     if exact.is_empty() {
@@ -288,6 +336,63 @@ mod tests {
                     assert!(seen.insert(TileId { z, x, y }.key()), "z{z}/{x}/{y} collided");
                 }
             }
+        }
+    }
+
+    #[test]
+    fn a_key_round_trips() {
+        // `from_key` is what lets the renderer recover a tile's position from its residency map
+        // key alone, so the two must agree at the edges of the bit packing as well as the middle.
+        for z in 0..=22u8 {
+            let n = 1u32 << z;
+            for &(x, y) in &[(0, 0), (n - 1, n - 1), (n / 2, n / 3)] {
+                let tile = TileId { z, x, y };
+                assert_eq!(TileId::from_key(tile.key()), tile);
+            }
+        }
+    }
+
+    #[test]
+    fn a_tile_descends_from_its_ancestors_and_from_itself() {
+        let tile = TileId { z: 12, x: 2048, y: 1362 };
+        assert!(tile.descends_from(&tile, 2), "a tile stands in for itself");
+        assert!(tile.descends_from(&TileId { z: 11, x: 1024, y: 681 }, 2));
+        assert!(tile.descends_from(&TileId { z: 10, x: 512, y: 340 }, 2));
+    }
+
+    #[test]
+    fn descent_stops_at_the_depth_and_never_goes_upwards() {
+        let tile = TileId { z: 12, x: 2048, y: 1362 };
+        // Three levels up is a real ancestor, but past the depth we are willing to hold.
+        assert!(!tile.descends_from(&TileId { z: 9, x: 256, y: 170 }, 2));
+        // An ancestor does not descend from its own descendant.
+        assert!(!TileId { z: 10, x: 512, y: 340 }.descends_from(&tile, 2));
+        // A neighbour at the same zoom shares no ground.
+        assert!(!tile.descends_from(&TileId { z: 11, x: 1025, y: 681 }, 2));
+    }
+
+    #[test]
+    fn a_resident_descendant_stands_in_for_a_visible_tile() {
+        // The zoom-out case: the camera has pulled back to z10 and those tiles are still in
+        // flight, but the z12 tiles from a moment ago are resident and cover the same ground.
+        let visible = vec![TileId { z: 10, x: 512, y: 340 }];
+        assert!(stands_in_for_visible(TileId { z: 12, x: 2048, y: 1362 }.key(), &visible, 2));
+        assert!(stands_in_for_visible(TileId { z: 11, x: 1024, y: 681 }.key(), &visible, 2));
+        // Deeper than we hold, and elsewhere in the world.
+        assert!(!stands_in_for_visible(TileId { z: 13, x: 4096, y: 2724 }.key(), &visible, 2));
+        assert!(!stands_in_for_visible(TileId { z: 12, x: 8, y: 8 }.key(), &visible, 2));
+    }
+
+    #[test]
+    fn the_keep_list_stays_free_of_descendants() {
+        // Descendants are recognised against what is resident, never enumerated into the keep
+        // list: naming them would be 4^DESCENDANT_DEPTH keys per visible tile, almost all of
+        // which were never fetched. This is the invariant that lets the bound above hold.
+        let c = camera(-122.4194, 37.7749, 14.0, 411.0, 891.0);
+        let exact = visible(&c, 0, 16);
+        let deepest = exact.iter().map(|t| t.z).max().expect("a tile");
+        for tile in resident_set(&c, 0, 16) {
+            assert!(tile.z <= deepest, "{tile:?} is deeper than any visible tile");
         }
     }
 }

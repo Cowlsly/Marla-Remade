@@ -29,7 +29,7 @@ import kotlinx.coroutines.flow.Flow
  * stored it, so every caller sees the identical database.
  */
 class PasswordRepository private constructor(context: Context) :
-    RoomRepository<PasswordDatabase>(context, PasswordDatabase::class) {
+    RoomRepository<PasswordDatabase>(context, PasswordDatabase::class), PasskeyStore {
 
     private val passwordDao: PasswordDao get() = db.passwordDao()
     private val passkeyDao: PasskeyDao get() = db.passkeyDao()
@@ -59,11 +59,11 @@ class PasswordRepository private constructor(context: Context) :
     // ------------------------------------------------------------------
 
     suspend fun getAllPasskeys(): List<Passkey> = passkeyDao.getAll()
-    suspend fun getPasskeysByRpId(rpId: String): List<Passkey> = passkeyDao.getByRpId(rpId)
-    suspend fun getPasskeyByCredentialId(credentialId: String): Passkey? =
+    override suspend fun getPasskeysByRpId(rpId: String): List<Passkey> = passkeyDao.getByRpId(rpId)
+    override suspend fun getPasskeyByCredentialId(credentialId: String): Passkey? =
         passkeyDao.getByCredentialId(credentialId)
 
-    suspend fun upsertPasskey(passkey: Passkey): Long = passkeyDao.upsert(passkey)
+    override suspend fun upsertPasskey(passkey: Passkey): Long = passkeyDao.upsert(passkey)
     suspend fun upsertPasskeyRaw(passkey: Passkey): Long = passkeyDao.upsertRaw(passkey)
     suspend fun deletePasskey(passkey: Passkey): Int = passkeyDao.delete(passkey)
 

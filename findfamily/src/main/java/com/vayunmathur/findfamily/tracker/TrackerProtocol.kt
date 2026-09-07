@@ -106,7 +106,7 @@ object TrackerProtocol {
         return priv.copyOfRange(4, 4 + len)
     }
 
-    private fun u64be(v: Long): ByteArray {
+    internal fun u64be(v: Long): ByteArray {
         val out = ByteArray(8)
         for (i in 0 until 8) out[i] = (v ushr (56 - i * 8)).toByte()
         return out

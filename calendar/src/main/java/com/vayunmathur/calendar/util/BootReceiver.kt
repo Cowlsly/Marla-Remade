@@ -3,6 +3,8 @@ package com.vayunmathur.calendar.util
 import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
+import android.os.UserManager
+import android.util.Log
 import androidx.glance.appwidget.updateAll
 import com.vayunmathur.calendar.glance.CalendarGlanceWidget
 import com.vayunmathur.library.widgets.scheduleHourlyUpdate
@@ -16,6 +18,13 @@ import kotlinx.coroutines.launch
  * AlarmManager alarms don't survive either. Mirrors the clock app's
  * [com.vayunmathur.clock.util.BootReceiver] plus findfamily's
  * package-replaced handling.
+ *
+ * Runs twice on a reboot and does different work each time. At
+ * ACTION_LOCKED_BOOT_COMPLETED the calendar provider is credential-encrypted and
+ * unreadable, so alarms are re-armed from the device-protected
+ * [com.vayunmathur.calendar.data.ReminderMirror]. At ACTION_BOOT_COMPLETED - which an
+ * FBE device only delivers once the user has unlocked - the provider is authoritative
+ * and a full reconcile runs, replacing whatever the locked pass armed.
  */
 class BootReceiver : BroadcastReceiver() {
     override fun onReceive(context: Context, intent: Intent) {
@@ -24,18 +33,50 @@ class BootReceiver : BroadcastReceiver() {
             Intent.ACTION_LOCKED_BOOT_COMPLETED,
             Intent.ACTION_MY_PACKAGE_REPLACED,
             "android.intent.action.QUICKBOOT_POWERON" -> {
+                val unlocked =
+                    context.getSystemService(UserManager::class.java)?.isUserUnlocked != false
+                val action = intent.action
                 val pendingResult = goAsync()
                 CoroutineScope(SupervisorJob() + Dispatchers.IO).launch {
                     try {
-                        ReminderScheduler.reconcileAll(context)
-                        context.scheduleHourlyUpdate(CalendarGlanceWidget::class)
-                        CalendarGlanceWidget().updateAll(context)
-                    } catch (_: Exception) {
+                        if (unlocked) reconcileFromProvider(context, action)
+                        else armFromMirror(context, action)
                     } finally {
                         pendingResult.finish()
                     }
                 }
             }
         }
+    }
+
+    private suspend fun armFromMirror(context: Context, action: String?) {
+        try {
+            val armed = ReminderScheduler.scheduleFromMirror(context)
+            Log.i(TAG, "$action: armed $armed reminder(s) from the device-protected mirror")
+        } catch (e: Exception) {
+            Log.e(TAG, "$action: could not arm reminders from the mirror", e)
+        }
+        // Widgets are deliberately skipped: Glance keeps its state in credential-encrypted
+        // storage, and the launcher does not render before the first unlock anyway.
+    }
+
+    private suspend fun reconcileFromProvider(context: Context, action: String?) {
+        // Reminders and widgets are caught separately so a failure in one cannot silently
+        // take out the other - a single blanket catch here is what hid the locked-boot bug.
+        try {
+            ReminderScheduler.reconcileAll(context)
+        } catch (e: Exception) {
+            Log.e(TAG, "$action: could not reschedule reminders from the calendar provider", e)
+        }
+        try {
+            context.scheduleHourlyUpdate(CalendarGlanceWidget::class)
+            CalendarGlanceWidget().updateAll(context)
+        } catch (e: Exception) {
+            Log.e(TAG, "$action: could not refresh widgets", e)
+        }
+    }
+
+    private companion object {
+        const val TAG = "CalendarBootReceiver"
     }
 }

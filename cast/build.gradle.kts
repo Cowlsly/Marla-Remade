@@ -19,6 +19,10 @@ android {
 }
 
 dependencies {
+    // Compile-only stubs for `com.android.media.remotedisplay`, the remote display provider API.
+    // A shared library on the system image, pulled in at runtime by the `<uses-library>` tag;
+    // must NOT be packaged. See :library:remotedisplay-stubs.
+    compileOnly(project(":library:remotedisplay-stubs"))
     // The wire format, shared verbatim with the TV receiver. Nothing here re-implements it.
     implementation(project(":cast:protocol"))
     // The IPC contract, shared with every app that streams its content through here. Depended on

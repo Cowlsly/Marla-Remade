@@ -366,6 +366,18 @@ class FindFamilyViewModel(
         LocationServiceController.globalSharingEnabledFlow(ctx)
             .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), true)
 
+    /** Whether this phone has opted in to finding other people's powered-off devices.
+     * Opt-in, so it starts false — see [LocationServiceController.CROWD_FINDING_ENABLED_KEY]. */
+    val crowdFindingEnabled: StateFlow<Boolean> =
+        LocationServiceController.crowdFindingEnabledFlow(ctx)
+            .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), false)
+
+    override fun setCrowdFinding(enabled: Boolean) {
+        viewModelScope.launch(Dispatchers.IO) {
+            LocationServiceController.setCrowdFindingEnabled(ctx, enabled)
+        }
+    }
+
     /** Toggle per-person location sharing and reconcile the service so it stops
      * when nobody is being shared with and starts when sharing is (re)enabled.
      * Manual toggle always resets auto-toggle to Never.

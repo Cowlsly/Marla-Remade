@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  The wizard keeps nothing worth carrying anywhere: it writes to system settings, not to its
+  own storage, and it disables itself the moment it finishes. Excluding everything is also the
+  only correct answer for device transfer - the whole point of a restore is that setup has not
+  happened yet on the receiving device.
+-->
+<data-extraction-rules>
+    <cloud-backup>
+        <exclude domain="root" path="." />
+    </cloud-backup>
+    <device-transfer>
+        <exclude domain="root" path="." />
+    </device-transfer>
+</data-extraction-rules>

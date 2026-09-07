@@ -1,0 +1,106 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Application label. Never shown in a launcher; appears in Settings > Apps. -->
+    <string name="app_name">Setup</string>
+
+    <!-- Footer button advancing to the next step. Shown on most steps. -->
+    <string name="next">Next</string>
+    <!-- Footer button leaving a step without doing it. Shown on the restore and gesture steps. -->
+    <string name="skip">Skip</string>
+    <!-- Dismisses a picker dialog without changing anything. -->
+    <string name="cancel">Cancel</string>
+
+    <!-- Welcome step: the display heading, shown very large above everything else. -->
+    <string name="welcome_to_modern_apps_os">Welcome to Modern Apps OS</string>
+    <!-- Welcome step: one-line pitch, shown under the heading. -->
+    <string name="modern_apps_os_desc">Privacy and security, crafted for your mobile device, usable by everyone.</string>
+    <!-- Welcome step: shown to the device owner, under the pitch. -->
+    <string name="lets_setup_your_device">Let\'s set up your device in a few steps.</string>
+    <!-- Welcome step: shown instead of the above to a secondary user setting up their own profile. -->
+    <string name="lets_setup_your_profile">Let\'s set up your user profile in a few steps.</string>
+    <!-- Welcome step: button opening the system language picker. Falls back to this when the current locale has no display name. -->
+    <string name="english_united_states">English (United States)</string>
+    <!-- Welcome step: button opening the accessibility settings shown during setup. -->
+    <string name="accessibility">Accessibility</string>
+    <!-- Welcome step: footer button opening the emergency dialer. Only on devices that can call. -->
+    <string name="emergency_call">Emergency call</string>
+    <!-- Title of the language picker dialog opened from the welcome step. -->
+    <string name="choose_your_language">Choose your language</string>
+
+    <!-- Wi-Fi step: title passed to the system Wi-Fi setup screen. -->
+    <string name="connect_to_wi_fi">Connect to Wi-Fi</string>
+    <!-- Wi-Fi step: description passed to the system Wi-Fi setup screen. -->
+    <string name="select_a_network">Select a network</string>
+    <!-- Wi-Fi step: label for the skip button on the system Wi-Fi setup screen. -->
+    <string name="set_up_without_wi_fi">Set up without Wi-Fi</string>
+
+    <!-- Date and time step: heading. -->
+    <string name="date_and_time">Date and time</string>
+    <!-- Date and time step: subtitle under the heading. -->
+    <string name="date_and_time_desc">Set your time zone and adjust current date and time if needed</string>
+    <!-- Date and time step: label of the row showing the current date, above the date itself. -->
+    <string name="date">Date</string>
+    <!-- Date and time step: label of the row showing the current time, above the time itself. -->
+    <string name="time">Time</string>
+    <!-- Date and time step: label of the row showing the current time zone, above the zone name. -->
+    <string name="time_zone">Time zone</string>
+    <!-- Title of the time zone picker dialog opened from the date and time step. -->
+    <string name="select_time_zone">Select time zone</string>
+
+    <!-- Location step: heading. -->
+    <string name="location_services">Location services</string>
+    <!-- Location step: title of the first switch row. -->
+    <string name="location_access_title">Use location</string>
+    <!-- Location step: supporting text under the "Use location" switch. -->
+    <string name="location_access_desc">Allow apps that have asked your permission to use your location information. This may include your current location and past locations.</string>
+    <!-- Location step: title of the second switch row. Device owner only. -->
+    <string name="wifi_scanning_always_available_enabled_title">Wi-Fi scanning always available</string>
+    <!-- Location step: supporting text under the Wi-Fi scanning switch. -->
+    <string name="wifi_scanning_always_available_enabled_desc">Allow apps and services with permission to scan for Wi-Fi networks to do so even when Wi-Fi is off. For example, when network location is on, this allows it to scan for Wi-Fi networks even when Wi-Fi is off, improving location accuracy.</string>
+
+    <!-- Restore step: heading. -->
+    <string name="restore_apps_and_data"><![CDATA[Restore apps & data]]></string>
+    <!-- Restore step: subtitle under the heading. -->
+    <string name="data_restore_desc">If you have a backup from your previous Modern Apps OS device, you can restore it here.</string>
+    <!-- Restore step: footer button starting the restore flow in the backup app. -->
+    <string name="restore">Restore</string>
+
+    <!-- Gesture step: heading. -->
+    <string name="swipe_gestures_title">Swipe to navigate your phone</string>
+    <!-- Gesture step: subtitle under the heading. -->
+    <string name="swipe_gestures_desc">Learn gestures to go home, go back and switch between apps</string>
+    <!-- Gesture step: footer button opening the gesture tutorial. -->
+    <string name="try_it">Try it</string>
+
+    <!-- Final step: heading. -->
+    <string name="you_re_all_set_now">You\'re all set now!</string>
+    <!-- Final step: subtitle shown to the device owner. -->
+    <string name="device_setup_done_desc">You\'re ready to start using your device</string>
+    <!-- Final step: subtitle shown instead of the above to a secondary user. -->
+    <string name="profile_setup_done_desc">You\'re ready to start using your user profile</string>
+    <!-- Final step: footer button that completes setup and leaves the wizard. -->
+    <string name="start">Start</string>
+    <!-- Final step: label of the checkbox offering to turn OEM unlocking back off. -->
+    <string name="disable_oem_unlocking">Disable OEM unlocking</string>
+    <!-- Final step: supporting text under the "Disable OEM unlocking" checkbox. -->
+    <string name="disable_oem_unlocking_desc">It\'s recommended to disable OEM unlocking to improve device security</string>
+
+    <!-- Welcome step: warning banner shown above everything when the bootloader is unlocked. -->
+    <string name="oem_unlocked_warning">The bootloader is unlocked and software integrity can not be guaranteed. Any data stored on this device may be available to attackers. Do not store any sensitive data on this device.</string>
+    <!-- Welcome step: line introducing the instructions URL in the unlocked-bootloader banner. -->
+    <string name="visit_this_link_on_another_device">Visit this link on another device:</string>
+    <!-- The bootloader locking instructions URL. Shown as plain text, not a link: the device has no browser during setup. -->
+    <string name="oem_lock_url" translatable="false">grapheneos.org/UBL</string>
+    <!-- Bootloader step: heading. Shown after the welcome step when the bootloader is unlocked. -->
+    <string name="lock_your_bootloader">Lock your bootloader</string>
+    <!-- Bootloader step: the full explanation, shown as the body of the step. -->
+    <string name="oem_unlock_fullscreen_desc">The bootloader is unlocked and software integrity can not be guaranteed. Any data stored on this device may be available to attackers. Do not store any sensitive data on this device.\n\nLocking the bootloader at a later stage will wipe all the data on this device. To keep the data safe and secure we advice you to lock the bootloader before setting up the device.\n\nTo lock your bootloader, visit the link below on another device for instructions and then press \"Reboot to bootloader\":</string>
+    <!-- Bootloader step: footer button that reboots straight into the bootloader. -->
+    <string name="reboot_to_bootloader">Reboot to bootloader</string>
+    <!-- Bootloader step: footer button dismissing the warning. Disabled until the countdown ends and the risks are acknowledged. -->
+    <string name="continue_without_locking">Continue without locking</string>
+    <!-- Bootloader step: the same button while the countdown runs. %d is the seconds remaining. -->
+    <string name="continue_without_locking_timer">Continue without locking (%d)</string>
+    <!-- Bootloader step: label of the checkbox that must be ticked before setup can continue. -->
+    <string name="oem_unlock_ack_risks">I understand the security risks of not locking my bootloader.</string>
+</resources>

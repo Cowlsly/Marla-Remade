@@ -57,6 +57,7 @@
 //! monotonicity, a PMTiles round trip — never equality with tippecanoe. See
 //! [`pyramid`] for the policy and its consequences.
 
+pub mod boolean;
 pub mod clip;
 pub mod geojson;
 pub mod geom;

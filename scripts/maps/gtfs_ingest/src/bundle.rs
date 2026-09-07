@@ -1138,6 +1138,18 @@ fn directed(line: &[(i32, i32)]) -> Vec<((i32, i32), f64, f64)> {
     out
 }
 
+/// The nine cells a corridor-radius match can live in, centre first.
+///
+/// Returning on the first match means visit order decides how much of the neighbourhood is
+/// scanned. The point's own cell is by far the likeliest to hold it — a corridor of 30 m inside a
+/// cell of 40 m — so it goes first, then the four edge neighbours, then the corners, which can
+/// only match across a cell join. Visiting them in `-1..=1` order put a corner first and scanned
+/// most of the neighbourhood before reaching the answer.
+///
+/// A pure reordering: the set of samples examined is unchanged, so every result is too.
+const NEIGHBOURHOOD: [(i32, i32); 9] =
+    [(0, 0), (1, 0), (-1, 0), (0, 1), (0, -1), (1, 1), (1, -1), (-1, 1), (-1, -1)];
+
 /// Track already drawn, for suppressing a line that adds nothing.
 ///
 /// Two services of one colour must never draw as parallel lines: nothing distinguishes them,
@@ -1161,15 +1173,95 @@ fn directed(line: &[(i32, i32)]) -> Vec<((i32, i32), f64, f64)> {
 pub struct Covered {
     points: Vec<((i32, i32), f64, f64)>,
     cells: std::collections::HashMap<Cell, Vec<u32>>,
+    /// Which service drew each sample, parallel to `points`. See [`Covered::crowd`].
+    tags: Vec<u32>,
 }
 
 impl Covered {
     /// Record every metre of `line` as drawn.
     pub fn add(&mut self, line: &[(i32, i32)]) {
+        self.add_tagged(line, 0);
+    }
+
+    /// Record every metre of `line` as drawn by service `tag`.
+    pub fn add_tagged(&mut self, line: &[(i32, i32)], tag: u32) {
         for sample in walk(line) {
             let at = self.points.len() as u32;
             self.cells.entry(cell_of(sample.0)).or_default().push(at);
             self.points.push(sample);
+            self.tags.push(tag);
+        }
+    }
+
+    /// The most distinct services already drawn over any one metre of `line`.
+    ///
+    /// The colour-scoped gates above stop a service being drawn twice, but they are deliberately
+    /// blind to *other* services: two lines sharing a track are two real services and both should
+    /// draw, fanned into lanes. That holds for a city. It does not hold for a planet, where one
+    /// physical alignment is republished by a city feed, the regional feed that contains it and a
+    /// national feed on top, each under its own `route_color` and often its own `route_type` — all
+    /// of which read as distinct services and each claim a lane. That is what turns one railway
+    /// into fifteen jagged parallel lines when you zoom in.
+    ///
+    /// So the rule is a ceiling rather than a ban: a few services over one track is real, fifteen
+    /// is a data artefact. Returns the worst point rather than an average, because a line that
+    /// joins a crowded trunk for part of its length is exactly the case worth suppressing.
+    ///
+    /// `limit` stops the walk as soon as any point reaches it. The answer above the ceiling is
+    /// never used, only compared against it, and this is called once per surviving line over a
+    /// structure holding every sample of every line already drawn.
+    pub fn crowd_reaches(&self, line: &[(i32, i32)], limit: usize) -> bool {
+        if limit == 0 {
+            return true;
+        }
+        let mut seen: Vec<u32> = Vec::new();
+        for &(point, ux, uy) in &walk(line) {
+            seen.clear();
+            self.tags_over(point, ux, uy, &mut seen, limit);
+            if seen.len() >= limit {
+                return true;
+            }
+        }
+        false
+    }
+
+    /// The most distinct services already drawn over any one metre of `line`.
+    ///
+    /// Unbounded, for tests and for reporting. Prefer [`crowd_reaches`](Self::crowd_reaches) on
+    /// the build path, which stops as soon as the answer can no longer change the decision.
+    pub fn crowd(&self, line: &[(i32, i32)]) -> usize {
+        let mut worst = 0;
+        let mut seen: Vec<u32> = Vec::new();
+        for &(point, ux, uy) in &walk(line) {
+            seen.clear();
+            self.tags_over(point, ux, uy, &mut seen, usize::MAX);
+            worst = worst.max(seen.len());
+        }
+        worst
+    }
+
+    /// Every distinct service drawn within [`CORRIDOR_M`] of this point, running parallel to it.
+    ///
+    /// Stops once `limit` distinct services have been found, since no caller needs more.
+    fn tags_over(&self, point: (i32, i32), ux: f64, uy: f64, out: &mut Vec<u32>, limit: usize) {
+        let (cx, cy) = cell_of(point);
+        for (dx, dy) in NEIGHBOURHOOD {
+            let Some(bucket) = self.cells.get(&(cx + dx, cy + dy)) else { continue };
+            for &i in bucket {
+                let (other, oux, ouy) = self.points[i as usize];
+                if (ux * oux + uy * ouy).abs() < COS_FOLD {
+                    continue;
+                }
+                if distance_m(point, other) <= CORRIDOR_M {
+                    let tag = self.tags[i as usize];
+                    if !out.contains(&tag) {
+                        out.push(tag);
+                        if out.len() >= limit {
+                            return;
+                        }
+                    }
+                }
+            }
         }
     }
 
@@ -1185,29 +1277,11 @@ impl Covered {
 
     /// Is this point already drawn, by track running parallel to it?
     ///
-    /// Returns on the first match, so the order the nine cells are visited in decides how much
-    /// of the neighbourhood is scanned. The point's own cell is by far the likeliest to hold
-    /// the match \u2014 a corridor of 30 m inside a cell of 40 m \u2014 so it goes first, then the four
-    /// edge neighbours, then the corners, which can only match across a cell join. Visiting
-    /// them in `-1..=1` order put a corner first and scanned most of the neighbourhood before
-    /// reaching the answer.
-    ///
-    /// This is a pure reordering: the set of samples examined is unchanged, so the result is
-    /// too. It matters because the buckets are unbounded \u2014 [`add`](Self::add) records every
-    /// sample of every line it draws, and a trunk alignment republished by a dozen feeds is a
-    /// dozen overlapping sample runs in the same cells.
+    /// Returns on the first match, so visit order matters — see [`NEIGHBOURHOOD`], which is
+    /// ordered for exactly that reason. The buckets are unbounded: [`add`](Self::add) records
+    /// every sample of every line it draws, and a trunk alignment republished by a dozen feeds is
+    /// a dozen overlapping sample runs in the same cells.
     fn covers(&self, point: (i32, i32), ux: f64, uy: f64) -> bool {
-        const NEIGHBOURHOOD: [(i32, i32); 9] = [
-            (0, 0),
-            (1, 0),
-            (-1, 0),
-            (0, 1),
-            (0, -1),
-            (1, 1),
-            (1, -1),
-            (-1, 1),
-            (-1, -1),
-        ];
         let (cx, cy) = cell_of(point);
         for (dx, dy) in NEIGHBOURHOOD {
             let Some(bucket) = self.cells.get(&(cx + dx, cy + dy)) else { continue };
@@ -1870,6 +1944,50 @@ mod tests {
         assert!(covered.contains(&shifted(&line, 9.0)), "the adjacent track");
         // A short-turn lies on its parent for its whole length, so it adds nothing either.
         assert!(covered.contains(&north(37.7, -122.4, 100.0, 30)), "a short-turn");
+    }
+
+    /// How many distinct services already draw over a stretch of track.
+    ///
+    /// The colour-scoped gates let two services share a track on purpose, and that is right for a
+    /// city. On a planet one alignment is republished by a city feed, the regional feed containing
+    /// it and a national feed on top, each under its own colour, and every one of them claims a
+    /// lane — which is what draws one railway as fifteen jagged parallel lines.
+    #[test]
+    fn crowd_counts_the_distinct_services_over_a_track() {
+        let line = north(37.7, -122.4, 100.0, 60);
+        let mut covered = Covered::default();
+        assert_eq!(covered.crowd(&line), 0, "empty track carries nobody");
+
+        covered.add_tagged(&line, 0xE31E24);
+        assert_eq!(covered.crowd(&line), 1);
+        // A second service on the same track is real and must be counted, not merged.
+        covered.add_tagged(&line, 0x0054A5);
+        assert_eq!(covered.crowd(&line), 2);
+        // The same service again is not a third.
+        covered.add_tagged(&line, 0xE31E24);
+        assert_eq!(covered.crowd(&line), 2, "one service counted twice");
+        // Slightly off, still the same corridor.
+        covered.add_tagged(&shifted(&line, 9.0), 0x00A650);
+        assert_eq!(covered.crowd(&line), 3, "a re-survey a few metres off is the same track");
+        // Track nobody has drawn is uncrowded however busy its neighbour is.
+        assert_eq!(covered.crowd(&north(37.9, -122.9, 100.0, 60)), 0, "elsewhere");
+    }
+
+    /// The worst point along the line, not the average: a branch joining a busy trunk for part of
+    /// its length is exactly the line worth suppressing.
+    #[test]
+    fn crowd_reports_the_busiest_point_not_the_whole_line() {
+        let trunk = north(37.7, -122.4, 100.0, 30);
+        let longer = north(37.7, -122.4, 100.0, 60);
+        let mut covered = Covered::default();
+        for colour in [1u32, 2, 3] {
+            covered.add_tagged(&trunk, colour);
+        }
+        assert_eq!(
+            covered.crowd(&longer),
+            3,
+            "a line overlapping a crowded trunk for half its length is crowded"
+        );
     }
 
     /// Survey noise is not new track. Two agencies' surveys of one track disagree by a few

@@ -2,6 +2,7 @@ package com.vayunmathur.passwords.platform
 
 import com.vayunmathur.passwords.data.Passkey
 import com.vayunmathur.passwords.data.Password
+import com.vayunmathur.passwords.domain.PasskeyLink
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.emptyFlow
 
@@ -26,15 +27,21 @@ data class MenuUiState(
      * Wall-clock millis, normally ticked once a second by [PasswordsViewModel.tickerFlow].
      * It is state rather than a `System.currentTimeMillis()` call inside the screen so a
      * preview can pin it and get the same TOTP code and countdown ring every render.
+     *
+     * A lambda, not a `Long`, so the tick is read inside the one row that draws a TOTP code
+     * rather than in the screen's own scope. Reading it up here invalidated the whole list
+     * every second, and `ListPage` is inline, so nothing below could skip.
      */
-    val now: Long = 0L,
+    val now: () -> Long = { 0L },
 )
 
 /** What the credential detail screen draws. */
 data class PasswordUiState(
     val password: Password = Password(),
+    /** Passkeys merged into this entry, resolved by `mergeCredentials`. */
+    val passkeys: List<Passkey> = emptyList(),
     /** See [MenuUiState.now]. */
-    val now: Long = 0L,
+    val now: () -> Long = { 0L },
 )
 
 /** What the add/edit form draws. */
@@ -61,6 +68,8 @@ interface PasswordsActions {
     fun copyToClipboard(label: String, text: String, feedback: String? = null) {}
 
     fun delete(password: Password) {}
+
+    fun setPasskeyLink(passkey: Passkey, link: PasskeyLink) {}
 
     fun updateDraft(transform: (Password) -> Password) {}
 

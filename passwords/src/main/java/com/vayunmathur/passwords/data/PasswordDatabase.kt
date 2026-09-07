@@ -64,7 +64,7 @@ abstract class PasskeyDao {
 
 @Database(
     entities = [Password::class, Passkey::class, SyncSnapshot::class],
-    version = 4,
+    version = 5,
     exportSchema = false,
 )
 @ColumnTypeConverters(Converters::class)
@@ -141,6 +141,11 @@ abstract class PasswordDatabase : RoomDatabase() {
                 )
                 it.execSQL("DROP TABLE `Password`")
                 it.execSQL("ALTER TABLE `Password_new` RENAME TO `Password`")
+            },
+            // Which password a passkey belongs to. Nullable with no default so existing rows read
+            // as "match automatically", which is the behaviour they had before the column existed.
+            Migration(4, 5) {
+                it.execSQL("ALTER TABLE `Passkey` ADD COLUMN `linkedPasswordSyncId` TEXT")
             },
         )
     }

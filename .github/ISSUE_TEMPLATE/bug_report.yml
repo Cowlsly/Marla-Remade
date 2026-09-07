@@ -29,6 +29,7 @@ body:
         - hub
         - keyboard
         - logicgate
+        - logviewer
         - maps
         - measure
         - messages

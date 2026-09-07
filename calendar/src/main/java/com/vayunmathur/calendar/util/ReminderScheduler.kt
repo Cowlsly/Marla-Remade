@@ -6,6 +6,7 @@ import android.content.Context
 import android.content.Intent
 import com.vayunmathur.calendar.data.Event
 import com.vayunmathur.calendar.data.Instance
+import com.vayunmathur.calendar.data.ReminderMirror
 import kotlin.time.Clock
 import kotlin.time.Duration.Companion.days
 
@@ -28,6 +29,10 @@ import kotlin.time.Duration.Companion.days
  * correct across insert / update / delete / exdate without per-mutation
  * bookkeeping. The set of currently-scheduled request codes is persisted so a
  * later reconcile can cancel alarms belonging to events that no longer exist.
+ *
+ * Because the provider is unreadable before the first unlock after a reboot,
+ * [reconcileAll] also writes a small [ReminderMirror] to device-protected storage,
+ * and [scheduleFromMirror] re-arms alarms from it at ACTION_LOCKED_BOOT_COMPLETED.
  */
 object ReminderScheduler {
     const val EXTRA_EVENT_ID = "event_id"
@@ -42,16 +47,25 @@ object ReminderScheduler {
     // How far ahead to look for the next occurrence of a recurring event.
     private val RECURRENCE_WINDOW = 400.days
 
+    // How far ahead the device-protected mirror reaches. The mirror only has to cover
+    // the gap between the last unlocked reconcile and the first unlock after a reboot,
+    // and it is rewritten on every reconcile, so a week is generous - it survives a
+    // phone left off over a long weekend. Keeping it short also bounds both the size of
+    // the blob and how much scheduling metadata sits in unencrypted storage.
+    private val MIRROR_WINDOW = 7.days
+
     /** Convenience for boot / package-replaced: reschedule from the provider. */
-    fun reconcileAll(context: Context) =
+    suspend fun reconcileAll(context: Context) =
         reconcileAll(context, Event.getAllEvents(context))
 
-    fun reconcileAll(context: Context, events: List<Event>) {
+    suspend fun reconcileAll(context: Context, events: List<Event>) {
         val alarmManager = context.getSystemService(AlarmManager::class.java) ?: return
         cancelAllTracked(context, alarmManager)
 
         val nowMillis = Clock.System.now().toEpochMilliseconds()
         val scheduled = mutableSetOf<Int>()
+        val mirrorHorizon = nowMillis + MIRROR_WINDOW.inWholeMilliseconds
+        val mirrored = mutableListOf<ReminderMirror.Entry>()
 
         for (event in events) {
             val eventId = event.id ?: continue
@@ -68,6 +82,11 @@ object ReminderScheduler {
                         eventId, minutes, event.start, event.end, event.title,
                     )
                     scheduled += code
+                    if (triggerAt <= mirrorHorizon) {
+                        mirrored += ReminderMirror.Entry(
+                            eventId, minutes, event.start, event.end,
+                        )
+                    }
                 }
             } else {
                 val now = Clock.System.now()
@@ -85,10 +104,54 @@ object ReminderScheduler {
                         eventId, minutes, next.begin, next.end, event.title,
                     )
                     scheduled += code
+                    if (triggerAt <= mirrorHorizon) {
+                        mirrored += ReminderMirror.Entry(
+                            eventId, minutes, next.begin, next.end,
+                        )
+                    }
                 }
             }
         }
         saveTracked(context, scheduled)
+        ReminderMirror.write(context, mirrored)
+    }
+
+    /**
+     * Re-arm alarms at ACTION_LOCKED_BOOT_COMPLETED, when the calendar provider cannot be
+     * read. Returns how many were armed.
+     *
+     * Deliberately does not cancel or track anything: [loadTracked] / [saveTracked] live in
+     * credential-encrypted storage and are unreachable here. It does not need to. The mirror
+     * is written by the same [reconcileAll] pass that writes the tracked set and is a subset
+     * of it, so every code armed here is already tracked and will be cancelled by the next
+     * post-unlock [cancelAllTracked] - which is what makes deletions that happened while the
+     * phone was off resolve correctly. Re-arming is otherwise idempotent: request codes are
+     * derived from the event, so a second locked boot just replaces the same alarms.
+     *
+     * The mirror carries no title, so pre-unlock notifications fall back to the generic
+     * string. See [ReminderMirror] for why.
+     */
+    suspend fun scheduleFromMirror(context: Context): Int {
+        val alarmManager = context.getSystemService(AlarmManager::class.java) ?: return 0
+        val nowMillis = Clock.System.now().toEpochMilliseconds()
+        var armed = 0
+        for (entry in ReminderMirror.read(context)) {
+            val triggerAt = entry.instanceStart - entry.minutes.toLong() * 60_000L
+            if (triggerAt <= nowMillis) continue
+            scheduleExact(
+                context,
+                alarmManager,
+                requestCode(entry.eventId, entry.minutes, entry.instanceStart),
+                triggerAt,
+                entry.eventId,
+                entry.minutes,
+                entry.instanceStart,
+                entry.instanceEnd,
+                title = null,
+            )
+            armed++
+        }
+        return armed
     }
 
     private fun scheduleExact(
@@ -100,14 +163,14 @@ object ReminderScheduler {
         minutes: Int,
         instanceStart: Long,
         instanceEnd: Long,
-        title: String,
+        title: String?,
     ) {
         val intent = Intent(context, ReminderReceiver::class.java).apply {
             putExtra(EXTRA_EVENT_ID, eventId)
             putExtra(EXTRA_MINUTES, minutes)
             putExtra(EXTRA_INSTANCE_START, instanceStart)
             putExtra(EXTRA_INSTANCE_END, instanceEnd)
-            putExtra(EXTRA_TITLE, title)
+            if (title != null) putExtra(EXTRA_TITLE, title)
         }
         val pendingIntent = PendingIntent.getBroadcast(
             context,

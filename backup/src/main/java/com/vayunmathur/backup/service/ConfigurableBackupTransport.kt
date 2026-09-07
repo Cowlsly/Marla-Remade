@@ -6,10 +6,13 @@ import android.app.backup.BackupTransport
 import android.app.backup.RestoreDescription
 import android.app.backup.RestoreSet
 import android.content.Context
+import android.content.Intent
 import android.content.pm.PackageInfo
 import android.os.Build
 import android.os.ParcelFileDescriptor
 import android.util.Base64
+import com.vayunmathur.backup.MainActivity
+import com.vayunmathur.backup.R
 import com.vayunmathur.backup.data.backend.BackendFactory
 import com.vayunmathur.backup.data.backend.BackupRepository
 import com.vayunmathur.backup.domain.crypto.Crypto
@@ -59,12 +62,31 @@ class ConfigurableBackupTransport(private val context: Context) : BackupTranspor
 
     override fun name(): String = COMPONENT
     override fun transportDirName(): String = "com.vayunmathur.backup"
-    override fun configurationIntent() = null
-    override fun dataManagementIntent() = null
-    override fun dataManagementIntentLabel(): CharSequence? = null
+
+    /**
+     * Settings' backup page is this app's only entry point - there is no launcher icon - so
+     * both intents point at [MainActivity].
+     *
+     * The framework distinguishes the two: [configurationIntent] is opened by tapping the
+     * destination row (where a cloud transport would put account selection), while
+     * [dataManagementIntent] is the "manage" affordance labelled with
+     * [dataManagementIntentLabel]. This transport has a single screen covering both, so both
+     * lead there rather than one of them dead-ending.
+     *
+     * NEW_TASK because the framework starts these from Settings' context, not an activity.
+     */
+    override fun configurationIntent(): Intent = settingsIntent()
+
+    override fun dataManagementIntent(): Intent = settingsIntent()
+
+    override fun dataManagementIntentLabel(): CharSequence =
+        context.getString(R.string.data_management_label)
+
+    private fun settingsIntent(): Intent =
+        Intent(context, MainActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
 
     override fun currentDestinationString(): String =
-        repoOrNull()?.backend?.displayName ?: "Not configured"
+        repoOrNull()?.backend?.displayName ?: context.getString(R.string.destination_not_configured)
 
     override fun getTransportFlags(): Int = 0
     override fun requestBackupTime(): Long = 0

@@ -16,7 +16,14 @@ import kotlinx.coroutines.flow.Flow
 
 @Dao
 interface LocationValueDao {
-    @Query("SELECT * FROM LocationValue WHERE (userid, timestamp) IN ( SELECT userid, MAX(timestamp) FROM LocationValue GROUP BY userid )")
+    /**
+     * The newest report per user, ranked by when it was *sent* rather than when its position was
+     * measured. Shutdown and low-battery reports deliberately carry a stale fix, so ranking on
+     * `timestamp` would let the live heartbeat that preceded them win and the parting report
+     * would never reach the UI — stored, but invisible. For live-only data the two columns are
+     * equal and this behaves exactly as it always did.
+     */
+    @Query("SELECT * FROM LocationValue WHERE (userid, reportedAt) IN ( SELECT userid, MAX(reportedAt) FROM LocationValue GROUP BY userid )")
     fun getLatest(): Flow<List<LocationValue>>
 
     @Query("SELECT * FROM LocationValue WHERE userid = :userid")
@@ -147,7 +154,7 @@ interface TemporaryLinkDao {
     suspend fun delete(value: TemporaryLink): Int
 }
 
-@Database(entities = [User::class, Waypoint::class, LocationValue::class, TemporaryLink::class], version = 11, exportSchema = false)
+@Database(entities = [User::class, Waypoint::class, LocationValue::class, TemporaryLink::class], version = 12, exportSchema = false)
 @ColumnTypeConverters(DefaultConverters::class)
 abstract class FFDatabase : RoomDatabase() {
     abstract fun userDao(): UserDao
@@ -234,6 +241,20 @@ abstract class FFDatabase : RoomDatabase() {
                 )
                 it.execSQL("DROP TABLE `TemporaryLink`")
                 it.execSQL("ALTER TABLE `TemporaryLink_new` RENAME TO `TemporaryLink`")
+            },
+            // A fix now records when it was measured (`timestamp`) separately from when it was
+            // sent (`reportedAt`), because shutdown and low-battery reports deliberately publish
+            // a stale last known position. Existing rows were all live reports, so `reportedAt`
+            // backfills from `timestamp` and `source` defaults to LIVE. The index mirrors the
+            // existing (userid, timestamp) one because getLatest now ranks on `reportedAt`.
+            androidx.room3.migration.Migration(11, 12) {
+                it.execSQL("ALTER TABLE `LocationValue` ADD COLUMN `reportedAt` INTEGER NOT NULL DEFAULT 0")
+                it.execSQL("UPDATE `LocationValue` SET `reportedAt` = `timestamp`")
+                it.execSQL("ALTER TABLE `LocationValue` ADD COLUMN `source` TEXT NOT NULL DEFAULT 'LIVE'")
+                it.execSQL(
+                    "CREATE INDEX IF NOT EXISTS `index_LocationValue_userid_reportedAt` " +
+                        "ON `LocationValue` (`userid`, `reportedAt`)"
+                )
             }
         )
     }

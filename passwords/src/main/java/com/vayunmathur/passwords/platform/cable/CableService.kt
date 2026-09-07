@@ -8,6 +8,7 @@ import android.content.Intent
 import android.content.pm.ServiceInfo
 import android.os.IBinder
 import android.util.Log
+import androidx.annotation.StringRes
 import androidx.core.app.NotificationCompat
 import androidx.core.app.ServiceCompat
 import com.vayunmathur.passwords.data.PasswordRepository
@@ -73,8 +74,8 @@ class CableService : Service() {
         )
     }
 
-    private fun updateNotification(text: String) {
-        getSystemService(NotificationManager::class.java)?.notify(NOTIFICATION_ID, buildNotification(text))
+    private fun updateNotification(@StringRes text: Int) {
+        getSystemService(NotificationManager::class.java)?.notify(NOTIFICATION_ID, buildNotification(getString(text)))
     }
 
     private fun buildNotification(text: String) =

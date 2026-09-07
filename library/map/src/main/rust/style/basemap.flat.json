@@ -233,7 +233,7 @@
       "type": "fill",
       "kinds": ["building", "building_part"],
       "light": "#cccccc",
-      "dark": "#22262c",
+      "dark": "#3c4048",
       "opacity": 0.5,
       "minzoom": 14
     },

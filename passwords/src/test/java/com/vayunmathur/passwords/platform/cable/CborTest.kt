@@ -32,6 +32,17 @@ class CborTest {
         assertEquals(s, CborReader.decode(Cbor.encode(s)))
     }
 
+    /**
+     * The header length is the UTF-8 byte count, not String.length, which counts UTF-16 units.
+     * With the wrong count the decoder consumes the wrong number of bytes and the value is
+     * truncated, so a clean round-trip is the assertion.
+     */
+    @Test fun nonAsciiTextStringRoundTrip() {
+        for (s in listOf("café", "日本語", "naïve.example.com", "emoji 🔑")) {
+            assertEquals(s, CborReader.decode(Cbor.encode(s)))
+        }
+    }
+
     @Test fun arrayRoundTrip() {
         val list = listOf(1L, "two", byteArrayOf(3))
         val decoded = CborReader.decode(Cbor.encode(list)) as List<*>

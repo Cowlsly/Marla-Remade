@@ -1,0 +1,88 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <!-- All five are kept from the app this replaces, and all five are load-bearing because we
+         ship preinstalled in /system/priv-app rather than sideloaded. READ_LOGS_FULL,
+         READ_OEM_UNLOCK_STATE and QUERY_USERS are signature|privileged, so each also needs an
+         entry in vendor/modern-apps/privapp-permissions-modern-apps.xml - a missing entry there
+         is a boot failure under ro.control_privapp_permissions=enforce, and a spurious one is
+         equally fatal.
+
+         READ_OEM_UNLOCK_STATE backs the "bootloader unlocked" flag and QUERY_USERS backs the
+         "userType:" line in every report header; dropping either would silently change the output
+         of the app we are replacing. -->
+    <uses-permission android:name="android.permission.READ_LOGS" />
+    <uses-permission android:name="android.permission.READ_LOGS_FULL" />
+    <uses-permission android:name="android.permission.READ_OEM_UNLOCK_STATE" />
+    <uses-permission android:name="android.permission.QUERY_ALL_PACKAGES" />
+    <uses-permission android:name="android.permission.QUERY_USERS" />
+
+    <!-- Renamed from app.grapheneos.logviewer.* but the protection levels are unchanged, because
+         they are what makes the two entry points safe to export. `privileged` on the logcat side
+         means only a priv-app can read the system log; `preinstalled` on the error-report side is
+         looser on purpose, so a preinstalled app can show the user its own crash. -->
+    <permission
+        android:name="com.vayunmathur.logviewer.SHOW_LOGCAT"
+        android:label="@string/permission_show_logcat_label"
+        android:description="@string/permission_show_logcat_desc"
+        android:protectionLevel="signature|privileged" />
+
+    <permission
+        android:name="com.vayunmathur.logviewer.SHOW_ERROR_REPORT"
+        android:label="@string/permission_show_error_report_label"
+        android:description="@string/permission_show_error_report_desc"
+        android:protectionLevel="signature|preinstalled" />
+
+    <!-- largeHeap because a full logcat dump is held in memory as one string plus one string per
+         line; this is inherited from the app being replaced and is not optional. -->
+    <application
+        android:icon="@mipmap/ic_launcher"
+        android:label="@string/app_name"
+        android:largeHeap="true"
+        android:roundIcon="@mipmap/ic_launcher"
+        android:supportsRtl="true"
+        android:theme="@style/Theme.General">
+
+        <!-- Deliberately no MAIN/LAUNCHER activity. Both entry points are permission-guarded and
+             reached from elsewhere - Settings, the system's crash dialog, or another priv-app - so
+             a launcher entry would only offer an icon that cannot do anything on its own. -->
+        <activity
+            android:name=".intents.LogcatActivity"
+            android:configChanges="mcc|mnc|colorMode|density|fontScale|fontWeightAdjustment|keyboard|keyboardHidden|layoutDirection|navigation|orientation|screenLayout|screenSize|smallestScreenSize|touchscreen|uiMode"
+            android:documentLaunchMode="always"
+            android:exported="true"
+            android:permission="com.vayunmathur.logviewer.SHOW_LOGCAT"
+            android:theme="@style/Theme.General">
+            <intent-filter>
+                <action android:name="${applicationId}.LOGCAT" />
+                <action android:name="${applicationId}.PKG_LOGCAT" />
+                <category android:name="android.intent.category.DEFAULT" />
+            </intent-filter>
+        </activity>
+
+        <activity
+            android:name=".intents.ErrorReportActivity"
+            android:configChanges="mcc|mnc|colorMode|density|fontScale|fontWeightAdjustment|keyboard|keyboardHidden|layoutDirection|navigation|orientation|screenLayout|screenSize|smallestScreenSize|touchscreen|uiMode"
+            android:documentLaunchMode="always"
+            android:exported="true"
+            android:permission="com.vayunmathur.logviewer.SHOW_ERROR_REPORT"
+            android:theme="@style/Theme.General">
+            <intent-filter>
+                <action android:name="${applicationId}.ERROR_REPORT" />
+                <action android:name="android.intent.action.APP_ERROR" />
+                <category android:name="android.intent.category.DEFAULT" />
+            </intent-filter>
+        </activity>
+
+        <!-- Serves a log snapshot to the share target as a content: Uri without ever writing it to
+             storage. A file would have to be cleaned up and would briefly put the log somewhere
+             another app could read; putting the bytes in the Intent instead would blow the binder
+             transaction limit on any real log. -->
+        <provider
+            android:name=".provider.BlobProvider"
+            android:authorities="${applicationId}.BlobProvider"
+            android:exported="false"
+            android:grantUriPermissions="true" />
+
+    </application>
+</manifest>

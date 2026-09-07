@@ -7,6 +7,7 @@ import com.vayunmathur.findfamily.data.User
 import com.vayunmathur.findfamily.data.RequestStatus
 import com.vayunmathur.findfamily.data.FindFamilyRepository
 import com.vayunmathur.findfamily.uwb.UwbEnvelope
+import com.vayunmathur.findfamily.tracker.PoweredOffProtocol
 import com.vayunmathur.e2ee.E2eeKeyStore
 import com.vayunmathur.e2ee.Pqc
 import com.vayunmathur.e2ee.PqcIdentity
@@ -71,6 +72,17 @@ object Networking {
     @Volatile
     private var initialized = false
 
+    /**
+     * True while running on the device-protected mirror, before the user has unlocked.
+     * In this mode [repository] is not bound and must not be touched — the Room database
+     * is credential-encrypted and unreadable.
+     */
+    @Volatile
+    private var directBoot = false
+
+    /** Whether the pre-unlock path is currently driving the socket. */
+    val inDirectBootMode: Boolean get() = directBoot
+
     /** Adapts the app's encrypted DataStore to the e2ee module's storage abstraction. */
     private class DataStoreKeyStore(private val ds: DataStoreUtils) : E2eeKeyStore {
         override suspend fun getBytes(name: String): ByteArray? = ds.getByteArrayAwait(name)
@@ -124,6 +136,62 @@ object Networking {
         }
     }
 
+    /**
+     * Bootstrap from the device-protected mirror, for the window between a reboot and the
+     * first unlock. Loads the identity [DirectBootStore] copied out of credential-encrypted
+     * storage and binds no repository, since Room is unreadable until the passcode is entered.
+     *
+     * Returns false, rather than creating anything, when the mirror has not been seeded.
+     * `PqcIdentity.loadOrCreate` would happily mint a fresh identity, and a userid invented
+     * here would not be the one in credential-encrypted storage — every publish would arrive
+     * at peers as an unknown sender. Doing nothing is the correct failure.
+     */
+    suspend fun initDirectBoot(ds: DataStoreUtils): Boolean {
+        if (initialized) return directBoot
+        initMutex.withLock {
+            if (initialized) return directBoot
+            val mirroredId = ds.getLongAwait("userid") ?: return false
+            dataStoreUtils = ds
+            if (!pqcInitAttempted) {
+                pqcInitAttempted = true
+                try {
+                    pqcIdentity = PqcIdentity.loadOrCreate(DataStoreKeyStore(ds), "ff_pqc")
+                    pqcReady = true
+                } catch (e: Throwable) {
+                    Log.w(TAG, "direct boot: PQC identity unavailable", e)
+                    pqcReady = false
+                }
+            }
+            if (!pqcReady) return false
+            userid = mirroredId
+            directBoot = true
+            initialized = true
+            Log.d(TAG, "direct boot init as ${userid.toULong()}")
+            return true
+        }
+    }
+
+    /**
+     * Hand over from the mirror to the real credential-encrypted state once the user unlocks.
+     * Drops the socket first so the reconnect re-subscribes with the identity loaded from
+     * credential-encrypted storage, which is the authoritative copy.
+     */
+    suspend fun promoteToUnlocked(
+        repository: FindFamilyRepository,
+        ceStore: DataStoreUtils,
+        meName: String,
+    ) {
+        initMutex.withLock {
+            if (!directBoot) return
+            directBoot = false
+            initialized = false
+            pqcInitAttempted = false
+            pqcReady = false
+        }
+        stopLive()
+        init(repository, ceStore, meName)
+    }
+
     // ----------------------------------------------------------------
     // Binary wire protocol (no JSON, no base64 on the wire):
     //   client→server SUB    : [0x01][u64 userid][optional raw PQC bundle…]  (subscribe + register)
@@ -152,6 +220,14 @@ object Networking {
     private const val WS_OP_REPORT_PUT: Byte = 0x09 //       [0x09][16B epochId][ciphertext…]
     private const val WS_OP_REPORT_GET_REQ: Byte = 0x0A //   [0x0A][u16 n]([16B epochId]×n)
     private const val WS_OP_REPORT_GET_RESP: Byte = 0x0B //  [0x0B][u16 count]([u32 len][ct]×count)
+
+    // Powered-off finding. The server cannot derive these ids itself the way it derives tracker
+    // epoch-ids: the rotation period is fixed at 1024s by the Bluetooth HAL and the controller
+    // anchors its key schedule to shutdown time, which nothing else knows. So the device uploads
+    // the EIDs it armed with and the server just remembers them, after which the existing
+    // 0x07/0x09/0x0A path resolves and carries reports unchanged. Additive: a server that
+    // predates this ignores 0x0C, and the only symptom is that no sightings are ever resolved.
+    private const val WS_OP_POF_REGISTER: Byte = 0x0C // [0x0C][u64 userid][u16 count]([20B eid]×count)
 
     private const val WS_KEY_NONE = 0
     private const val WS_KEY_CLASSIC = 1
@@ -458,6 +534,22 @@ object Networking {
         }
     }
 
+    /**
+     * Publish to a peer identified only by id and cached public bundle. This is the
+     * pre-unlock path: it takes the same wire format as the [User] overload but reads
+     * nothing from Room, which is unreadable before the passcode is entered.
+     */
+    suspend fun publishLocation(location: LocationValue, targetId: Long, bundleB64: String): Boolean {
+        return try {
+            val ok = sendLivePublish(targetId, "location", sealLocation(location, Base64.decode(bundleB64)))
+            Log.d(TAG, "publishLocation PQC to ${targetId.toULong()} (direct boot) ok=$ok")
+            ok
+        } catch (e: Exception) {
+            Log.w(TAG, "publishLocation direct boot to ${targetId.toULong()} failed", e)
+            false
+        }
+    }
+
     // ----------------------------------------------------------------
     // UWB session-setup channel — small handshake envelopes (request / ack /
     // config / cancel), end-to-end encrypted over the same socket. Ranging
@@ -572,6 +664,40 @@ object Networking {
     }
 
     private fun ByteArray.toHex(): String = joinToString("") { "%02x".format(it) }
+
+    /**
+     * Beacon: register the EIDs this device armed its Bluetooth controller with before shutting
+     * down, so finders can resolve them to this device's ML-KEM public bundle.
+     *
+     * Must be sent *before* the device powers off — once it is off it cannot re-register, and
+     * unlike a live tracker it will not self-heal on the next heartbeat. Registrations are held
+     * in memory server-side, so a relay restart during the powered-off window silently ends
+     * findability until the device boots again.
+     */
+    suspend fun registerPoweredOffEids(userId: Long, eids: List<ByteArray>): Boolean {
+        val session = wsSession ?: return false
+        if (eids.isEmpty()) return false
+        val n = eids.size.coerceAtMost(PoweredOffProtocol.ARMED_SLOTS)
+        return try {
+            // u16 count, not u8: the controller addresses 256 keys (index 0..255) and 256 does
+            // not fit in a byte. Getting this wrong would silently drop the last EID, costing the
+            // final 17 minutes of the window.
+            val frame = ByteArray(11 + n * PoweredOffProtocol.EID_LEN)
+            frame[0] = WS_OP_POF_REGISTER
+            putU64Be(frame, 1, userId.toULong())
+            frame[9] = (n ushr 8).toByte()
+            frame[10] = n.toByte()
+            var off = 11
+            for (i in 0 until n) {
+                eids[i].copyInto(frame, off, 0, PoweredOffProtocol.EID_LEN)
+                off += PoweredOffProtocol.EID_LEN
+            }
+            session.send(frame)
+            true
+        } catch (e: Exception) {
+            Log.w(TAG, "registerPoweredOffEids failed", e); false
+        }
+    }
 
     // ----------------------------------------------------------------
     // Encryption helpers (post-quantum only)

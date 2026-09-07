@@ -25,6 +25,7 @@ import com.vayunmathur.library.util.tryOrDefault
 import com.vayunmathur.passwords.R
 import com.vayunmathur.passwords.Route
 import com.vayunmathur.passwords.domain.TOTP
+import com.vayunmathur.passwords.domain.mergeCredentials
 import com.vayunmathur.passwords.platform.MenuUiState
 import com.vayunmathur.passwords.platform.PasswordsActions
 import com.vayunmathur.library.ui.appBarScrollBehavior
@@ -35,21 +36,33 @@ fun MenuScreen(
     state: MenuUiState,
     actions: PasswordsActions,
 ) {
-    val now = state.now
-
     val items: List<CredentialItem> = remember(state.passwords, state.passkeys) {
-        state.passwords.map { CredentialItem.PasswordItem(it) } +
-            state.passkeys.map { CredentialItem.PasskeyItem(it) }
+        val merged = mergeCredentials(state.passwords, state.passkeys)
+        state.passwords.map {
+            CredentialItem.PasswordItem(it, merged.passkeysByPasswordSyncId[it.syncId].orEmpty())
+        } + merged.standalone.map { CredentialItem.PasskeyItem(it) }
     }
 
     ListPage<CredentialItem, Route, Route.PasswordEditPage>(backStack, items, "Passwords", {
         when (it) {
             // Same keys as the detail page's header, so the row's name and user travel there rather
             // than crossfading. Passkeys have no detail page to morph into, so they stay unkeyed.
-            is CredentialItem.PasswordItem -> Text(
-                it.password.name.ifBlank { stringResource(R.string.no_name) },
-                modifier = Modifier.sharedText("password-name-${it.password.id}"),
-            )
+            is CredentialItem.PasswordItem -> Row(verticalAlignment = Alignment.CenterVertically) {
+                Text(
+                    it.password.name.ifBlank { stringResource(R.string.no_name) },
+                    modifier = Modifier.sharedText("password-name-${it.password.id}"),
+                )
+                if (it.passkeys.isNotEmpty()) {
+                    Spacer(Modifier.width(6.dp))
+                    IconKey(Modifier.size(14.dp))
+                    if (it.passkeys.size > 1) {
+                        Text(
+                            stringResource(R.string.passkey_count, it.passkeys.size),
+                            style = MaterialTheme.typography.labelSmall,
+                        )
+                    }
+                }
+            }
             is CredentialItem.PasskeyItem -> Row(verticalAlignment = Alignment.CenterVertically) {
                 IconKey(Modifier.size(16.dp))
                 Spacer(Modifier.width(4.dp))
@@ -75,25 +88,34 @@ fun MenuScreen(
             val password = it.password
             if (password.totpSecret.isNullOrBlank()) return@ListPage
             val secret = password.totpSecret
-            val timeBucket = now / 1000 / 30
+            // Both reads of the ticker happen here, in the trailing slot's own restart scope, so
+            // the row's name, subtitle and ListItem layout are untouched by the tick.
+            val timeBucket = state.now() / 1000 / 30
             val currentCode = remember(secret, timeBucket) {
                 tryOrDefault("----") { TOTP.generate(secret, timeBucket * 30) }
             }
-            val progress = (30000L - now % 30000L) / 30000f
             Row(Modifier.clickable {
                 actions.copyToClipboard("totp", currentCode)
             }.wrapContentHeight(), verticalAlignment = Alignment.CenterVertically) {
                 Text(currentCode, style = MaterialTheme.typography.bodyLarge)
                 Spacer(Modifier.width(8.dp))
                 Box(contentAlignment = Alignment.Center) {
-                    CircularProgressIndicator({progress}, Modifier.size(40.dp))
+                    CircularProgressIndicator(
+                        { (30000L - state.now() % 30000L) / 30000f },
+                        Modifier.size(40.dp),
+                    )
                     IconCopy(Modifier.size(16.dp))
                 }
             }
         }
     }, searchEnabled = true, searchString = {
         when (it) {
-            is CredentialItem.PasswordItem -> "${it.password.name} ${it.password.username} ${it.password.email} ${it.password.websites.joinToString(" ")}"
+            is CredentialItem.PasswordItem ->
+                "${it.password.name} ${it.password.username} ${it.password.email} " +
+                    it.password.websites.joinToString(" ") + " " +
+                    // A merged passkey no longer has a row of its own, so searching for the site
+                    // has to reach it through the password.
+                    it.passkeys.joinToString(" ") { pk -> "${pk.rpName} ${pk.rpId} ${pk.userName}" }
             is CredentialItem.PasskeyItem -> "${it.passkey.rpName} ${it.passkey.rpId} ${it.passkey.userName}"
         }
     }, scrollBehavior = appBarScrollBehavior())

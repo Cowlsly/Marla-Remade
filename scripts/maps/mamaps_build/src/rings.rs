@@ -603,6 +603,7 @@ mod tests {
             build_id: 1,
             scratch: std::env::temp_dir()
                 .join(format!("mamaps_rings_{}.tilechunks", std::process::id())),
+            ocean: false,
         };
         let store = crate::store::Store::of(&features).expect("spill");
         let (bytes, stats) = crate::tiler::build(&store, &settings).expect("build");

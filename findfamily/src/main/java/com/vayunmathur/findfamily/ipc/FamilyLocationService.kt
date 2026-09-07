@@ -10,6 +10,7 @@ import android.os.Message
 import android.os.Messenger
 import android.os.RemoteException
 import com.vayunmathur.findfamily.data.FindFamilyRepository
+import com.vayunmathur.findfamily.util.Networking
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
@@ -161,7 +162,17 @@ class FamilyLocationService : Service() {
         val timestamps = ArrayList<Long>(locations.size)
         val batteries = ArrayList<Float>(locations.size)
 
+        // This device's own row is deliberately not sent. Maps already draws the user's own
+        // position as the location puck, from its own fix rather than a round trip through here,
+        // so including it would put a second, staler marker on top of the puck.
+        //
+        // Filtered at the source rather than in the client: the wire format has no self marker,
+        // and adding one would mean every consumer had to remember to honour it. `userid` is 0
+        // until the identity bootstrap has run, and no real id is 0, so the guard also stops a
+        // pre-init snapshot dropping an innocent row.
+        val self = Networking.userid
         for ((id, location) in locations) {
+            if (self != 0L && id == self) continue
             // Skip anyone we can't label — a nameless pin isn't actionable.
             val name = namesById[id] ?: continue
             ids.add(id)

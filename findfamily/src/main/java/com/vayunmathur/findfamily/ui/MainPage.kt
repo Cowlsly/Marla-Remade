@@ -2,6 +2,7 @@ package com.vayunmathur.findfamily.ui
 
 import com.vayunmathur.library.ui.DateString
 import com.vayunmathur.library.ui.is24Hour
+import android.Manifest
 import android.content.Context
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.Image
@@ -63,6 +64,8 @@ import com.vayunmathur.library.ui.ToggleFloatingActionButton
 import com.vayunmathur.library.ui.TopAppBar
 import com.vayunmathur.library.ui.dynamicLightColorScheme
 import com.vayunmathur.library.ui.rememberBottomSheetScaffoldState
+import com.vayunmathur.library.ui.rememberMessenger
+import com.vayunmathur.library.ui.rememberPermissionRequest
 import com.vayunmathur.library.ui.rememberSliderState
 import com.vayunmathur.library.room.SqlCipherDbCodec
 import com.vayunmathur.findfamily.ui.dialogs.interactionSourceClickable
@@ -98,6 +101,7 @@ import kotlin.math.roundToInt
 import com.vayunmathur.findfamily.R
 import com.vayunmathur.findfamily.BuildConfig
 import com.vayunmathur.findfamily.Route
+import com.vayunmathur.findfamily.data.LocationSource
 import com.vayunmathur.findfamily.data.LocationValue
 import com.vayunmathur.findfamily.data.TemporaryLink
 import com.vayunmathur.findfamily.data.User
@@ -190,6 +194,7 @@ fun MainPage(
     val temporaryLinks by ffViewModel.temporaryLinks.collectAsState()
     val waypoints by ffViewModel.waypoints.collectAsState()
     val globalSharingEnabled by ffViewModel.globalSharingEnabled.collectAsState()
+    val crowdFindingEnabled by ffViewModel.crowdFindingEnabled.collectAsState()
 
     val connectedUsers by ffViewModel.connectedUsers.collectAsState()
     val awaitingRequestUsers by ffViewModel.awaitingRequestUsers.collectAsState()
@@ -280,7 +285,7 @@ fun MainPage(
             userNamesByLocationName = usersByLocationName
         ),
         person = selectedUser?.let {
-            PersonUiState(it, userPositions[it.id], waypoints, globalSharingEnabled)
+            PersonUiState(it, userPositions[it.id], waypoints, globalSharingEnabled, crowdFindingEnabled)
         }
     )
 
@@ -772,6 +777,50 @@ fun PersonDetailSheet(state: PersonUiState, actions: PersonActions) {
         ) {
             Text(stringResource(R.string.change_connected_contact))
         }
+        // Only offered on your own entry: both are properties of this phone, not of a relationship
+        // with a particular person. They are the two halves of powered-off finding and sit
+        // together on purpose — "keep mine findable" next to "help find theirs" is what makes the
+        // bargain legible. Showing either alone invites the fair objection that you are taking
+        // from the network without giving back, or giving without getting.
+        if (user.id == Networking.userid) {
+            Spacer(Modifier.height(4.dp))
+            PoweredOffFindingSetting()
+            Spacer(Modifier.height(8.dp))
+            CrowdFindingRow(state.crowdFindingEnabled) { actions.setCrowdFinding(it) }
+        }
+    }
+}
+
+/**
+ * Opt-in for acting as a finder. Deliberately a switch with the explanation always visible rather
+ * than a one-time dialog: the user is agreeing to have their phone do work on strangers' behalf,
+ * so what it actually does should stay readable, not be buried in a consent they clicked once.
+ */
+@Composable
+private fun CrowdFindingRow(enabled: Boolean, onChange: (Boolean) -> Unit) {
+    val context = LocalContext.current
+    val messenger = rememberMessenger()
+    // BLUETOOTH_SCAN is a runtime permission, and without it the scanner silently starts and
+    // immediately closes. Ask at the moment the user opts in, so a denial can be explained here
+    // rather than leaving a switch that is on but doing nothing.
+    val requestScan = rememberPermissionRequest(Manifest.permission.BLUETOOTH_SCAN) { granted ->
+        if (granted) onChange(true)
+        else messenger.show(context.getString(R.string.crowd_finding_needs_bluetooth))
+    }
+    Column(Modifier.fillMaxWidth().padding(horizontal = 4.dp)) {
+        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+            Text(
+                stringResource(R.string.crowd_finding_title),
+                Modifier.weight(1f),
+                style = MaterialTheme.typography.bodyMedium
+            )
+            Switch(enabled, { on -> if (on) requestScan() else onChange(false) })
+        }
+        Text(
+            stringResource(R.string.crowd_finding_explanation),
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant
+        )
     }
 }
 
@@ -927,22 +976,38 @@ fun UserCard(user: User, locationValue: LocationValue?, showSupportingContent: B
             },
             supportingContent = {
                 if (showSupportingContent) {
+                    // A network sighting is not a fix: it is where some other phone happened to
+                    // be standing when it heard this device. Saying "Updated 5 minutes ago at
+                    // Home" would imply a precision and a freshness that isn't there, so it gets
+                    // its own deliberately vaguer wording.
                     Text(
-                        stringResource(
-                            R.string.user_card_status,
-                            lastUpdatedTime,
-                            user.locationName,
-                            sinceString
-                        )
+                        if (locationValue?.source == LocationSource.NETWORK_SIGHTING) {
+                            stringResource(
+                                R.string.user_card_network_sighting,
+                                lastUpdatedTime,
+                                user.locationName
+                            )
+                        } else {
+                            stringResource(
+                                R.string.user_card_status,
+                                lastUpdatedTime,
+                                user.locationName,
+                                sinceString
+                            )
+                        }
                     )
                 }
             },
             trailingContent = {
                 if (showSupportingContent) {
                     Column(horizontalAlignment = Alignment.End) {
-                        Text(speedString, style = MaterialTheme.typography.labelMedium)
-                        Spacer(Modifier.height(2.dp))
-                        locationValue?.battery?.let { BatteryBar(it) }
+                        // Speed and battery come from the device itself. A network sighting has
+                        // neither — the numbers would be the finder's, so show nothing.
+                        if (locationValue?.source != LocationSource.NETWORK_SIGHTING) {
+                            Text(speedString, style = MaterialTheme.typography.labelMedium)
+                            Spacer(Modifier.height(2.dp))
+                            locationValue?.battery?.let { BatteryBar(it) }
+                        }
                     }
                 }
             }

@@ -21,6 +21,7 @@ object EntryMapper {
     private const val FIELD_SIGN_COUNT = "_SignCount"
     private const val FIELD_CREATED = "_Created"
     private const val FIELD_LAST_USED = "_LastUsed"
+    private const val FIELD_LINKED_PASSWORD = "_LinkedPassword"
 
     /**
      * Every key this mapper can emit. Keys outside this set belong to whatever client
@@ -29,7 +30,7 @@ object EntryMapper {
     val OWNED_KEYS = setOf(
         "Title", "UserName", "Email", "Password", "Notes", "URL", "Websites", "otp", "TOTP Seed",
         FIELD_TYPE, FIELD_SYNC_ID, FIELD_MODIFIED,
-        FIELD_SIGN_COUNT, FIELD_CREATED, FIELD_LAST_USED,
+        FIELD_SIGN_COUNT, FIELD_CREATED, FIELD_LAST_USED, FIELD_LINKED_PASSWORD,
         "KPEX_PASSKEY_USERNAME", "KPEX_PASSKEY_PRIVATE_KEY_PEM", "KPEX_PASSKEY_CREDENTIAL_ID",
         "KPEX_PASSKEY_USER_HANDLE", "KPEX_PASSKEY_RELYING_PARTY",
     )
@@ -92,6 +93,10 @@ object EntryMapper {
         put(FIELD_SIGN_COUNT, pk.signCount.toString())
         put(FIELD_CREATED, pk.creationTime.toString())
         put(FIELD_LAST_USED, pk.lastUsedTime.toString())
+        // Only when set. contentHash covers every key but _SyncId/_Modified, so emitting this
+        // unconditionally would rewrite the hash of every existing passkey and report them all as
+        // changed on the next sync.
+        pk.linkedPasswordSyncId?.takeIf { it.isNotBlank() }?.let { put(FIELD_LINKED_PASSWORD, it) }
         put(FIELD_SYNC_ID, pk.syncId)
         put(FIELD_MODIFIED, pk.updatedAt.toString())
     }
@@ -116,6 +121,7 @@ object EntryMapper {
             creationTime = entry[FIELD_CREATED]?.toLongOrNull() ?: now,
             lastUsedTime = entry[FIELD_LAST_USED]?.toLongOrNull() ?: now,
             signCount = entry[FIELD_SIGN_COUNT]?.toIntOrNull() ?: 0,
+            linkedPasswordSyncId = entry[FIELD_LINKED_PASSWORD]?.takeIf { it.isNotBlank() },
             syncId = entry[FIELD_SYNC_ID]?.takeIf { it.isNotBlank() } ?: newSyncId(),
             updatedAt = entry[FIELD_MODIFIED]?.toLongOrNull() ?: now,
         )

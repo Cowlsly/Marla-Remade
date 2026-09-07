@@ -26,6 +26,7 @@ import androidx.core.net.toUri
 import com.vayunmathur.library.util.DatabaseHelper
 import com.vayunmathur.passwords.R
 import com.vayunmathur.passwords.data.PasswordRepository
+import com.vayunmathur.passwords.domain.DomainMatch
 import kotlinx.coroutines.runBlocking
 import android.util.Log
 import com.vayunmathur.passwords.data.Password
@@ -165,12 +166,8 @@ class PasswordAutofillService : AutofillService() {
     }
 
     private fun matchesContext(storedSite: String, currentPkg: String?, currentWeb: String?): Boolean {
-        val normalized = storedSite.trim().lowercase()
-            .removePrefix("https://")
-            .removePrefix("http://")
-            .removeSuffix("/")
-
         if (currentPkg != null) {
+            val normalized = storedSite.trim().lowercase().removeSuffix("/")
             val pkg = currentPkg.lowercase()
             if (normalized == pkg || normalized == "android-app://$pkg") return true
         }
@@ -178,12 +175,16 @@ class PasswordAutofillService : AutofillService() {
         if (currentWeb != null) {
             val currentHost = try {
                 val uri = if (currentWeb.contains("://")) currentWeb.toUri() else "https://$currentWeb".toUri()
-                uri.host?.lowercase() ?: currentWeb.lowercase()
+                uri.host?.lowercase() ?: currentWeb
             } catch (_: Exception) {
-                currentWeb.lowercase()
+                currentWeb
             }
-
-            if (currentHost.endsWith(normalized) || normalized.endsWith(currentHost)) return true
+            // The stored site is the parent: saving example.com fills on login.example.com, but
+            // saving login.example.com does not fill on bare example.com.
+            return DomainMatch.isSameSiteOrSubdomain(
+                DomainMatch.normalizeSite(currentHost),
+                DomainMatch.normalizeSite(storedSite),
+            )
         }
 
         return false

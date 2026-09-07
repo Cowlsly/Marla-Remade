@@ -5,7 +5,9 @@ import android.app.PendingIntent
 import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
+import android.os.UserManager
 import android.text.format.DateFormat
+import android.util.Log
 import androidx.core.app.NotificationCompat
 import com.vayunmathur.calendar.MainActivity
 import com.vayunmathur.calendar.R
@@ -47,6 +49,9 @@ class ReminderReceiver : BroadcastReceiver() {
         )
 
         val timeString = DateFormat.getTimeFormat(context).format(Date(instanceStart))
+        // Visibility is left at the platform default (VISIBILITY_PRIVATE) on purpose: that is
+        // what lets the system redact this on the lock screen when the user has asked for
+        // sensitive content to be hidden. Do not set VISIBILITY_PUBLIC.
         val notification = NotificationCompat.Builder(context, CHANNEL_ID)
             .setSmallIcon(R.drawable.ic_reminder_notification)
             .setContentTitle(title)
@@ -66,8 +71,15 @@ class ReminderReceiver : BroadcastReceiver() {
         val pendingResult = goAsync()
         CoroutineScope(SupervisorJob() + Dispatchers.IO).launch {
             try {
-                ReminderScheduler.reconcileAll(context)
-            } catch (_: Exception) {
+                // Before the first unlock the provider is unreadable, so there is nothing to
+                // reconcile against. The post-unlock BOOT_COMPLETED pass picks this up; the
+                // cost is that a recurring reminder firing pre-unlock does not arm its next
+                // occurrence until the user unlocks.
+                if (context.getSystemService(UserManager::class.java)?.isUserUnlocked != false) {
+                    ReminderScheduler.reconcileAll(context)
+                }
+            } catch (e: Exception) {
+                Log.e(TAG, "could not reschedule after a reminder fired", e)
             } finally {
                 pendingResult.finish()
             }
@@ -76,5 +88,6 @@ class ReminderReceiver : BroadcastReceiver() {
 
     companion object {
         const val CHANNEL_ID = "calendar_reminders"
+        private const val TAG = "CalendarReminderReceiver"
     }
 }

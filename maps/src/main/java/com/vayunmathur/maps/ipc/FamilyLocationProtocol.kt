@@ -36,6 +36,10 @@ object FamilyLocationProtocol {
 /**
  * One family member's live present-location, decoded from a snapshot push.
  *
+ * Never this device's own user: findfamily filters it out of the snapshot before sending, because
+ * maps already draws the local position as the location puck from its own fix. A self entry here
+ * would be a second, staler marker sitting under the puck.
+ *
  * @param battery last reported battery level; negative when unknown/omitted.
  */
 data class FamilyMember(

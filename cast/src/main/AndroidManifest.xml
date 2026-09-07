@@ -16,6 +16,22 @@
          permission gates the API, not the source. -->
     <uses-permission android:name="android.permission.RECORD_AUDIO" />
 
+    <!-- Both halves of RemoteDisplayProviderWatcher.verifyServiceTrusted: the app must hold
+         REMOTE_DISPLAY_PROVIDER and the service must be guarded by BIND_REMOTE_DISPLAY. Failing
+         either one is not an error the user sees - the watcher logs and skips the service, and the
+         Cast page is simply empty. Signature|privileged, so it needs the priv-app allowlist entry
+         in vendor/modern-apps/privapp-permissions-modern-apps.xml. -->
+    <uses-permission android:name="android.permission.REMOTE_DISPLAY_PROVIDER" />
+    <!-- Selecting a route in Settings has to end at MirrorConsentActivity, because screen-capture
+         consent needs an Activity and is single-use. By then Settings is in front and this app is a
+         bound service in the background, so without this the launch is silently dropped and the
+         route sits at CONNECTING for ever. protectionLevel is
+         signature|privileged|vendorPrivileged|oem|verifier|role, so the priv-app allowlist entry is
+         what grants it - this app is presigned with its own key, not the platform key.
+         CAPTURE_VIDEO_OUTPUT, which would let a VirtualDisplay mirror with no consent Activity at
+         all, is signature-only and therefore unreachable for a presigned app. -->
+    <uses-permission android:name="android.permission.START_ACTIVITIES_FROM_BACKGROUND" />
+
     <uses-feature android:name="android.hardware.wifi" android:required="false" />
 
     <permission
@@ -32,6 +48,13 @@
         android:roundIcon="@mipmap/ic_launcher"
         android:supportsRtl="true"
         android:theme="@style/Theme.General">
+        <!-- The remote display provider API is a shared library, not part of the base framework.
+             Optional so the app still installs on a stock device, where nothing binds
+             CastRemoteDisplayService anyway. -->
+        <uses-library
+            android:name="com.android.media.remotedisplay"
+            android:required="false" />
+
         <activity
             android:name=".MainActivity"
             android:configChanges="mcc|mnc|colorMode|density|fontScale|fontWeightAdjustment|keyboard|keyboardHidden|layoutDirection|navigation|orientation|screenLayout|screenSize|smallestScreenSize|touchscreen|uiMode"
@@ -67,6 +90,18 @@
             android:name=".service.CastService"
             android:exported="false"
             android:foregroundServiceType="mediaProjection|mediaPlayback" />
+
+        <!-- Bound by system_server's RemoteDisplayProviderWatcher, which is what puts this app's
+             receivers in Settings' Cast page. BIND_REMOTE_DISPLAY is required by the watcher, not
+             merely prudent - see MaRemoteDisplayProvider. -->
+        <service
+            android:name=".service.CastRemoteDisplayService"
+            android:exported="true"
+            android:permission="android.permission.BIND_REMOTE_DISPLAY">
+            <intent-filter>
+                <action android:name="com.android.media.remotedisplay.RemoteDisplayProvider" />
+            </intent-filter>
+        </service>
 
         <service
             android:name=".service.ContentCastService"

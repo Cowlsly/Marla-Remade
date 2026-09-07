@@ -14,6 +14,16 @@
     <uses-permission android:name="android.permission.READ_MEDIA_VIDEO" />
     <uses-permission android:name="android.permission.READ_MEDIA_AUDIO" />
 
+    <!--
+      Guards the settings UI so only the system can open it. Backup has no launcher icon -
+      it is reached from Settings > System > Backup, which starts it via the transport's
+      dataManagementIntent - and an exported activity with no guard would let any installed
+      app open the backup configuration.
+    -->
+    <permission
+        android:name="com.vayunmathur.backup.OPEN_SETTINGS"
+        android:protectionLevel="signature" />
+
     <application
         android:allowBackup="true"
         android:dataExtractionRules="@xml/data_extraction_rules"
@@ -22,16 +32,19 @@
         android:roundIcon="@mipmap/ic_launcher"
         android:supportsRtl="true"
         android:theme="@style/Theme.General">
+        <!--
+          No MAIN/LAUNCHER filter: backup is configured from Settings, not from a home-screen
+          icon, the same way Seedvault is on GrapheneOS. The framework reaches this activity
+          through ConfigurableBackupTransport.dataManagementIntent(), and Settings' backup page
+          renders it under the label the transport supplies.
+        -->
         <activity
             android:configChanges="mcc|mnc|colorMode|density|fontScale|fontWeightAdjustment|keyboard|keyboardHidden|layoutDirection|navigation|orientation|screenLayout|screenSize|smallestScreenSize|touchscreen|uiMode"
             android:name=".MainActivity"
             android:exported="true"
-            android:theme="@style/Theme.General">
-            <intent-filter>
-                <action android:name="android.intent.action.MAIN" />
-                <category android:name="android.intent.category.LAUNCHER" />
-            </intent-filter>
-        </activity>
+            android:launchMode="singleTask"
+            android:permission="com.vayunmathur.backup.OPEN_SETTINGS"
+            android:theme="@style/Theme.General" />
 
         <service
             android:name=".service.ConfigurableBackupTransportService"

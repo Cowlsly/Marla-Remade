@@ -15,7 +15,23 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_LOCATION" />
     <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
 
+    <!--
+      Powered-off finding, finder half. Arming a beacon needs BLUETOOTH_PRIVILEGED, which is
+      signature|privileged and so only ever available to a preinstalled build — but *hearing* one
+      is ordinary BLE, and the network is only worth anything if plenty of phones are listening.
+      So this is declared here rather than in src/dev: an F-Droid install has to be able to
+      contribute sightings too. Scanning still does nothing until the user opts in
+      (CROWD_FINDING_ENABLED_KEY, default off).
+    -->
+    <uses-permission android:name="android.permission.BLUETOOTH_SCAN" />
+    <uses-feature android:name="android.hardware.bluetooth_le" android:required="false" />
+
     <uses-permission android:name="android.permission.RANGING" />
+    <!-- Powered-off finding (NearbyManager#setPoweredOffFindingEphemeralIds). signature|privileged,
+         so this is only actually granted when findfamily is installed as a MAOS priv-app with a
+         matching privapp-permissions entry; everywhere else the calls throw SecurityException and
+         PoweredOffBeacon treats the feature as absent. Requesting it here is harmless either way. -->
+    <uses-permission android:name="android.permission.BLUETOOTH_PRIVILEGED" />
     <uses-feature android:name="android.hardware.uwb" android:required="false" />
 
     <permission
@@ -62,6 +78,7 @@
         <service
             android:name=".util.LocationTrackingService"
             android:foregroundServiceType="location"
+            android:directBootAware="true"
             android:exported="false" />
 
         <service
@@ -102,8 +119,12 @@
         </service>
 
 
-        <receiver android:name=".util.BootReceiver" android:exported="false">
+        <receiver
+            android:name=".util.BootReceiver"
+            android:directBootAware="true"
+            android:exported="false">
             <intent-filter>
+                <action android:name="android.intent.action.LOCKED_BOOT_COMPLETED" />
                 <action android:name="android.intent.action.BOOT_COMPLETED" />
                 <action android:name="android.intent.action.MY_PACKAGE_REPLACED" />
             </intent-filter>

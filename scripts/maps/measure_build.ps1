@@ -73,8 +73,32 @@ function Find-Binary([string] $given, [string] $crate, [string] $name) {
     throw "no $name.exe — run: cargo build --release --manifest-path scripts\maps\$crate\Cargo.toml"
 }
 
+# Refuse a binary older than the source it was built from.
+#
+# This script runs whatever `.exe` is on disk and does not build it, which is the right split — a
+# five-hour planet run should not silently recompile. But it means an edit that was tested with
+# `cargo test` (which builds its own binary) and then never `cargo build`-ed produces a run that
+# looks completely normal and measures the *old* code. That happened: a 45-minute rebuild came back
+# byte-identical to the run it was meant to differ from, and the only clue was a matching sha256.
+function Assert-Fresh([string] $exe, [string] $crate) {
+    $src = Join-Path $repo "scripts\maps\$crate\src"
+    if (-not (Test-Path $src)) { return }
+    $newest = Get-ChildItem $src -Recurse -Include *.rs -File -ErrorAction SilentlyContinue |
+        Sort-Object LastWriteTime -Descending | Select-Object -First 1
+    if (-not $newest) { return }
+    $built = (Get-Item $exe).LastWriteTime
+    if ($built -lt $newest.LastWriteTime) {
+        throw ("$(Split-Path $exe -Leaf) is older than $crate's source " +
+               "($($built.ToString('HH:mm:ss')) vs $($newest.Name) at " +
+               "$($newest.LastWriteTime.ToString('HH:mm:ss'))). This run would measure stale code. " +
+               "Rebuild: cargo build --release --manifest-path scripts\maps\$crate\Cargo.toml")
+    }
+}
+
 $build = Find-Binary $Exe  "mamaps_build" "mamaps_build"
 $dump  = Find-Binary $Dump "tile_build"   "mamaps_dump"
+Assert-Fresh $build "mamaps_build"
+Assert-Fresh $dump  "tile_build"
 $Pbf   = (Resolve-Path $Pbf).Path
 $Out   = [System.IO.Path]::GetFullPath($Out)
 # Named by the writer, beside the output. This is the scratch that peaks.

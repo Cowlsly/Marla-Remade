@@ -60,6 +60,34 @@
     <string name="passkey_created">Created</string>
     <!-- Detail row label. Timestamp when passkey was last used -->
     <string name="passkey_last_used">Last Used</string>
+    <!-- Section header on the password detail screen for passkeys belonging to this entry. Noun plural -->
+    <string name="section_passkeys">Passkeys</string>
+    <!-- Section header on the passkey detail screen for which password entry it belongs to. Noun -->
+    <string name="passkey_link_section">Linked Entry</string>
+    <!-- Shown in place of an entry name when this passkey belongs to no password entry -->
+    <string name="passkey_link_none">Not linked</string>
+    <!-- Shown under the linked entry name when the link was found by matching, not chosen by the user -->
+    <string name="passkey_link_auto">Matched automatically</string>
+    <!-- Shown under the linked entry name when the user chose the link by hand -->
+    <string name="passkey_link_manual">Linked by you</string>
+    <!-- Shown in place of an entry name when the user disconnected this passkey. Explains why it does not re-match -->
+    <string name="passkey_link_detached">Disconnected. It will not be matched automatically.</string>
+    <!-- Button. Opens a picker to attach this passkey to a password entry. Verb -->
+    <string name="passkey_connect">Link to entry</string>
+    <!-- Button. Detaches this passkey from its password entry. Verb -->
+    <string name="passkey_disconnect">Unlink</string>
+    <!-- Button. Returns a disconnected passkey to being matched automatically. Verb phrase -->
+    <string name="passkey_link_use_auto">Match automatically</string>
+    <!-- Title of the dialog listing password entries to link a passkey to -->
+    <string name="passkey_link_dialog_title">Link to entry</string>
+    <!-- Empty state in the link dialog when the vault has no password entries -->
+    <string name="passkey_link_dialog_empty">No entries to link to</string>
+    <!-- Confirmation message. %1$s = name of the password entry the passkey was linked to -->
+    <string name="passkey_linked_message">Linked to <xliff:g id="entry" example="Example Mail">%1$s</xliff:g></string>
+    <!-- Confirmation message after unlinking a passkey from its entry -->
+    <string name="passkey_unlinked_message">Passkey unlinked</string>
+    <!-- Badge on a list row with more than one passkey. %1$d = how many, e.g. 2 -->
+    <string name="passkey_count">%1$d</string>
     <!-- Biometric/auth prompt action label shown when database needs unlocking (PasskeyCredentialService pending intent). Verb phrase -->
     <string name="unlock_database">Unlock Passwords</string>
 
@@ -85,10 +113,30 @@
     <string name="import_source_apple">Apple Passwords</string>
     <string name="import_source_proton_pass">Proton Pass</string>
 
-    <string name="cable_channel_name">Cross-device sign-in</string>
-    <string name="cable_starting">Starting cross-device sign-in</string>
-    <string name="cable_prompt_title">Sign in on your other device?</string>
-    <string name="cable_prompt_subtitle">Verify to approve this passkey sign-in</string>
+    <!-- Notification channel name. Covers both cross-device sign-in and registration -->
+    <string name="cable_channel_name">Cross-device passkeys</string>
+    <!-- First notification text, before the tunnel is up -->
+    <string name="cable_starting">Starting cross-device request</string>
+    <!-- Biometric prompt title when a scanned QR code starts a cross-device passkey request -->
+    <string name="cable_prompt_title">Continue on your other device?</string>
+    <!-- Biometric prompt subtitle. Verb phrase, "Verify" = confirm your identity -->
+    <string name="cable_prompt_subtitle">Verify to approve this passkey request</string>
+    <!-- Notification text while connecting to the relay server. Noun phrase -->
+    <string name="cable_status_connecting">Connecting</string>
+    <!-- Notification text while broadcasting over Bluetooth so the other device can find this one -->
+    <string name="cable_status_advertising">Advertising over Bluetooth</string>
+    <!-- Notification text during the encrypted handshake with the other device -->
+    <string name="cable_status_handshake">Performing secure handshake</string>
+    <!-- Notification text once connected, waiting for the other device to say what it needs -->
+    <string name="cable_status_waiting">Waiting for the other device</string>
+    <!-- Notification text after a successful cross-device sign-in -->
+    <string name="cable_status_signed_in">Signed in on your other device</string>
+    <!-- Notification text after a passkey was successfully registered from the other device -->
+    <string name="cable_status_registered">Passkey created</string>
+    <!-- Notification text when the request could not be completed -->
+    <string name="cable_status_failed">Request failed</string>
+    <!-- Notification text when the other device cancelled the request -->
+    <string name="cable_status_cancelled">Cancelled by the other device</string>
     <string name="name_required">Name cannot be empty</string>
 
     <!-- Section header for the two-way KeePass file sync settings. KDBX = KeePass database file extension, keep as-is -->

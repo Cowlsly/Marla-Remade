@@ -98,10 +98,11 @@
 use std::cmp::Reverse;
 use std::collections::{BTreeMap, BinaryHeap};
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::Mutex;
 
 use rayon::prelude::*;
+use tile_build::boolean;
 use tile_build::geom::{self, Geometry, IntGeometry, SigPt};
 use tile_build::par;
 use tile_build::subdivide;
@@ -231,6 +232,12 @@ pub struct Settings {
     /// Beside the output archive, as `<out>.tilechunks`, matching where the feature spill is placed.
     /// Truncated at the start of every zoom and removed at the end of each, so it holds one zoom.
     pub scratch: PathBuf,
+    /// Whether to synthesise the sea, as tile rectangle minus land. See [`add_ocean`].
+    ///
+    /// Only sound when the `earth` layer is being built from a real coastline, because the rule
+    /// "no land in this tile means the tile is open water" is only true if land is authoritative.
+    /// Without it, every inland tile would come out flooded.
+    pub ocean: bool,
 }
 
 /// One chunk's share of a zoom, keyed on `(tile id, layer id)`.
@@ -317,6 +324,8 @@ impl Tally {
 /// sequential passes over a file cost seconds on any modern disk; holding the features cost 4.9 GB of
 /// a measured 10.03 GB California peak.
 pub fn build(store: &Store, settings: &Settings) -> Result<(Vec<u8>, Vec<ZoomStats>)> {
+    // Before any tile is encoded, so every worker sees the same value.
+    OCEAN.store(settings.ocean, Ordering::Relaxed);
     adopt_thread_budget();
     let bbox = store.bbox();
     let mut writer = StreamWriter::new(Options {
@@ -1067,6 +1076,13 @@ pub fn encode_seconds() -> (f64, f64, f64) {
 /// unconditional adds per tile.
 static WIDEST_LAYER: [AtomicU64; 256] = [const { AtomicU64::new(0) }; 256];
 
+/// Whether [`add_ocean`] runs, mirroring [`Settings::ocean`].
+///
+/// A static because `encode_batch` is reached through rayon's `map_init` and takes only the batch;
+/// threading a setting through that signature for one boolean would be a worse trade than the two
+/// lines here. Set once at the top of a build, before any tile is encoded.
+static OCEAN: AtomicBool = AtomicBool::new(false);
+
 /// The widest tile-layer seen per layer id, taken and reset.
 ///
 /// Only the layers that appeared, so a build that carried three layers reports three rows.
@@ -1100,6 +1116,121 @@ fn timed<R>(on: bool, counter: &std::sync::atomic::AtomicU64, f: impl FnOnce() -
 /// need no atomics and a million tiles do not contend on three cache lines.
 type Encoded = (u64, Option<(Vec<u8>, usize)>, crate::rings::Stats, crate::coalesce::Stats);
 
+/// Derive the sea for one tile as `buffered tile rectangle − land`, and add it to `water`.
+///
+/// Called from [`encode_batch`] after coalescing and before stage C, which is the first point at
+/// which a tile's land is complete, clipped and in tile-local coordinates.
+///
+/// # Why the land is both `earth` polygons and nothing else
+///
+/// `earth` carries the coastline mainland (kind `NONE`), `place=island` areas, and a `cliff`
+/// *line*. Only the polygons are land; the line is filtered out by `geom_type`. Islands count as
+/// land, so kind is deliberately not filtered — an island subtracted from the sea is exactly right.
+///
+/// # How the sea is cut out, and why not with a boolean
+///
+/// The sea is one polygon per tile: the buffered tile rectangle as the exterior, and every land
+/// ring as a hole. The tessellator already fills exterior-minus-holes — it is how every lake in
+/// every island is drawn — so the shape falls out of the format with no geometry computed here.
+///
+/// Subtracting the land with the polygon clipper was tried first and produced a visibly broken
+/// coastline. The clipper is correct, but its input was not: [`crate::clip`] uses
+/// Sutherland-Hodgman, which returns a **self-touching** ring when a concave polygon clips into
+/// disjoint pieces, joined by a zero-area sliver along the tile boundary. A coastline in a tile is
+/// exactly that shape, and a sweep-line boolean assumes simple polygons. Holes have no such
+/// precondition: the same self-touching rings already reach earcut as land and draw correctly.
+///
+/// # Why the rectangle is bigger than the tile's own buffer
+///
+/// Features are clipped to the tile plus [`geom::buffer_for`], so land runs right out to that
+/// edge. `crate::rings` drops a hole that is not *strictly* inside its exterior, counting a point
+/// on the boundary as outside, so a sea rectangle at the same buffer would have every coastal
+/// hole thrown away — and paint the whole tile blue. The rectangle therefore clears the land's
+/// own clip edge. Anything past the tile is discarded on device.
+///
+/// # Tiles with nothing in them
+///
+/// A tile with no features never reaches the encoder, so open ocean far from any coast gets no
+/// polygon and none is needed — the renderer's background is already the water colour, which is
+/// why that colour is the water one rather than the land one. What matters is that a tile holding
+/// *something* over open water — a marine protected area, say — does reach here, and does get a
+/// sea drawn over it. That is the whole point.
+fn add_ocean(layers: &mut Vec<ChunkEntry>) {
+    if !OCEAN.load(Ordering::Relaxed) {
+        return;
+    }
+    // Land's *exterior* rings only. A land polygon's own holes are inland water, and repeating
+    // them here would cut them out of the sea as well, painting a lake in the land colour.
+    let land: Vec<Vec<(i32, i32)>> = match layers
+        .iter()
+        .find(|entry| entry.layer.layer_id == tilecodec::mamaps::dict::LAYER_EARTH)
+    {
+        None => Vec::new(),
+        Some(entry) => entry
+            .layer
+            .features
+            .iter()
+            .filter(|feature| feature.geom_type == GEOM_POLYGON)
+            .filter_map(|feature| entry.layer.parts_of(feature).first().copied())
+            .map(|part| {
+                entry
+                    .layer
+                    .points(&part)
+                    .iter()
+                    .map(|&(x, y)| (x as i32, y as i32))
+                    .collect::<Vec<_>>()
+            })
+            .filter(|ring: &Vec<(i32, i32)>| ring.len() >= 3)
+            .collect(),
+    };
+
+    // Clear of the land's clip edge, so a coastal ring is strictly inside and survives `rings`.
+    let edge = (geom::buffer_for(EXTENT) + 2.0).round() as i32;
+    let far = EXTENT as i32 + edge;
+    let rect = vec![(-edge, -edge), (far, -edge), (far, far), (-edge, far)];
+
+    // Append to the existing `water` entry if the tile has one, so a lake and the sea share a
+    // layer. An open-ocean tile has no water entry at all, so create one — keeping the ascending
+    // `layer_id` order that the body index is written in, which `Vec::insert` at the sorted
+    // position gives and `push` would not.
+    let water = tilecodec::mamaps::dict::LAYER_WATER;
+    let at = match layers.binary_search_by_key(&water, |entry| entry.layer.layer_id) {
+        Ok(at) => at,
+        Err(at) => {
+            layers.insert(at, ChunkEntry::new(water));
+            at
+        }
+    };
+    let layer = &mut layers[at].layer;
+    let existing = layer.features.len();
+    let parts_offset = layer.parts.len() as u32;
+    push_part(layer, &rect, WINDING_OUTER);
+    for ring in &land {
+        push_part(layer, ring, WINDING_HOLE);
+    }
+    layer.features.push(BodyFeature {
+        kind: crate::schema::kind("ocean"),
+        kind_detail: tilecodec::mamaps::dict::NONE,
+        geom_type: GEOM_POLYGON,
+        flags: 0,
+        name_idx: tilecodec::mamaps::body::NAME_NONE,
+        parts_offset,
+        part_count: 1 + land.len() as u32,
+        transit_color: 0,
+        transit_ordinal: 0,
+        transit_lanes: 1,
+        transit_taper: u8::MAX,
+    });
+    // Spliced to the front. Within a layer the renderer draws in feature order, and the sea belongs
+    // under everything else in `water` — a lake on an island sits on top of the sea, not the other
+    // way round. Going first also keeps this layer's features in store order after the synthesised
+    // one, which `feature_order_within_a_tile_layer_is_the_store_order` exists to defend.
+    // `parts_offset` indexes the parts arena, which reordering does not touch.
+    layer.features[..existing + 1].rotate_right(1);
+    // Deliberately not touching `entry.ids`: only `places` and `poi` carry an id side table, and
+    // the sea has no OSM element to name anyway.
+}
+
 fn encode_batch(batch: Vec<(u64, Vec<ChunkEntry>)>) -> Result<Vec<Encoded>> {
     let min_len = par::min_task_len(batch.len());
     let on = timing();
@@ -1124,6 +1255,18 @@ fn encode_batch(batch: Vec<(u64, Vec<ChunkEntry>)>) -> Result<Vec<Encoded>> {
                     for entry in &mut layers {
                         lines.add(crate::coalesce::coalesce_lines(&mut entry.layer));
                     }
+                    // **The sea.** There is no `natural=ocean` in OpenStreetMap — water is defined
+                    // by the absence of land — so the only way to have ocean geometry is to
+                    // subtract the land from the tile. Before this, the sea was the renderer's
+                    // background colour, which meant nothing was ever drawn *over* it: marine
+                    // protected areas, which are real `landuse` polygons hundreds of kilometres
+                    // across, painted green across open water with nothing to repaint them.
+                    //
+                    // Here rather than in a schema rule because it is the one feature that is a
+                    // property of the tile rather than of any OSM element, and this is the first
+                    // point at which the tile's land is known: clipped, coalesced, and in
+                    // tile-local coordinates.
+                    add_ocean(&mut layers);
                     // **Stage C**, per tile: winding normalised, hole containment resolved,
                     // degenerate rings dropped. Once, here, in `f64` with no frame budget, instead
                     // of every frame on device in `i32` under one. This is what makes
@@ -1464,6 +1607,131 @@ mod tests {
         assert!(seen, "the poi should reach at least one tile");
     }
 
+    /// A tile with no land is all sea, and a tile with land has that land cut out of it.
+    ///
+    /// The reason the sea needs geometry at all: it used to be the renderer's background colour,
+    /// so nothing was ever drawn over it and marine protected areas — real `landuse` polygons,
+    /// hundreds of kilometres across — painted green across open water.
+    #[test]
+    fn the_sea_is_the_tile_minus_the_land() {
+        let _budget = budget();
+        let land_at = |lon: f64, lat: f64| Feature {
+            class: Class::area(dict::LAYER_EARTH, tilecodec::mamaps::dict::NONE, 0),
+            geometry: square(lon, lat, 0.05),
+            name: None,
+            id: tilecodec::mamaps::body::ID_NONE,
+            transit_color: 0,
+            transit_ordinal: 0,
+            transit_lanes: 0,
+            transit_taper: 0,
+        };
+        // One patch of land, and a lake sitting on it so the water layer already exists. Plus a
+        // marine protected area out at sea with no land under it at all — a real `landuse` polygon
+        // over open water, which is the exact shape of the bug this exists to fix.
+        let features = vec![
+            land_at(-120.0, 35.0),
+            Feature {
+                class: Class::area(dict::LAYER_WATER, crate::schema::kind("lake"), 0),
+                geometry: square(-119.99, 35.01, 0.005),
+                name: None,
+                id: tilecodec::mamaps::body::ID_NONE,
+                transit_color: 0,
+                transit_ordinal: 0,
+                transit_lanes: 0,
+                transit_taper: 0,
+            },
+            Feature {
+                class: Class::area(
+                    dict::LAYER_LANDUSE,
+                    crate::schema::kind("nature_reserve"),
+                    0,
+                ),
+                geometry: square(-123.0, 35.0, 0.05),
+                name: None,
+                id: tilecodec::mamaps::body::ID_NONE,
+                transit_color: 0,
+                transit_ordinal: 0,
+                transit_lanes: 0,
+                transit_taper: 0,
+            },
+        ];
+        let store = spilled(&features);
+        let with_sea = Settings { ocean: true, ..settings(8, 8) };
+        let (bytes, _) = build(&store, &with_sea).expect("build");
+
+        let entries = tilecodec::mamaps::read::read_all(&bytes).expect("read");
+        let ocean = crate::schema::kind("ocean");
+        let (mut all_sea, mut cut_out) = (0usize, 0usize);
+        for (_, _, body) in &entries {
+            let body = Body::parse(body).expect("parse");
+            let Some(water) = body.layer(dict::LAYER_WATER) else { continue };
+            let has_land = body.layer(dict::LAYER_EARTH).is_some();
+            for feature in &water.features {
+                if feature.kind != ocean {
+                    continue;
+                }
+                // The sea is drawn under everything else in its layer.
+                assert_eq!(
+                    water.features[0].kind, ocean,
+                    "the sea must be the layer's first feature so lakes draw over it"
+                );
+                if has_land {
+                    // The point of the whole exercise: land is a hole in the sea. One part is the
+                    // rectangle alone, which would paint the tile blue over the coastline — the
+                    // exact way this went wrong the first time it was built.
+                    assert!(
+                        feature.part_count > 1,
+                        "the sea over a tile with land must have that land cut out of it, but it \
+                         has {} part(s)",
+                        feature.part_count
+                    );
+                    cut_out += 1;
+                } else {
+                    assert_eq!(
+                        feature.part_count, 1,
+                        "open water has nothing to cut out of it"
+                    );
+                    all_sea += 1;
+                }
+            }
+        }
+        assert!(
+            all_sea > 0,
+            "a tile holding only a marine protected area should be entirely sea, so the sea is \
+             drawn over it"
+        );
+        assert!(cut_out > 0, "a tile with land should still carry the sea around it");
+    }
+
+    /// Without a coastline the rule "no land here means open water" is false, so the sea is not
+    /// synthesised at all. Otherwise a build of, say, `water` alone would flood the planet.
+    #[test]
+    fn no_coastline_means_no_synthesised_sea() {
+        let _budget = budget();
+        let features = vec![Feature {
+            class: Class::area(dict::LAYER_WATER, crate::schema::kind("lake"), 0),
+            geometry: square(-120.0, 35.0, 0.01),
+            name: None,
+            id: tilecodec::mamaps::body::ID_NONE,
+            transit_color: 0,
+            transit_ordinal: 0,
+            transit_lanes: 0,
+            transit_taper: 0,
+        }];
+        let store = spilled(&features);
+        let (bytes, _) = build(&store, &settings(8, 8)).expect("build");
+        let entries = tilecodec::mamaps::read::read_all(&bytes).expect("read");
+        let ocean = crate::schema::kind("ocean");
+        for (_, _, body) in &entries {
+            let body = Body::parse(body).expect("parse");
+            let Some(water) = body.layer(dict::LAYER_WATER) else { continue };
+            assert!(
+                water.features.iter().all(|f| f.kind != ocean),
+                "the sea was synthesised without a coastline to justify it"
+            );
+        }
+    }
+
     fn settings(min_zoom: u8, max_zoom: u8) -> Settings {
         Settings {
             min_zoom,
@@ -1471,6 +1739,9 @@ mod tests {
             simplification: DEFAULT_SIMPLIFICATION,
             build_id: 7,
             scratch: scratch(),
+            // Off by default here: these fixtures carry no coastline, so "no land in this tile"
+            // would flood every one of them. `ocean_fills_a_tile_with_no_land` opts in.
+            ocean: false,
         }
     }
 

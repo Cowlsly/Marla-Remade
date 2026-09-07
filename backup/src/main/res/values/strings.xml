@@ -1,4 +1,11 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <string name="app_name">Backup</string>
+
+    <!--
+      Shown by Settings' backup page, which reads them from the backup transport rather than
+      from this app's resources directly - see ConfigurableBackupTransport.
+    -->
+    <string name="data_management_label">Backup settings</string>
+    <string name="destination_not_configured">Not configured</string>
 </resources>

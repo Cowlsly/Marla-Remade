@@ -1,6 +1,7 @@
 package com.vayunmathur.library.ui
 
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Accessibility
 import androidx.compose.material.icons.filled.AcUnit
 import androidx.compose.material.icons.filled.CallEnd
 import androidx.compose.material.icons.filled.Dialpad
@@ -63,6 +64,7 @@ import androidx.compose.material.icons.filled.Square
 import androidx.compose.material.icons.filled.StarOutline
 import androidx.compose.material.icons.filled.StrikethroughS
 import androidx.compose.material.icons.filled.Style
+import androidx.compose.material.icons.filled.Swipe
 import androidx.compose.material.icons.filled.TextFields
 import androidx.compose.material.icons.filled.Title
 import androidx.compose.material.icons.filled.Today
@@ -182,6 +184,7 @@ import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material.icons.filled.KeyboardArrowUp
 import androidx.compose.material.icons.filled.LibraryMusic
 import androidx.compose.material.icons.filled.Link
+import androidx.compose.material.icons.filled.LinkOff
 import androidx.compose.material.icons.filled.LocationOn
 import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.Map
@@ -739,6 +742,10 @@ fun IconLink(modifier: Modifier = Modifier, tint: Color = LocalContentColor.curr
     AppIcon(Icons.Filled.Link, "Link", modifier, tint)
 
 @Composable
+fun IconLinkOff(modifier: Modifier = Modifier, tint: Color = LocalContentColor.current) =
+    AppIcon(Icons.Filled.LinkOff, "Unlink", modifier, tint)
+
+@Composable
 fun IconDirectionsWalk(modifier: Modifier = Modifier, tint: Color = LocalContentColor.current) =
     AppIcon(Icons.AutoMirrored.Filled.DirectionsWalk, "Walk", modifier, tint)
 
@@ -921,6 +928,14 @@ fun IconInfo(modifier: Modifier = Modifier, tint: Color = LocalContentColor.curr
 @Composable
 fun IconWarning(modifier: Modifier = Modifier, tint: Color = LocalContentColor.current) =
     AppIcon(Icons.Filled.Warning, "Warning", modifier, tint)
+
+@Composable
+fun IconAccessibility(modifier: Modifier = Modifier, tint: Color = LocalContentColor.current) =
+    AppIcon(Icons.Filled.Accessibility, "Accessibility", modifier, tint)
+
+@Composable
+fun IconSwipe(modifier: Modifier = Modifier, tint: Color = LocalContentColor.current) =
+    AppIcon(Icons.Filled.Swipe, "Swipe", modifier, tint)
 
 @Composable
 fun IconNote(modifier: Modifier = Modifier, tint: Color = LocalContentColor.current) =

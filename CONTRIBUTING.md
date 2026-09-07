@@ -579,7 +579,7 @@ Prefer an existing shared module over a new dependency:
 | `:library:biometric` / `:library:ink` | Biometric prompts / stylus ink |
 | `:library:downloadservice` | Foreground downloads for large assets and models |
 | `:library:locationprovider` | Location provider abstraction |
-| `:library:euicc-stubs` / `:library:backup-stubs` | Compile-only hidden-API stubs |
+| `:library:euicc-stubs` / `:library:backup-stubs` / `:library:remotedisplay-stubs` | Compile-only hidden-API stubs |
 | `:sdk:games` / `:sdk:cast` / `:sdk:openassistant` | Games hub, casting, assistant tool calling |
 
 See [SUPPLY_CHAIN_RISKS.md](SUPPLY_CHAIN_RISKS.md) before adding anything third-party.

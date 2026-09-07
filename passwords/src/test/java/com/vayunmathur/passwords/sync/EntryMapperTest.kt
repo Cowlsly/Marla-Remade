@@ -1,5 +1,6 @@
 package com.vayunmathur.passwords.sync
 
+import com.vayunmathur.passwords.data.PASSKEY_LINK_DETACHED
 import com.vayunmathur.passwords.data.Passkey
 import com.vayunmathur.passwords.data.Password
 import kotlin.test.Test
@@ -64,6 +65,40 @@ class EntryMapperTest {
         assertEquals(pk.syncId, back.syncId)
         assertEquals(pk.updatedAt, back.updatedAt)
         assertContentEquals(pk.privateKeyBytes, back.privateKeyBytes)
+        assertNull(back.linkedPasswordSyncId)
+    }
+
+    @Test fun everyLinkStateRoundTrips() {
+        for (link in listOf(null, PASSKEY_LINK_DETACHED, "0123456789abcdef0123456789abcdef")) {
+            val pk = Passkey(rpId = "acme.example", credentialId = "c", linkedPasswordSyncId = link)
+            val fields = EntryMapper.toFields(pk)
+            assertEquals(link, EntryMapper.toPasskey(fields).linkedPasswordSyncId)
+            assertEquals(fields, EntryMapper.toFields(EntryMapper.toPasskey(fields).copy(
+                syncId = pk.syncId,
+                updatedAt = pk.updatedAt,
+            )))
+        }
+    }
+
+    /**
+     * contentHash covers every key but _SyncId/_Modified, so emitting the link field for unlinked
+     * passkeys would rewrite the hash of every existing one and report them all as changed on the
+     * next sync.
+     */
+    @Test fun unlinkedPasskeysHashAsThoughTheFieldDidNotExist() {
+        val pk = Passkey(rpId = "acme.example", credentialId = "c", userId = "u")
+        val fields = EntryMapper.toFields(pk)
+
+        assertTrue("_LinkedPassword" !in fields)
+        assertEquals(
+            EntryMapper.contentHash(fields),
+            EntryMapper.contentHash(fields.filterKeys { it != "_LinkedPassword" }),
+        )
+        assertNotEquals(
+            EntryMapper.contentHash(fields),
+            EntryMapper.contentHash(EntryMapper.toFields(pk.copy(linkedPasswordSyncId = "abc"))),
+        )
+        assertTrue("_LinkedPassword" in EntryMapper.OWNED_KEYS)
     }
 
     @Test fun passkeyEntriesAreDetected() {

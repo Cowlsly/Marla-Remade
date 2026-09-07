@@ -77,6 +77,22 @@ impl ZoomRange {
 /// symptom. Four overlaps the waiting without opening enough sockets to matter.
 const WORKER_COUNT: usize = 4;
 
+/// The most tiles allowed resident on the GPU at once.
+///
+/// Eviction is the only thing bounding tile memory — there is no separate budget — so this is a
+/// real limit rather than a safety net. It matters more now that descendants are kept: an
+/// ancestor set is linear in depth, but a descendant set is not, and without a cap every deep
+/// tile visited would stay resident for as long as the camera sat above it.
+///
+/// Sized from what the renderer reports rather than from theory. A dense z14 screenful logged
+/// ~2.0 M triangles across 7 tiles, so a tile in a city centre costs single-digit megabytes of
+/// vertex and index buffers; 64 leaves room for a ~12-tile viewport, its four ancestor levels and
+/// a useful spread of descendants, while keeping the worst case in the hundreds of megabytes
+/// rather than the gigabytes an uncapped depth-2 fan-out could reach. Going over drops
+/// descendants first, so the cost of being wrong here is a briefly coarser zoom-out, not a blank
+/// screen.
+const RESIDENT_TILE_CAP: usize = 64;
+
 /// What a worker reports back about a tile.
 enum TileResult {
     /// Tessellated and ready to upload.
@@ -523,15 +539,20 @@ pub extern "system" fn Java_com_vayunmathur_library_map_MapNative_render<'l>(
     // to show a blurrier version of a tile that is being fetched anyway, and because
     // ancestors sort first it spent that latency before requesting what the user is
     // actually looking at.
+    //
+    // `visible` goes to `retain` as well as to the fetch loop, because the other half of the
+    // fallback — already-resident *descendants*, which are what stops a zoom-out blanking the
+    // map — cannot be named in a keep list without enumerating tiles that were never fetched.
     let (min_zoom, max_zoom) = map.zoom_range.get();
     // A tile is "had" only if it was tessellated at the current toggle generation, so a
     // toggle change re-requests the resident set through this same loop rather than
     // needing a path of its own. The stale mesh keeps drawing until its replacement
     // arrives.
     let (_, _, generation) = map.toggles.get();
+    let visible = select::visible(&camera, min_zoom, max_zoom);
     let keep: Vec<u64> =
         select::resident_set(&camera, min_zoom, max_zoom).iter().map(|t| t.key()).collect();
-    for tile in select::visible(&camera, min_zoom, max_zoom) {
+    for tile in &visible {
         let key = tile.key();
         if map.renderer.has_tile(key, generation)
             || map.absent.contains(&key)
@@ -540,9 +561,9 @@ pub extern "system" fn Java_com_vayunmathur_library_map_MapNative_render<'l>(
             continue;
         }
         // A closed channel means every worker died; the map keeps drawing what it has.
-        let _ = map.wanted.send(tile);
+        let _ = map.wanted.send(*tile);
     }
-    map.renderer.retain(&keep);
+    map.renderer.retain(&keep, &visible, RESIDENT_TILE_CAP);
 
     // Once a second, state what the renderer actually has. Every bug in this file so far has
     // been invisible from the outside: a viewport nobody measured, a zoom level the archive

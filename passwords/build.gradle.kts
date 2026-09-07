@@ -18,6 +18,12 @@ android {
     packaging {
         resources.excludes += "META-INF/INDEX.LIST"
     }
+    testOptions {
+        // CtapProcessor logs through android.util.Log, which is a stub that throws in JVM unit
+        // tests. Returning defaults lets the CTAP logic be tested without stripping the logging
+        // that makes caBLE sessions diagnosable on a device.
+        unitTests.isReturnDefaultValues = true
+    }
 }
 
 androidComponents {

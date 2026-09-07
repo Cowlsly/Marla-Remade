@@ -4,6 +4,7 @@ use crate::camera::Camera;
 use crate::style::paint::Stroke;
 use crate::style::{Anchor, Layer, LayerKind, Palette};
 use crate::tile::geometry::{self, TileMesh};
+use crate::tile::select;
 use crate::vulkan::buffers::Buffer;
 use crate::vulkan::context::{ANativeWindow, Context};
 use crate::vulkan::images::{AtlasSet, SampledImage};
@@ -12,6 +13,7 @@ use crate::vulkan::swapchain::Swapchain;
 use ash::vk;
 use std::cell::Cell;
 use std::collections::HashMap;
+use std::collections::HashSet;
 
 /// How many frames may be in flight. Two is enough to keep the GPU fed behind vsync
 /// without adding latency the user can feel when panning.
@@ -452,10 +454,47 @@ impl Renderer {
         Ok(())
     }
 
-    /// Drop every resident tile whose key is not in `keep`.
-    pub fn retain(&mut self, keep: &[u64]) {
-        let doomed: Vec<u64> =
-            self.tiles.keys().copied().filter(|k| !keep.contains(k)).collect();
+    /// Drop resident tiles that are neither wanted nor useful as a stand-in, and enforce the
+    /// residency cap.
+    ///
+    /// `keep` is the visible tiles and their ancestors, in the order [`select::resident_set`]
+    /// produced them — coarsest first. `visible` is needed separately because descendants cannot
+    /// be enumerated into a keep list without naming tiles that were never fetched; they are
+    /// recognised here, against what is actually resident.
+    ///
+    /// This is also the **only** bound on GPU memory. Tiles live until they fall out of this, so
+    /// the cap is not belt-and-braces: without it, retaining descendants would mean every deep
+    /// tile visited during a session stays resident for as long as the camera sits above it.
+    pub fn retain(&mut self, keep: &[u64], visible: &[select::TileId], cap: usize) {
+        let visible_keys: HashSet<u64> = visible.iter().map(|t| t.key()).collect();
+        let wanted: HashSet<u64> = keep.iter().copied().collect();
+
+        // Rank by how much is lost if it goes, because the cap has to evict *something* and the
+        // stand-ins are what it should reach for first.
+        let mut ranked: Vec<(u8, u64)> = self
+            .tiles
+            .keys()
+            .map(|&key| {
+                let rank = if visible_keys.contains(&key) {
+                    0 // on screen at its own zoom; evicting this is the blank frame itself
+                } else if wanted.contains(&key) {
+                    1 // an ancestor: one coarse tile covers many fine ones, so cheap to hold
+                } else if select::stands_in_for_visible(key, visible, select::DESCENDANT_DEPTH) {
+                    2 // a descendant: only covers a fraction of the screen, so the first to go
+                } else {
+                    3 // unrelated to anything on screen
+                };
+                (rank, key)
+            })
+            .collect();
+        ranked.sort_unstable();
+
+        let doomed: Vec<u64> = ranked
+            .iter()
+            .enumerate()
+            .filter(|(at, (rank, _))| *rank == 3 || *at >= cap)
+            .map(|(_, (_, key))| *key)
+            .collect();
         for key in doomed {
             if let Some(tile) = self.tiles.remove(&key) {
                 self.retire(tile);

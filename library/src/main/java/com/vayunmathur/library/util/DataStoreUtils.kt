@@ -1,7 +1,10 @@
 package com.vayunmathur.library.util
 
 import android.content.Context
+import android.os.UserManager
+import android.util.Log
 import androidx.datastore.core.DataStore
+import androidx.datastore.preferences.core.MutablePreferences
 import androidx.datastore.preferences.core.PreferenceDataStoreFactory
 import androidx.datastore.preferences.core.Preferences
 import androidx.datastore.preferences.core.booleanPreferencesKey
@@ -25,8 +28,10 @@ import kotlinx.coroutines.flow.mapNotNull
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 
-class DataStoreUtils private constructor(context: Context) {
-    private val dataStore = createDataStore(context)
+class DataStoreUtils internal constructor(private val dataStore: DataStore<Preferences>) {
+
+    private constructor(context: Context) : this(createDataStore(context))
+
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
     // Eagerly mirror the persisted preferences so the synchronous getters below
@@ -216,7 +221,30 @@ class DataStoreUtils private constructor(context: Context) {
         return getWithFallback(booleanPreferencesKey(string)) ?: bool
     }
 
+    /**
+     * Copy the values [source] holds for [keys] into this store, and nothing else. Returns how
+     * many keys were written.
+     */
+    internal suspend fun copyFrom(
+        source: DataStoreUtils,
+        keys: Collection<String>,
+        overwrite: Boolean,
+    ): Int {
+        if (keys.isEmpty()) return 0
+        val wanted = keys.toSet()
+        val sourcePrefs = source.dataStore.data.first()
+        // Skip the edit entirely when the source holds none of them, so an unseeded source is
+        // a true no-op rather than a rewrite of the target file on every call.
+        if (sourcePrefs.asMap().keys.none { it.name in wanted }) return 0
+
+        var copied = 0
+        dataStore.edit { copied = it.copyEntriesFrom(sourcePrefs, wanted, overwrite) }
+        return copied
+    }
+
     companion object {
+        private const val TAG = "DataStoreUtils"
+
         @Volatile
         private var instance: DataStoreUtils? = null
         @Volatile
@@ -227,6 +255,12 @@ class DataStoreUtils private constructor(context: Context) {
          *   for components that must run on the lock screen — e.g. an IME used to type the
          *   unlock password. Data in device-protected storage is not credential-encrypted, so
          *   only put non-sensitive settings there. The two modes are separate singletons/files.
+         *
+         *   Separate files with no migration between them: a key written through the default
+         *   store is *not* visible here, so a caller that switches to `deviceProtected = true`
+         *   reads an empty store rather than its existing data. Use
+         *   [seedDeviceProtectedStorage] to mirror the specific keys that are needed before
+         *   unlock.
          */
         fun getInstance(context: Context, deviceProtected: Boolean = false): DataStoreUtils {
             if (deviceProtected) {
@@ -244,8 +278,81 @@ class DataStoreUtils private constructor(context: Context) {
                 }
             }
         }
+
+        /**
+         * Mirror [keys] from the default (credential-encrypted) store into the
+         * device-protected one, so a Direct Boot component can read them before the first
+         * unlock. Returns how many keys were written.
+         *
+         * This copies; it does not move. The credential-encrypted original stays in place and
+         * stays authoritative. Device-protected storage is readable without the user's
+         * credential, so a value mirrored here has been deliberately taken out from behind the
+         * passcode — which is why [keys] is an explicit allowlist and not "everything". Name
+         * only the keys the pre-unlock path actually reads. (Contrast `SqlCipher`'s
+         * `moveDatabaseFrom` for Room: a single database has one home, so moving it is right
+         * there and wrong here.)
+         *
+         * By default a key is written only when it is absent from the device-protected store,
+         * which makes repeat calls cheap and non-destructive. That matters because
+         * `LOCKED_BOOT_COMPLETED` fires when an app leaves the stopped state as well as at a
+         * real boot, so nothing in this area gets to assume "once per boot". Pass
+         * [overwrite] for values that must track later changes — a user-facing toggle, say,
+         * where pinning the first value seen would be a bug.
+         *
+         * **Must be called while the user is unlocked.** It reads credential-encrypted
+         * storage, which is not merely empty before first unlock but unreadable, and the
+         * failure would be cached in the singleton for the rest of the process. Call it from
+         * an unlock-time path (`ACTION_USER_UNLOCKED`, or ordinary foreground use), never from
+         * a Direct Boot receiver; doing so throws rather than silently seeding nothing.
+         *
+         * @throws IllegalStateException if invoked before the user has unlocked the device.
+         */
+        suspend fun seedDeviceProtectedStorage(
+            context: Context,
+            keys: Collection<String>,
+            overwrite: Boolean = false,
+        ): Int {
+            val userManager = context.getSystemService(UserManager::class.java)
+            // Checked before getInstance, so a locked caller cannot leave a broken
+            // credential-encrypted singleton behind for everyone else.
+            check(userManager == null || userManager.isUserUnlocked) {
+                "seedDeviceProtectedStorage reads credential-encrypted storage and cannot run " +
+                    "before the user unlocks the device. Call it from an unlock-time path, not " +
+                    "from a LOCKED_BOOT_COMPLETED receiver."
+            }
+            val copied = getInstance(context, deviceProtected = true)
+                .copyFrom(getInstance(context), keys, overwrite)
+            if (copied > 0) Log.i(TAG, "seeded $copied key(s) into device-protected storage")
+            return copied
+        }
     }
 }
 
 private fun createDataStore(context: Context): DataStore<Preferences> =
     PreferenceDataStoreFactory.create { context.filesDir.resolve("datastore_default.preferences_pb") }
+
+/**
+ * Copy the entries [source] holds under [keys] into these preferences, leaving a key that is
+ * already present alone unless [overwrite]. Returns how many were written.
+ *
+ * Entries are taken from [source] whole rather than rebuilt, so each value keeps the type it
+ * was stored with and the caller does not have to declare it.
+ */
+internal fun MutablePreferences.copyEntriesFrom(
+    source: Preferences,
+    keys: Set<String>,
+    overwrite: Boolean,
+): Int {
+    var copied = 0
+    for ((key, value) in source.asMap()) {
+        if (key.name !in keys) continue
+        // The value came out of this very key, so it already has the type the key was stored
+        // with; the cast only re-attaches what the star projection erased.
+        @Suppress("UNCHECKED_CAST")
+        val typed = key as Preferences.Key<Any>
+        if (!overwrite && contains(typed)) continue
+        this[typed] = value
+        copied++
+    }
+    return copied
+}

@@ -5,12 +5,16 @@
 //! on a world tile and a drainage ditch does not, and getting that wrong is the difference between
 //! a readable coastline and a z4 tile with forty thousand ponds in it.
 //!
-//! # `ocean` is not here
+//! # `ocean` comes from the tiler, not from a tag
 //!
-//! Upstream's `water/ocean` comes from the same stitched coastline that `earth` does, not from a
-//! tag: there is no `natural=ocean` way in OSM. So it arrives with the coastline work, and until
-//! then the sea is the renderer's background colour — which is what that colour is for, and why it
-//! is the water colour rather than the land one.
+//! There is no `natural=ocean` way in OpenStreetMap — water is defined by the absence of land — so
+//! the sea cannot be classified here. It is derived per tile in [`crate::tiler::add_ocean`] as the
+//! tile rectangle minus the coastline land, and appended to this layer.
+//!
+//! It used to be the renderer's background colour instead, which is why that colour is the water
+//! one rather than the land one. That worked until something drew *over* the sea: marine protected
+//! areas are real `landuse` polygons hundreds of kilometres across, and with no ocean geometry
+//! after them in draw order they painted green across open water.
 
 use tilecodec::mamaps::dict::LAYER_WATER;
 
@@ -20,9 +24,14 @@ use super::{kind, Class, TagSource};
 pub const FILTERS: &[&str] = &["natural", "waterway", "landuse", "water"];
 
 /// Every `kind` this module can emit, for the dictionary-closure test.
+///
+/// `ocean` is here although [`classify`] never returns it: the tiler synthesises it into this
+/// layer, and the closure test is what keeps the name in step with the dictionary.
 #[cfg_attr(not(test), allow(dead_code))]
-pub const KINDS: &[&str] =
-    &["bay", "fjord", "lake", "river", "sea", "strait", "stream", "water", "canal", "dock", "reef"];
+pub const KINDS: &[&str] = &[
+    "bay", "fjord", "lake", "ocean", "river", "sea", "strait", "stream", "water", "canal", "dock",
+    "reef",
+];
 
 /// Classify a water feature.
 ///

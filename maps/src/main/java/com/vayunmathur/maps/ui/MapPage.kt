@@ -193,11 +193,11 @@ fun MapPage(
         )
     }
 
+    // Clearing the selection is enough: the `LaunchedEffect(selectedFeature)` above is the single
+    // dismissal path for every sheet state, so back does not hide the sheet itself. Doing both
+    // raced two `hide()` coroutines against each other for no benefit.
     BackHandler(selectedFeature != null) {
-        coroutineScope.launch {
-            viewModel.set(null)
-            sheetState.hide()
-        }
+        viewModel.set(null)
     }
 
     BackHandler(selectedFeature == null && inactiveNavigation != null) {
@@ -205,19 +205,24 @@ fun MapPage(
     }
 
     FreeHeightBottomSheetScaffold({
-        Column(Modifier.padding(horizontal = Spacing.lg).padding(top = Spacing.sm)) {
-            BottomSheetContent(
-                viewModel,
-                selectedFeature,
-                { viewModel.set(it) },
-                route,
-                chrome.selectedRouteType,
-                { chrome.selectedRouteType = it },
-                inactiveNavigation,
-                savedPlacesViewModel,
-                transitViewModel,
-                navState,
-            )
+        // Padding only when there is something to pad. An unconditional wrapper measures its own
+        // padding even with no content, which defeats the scaffold's "don't place a sheet that
+        // measured to nothing" guard and leaves a bare handle on screen.
+        if (selectedFeature != null || route != null || inactiveNavigation != null) {
+            Column(Modifier.padding(horizontal = Spacing.lg).padding(top = Spacing.sm)) {
+                BottomSheetContent(
+                    viewModel,
+                    selectedFeature,
+                    { viewModel.set(it) },
+                    route,
+                    chrome.selectedRouteType,
+                    { chrome.selectedRouteType = it },
+                    inactiveNavigation,
+                    savedPlacesViewModel,
+                    transitViewModel,
+                    navState,
+                )
+            }
         }
     }, Modifier, sheetState, MapChromeMetrics.sheetPeekHeight, contentKey = listOf(selectedFeature, chrome.selectedRouteType)) { paddingValues ->
         AppScaffold(

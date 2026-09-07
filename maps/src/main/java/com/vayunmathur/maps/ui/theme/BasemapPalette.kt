@@ -81,7 +81,7 @@ object BasemapPalette {
         Fill.Airstrip to Color(0xFF2B2D33),
         Fill.Pedestrian to Color(0xFF242229),
         Fill.Pier to Color(0xFF202225),
-        Fill.Buildings to Color(0xFF22262C),
+        Fill.Buildings to Color(0xFF3C4048),
         Fill.Boundaries to Color(0xFF4A4F57),
         Fill.Rail to Color(0xFF3A3E45),
         Fill.RoadCasing to Color(0xFF111318),

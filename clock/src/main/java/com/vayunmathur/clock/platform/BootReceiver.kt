@@ -24,9 +24,10 @@ class BootReceiver : BroadcastReceiver() {
                         enabled.forEach { AlarmScheduler.schedule(context, it) }
                         Log.i(TAG, "${intent.action}: rescheduled ${enabled.size} alarm(s)")
                     } catch (e: Exception) {
-                        // Expected at LOCKED_BOOT_COMPLETED: the database lives in
-                        // credential-encrypted storage, so BOOT_COMPLETED is what actually
-                        // reschedules. A failure there means no alarm survives the reboot.
+                        // Not expected at either action: ClockRepository is built with
+                        // useDeviceProtectedStorage = true precisely so the alarm database is
+                        // readable while the device is still locked. A failure here means no
+                        // alarm survives the reboot.
                         Log.e(TAG, "${intent.action}: could not reschedule alarms", e)
                     } finally {
                         pendingResult.finish()

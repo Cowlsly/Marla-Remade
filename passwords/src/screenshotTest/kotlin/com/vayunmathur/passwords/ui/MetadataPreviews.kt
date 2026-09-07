@@ -34,6 +34,7 @@ private val SampleMail = Password(
     password = "sample-passphrase",
     totpSecret = "JBSWY3DPEHPK3PXP",
     websites = listOf("mail.example.com", "login.example.com"),
+    syncId = "00000000000000000000000000000001",
 )
 
 private val SampleBank = Password(
@@ -70,6 +71,10 @@ private val SamplePasskey = Passkey(
     userId = "sample-user",
     userName = "sample.user@example.com",
     userDisplayName = "Sample User",
+    // Pinned rather than left to automatic matching: SampleMail and SampleBank share an email
+    // and both sit under example.com, so the automatic rule sees two candidates and leaves the
+    // passkey standalone - which is not the merged row these images are meant to show.
+    linkedPasswordSyncId = SampleMail.syncId,
 )
 
 /**
@@ -95,7 +100,7 @@ class MetadataPreviews {
                 state = MenuUiState(
                     passwords = listOf(SampleMail, SampleBank, SampleShop, SampleRouter),
                     passkeys = listOf(SamplePasskey),
-                    now = NOW,
+                    now = { NOW },
                 ),
                 actions = PasswordsActions.Noop,
             )
@@ -108,7 +113,11 @@ class MetadataPreviews {
     fun Preview2Entry() {
         DynamicTheme(darkTheme = true) {
             PasswordScreen(
-                state = PasswordUiState(password = SampleMail, now = NOW),
+                state = PasswordUiState(
+                    password = SampleMail,
+                    passkeys = listOf(SamplePasskey),
+                    now = { NOW },
+                ),
                 actions = PasswordsActions.Noop,
             )
         }
