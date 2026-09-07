@@ -2,7 +2,6 @@ package com.vayunmathur.contacts.ui
 
 import android.Manifest
 import android.content.pm.PackageManager
-import android.widget.Toast
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.clickable
@@ -34,6 +33,7 @@ import com.vayunmathur.contacts.Route
 import com.vayunmathur.contacts.util.VcfUtils
 import com.vayunmathur.library.ui.IconAdd
 import com.vayunmathur.library.ui.IconNavigation
+import com.vayunmathur.library.util.AppMessages
 import com.vayunmathur.library.util.NavBackStack
 import kotlinx.coroutines.launch
 
@@ -268,11 +268,7 @@ fun SettingsPage(viewModel: ContactViewModel, backStack: NavBackStack<Route>) {
                         if (name.isNotEmpty()) {
                             viewModel.renameLocalAccount(target, name) { ok, err ->
                                 if (!ok && err == "collision") {
-                                    Toast.makeText(
-                                        context,
-                                        context.getString(R.string.account_name_exists),
-                                        Toast.LENGTH_SHORT
-                                    ).show()
+                                    AppMessages.show(context.getString(R.string.account_name_exists))
                                 }
                             }
                             renameTarget = null
