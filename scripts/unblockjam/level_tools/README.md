@@ -13,7 +13,7 @@ You can find a large set of puzzles [here](https://www.michaelfogleman.com/rush/
 
 ```sh
 cd src
-cat example_levels.txt | go run cmd/convert_set > example_pack.json
+cat example_levels.txt | go run ./cmd/convert_set > example_pack.json
 ```
 
 ## Level IDs

@@ -45,7 +45,8 @@ func run() error {
 			return fmt.Errorf("expected exactly 3 parts in line %q, got %d", line, len(parts))
 		}
 
-		optimal, err := strconv.Atoi(parts[2])
+		// Fogleman's database columns are: number of moves, board description, cluster size.
+		optimal, err := strconv.Atoi(parts[0])
 		if err != nil {
 			return fmt.Errorf("converting optimal value to integer in line %q: %w", line, err)
 		}
