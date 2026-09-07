@@ -26,6 +26,7 @@ import com.vayunmathur.appstore.data.grapheneos.toUnifiedApp
 import com.vayunmathur.appstore.data.installer.InstallCoordinator
 import com.vayunmathur.appstore.data.installer.InstallStage
 import com.vayunmathur.appstore.data.play.PlayAuthState
+import com.vayunmathur.appstore.data.play.PlayHttpClient
 import com.vayunmathur.appstore.data.play.PlayRepository
 import com.vayunmathur.appstore.data.priority
 import com.vayunmathur.appstore.data.searchCandidate
@@ -157,6 +158,20 @@ class AppStoreViewModel(
         RowChrome(installed, installed.map { it.packageName }.toSet(), icons, stages)
     }.stateIn(viewModelScope, SharingStarted.Eagerly, RowChrome())
 
+    /**
+     * The transient line under the top bar.
+     *
+     * Being rate-limited by Play outranks whatever else was being said, because it is the
+     * reason nothing appears to be happening: the store is deliberately sitting still for
+     * a few seconds rather than hammering an endpoint that has already refused it. Read
+     * off the transport rather than the session — the limit is on the Play account and is
+     * shared by every caller, including the background update worker's own stack.
+     */
+    private val statusLine: StateFlow<String> =
+        combine(_statusMessage, PlayHttpClient.throttled) { message, throttled ->
+            if (throttled) context.getString(R.string.play_rate_limited) else message
+        }.stateIn(viewModelScope, SharingStarted.Eagerly, "")
+
     val updates: StateFlow<List<UnifiedApp>> = combine(
         _catalogUpdates,
         _playUpdates,
@@ -203,7 +218,7 @@ class AppStoreViewModel(
             updates,
             _isSyncing,
             _isLoadingHome,
-            _statusMessage,
+            statusLine,
             _playError,
         ) { u, syncing, loading, msg, playError ->
             HomeChrome(u.size, syncing, loading, msg.ifBlank { playError })
@@ -266,7 +281,7 @@ class AppStoreViewModel(
         chrome,
         _isCheckingUpdates,
         _lastUpdateCheck,
-        _statusMessage,
+        statusLine,
     ) { list, rows, checking, checkedAt, message ->
         UpdatesUiState(
             updates = list,

@@ -56,6 +56,8 @@
     <!-- Message after tapping Sync sources with every source switched off. -->
     <string name="sync_all_sources_off">Nothing to sync — every source is switched off.</string>
     <string name="play_unavailable">Play Store results unavailable: %1$s</string>
+    <!-- Status line under the top bar while the store is waiting out a Play Store rate limit. -->
+    <string name="play_rate_limited">Play Store is limiting requests — waiting before trying again…</string>
 
     <!-- Search. -->
     <string name="search_placeholder">Search for an app</string>
