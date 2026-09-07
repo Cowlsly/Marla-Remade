@@ -189,6 +189,7 @@ fun MainPage(
 
     val temporaryLinks by ffViewModel.temporaryLinks.collectAsState()
     val waypoints by ffViewModel.waypoints.collectAsState()
+    val globalSharingEnabled by ffViewModel.globalSharingEnabled.collectAsState()
 
     val connectedUsers by ffViewModel.connectedUsers.collectAsState()
     val awaitingRequestUsers by ffViewModel.awaitingRequestUsers.collectAsState()
@@ -278,7 +279,9 @@ fun MainPage(
             locationByUser = userPositions,
             userNamesByLocationName = usersByLocationName
         ),
-        person = selectedUser?.let { PersonUiState(it, userPositions[it.id], waypoints) }
+        person = selectedUser?.let {
+            PersonUiState(it, userPositions[it.id], waypoints, globalSharingEnabled)
+        }
     )
 
     // Owned here, not by MapView: the two animateTo effects below drive it, and MapView is
@@ -717,7 +720,16 @@ fun PersonDetailSheet(state: PersonUiState, actions: PersonActions) {
                 )
                 Switch(
                     user.sendingEnabled,
-                    { send -> actions.setUserSharing(user, send) }
+                    { send -> actions.setUserSharing(user, send) },
+                    enabled = state.sharingGloballyEnabled
+                )
+            }
+            if (!state.sharingGloballyEnabled) {
+                Text(
+                    stringResource(R.string.sharing_paused_note),
+                    Modifier.padding(horizontal = 4.dp),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
             }
             // Auto-toggle: "Turn on/off after" + duration/arrival dropdown (Never default)

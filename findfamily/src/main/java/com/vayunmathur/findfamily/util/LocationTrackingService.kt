@@ -51,11 +51,13 @@ import com.vayunmathur.findfamily.tracker.TrackerReporting
 import com.vayunmathur.findfamily.tracker.TrackerStore
 import com.vayunmathur.findfamily.MainActivity
 import com.vayunmathur.findfamily.R
+import com.vayunmathur.findfamily.service.SharingTileService
 import com.vayunmathur.library.util.DataStoreUtils
 import com.vayunmathur.library.work.startRepeatedTask
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
@@ -228,13 +230,18 @@ class LocationTrackingService : Service(), SensorEventListener {
                 Log.w("FF-Heartbeat", "arrival auto-toggle apply failed", e)
             }
 
-            val publishTargets = publishBaseUsers.filter { it.id != Networking.userid && it.sendingEnabled }
-            Log.d("FF-Heartbeat", "publish targets count=${publishTargets.size} ids=${publishTargets.map{ it.id.toULong() }} names=${publishTargets.map{ it.name }}")
+            // The sharing tile (GitHub #648) suppresses outbound publishing without touching the
+            // per-person switches, so turning it back on resumes exactly the set of people the
+            // user was sharing with. Receiving, waypoints and tracker reporting are unaffected.
+            val sharingOut = LocationServiceController.isGlobalSharingEnabled(this)
+            val publishTargets = if (!sharingOut) emptyList<User>()
+            else publishBaseUsers.filter { it.id != Networking.userid && it.sendingEnabled }
+            Log.d("FF-Heartbeat", "publish targets count=${publishTargets.size} ids=${publishTargets.map{ it.id.toULong() }} names=${publishTargets.map{ it.name }} globalSharing=$sharingOut")
             publishTargets.forEach {
                 val result = runCatching { Networking.publishLocation(locationValue, it) }
                 if (result.isFailure) Log.w("FF-Heartbeat", "publish to ${it.id.toULong()} threw", result.exceptionOrNull())
             }
-            currentLinks.filter { now < it.deleteAt }.forEach {
+            if (sharingOut) currentLinks.filter { now < it.deleteAt }.forEach {
                 val result = runCatching { Networking.publishLocation(locationValue, it) }
                 if (result.isFailure) Log.w("FF-Heartbeat", "publish to link ${it.id} threw", result.exceptionOrNull())
             }
@@ -918,6 +925,17 @@ object LocationServiceController {
     /** Persisted on/off switch for the whole tracking service (default on). */
     const val TRACKING_ENABLED_KEY = "tracking_enabled"
 
+    /**
+     * Persisted on/off switch for publishing this device's location to anyone, toggled
+     * from the Quick Settings sharing tile (default on — see SharingTileService).
+     *
+     * Deliberately separate from the per-person `sendingEnabled` flags so pausing and
+     * resuming restores whoever was being shared with, and from [TRACKING_ENABLED_KEY]
+     * so the service keeps running: peers' locations, waypoint entry/exit and UWB
+     * tracker reporting all continue while sharing is paused.
+     */
+    const val GLOBAL_SHARING_ENABLED_KEY = "global_sharing_enabled"
+
     fun hasFineLocationPermission(context: Context): Boolean =
         ContextCompat.checkSelfPermission(
             context,
@@ -932,6 +950,23 @@ object LocationServiceController {
     suspend fun setTrackingEnabled(context: Context, enabled: Boolean) {
         DataStoreUtils.getInstance(context).setBoolean(TRACKING_ENABLED_KEY, enabled)
         syncServiceState(context)
+    }
+
+    /** Whether outbound sharing is on. Defaults to true (opt-out, not opt-in). */
+    suspend fun isGlobalSharingEnabled(context: Context): Boolean =
+        DataStoreUtils.getInstance(context).getBooleanAwait(GLOBAL_SHARING_ENABLED_KEY, true)
+
+    /** [isGlobalSharingEnabled] as a stream, for the UI to grey out the per-person switches. */
+    fun globalSharingEnabledFlow(context: Context): Flow<Boolean> =
+        DataStoreUtils.getInstance(context).booleanFlow(GLOBAL_SHARING_ENABLED_KEY, true)
+
+    /**
+     * Persist the outbound-sharing choice. The next heartbeat picks it up; the service
+     * itself is left alone, so this never stops receiving or tracker reporting.
+     */
+    suspend fun setGlobalSharingEnabled(context: Context, enabled: Boolean) {
+        DataStoreUtils.getInstance(context).setBoolean(GLOBAL_SHARING_ENABLED_KEY, enabled)
+        SharingTileService.requestRefresh(context)
     }
 
     /**

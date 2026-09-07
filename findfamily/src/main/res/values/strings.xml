@@ -298,11 +298,15 @@
 
     <!-- TrackingTileService: Quick Settings tile label. Short noun phrase -->
     <string name="tile_label">FindFamily tracking</string>
-    <!-- TrackingTileService: tile subtitle when tracking is on. Short status -->
+    <!-- Quick Settings tile subtitle when the tile is on. Short status -->
     <string name="tile_subtitle_on">On</string>
-    <!-- TrackingTileService: tile subtitle when tracking is off. Short status -->
+    <!-- Quick Settings tile subtitle when the tile is off. Short status -->
     <string name="tile_subtitle_off">Off</string>
     <!-- TrackingTileService: tile subtitle when location permission is missing. Short status -->
     <string name="tile_subtitle_no_permission">Tap to set up</string>
+    <!-- SharingTileService: Quick Settings tile label for the pause-sharing tile. Short noun phrase -->
+    <string name="sharing_tile_label">FindFamily sharing</string>
+    <!-- UserPage: Note under the disabled sharing switch when the Quick Settings sharing tile is off. Sentence -->
+    <string name="sharing_paused_note">Sharing is paused for everyone from the Quick Settings tile</string>
 
 </resources>

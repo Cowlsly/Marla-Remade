@@ -57,6 +57,8 @@ data class PersonUiState(
     val location: LocationValue? = null,
     /** Saved places, offered in the auto-toggle dropdown as "Arrival at <name>" triggers. */
     val waypoints: List<Waypoint> = emptyList(),
+    /** False while the Quick Settings sharing tile has sharing paused (GitHub #648). */
+    val sharingGloballyEnabled: Boolean = true,
 )
 
 /** Person-sheet callbacks. Same no-op-default arrangement as [FamilyListActions]. */

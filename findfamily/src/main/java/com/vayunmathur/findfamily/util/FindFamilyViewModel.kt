@@ -360,6 +360,12 @@ class FindFamilyViewModel(
         }
     }
 
+    /** False while the Quick Settings sharing tile has publishing paused (GitHub #648);
+     * the per-person switches are shown but disabled so their state is still visible. */
+    val globalSharingEnabled: StateFlow<Boolean> =
+        LocationServiceController.globalSharingEnabledFlow(ctx)
+            .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), true)
+
     /** Toggle per-person location sharing and reconcile the service so it stops
      * when nobody is being shared with and starts when sharing is (re)enabled.
      * Manual toggle always resets auto-toggle to Never.
