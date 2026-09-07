@@ -57,6 +57,7 @@ import com.vayunmathur.library.ui.CardDefaults
 import com.vayunmathur.library.ui.CircularProgressIndicator
 import com.vayunmathur.library.ui.DailyReminderSettingsSection
 import com.vayunmathur.library.ui.DetailScaffold
+import com.vayunmathur.library.ui.DynamicTheme
 import com.vayunmathur.library.ui.ExperimentalMaterial3Api
 import com.vayunmathur.library.ui.GameCenterScreen
 import com.vayunmathur.library.ui.IconCheck
@@ -126,7 +127,12 @@ fun Navigation(viewModel: UnblockJamViewModel) {
                 )
             }
             entry<Route.Settings> {
-                SettingsPage(viewModel, onBack = { backStack.pop() })
+                // The board palette maps colorScheme.primary to the board surface, so it is a
+                // near-match for the background and unreadable as the accent shared settings rows
+                // paint their section headings with.
+                DynamicTheme {
+                    SettingsPage(viewModel, onBack = { backStack.pop() })
+                }
             }
         }
 
