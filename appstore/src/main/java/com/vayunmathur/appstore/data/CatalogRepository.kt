@@ -1,6 +1,7 @@
 package com.vayunmathur.appstore.data
 
 import android.content.Context
+import com.vayunmathur.appstore.domain.SearchRanking
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.SharingStarted
@@ -104,9 +105,18 @@ class CatalogRepository(
 
     suspend fun searchLocal(query: String, limit: Int = 60): List<UnifiedApp> =
         withContext(Dispatchers.IO) {
-            if (query.isBlank()) return@withContext emptyList()
-            runCatching { db.cachedAppDao().searchAll(query, limit).map { it.toUnifiedApp() } }
-                .getOrDefault(emptyList())
+            val phrase = query.trim()
+            if (phrase.isBlank()) return@withContext emptyList()
+            // `LIKE '%chase mobile%'` only matches a row that holds both words together and
+            // in that order, which is why a two-word query used to come back empty even
+            // when each word was there. Ask per word as well, and let the ranking decide
+            // what the extra hits are worth (issue #595).
+            val queries = (listOf(phrase) + SearchRanking.tokenize(phrase)).distinct()
+            runCatching {
+                queries.flatMap { db.cachedAppDao().searchAll(it, limit) }
+                    .distinctBy { it.packageName }
+                    .map { it.toUnifiedApp() }
+            }.getOrDefault(emptyList())
         }
 
     suspend fun byPackage(packageName: String): UnifiedApp? = withContext(Dispatchers.IO) {

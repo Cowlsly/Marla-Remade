@@ -10,6 +10,8 @@ import com.aurora.gplayapi.data.models.AuthData
 import com.aurora.gplayapi.data.models.PlayFile
 import com.aurora.gplayapi.helpers.AuthHelper
 import com.vayunmathur.appstore.data.UnifiedApp
+import com.vayunmathur.appstore.data.searchCandidate
+import com.vayunmathur.appstore.domain.SearchRanking
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -166,8 +168,25 @@ class PlayRepository(private val context: Context) {
 
     // --- Convenience wrappers -----------------------------------------------------
 
-    suspend fun search(query: String): List<UnifiedApp> =
-        withApi { it.search(query) }.orEmpty()
+    /**
+     * Play's search: more pages while the answer is unsatisfying, then the first word.
+     *
+     * A phrase Play does not recognise comes back either as filler or as nothing at all —
+     * the reason "Google Maps" returned Facebook and Netflix and "chase mobile" returned
+     * nothing (issue #595). Neither is worth showing, so the search reads on, and failing
+     * that asks the broader question. [SearchRanking] decides what any of it is worth, and
+     * is also what decides whether an answer counts as one.
+     */
+    suspend fun search(query: String): List<UnifiedApp> {
+        val answered: (List<UnifiedApp>) -> Boolean = { results ->
+            results.any { SearchRanking.score(it.searchCandidate(), query) != null }
+        }
+        val direct = withApi { it.search(query, SEARCH_MAX_PAGES, answered) }.orEmpty()
+        val tokens = SearchRanking.tokenize(query)
+        if (tokens.size < 2 || answered(direct)) return direct
+        val broader = withApi { it.search(tokens.first(), SEARCH_MAX_PAGES, answered) }.orEmpty()
+        return (direct + broader).distinctBy { it.packageName }
+    }
 
     suspend fun details(packageName: String): UnifiedApp? =
         withApi { it.getDetails(packageName) }
@@ -234,5 +253,11 @@ class PlayRepository(private val context: Context) {
 
     private companion object {
         const val TAG = "PlayRepository"
+
+        /**
+         * How far into Play's search stream to read before giving up on a query. Only
+         * reached when the pages so far hold nothing that answers it.
+         */
+        const val SEARCH_MAX_PAGES = 3
     }
 }

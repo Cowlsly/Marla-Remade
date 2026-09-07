@@ -1,5 +1,7 @@
 package com.vayunmathur.appstore.data
 
+import com.vayunmathur.appstore.domain.SearchRanking
+
 enum class AppSource {
     /** This monorepo's own repository, signed with the same key as this app. */
     MODERN_APPS,
@@ -121,6 +123,15 @@ data class UnifiedApp(
     /** The single best image to head the detail page with. */
     val heroImage: String? get() = featureGraphic ?: screenshots.firstOrNull()
 }
+
+/** The fields [SearchRanking] looks at, for a listing from any source. */
+fun UnifiedApp.searchCandidate(): SearchRanking.Candidate = SearchRanking.Candidate(
+    name = name,
+    packageName = packageName,
+    author = author.orEmpty(),
+    summary = summary,
+    popularity = installs,
+)
 
 data class InstalledInfo(
     val packageName: String,

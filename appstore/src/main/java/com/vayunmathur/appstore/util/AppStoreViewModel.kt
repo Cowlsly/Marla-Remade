@@ -28,8 +28,10 @@ import com.vayunmathur.appstore.data.installer.InstallStage
 import com.vayunmathur.appstore.data.play.PlayAuthState
 import com.vayunmathur.appstore.data.play.PlayRepository
 import com.vayunmathur.appstore.data.priority
+import com.vayunmathur.appstore.data.searchCandidate
 import com.vayunmathur.appstore.data.security.ApkCertificates
 import com.vayunmathur.appstore.data.security.VerificationResult
+import com.vayunmathur.appstore.domain.SearchRanking
 import com.vayunmathur.library.util.AppMessages
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
@@ -679,21 +681,9 @@ class AppStoreViewModel(
             .distinctBy { it.packageName }
             .toList()
 
-    /** Exact hits first, then name prefixes, then everything else alphabetically. */
-    private fun rank(apps: List<UnifiedApp>, query: String): List<UnifiedApp> {
-        val q = query.trim().lowercase()
-        fun score(app: UnifiedApp): Int {
-            val name = app.name.lowercase()
-            return when {
-                name == q || app.packageName.lowercase() == q -> 0
-                name.startsWith(q) -> 1
-                name.split(' ').any { it.startsWith(q) } -> 2
-                name.contains(q) -> 3
-                else -> 4
-            }
-        }
-        return apps.sortedWith(compareBy({ score(it) }, { it.name.lowercase() }))
-    }
+    /** See [SearchRanking]: exact and prefix hits first, and nothing that answers no word. */
+    private fun rank(apps: List<UnifiedApp>, query: String): List<UnifiedApp> =
+        SearchRanking.rank(apps, query) { it.searchCandidate() }
 
     // --- Detail -----------------------------------------------------------------------
 

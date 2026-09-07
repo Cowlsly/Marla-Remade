@@ -61,13 +61,38 @@ class PlayStoreApi(
         }
     }
 
-    suspend fun search(query: String): List<UnifiedApp> = withContext(Dispatchers.IO) {
+    /**
+     * Play's search, following pages only while the answer is unsatisfying.
+     *
+     * The first page is often editorial filler — searching "Google Maps" and getting
+     * Facebook, Messenger, Netflix and Snapchat is issue #595 — with the genuine hits on
+     * the page behind it. [answered] decides when to stop, so a query that is answered
+     * straight away still costs exactly one request and the extra round trips are spent
+     * only where the alternative was showing the user nothing they asked for.
+     */
+    suspend fun search(
+        query: String,
+        maxPages: Int,
+        answered: (List<UnifiedApp>) -> Boolean,
+    ): List<UnifiedApp> = withContext(Dispatchers.IO) {
         try {
-            val bundle = SearchHelper(authData).using(httpClient).searchResults(query)
-            bundle.streamClusters.values
-                .flatMap { it.clusterAppList }
-                .map { it.toUnifiedApp() }
-                .distinctBy { it.packageName }
+            val helper = SearchHelper(authData).using(httpClient)
+            val found = LinkedHashMap<String, UnifiedApp>()
+            var bundle = helper.searchResults(query)
+            var page = 1
+            while (true) {
+                bundle.streamClusters.values
+                    .flatMap { it.clusterAppList }
+                    .forEach { app ->
+                        val unified = app.toUnifiedApp()
+                        found.putIfAbsent(unified.packageName, unified)
+                    }
+                if (answered(found.values.toList())) break
+                if (page >= maxPages || !bundle.hasNext()) break
+                bundle = helper.nextStreamBundle(query, bundle.streamNextPageUrl)
+                page++
+            }
+            found.values.toList()
         } catch (_: Exception) {
             emptyList()
         }
