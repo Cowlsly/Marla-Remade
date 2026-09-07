@@ -24,6 +24,7 @@ fun WordGamePage(
     val foundWords by viewModel.foundWords.collectAsState()
     val bonusWords by viewModel.bonusWords.collectAsState()
     val tapToSpell by viewModel.tapToSpell.collectAsState()
+    val wheelSpacing by viewModel.wheelSpacing.collectAsState()
     val revealedHints by viewModel.revealedHints.collectAsState()
     val hintCooldownEnd by viewModel.hintCooldownEnd.collectAsState()
     val gameMode by viewModel.gameMode.collectAsState()
@@ -87,6 +88,7 @@ fun WordGamePage(
             foundWords = foundWords,
             bonusWords = bonusWords,
             tapToSpell = tapToSpell,
+            wheelSpacing = wheelSpacing,
             revealedHints = revealedHints,
             hintCooldownEnd = hintCooldownEnd,
             gameMode = gameMode,

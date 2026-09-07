@@ -13,6 +13,16 @@
     <string name="tap_to_spell">Tap to Spell</string>
     <!-- SettingsPage: Subtitle explaining tap-to-spell behavior. Sentence -->
     <string name="tap_to_spell_description">Tap letters to build words instead of dragging</string>
+    <!-- SettingsPage: Label for the row choosing how far apart the letters sit on the wheel. Noun phrase -->
+    <string name="wheel_spacing">Letter Wheel Spacing</string>
+    <!-- SettingsPage: Letter wheel spacing option, the standard spacing. Adjective -->
+    <string name="wheel_spacing_default">Default</string>
+    <!-- SettingsPage: Letter wheel spacing option, letters further apart than default. Adjective -->
+    <string name="wheel_spacing_wide">Wide</string>
+    <!-- SettingsPage: Letter wheel spacing option, one step wider than Wide. Comparative adjective -->
+    <string name="wheel_spacing_wider">Wider</string>
+    <!-- SettingsPage: Letter wheel spacing option, the widest available. Superlative adjective -->
+    <string name="wheel_spacing_widest">Widest</string>
     <!-- Hint confirmation dialog: Title asking confirm before using hint (consumes cooldown). Question sentence -->
     <string name="hint_confirmation">Are you sure you want to use a hint?</string>
     <!-- Hint confirmation dialog: Confirm button. Yes -->

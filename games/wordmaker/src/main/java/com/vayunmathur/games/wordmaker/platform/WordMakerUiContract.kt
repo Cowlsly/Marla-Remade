@@ -3,6 +3,7 @@ package com.vayunmathur.games.wordmaker.platform
 import com.vayunmathur.games.wordmaker.data.CrosswordData
 import com.vayunmathur.games.wordmaker.data.Difficulty
 import com.vayunmathur.games.wordmaker.data.GameMode
+import com.vayunmathur.games.wordmaker.data.WheelSpacing
 
 /**
  * The UI contract between [WordMakerViewModel] and the screens.
@@ -20,6 +21,7 @@ data class WordGameUiState(
     val foundWords: Set<String> = emptySet(),
     val bonusWords: Set<String> = emptySet(),
     val tapToSpell: Boolean = false,
+    val wheelSpacing: WheelSpacing = WheelSpacing.DEFAULT,
     val revealedHints: Set<Pair<Int, Int>> = emptySet(),
     /** Epoch millis until which the hint button stays disabled; 0 means available now. */
     val hintCooldownEnd: Long = 0L,
@@ -83,6 +85,7 @@ interface CompetitiveLobbyActions {
 /** What the settings screen draws. */
 data class SettingsUiState(
     val tapToSpell: Boolean = false,
+    val wheelSpacing: WheelSpacing = WheelSpacing.DEFAULT,
     val reminderEnabled: Boolean = false,
     val reminderHour: Int = 20,
     val reminderMinute: Int = 0,
@@ -91,6 +94,7 @@ data class SettingsUiState(
 /** Settings callbacks. Same no-op-default arrangement as [WordGameActions]. */
 interface SettingsActions {
     fun setTapToSpell(enabled: Boolean) {}
+    fun setWheelSpacing(spacing: WheelSpacing) {}
     fun setReminderEnabled(enabled: Boolean) {}
     fun setReminderTime(hour: Int, minute: Int) {}
 

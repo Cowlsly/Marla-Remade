@@ -44,6 +44,7 @@ import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.vayunmathur.games.wordmaker.R
+import com.vayunmathur.games.wordmaker.data.WheelSpacing
 import com.vayunmathur.games.wordmaker.ui.ChooserLetter
 import com.vayunmathur.library.ui.animatedDp
 import kotlinx.coroutines.CoroutineScope
@@ -57,6 +58,7 @@ import kotlin.math.sin
 fun LetterChooser(
     letters: List<ChooserLetter>,
     tapToSpell: Boolean,
+    wheelSpacing: WheelSpacing,
     onShuffle: () -> Unit,
     onWordSubmitted: suspend CoroutineScope.(String, List<Int>) -> Unit,
     onWordBoxPositioned: (Offset) -> Unit,
@@ -78,11 +80,12 @@ fun LetterChooser(
 
     val density = LocalDensity.current
     val letterCircleRadius = with(density) { 35.dp.toPx() }
-    val boxSizePx = with(density) { 250.dp.toPx() }
+    val boxSize = wheelSpacing.boxSize
+    val boxSizePx = with(density) { boxSize.toPx() }
     val boxCenter = Offset(boxSizePx / 2, boxSizePx / 2)
 
     val angleStep = 2 * Math.PI / letters.size.toDouble()
-    val radius = 85.dp
+    val radius = wheelSpacing.ringRadius
     val radiusPx = with(density) { radius.toPx() }
     val letterCenters = remember(letters, boxCenter, radiusPx) {
         List(letters.size) { index ->
@@ -158,11 +161,16 @@ fun LetterChooser(
             }
             Box(
                 modifier = Modifier
-                    .size(250.dp)
+                    .size(boxSize)
                     .onGloballyPositioned {
                         dragStartOffset = it.localToRoot(Offset.Zero)
                     }
-                    .pointerInput(letters) {
+                    // Keyed on the spacing as well as the letters: the gesture coroutine keeps
+                    // the closures from the composition that started it, and getLetterAtArc /
+                    // getLetterAtCircle capture boxCenter, radiusPx and letterCenters. Without
+                    // the extra key, changing the spacing mid-puzzle redraws the wheel at the
+                    // new radius but keeps hit-testing against the old one.
+                    .pointerInput(letters, wheelSpacing) {
                         detectDragGestures(
                             onDragStart = { startOffset ->
                                 currentDragPosition = startOffset

@@ -24,6 +24,7 @@ class LevelDataStore(context: Context) {
         private val BONUS_WORDS_KEY = stringSetPreferencesKey("bonus_words")
         private val TOTAL_BONUS_WORDS_KEY = intPreferencesKey("total_bonus_words")
         private val TAP_TO_SPELL_KEY = booleanPreferencesKey("tap_to_spell")
+        private val WHEEL_SPACING_KEY = stringPreferencesKey("wheel_spacing")
         private val REVEALED_HINTS_KEY = stringSetPreferencesKey("revealed_hints")
         private val GAME_MODE_KEY = stringPreferencesKey("game_mode")
         private val DIFFICULTY_KEY = stringPreferencesKey("competitive_difficulty")
@@ -51,6 +52,11 @@ class LevelDataStore(context: Context) {
     val totalBonusWords: Flow<Int> = appContext.dataStore.data.map { it[TOTAL_BONUS_WORDS_KEY] ?: 0 }
 
     val tapToSpell: Flow<Boolean> = appContext.dataStore.data.map { it[TAP_TO_SPELL_KEY] ?: false }
+
+    val wheelSpacing: Flow<WheelSpacing> = appContext.dataStore.data.map { prefs ->
+        prefs[WHEEL_SPACING_KEY]?.let { runCatching { WheelSpacing.valueOf(it) }.getOrNull() }
+            ?: WheelSpacing.DEFAULT
+    }
 
     val gameMode: Flow<GameMode> = appContext.dataStore.data.map { prefs ->
         prefs[GAME_MODE_KEY]?.let { runCatching { GameMode.valueOf(it) }.getOrNull() } ?: GameMode.CASUAL
@@ -115,6 +121,10 @@ class LevelDataStore(context: Context) {
 
     suspend fun setTapToSpell(enabled: Boolean) {
         appContext.dataStore.edit { it[TAP_TO_SPELL_KEY] = enabled }
+    }
+
+    suspend fun setWheelSpacing(spacing: WheelSpacing) {
+        appContext.dataStore.edit { it[WHEEL_SPACING_KEY] = spacing.name }
     }
 
     suspend fun setGameMode(mode: GameMode) {

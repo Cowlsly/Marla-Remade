@@ -9,6 +9,7 @@ import com.vayunmathur.games.wordmaker.data.CrosswordData
 import com.vayunmathur.games.wordmaker.data.Difficulty
 import com.vayunmathur.games.wordmaker.data.GameMode
 import com.vayunmathur.games.wordmaker.data.LevelDataStore
+import com.vayunmathur.games.wordmaker.data.WheelSpacing
 import com.vayunmathur.games.wordmaker.domain.CompetitiveLevelGenerator
 import com.vayunmathur.games.wordmaker.domain.Dictionary
 import com.vayunmathur.library.util.DailyChallengeStore
@@ -52,6 +53,9 @@ class WordMakerViewModel(application: Application) : AndroidViewModel(applicatio
 
     val tapToSpell: StateFlow<Boolean> = levelDataStore.tapToSpell
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), false)
+
+    val wheelSpacing: StateFlow<WheelSpacing> = levelDataStore.wheelSpacing
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), WheelSpacing.DEFAULT)
 
     private val reminderSettings = DailyReminderSettings(application, DAILY_KEY_PREFIX)
 
@@ -351,6 +355,10 @@ class WordMakerViewModel(application: Application) : AndroidViewModel(applicatio
 
     fun setTapToSpell(enabled: Boolean) {
         viewModelScope.launch { levelDataStore.setTapToSpell(enabled) }
+    }
+
+    fun setWheelSpacing(spacing: WheelSpacing) {
+        viewModelScope.launch { levelDataStore.setWheelSpacing(spacing) }
     }
 
     fun setReminderEnabled(enabled: Boolean) {

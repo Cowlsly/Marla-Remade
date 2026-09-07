@@ -82,6 +82,9 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.joinAll
 import kotlinx.coroutines.launch
 
+/** Room above the wheel for the formed-word box and its padding. */
+private val WHEEL_HEADROOM = 70.dp
+
 @Composable
 fun WordGameScreen(
     state: WordGameUiState,
@@ -94,6 +97,7 @@ fun WordGameScreen(
     val foundWords = state.foundWords
     val bonusWords = state.bonusWords
     val tapToSpell = state.tapToSpell
+    val wheelSpacing = state.wheelSpacing
     val revealedHints = state.revealedHints
     val hintCooldownEnd = state.hintCooldownEnd
     val gameMode = state.gameMode
@@ -234,11 +238,12 @@ fun WordGameScreen(
                 }
         ) {
             // Puzzle board occupies the space above the letter wheel so it stays
-            // vertically centred there. The wheel below is 320.dp tall.
+            // vertically centred there. The wheel below reserves its own height.
+            val wheelHeight = wheelSpacing.boxSize + WHEEL_HEADROOM
             Box(
                 modifier = Modifier
                     .fillMaxSize()
-                    .padding(bottom = 320.dp),
+                    .padding(bottom = wheelHeight),
                 contentAlignment = Alignment.Center
             ) {
                 CrosswordBoard(
@@ -276,7 +281,7 @@ fun WordGameScreen(
                 }
                 Spacer(modifier = Modifier.weight(1f))
                 Box(
-                    modifier = Modifier.height(320.dp),
+                    modifier = Modifier.height(wheelHeight),
                     contentAlignment = Alignment.Center
                 ) {
                     if (isWon && isDaily) {
@@ -294,6 +299,7 @@ fun WordGameScreen(
                         LetterChooser(
                             letters = shuffledLetters,
                             tapToSpell = tapToSpell,
+                            wheelSpacing = wheelSpacing,
                             onShuffle = {
                                 var nextLetters = shuffledLetters.shuffled()
                                 while (nextLetters == shuffledLetters && shuffledLetters.size > 1) {
