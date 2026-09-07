@@ -66,6 +66,9 @@ class AppStoreViewModel(
     /** Off-by-default: the periodic check may also download and install updates unattended. */
     val autoInstallUpdates: StateFlow<Boolean> = settings.autoInstallUpdates
 
+    /** The sources the user has left switched on. See [AppSource.TOGGLEABLE]. */
+    val enabledSources: StateFlow<Set<AppSource>> = settings.enabledSources
+
     /** SHA-256 of this app's own signing certificate — the Modern Apps trust root. */
     val ownSigningCertificates: Set<String> by lazy { ApkCertificates.selfSigners(context) }
 
@@ -314,12 +317,16 @@ class AppStoreViewModel(
 
     init {
         viewModelScope.launch {
+            // The persisted choice rather than the flow's optimistic default: a source the
+            // user switched off must not be contacted once on every cold start while the
+            // stored value is still on its way.
+            val enabled = settings.readEnabledSources()
             installedRepo.refresh()
-            play.restore()
-            loadHome()
-            refreshPlayInstalledPackages()
+            if (AppSource.PLAYSTORE in enabled) play.restore()
+            loadHome(enabled)
+            refreshPlayInstalledPackages(enabled)
         }
-        viewModelScope.launch { loadAccrescent() }
+        viewModelScope.launch { loadAccrescent(settings.readEnabledSources()) }
         viewModelScope.launch {
             // Recompute catalogue-side updates whenever either half changes. The Play
             // half needs a network call and is driven by checkForUpdates() instead.
@@ -361,7 +368,13 @@ class AppStoreViewModel(
      * account, no network) leaves the previous answer in place rather than emptying the
      * library, so a transient failure can't hide apps Play was known to host.
      */
-    private suspend fun refreshPlayInstalledPackages() {
+    private suspend fun refreshPlayInstalledPackages(
+        enabled: Set<AppSource> = enabledSources.value,
+    ) {
+        if (AppSource.PLAYSTORE !in enabled) {
+            _playInstalledPackages.value = emptySet()
+            return
+        }
         val index = catalog.packageIndex.value
         val candidates = installedRepo.apps.value
             .map { it.packageName }
@@ -378,7 +391,8 @@ class AppStoreViewModel(
      * Refresh Accrescent's signed allowlist and its home listings. Both fail soft: a network
      * blip leaves the previous rows and attribution set in place rather than emptying them.
      */
-    private suspend fun loadAccrescent() {
+    private suspend fun loadAccrescent(enabled: Set<AppSource> = enabledSources.value) {
+        if (AppSource.ACCRESCENT !in enabled) return
         accrescent.refreshRepoData()
         val ids = accrescent.appIds()
         if (ids.isNotEmpty()) _accrescentPackages.value = ids
@@ -413,7 +427,7 @@ class AppStoreViewModel(
      * anonymous account. Those failing is normal — no network, no account — and leaves the
      * offline rows exactly as they were rather than emptying the screen.
      */
-    private suspend fun loadHome() {
+    private suspend fun loadHome(enabled: Set<AppSource> = enabledSources.value) {
         _isLoadingHome.value = true
         _recentlyUpdated.value = catalog.recentlyUpdated(RECENT_LIMIT)
 
@@ -428,6 +442,11 @@ class AppStoreViewModel(
                     byPackage[row.packageName]?.toUnifiedApp() ?: row
                 }
             }
+        }
+
+        if (AppSource.PLAYSTORE !in enabled) {
+            _isLoadingHome.value = false
+            return
         }
 
         val clusters = play.homeClusters()
@@ -532,8 +551,9 @@ class AppStoreViewModel(
     fun syncSources() {
         if (_isSyncing.value) return
         viewModelScope.launch {
+            val enabled = enabledSources.value
             _isSyncing.value = true
-            val report = catalog.sync { step ->
+            val report = catalog.sync(enabled) { step ->
                 _statusMessage.value = context.getString(
                     when (step) {
                         SyncStep.FDROID -> R.string.sync_step_fdroid
@@ -546,6 +566,7 @@ class AppStoreViewModel(
 
             AppMessages.show(
                 when {
+                    report.allSkipped -> context.getString(R.string.sync_all_sources_off)
                     !report.anyFailed -> context.getString(
                         R.string.sync_done,
                         (report.fdroidCount ?: 0) + (report.modernCount ?: 0),
@@ -558,9 +579,52 @@ class AppStoreViewModel(
             )
 
             _categories.value = catalog.categories()
-            loadHome()
-            loadAccrescent()
+            loadHome(enabled)
+            loadAccrescent(enabled)
             installedRepo.refresh()
+        }
+    }
+
+    /**
+     * Turn a source on or off, and make the rest of the store agree immediately.
+     *
+     * Disabling drops the source's cached rows and whatever it had already contributed to the
+     * screens, rather than waiting for the next sync: the point of the switch is that the store
+     * stops offering that source's apps, and leaving them on screen until something else
+     * happens to refresh would read as the switch not working.
+     */
+    fun setSourceEnabled(source: AppSource, enabled: Boolean) {
+        viewModelScope.launch {
+            settings.setSourceEnabled(source, enabled)
+            // Computed here rather than re-read from the flow: the DataStore write has to make
+            // a round trip before enabledSources reflects it, and everything below needs the
+            // choice the user just made.
+            val next =
+                if (enabled) enabledSources.value + source else enabledSources.value - source
+            catalog.purgeDisabled(next)
+            if (!enabled) forgetSource(source)
+            _categories.value = catalog.categories()
+            loadHome(next)
+            loadAccrescent(next)
+        }
+    }
+
+    /** Drop what a source had already contributed to the screens. */
+    private fun forgetSource(source: AppSource) {
+        when (source) {
+            AppSource.PLAYSTORE -> {
+                _playSections.value = emptyList()
+                _playUpdates.value = emptyList()
+                _playInstalledPackages.value = emptySet()
+            }
+            AppSource.ACCRESCENT -> {
+                _accrescentApps.value = emptyList()
+                _accrescentPackages.value = emptySet()
+                _accrescentUpdates.value = emptyList()
+            }
+            // The offline sources have no in-memory rows of their own: browse, search and the
+            // update check all read the Room cache that purgeDisabled just emptied.
+            else -> Unit
         }
     }
 
@@ -578,6 +642,7 @@ class AppStoreViewModel(
         searchJob = viewModelScope.launch {
             delay(SEARCH_DEBOUNCE_MS)
             _isSearching.value = true
+            val enabled = enabledSources.value
 
             // Local first and published immediately: the F-Droid catalogue is on disk, so
             // there is no reason to make the user wait on Play before seeing anything.
@@ -586,8 +651,9 @@ class AppStoreViewModel(
 
             // Accrescent search is client-side over the listings already cached from the home
             // carousel (its API has no search RPC), so it adds no network round-trip here.
-            val accrescentResults = accrescent.search(query)
-            val remote = play.search(query)
+            val accrescentResults =
+                if (AppSource.ACCRESCENT in enabled) accrescent.search(query) else emptyList()
+            val remote = if (AppSource.PLAYSTORE in enabled) play.search(query) else emptyList()
             _searchResults.value = rank(merge(local, remote, accrescentResults), query)
             _isSearching.value = false
             _hasSearched.value = true
@@ -665,7 +731,9 @@ class AppStoreViewModel(
             }
             // Play listings from a cluster are shells: no description, no
             // screenshots, no version code. Fill them in before the page settles.
-            if (app.source == AppSource.PLAYSTORE && app.screenshots.isEmpty()) {
+            if (app.source == AppSource.PLAYSTORE && app.screenshots.isEmpty() &&
+                AppSource.PLAYSTORE in enabledSources.value
+            ) {
                 _isLoadingDetails.value = true
                 val details = play.details(app.packageName)
                 if (details != null) _selectedApp.value = details
@@ -692,8 +760,10 @@ class AppStoreViewModel(
                 source = AppSource.PLAYSTORE,
                 name = packageName.substringAfterLast('.'),
             )
-            val details = play.details(packageName)
-            if (details != null) _selectedApp.value = details
+            if (AppSource.PLAYSTORE in enabledSources.value) {
+                val details = play.details(packageName)
+                if (details != null) _selectedApp.value = details
+            }
             _isLoadingDetails.value = false
         }
     }
@@ -801,6 +871,7 @@ class AppStoreViewModel(
     override fun checkForUpdates() {
         if (_isCheckingUpdates.value) return
         viewModelScope.launch {
+            val enabled = enabledSources.value
             _isCheckingUpdates.value = true
             _statusMessage.value = context.getString(R.string.updates_checking)
 
@@ -814,29 +885,33 @@ class AppStoreViewModel(
             // updates come from its signed index below instead.
             val index = catalog.packageIndex.value
             val installed = installedRepo.updatable.value
-            val playCandidates = installed
-                .filter {
-                    it.packageName !in index &&
-                        it.packageName !in SandboxedGooglePlay.PACKAGES
-                }
-                .map { it.packageName }
+            if (AppSource.PLAYSTORE in enabled) {
+                val playCandidates = installed
+                    .filter {
+                        it.packageName !in index &&
+                            it.packageName !in SandboxedGooglePlay.PACKAGES
+                    }
+                    .map { it.packageName }
 
-            val remote = play.details(playCandidates).associateBy { it.packageName }
-            _playUpdates.value = installed.mapNotNull { inst ->
-                remote[inst.packageName]?.takeIf { it.versionCode > inst.versionCode }
+                val remote = play.details(playCandidates).associateBy { it.packageName }
+                _playUpdates.value = installed.mapNotNull { inst ->
+                    remote[inst.packageName]?.takeIf { it.versionCode > inst.versionCode }
+                }
+                // The same response tells us which of these packages Play actually hosts, which
+                // the library uses to tell a genuine Play app from a sideloaded one.
+                if (remote.isNotEmpty()) _playInstalledPackages.value = remote.keys.toSet()
             }
-            // The same response tells us which of these packages Play actually hosts, which
-            // the library uses to tell a genuine Play app from a sideloaded one.
-            if (remote.isNotEmpty()) _playInstalledPackages.value = remote.keys.toSet()
 
             // Accrescent: refresh the signed allowlist, then ask its API for a newer build of
             // each installed package it vouches for.
-            accrescent.refreshRepoData()
-            val accrescentIds = accrescent.appIds()
-            if (accrescentIds.isNotEmpty()) _accrescentPackages.value = accrescentIds
-            _accrescentUpdates.value = installed
-                .filter { it.packageName in accrescentIds }
-                .mapNotNull { inst -> accrescentUpdate(inst.packageName, inst.versionCode) }
+            if (AppSource.ACCRESCENT in enabled) {
+                accrescent.refreshRepoData()
+                val accrescentIds = accrescent.appIds()
+                if (accrescentIds.isNotEmpty()) _accrescentPackages.value = accrescentIds
+                _accrescentUpdates.value = installed
+                    .filter { it.packageName in accrescentIds }
+                    .mapNotNull { inst -> accrescentUpdate(inst.packageName, inst.versionCode) }
+            }
 
             // GrapheneOS: its signed index is the only place a Sandboxed Google Play update
             // can come from, which is why the three are held back from the Play list above.

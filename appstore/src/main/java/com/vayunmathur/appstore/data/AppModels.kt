@@ -39,6 +39,16 @@ enum class AppSource {
          */
         val PRIORITY: List<AppSource> =
             listOf(GRAPHENEOS, MODERN_APPS, FDROID, ACCRESCENT, PLAYSTORE)
+
+        /**
+         * Sources the user may switch off, in the order the sources screen lists them.
+         *
+         * [GRAPHENEOS] is absent on purpose. It carries nothing but the Sandboxed Google Play
+         * components, which only exist on a device whose OS already ships the gmscompat layer
+         * they belong to, and which must never be updated from anywhere else — so a switch
+         * would either do nothing or strand three system packages on a stale build.
+         */
+        val TOGGLEABLE: List<AppSource> = listOf(MODERN_APPS, FDROID, PLAYSTORE, ACCRESCENT)
     }
 }
 
@@ -140,6 +150,8 @@ data class RepoDescriptor(
  * pipeline *and* the mirror operator in its trusted set, with no published source to
  * check the binary against. The f-droid.org archive is excluded for a different reason:
  * it exists to serve superseded versions, which is the opposite of what we want.
+ *
+ * Either of these can be switched off (see [AppSource.TOGGLEABLE]); neither can be replaced.
  */
 object DefaultRepos {
     val FDROID = RepoDescriptor(

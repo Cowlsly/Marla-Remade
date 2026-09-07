@@ -18,8 +18,16 @@ data class SyncReport(
     /** How many F-Droid apps carry the reproducible badge this sync. */
     val fdroidReproducible: Int = 0,
     val modernCount: Int? = null,
+    /** Sources the user has switched off, which this run skipped rather than attempted. */
+    val skipped: Set<AppSource> = emptySet(),
 ) {
-    val anyFailed: Boolean get() = fdroidCount == null || modernCount == null
+    val anyFailed: Boolean
+        get() = (AppSource.FDROID !in skipped && fdroidCount == null) ||
+            (AppSource.MODERN_APPS !in skipped && modernCount == null)
+
+    /** True when every offline source is switched off, so there was nothing to sync. */
+    val allSkipped: Boolean
+        get() = DefaultRepos.ALL.all { it.source in skipped }
 }
 
 /**
@@ -134,21 +142,52 @@ class CatalogRepository(
      *
      * Each source is independent: one failing leaves the other's rows updated and its own
      * previous rows untouched, rather than aborting the whole run.
+     *
+     * A source missing from [enabled] is skipped and its cached rows dropped, so nothing it
+     * published is still offered by browse, search or the update check.
      */
-    suspend fun sync(onProgress: (SyncStep) -> Unit = {}): SyncReport = withContext(Dispatchers.IO) {
+    suspend fun sync(
+        enabled: Set<AppSource>,
+        onProgress: (SyncStep) -> Unit = {},
+    ): SyncReport = withContext(Dispatchers.IO) {
         ensureDefaultRepos()
+        purgeDisabled(enabled)
 
-        onProgress(SyncStep.FDROID)
-        val fdroid = runCatching { fdroidProvider.syncIntoDb() }.getOrNull()
+        val fdroid = if (DefaultRepos.FDROID.source in enabled) {
+            onProgress(SyncStep.FDROID)
+            runCatching { fdroidProvider.syncIntoDb() }.getOrNull()
+        } else {
+            null
+        }
 
-        onProgress(SyncStep.MODERN_APPS)
-        val modern = runCatching { modernProvider.syncIntoDb() }.getOrNull()
+        val modern = if (DefaultRepos.MODERN_APPS.source in enabled) {
+            onProgress(SyncStep.MODERN_APPS)
+            runCatching { modernProvider.syncIntoDb() }.getOrNull()
+        } else {
+            null
+        }
 
         SyncReport(
             fdroidCount = fdroid,
             fdroidReproducible = fdroidProvider.lastReproducibleCount,
             modernCount = modern,
+            skipped = DefaultRepos.ALL.mapNotNullTo(mutableSetOf()) {
+                it.source.takeIf { source -> source !in enabled }
+            },
         )
+    }
+
+    /**
+     * Drop the cached rows of every offline source not in [enabled].
+     *
+     * The [RepoEntity] itself stays, so the sources screen can still show what the repo is
+     * pinned to and when it last synced — turning a source off is not the same as forgetting
+     * it, and re-enabling it should not have to re-derive the pin.
+     */
+    suspend fun purgeDisabled(enabled: Set<AppSource>) = withContext(Dispatchers.IO) {
+        DefaultRepos.ALL.filterNot { it.source in enabled }.forEach {
+            db.cachedAppDao().deleteByRepo(it.url)
+        }
     }
 
     /** Seed the fixed repository set and prune rows left by older configurations. */

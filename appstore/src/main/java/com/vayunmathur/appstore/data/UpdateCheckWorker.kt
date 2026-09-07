@@ -67,10 +67,12 @@ class UpdateCheckWorker(
         val play = PlayRepository(context)
         val accrescent = AccrescentRepository(context, db)
         val grapheneOS = GrapheneOSRepository(context)
+        val settings = SettingsRepository(context, scope)
+        val enabled = settings.readEnabledSources()
 
-        catalog.sync()
+        catalog.sync(enabled)
         installedRepo.refresh()
-        play.restore()
+        if (AppSource.PLAYSTORE in enabled) play.restore()
 
         val installed = installedRepo.updatable.value
         val fromCatalog = catalog.updatesFor(installed)
@@ -80,35 +82,43 @@ class UpdateCheckWorker(
         // here: only the builds GrapheneOS re-hosts are the ones this device can use. Their
         // updates come from GrapheneOS's own signed index instead, below.
         val index = catalog.packageIndex.value
-        val unknown = installed
-            .filter {
-                it.packageName !in index &&
-                    it.packageName !in SandboxedGooglePlay.PACKAGES
+        val fromPlay = if (AppSource.PLAYSTORE in enabled) {
+            val unknown = installed
+                .filter {
+                    it.packageName !in index &&
+                        it.packageName !in SandboxedGooglePlay.PACKAGES
+                }
+                .map { it.packageName }
+            val remote = play.details(unknown).associateBy { it.packageName }
+            installed.mapNotNull { inst ->
+                remote[inst.packageName]?.takeIf { it.versionCode > inst.versionCode }
             }
-            .map { it.packageName }
-        val remote = play.details(unknown).associateBy { it.packageName }
-        val fromPlay = installed.mapNotNull { inst ->
-            remote[inst.packageName]?.takeIf { it.versionCode > inst.versionCode }
+        } else {
+            emptyList()
         }
 
         // Accrescent: refresh its signed allowlist, then ask its API for a newer build of each
         // installed package it vouches for. Auto-install still routes through InstallCoordinator,
         // which re-verifies signer + min-version before committing.
-        accrescent.refreshRepoData()
-        val accrescentIds = accrescent.appIds()
-        val fromAccrescent = installed
-            .filter { it.packageName in accrescentIds }
-            .mapNotNull { inst ->
-                val update = runCatching {
-                    accrescent.updateInfo(inst.packageName, inst.versionCode)
-                }.getOrNull() ?: return@mapNotNull null
-                val details = accrescent.details(inst.packageName) ?: UnifiedApp(
-                    packageName = inst.packageName,
-                    source = AppSource.ACCRESCENT,
-                    name = inst.packageName.substringAfterLast('.'),
-                )
-                details.copy(versionCode = update.versionCode, versionName = update.versionName)
-            }
+        val fromAccrescent = if (AppSource.ACCRESCENT in enabled) {
+            accrescent.refreshRepoData()
+            val accrescentIds = accrescent.appIds()
+            installed
+                .filter { it.packageName in accrescentIds }
+                .mapNotNull { inst ->
+                    val update = runCatching {
+                        accrescent.updateInfo(inst.packageName, inst.versionCode)
+                    }.getOrNull() ?: return@mapNotNull null
+                    val details = accrescent.details(inst.packageName) ?: UnifiedApp(
+                        packageName = inst.packageName,
+                        source = AppSource.ACCRESCENT,
+                        name = inst.packageName.substringAfterLast('.'),
+                    )
+                    details.copy(versionCode = update.versionCode, versionName = update.versionName)
+                }
+        } else {
+            emptyList()
+        }
 
         // GrapheneOS: refresh its signed index and offer a newer build of each Sandboxed
         // Google Play component that is installed. Skipped on stock Android, where these
@@ -130,7 +140,6 @@ class UpdateCheckWorker(
             .sortedBy { it.source.priority }
             .distinctBy { it.packageName }
 
-        val settings = SettingsRepository(context, scope)
         val autoInstall = settings.readAutoInstallUpdates()
 
         if (autoInstall && updates.isNotEmpty()) {

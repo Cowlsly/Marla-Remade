@@ -5,6 +5,7 @@ import androidx.datastore.preferences.core.Preferences
 import androidx.datastore.preferences.core.booleanPreferencesKey
 import androidx.datastore.preferences.core.edit
 import androidx.datastore.preferences.core.emptyPreferences
+import androidx.datastore.preferences.core.stringSetPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -31,6 +32,7 @@ class SettingsRepository(
     scope: CoroutineScope,
 ) {
     private val _autoInstallUpdates = MutableStateFlow(DEFAULT_AUTO_INSTALL_UPDATES)
+    private val _enabledSources = MutableStateFlow(AppSource.entries.toSet())
 
     /**
      * Whether the periodic update check may also download and install updates on its own,
@@ -41,16 +43,37 @@ class SettingsRepository(
      */
     val autoInstallUpdates: StateFlow<Boolean> = _autoInstallUpdates.asStateFlow()
 
+    /**
+     * The sources the store may talk to. Everything not in [AppSource.TOGGLEABLE] is always in
+     * here.
+     *
+     * What is persisted is the *disabled* set, so a source added in a later version starts out
+     * on rather than silently off for everyone who already had the app.
+     */
+    val enabledSources: StateFlow<Set<AppSource>> = _enabledSources.asStateFlow()
+
     init {
         scope.launch {
             context.settingsDataStore.data
                 .catch { e -> if (e is IOException) emit(emptyPreferences()) else throw e }
-                .collect { prefs -> _autoInstallUpdates.value = prefs.autoInstallUpdates() }
+                .collect { prefs ->
+                    _autoInstallUpdates.value = prefs.autoInstallUpdates()
+                    _enabledSources.value = prefs.enabledSources()
+                }
         }
     }
 
     suspend fun setAutoInstallUpdates(enabled: Boolean) {
         context.settingsDataStore.edit { it[KEY_AUTO_INSTALL_UPDATES] = enabled }
+    }
+
+    suspend fun setSourceEnabled(source: AppSource, enabled: Boolean) {
+        if (source !in AppSource.TOGGLEABLE) return
+        context.settingsDataStore.edit { prefs ->
+            val disabled = prefs[KEY_DISABLED_SOURCES].orEmpty()
+            prefs[KEY_DISABLED_SOURCES] =
+                if (enabled) disabled - source.name else disabled + source.name
+        }
     }
 
     /**
@@ -60,6 +83,9 @@ class SettingsRepository(
      */
     suspend fun readAutoInstallUpdates(): Boolean = read().autoInstallUpdates()
 
+    /** One-shot read of [enabledSources], for the same cold-started callers. */
+    suspend fun readEnabledSources(): Set<AppSource> = read().enabledSources()
+
     private suspend fun read(): Preferences =
         context.settingsDataStore.data
             .catch { e -> if (e is IOException) emit(emptyPreferences()) else throw e }
@@ -68,9 +94,19 @@ class SettingsRepository(
     private fun Preferences.autoInstallUpdates(): Boolean =
         this[KEY_AUTO_INSTALL_UPDATES] ?: DEFAULT_AUTO_INSTALL_UPDATES
 
+    private fun Preferences.enabledSources(): Set<AppSource> {
+        // An unrecognised name is ignored rather than treated as a disabled source, so a
+        // downgrade cannot leave the store permanently unable to re-enable something.
+        val disabled = this[KEY_DISABLED_SOURCES].orEmpty()
+            .mapNotNullTo(mutableSetOf()) { runCatching { AppSource.valueOf(it) }.getOrNull() }
+        return AppSource.entries.toSet() - disabled
+    }
+
     companion object {
         const val DEFAULT_AUTO_INSTALL_UPDATES = false
         private val KEY_AUTO_INSTALL_UPDATES =
             booleanPreferencesKey("auto_install_updates")
+        private val KEY_DISABLED_SOURCES =
+            stringSetPreferencesKey("disabled_sources")
     }
 }

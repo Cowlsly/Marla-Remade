@@ -10,7 +10,10 @@
     <string name="this_will_uninstall_you_can_reinstall_la">%1$s will be removed. You can install it again any time.</string>
     <string name="last_sync">Last sync: %1$s</string>
     <string name="repositories">Sources</string>
-    <string name="sources_are_fixed">These three sources are built in and cannot be changed. Other F-Droid repos just hand out binaries someone else built, so there is nothing to check them against.</string>
+    <!-- Sources page, under the title. Explains that the list is fixed but each entry can be switched off. -->
+    <string name="sources_are_fixed">These sources are built in and no others can be added — other F-Droid repos just hand out binaries someone else built, so there is nothing to check them against. Switch off any you do not want the store to use.</string>
+    <!-- Sources page, warning shown when the user has switched every source off. -->
+    <string name="sources_all_disabled">Every source is switched off, so there is nothing to browse, search or update from.</string>
 
     <!-- Bottom navigation. -->
     <string name="nav_home">Home</string>
@@ -50,6 +53,8 @@
     <string name="sync_failed_all">Neither source would sync. Your existing catalogue is unchanged.</string>
     <string name="sync_failed_fdroid">F-Droid didn\'t sync. Its existing apps are unchanged.</string>
     <string name="sync_failed_modern_apps">Modern Apps didn\'t sync. Its existing apps are unchanged.</string>
+    <!-- Message after tapping Sync sources with every source switched off. -->
+    <string name="sync_all_sources_off">Nothing to sync — every source is switched off.</string>
     <string name="play_unavailable">Play Store results unavailable: %1$s</string>
 
     <!-- Search. -->
