@@ -52,7 +52,7 @@
     <string name="create_new_calendar">+ Crea nuovo calendario</string>
     <string name="default_layout">Layout predefinito</string>
     <string name="add_reminder">Aggiungi promemoria</string>
-    <string name="calendar_widget_description">Un riepilogo dei prossimi eventi — tocca per aprire il Calendario</string>
+    <string name="calendar_widget_description">Un riepilogo dei prossimi eventi - tocca per aprire Calendario</string>
     <string name="month_option_day_of_month">Il giorno <xliff:g id="day" example="15">%1$d</xliff:g> del mese</string>
     <string name="layout_agenda">Agenda</string>
     <string name="layout_day">Giorno</string>
@@ -74,4 +74,9 @@
     <string name="on_label">Il</string>
     <string name="month_option_nth_weekday">Il <xliff:g id="ordinal" example="secondo">%1$s</xliff:g> <xliff:g id="weekday" example="Lunedì">%2$s</xliff:g></string>
     <string name="theme">Tema</string>
+    <string name="layout_work_week_compact">Settimana lavorativa compatta</string>
+    <string name="layout_full_week_compact">Settimana intera compatta</string>
+    <string name="layout_short_work_week_compact">S5C</string>
+    <string name="layout_short_full_week_compact">S7C</string>
+    <string name="calendar_month_widget_description">Un riepilogo mensile in una griglia - tocca per aprire Calendario</string>
 </resources>
