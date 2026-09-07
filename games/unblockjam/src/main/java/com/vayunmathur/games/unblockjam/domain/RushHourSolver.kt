@@ -194,7 +194,7 @@ object RushHourSolver {
                 // Rush Hour board.
                 if (main.dimension.width <= main.dimension.height) return null
                 if (main.position.y != level.exit.y) return null
-                // Bit-packing bound. The shipped pack tops out at 14 blocks on a 6x6.
+                // Bit-packing bound. The shipped pack tops out at 15 blocks on a 6x6.
                 if (blocks.size > MAX_BLOCKS) return null
                 if (level.dimension.width > MAX_EXTENT || level.dimension.height > MAX_EXTENT) return null
 

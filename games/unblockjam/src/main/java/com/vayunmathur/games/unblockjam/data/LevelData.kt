@@ -31,8 +31,15 @@ data class LevelPack(
 ) {
     companion object {
         private val PACK_FILES = listOf(
-            "original_pack.json"
+            "original_pack.json",
+            "walls_1_pack.json",
+            "walls_2_pack.json",
+            "walls_3_pack.json"
         )
+
+        /** The wall packs share one combined completion achievement. */
+        val WALL_PACK_INDICES: List<Int> =
+            PACK_FILES.indices.filter { PACK_FILES[it].startsWith("walls_") }
 
         var PACKS: List<LevelPack> = listOf()
             private set

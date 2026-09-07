@@ -8,7 +8,6 @@ import com.vayunmathur.games.unblockjam.data.DailyLevelGenerator
 import com.vayunmathur.games.unblockjam.data.LevelData
 import com.vayunmathur.games.unblockjam.data.LevelPack
 import com.vayunmathur.library.util.LevelStats
-import com.vayunmathur.library.util.AchievementsManager
 import com.vayunmathur.library.util.DailyChallengeStore
 import com.vayunmathur.library.util.DailyStreakReporter
 import com.vayunmathur.library.work.DailyPuzzleReminder
@@ -46,7 +45,7 @@ data class UnblockJamUiState(
  *  - Current level data + move history + win state
  *  - Persistent level stats (best scores, total moves, undo count) via
  *    [CompletedLevelsRepository]
- *  - The [AchievementsManager] instance and existing-achievement check
+ *  - The [UnblockJamAchievementsManager] instance and existing-achievement check
  *
  * Composables keep only purely-visual state: the in-flight drag offsets,
  * dialog visibility, and the slide-out animation for the main block when
@@ -56,7 +55,7 @@ class UnblockJamViewModel(application: Application) : AndroidViewModel(applicati
 
     val repository: CompletedLevelsRepository = CompletedLevelsRepository(application)
 
-    val achievementsManager: AchievementsManager = run {
+    val achievementsManager: UnblockJamAchievementsManager = run {
         val json = application.assets.open("achievements.json")
             .bufferedReader().use { it.readText() }
         UnblockJamAchievementsManager(application, json, repository)
@@ -73,8 +72,8 @@ class UnblockJamViewModel(application: Application) : AndroidViewModel(applicati
 
     /**
      * Daily scores live in their own prefs file, pruned to the current day. They must not land in
-     * [repository], whose map size feeds the `level_50` and `all_levels_pack_0` achievements —
-     * five new level IDs a day would inflate both.
+     * [repository], whose map size feeds the `level_50` achievement — five new level IDs a day
+     * would inflate it.
      */
     private val dailyRepository = LevelStatsRepository(application, "daily_stats")
 
@@ -242,7 +241,6 @@ class UnblockJamViewModel(application: Application) : AndroidViewModel(applicati
             return
         }
 
-        val pack = LevelPack.PACKS[s.packIndex]
         viewModelScope.launch {
             withContext(Dispatchers.IO) {
                 repository.updateBestScore(level.id, moves)
@@ -255,9 +253,7 @@ class UnblockJamViewModel(application: Application) : AndroidViewModel(applicati
             if (moves <= level.optimalMoves) {
                 achievementsManager.onAchievementUnlocked("optimal_win")
             }
-            if (s.packIndex == 0 && refreshed.size >= pack.levels.size) {
-                achievementsManager.onAchievementUnlocked("all_levels_pack_0")
-            }
+            achievementsManager.onPackCompletionChanged(refreshed.keys)
         }
     }
 

@@ -11,6 +11,12 @@
     "targetProgress": 250
   },
   {
+    "id": "all_wall_packs",
+    "name": "Wallbreaker",
+    "description": "Complete every level in Walls I, Walls II and Walls III.",
+    "targetProgress": 300
+  },
+  {
     "id": "moves_1000",
     "name": "Smooth Mover",
     "description": "Make 1000 total block movements.",

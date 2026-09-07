@@ -2,6 +2,7 @@ package com.vayunmathur.games.unblockjam.platform
 
 import android.content.Context
 import com.vayunmathur.games.unblockjam.data.CompletedLevelsRepository
+import com.vayunmathur.games.unblockjam.data.LevelPack
 import com.vayunmathur.library.util.AchievementsManager
 import com.vayunmathur.library.util.DailyChallengeStore
 import kotlinx.coroutines.CoroutineScope
@@ -22,7 +23,7 @@ class UnblockJamAchievementsManager(
         onProgressUpdated("level_50", stats.size)
         onProgressUpdated("moves_1000", repository.getTotalMoves())
         onProgressUpdated("undo_master", repository.getUndoCount())
-        onProgressUpdated("all_levels_pack_0", stats.size)
+        onPackCompletionChanged(stats.keys)
 
         CoroutineScope(Dispatchers.IO).launch {
             val bestStreak = dailyStore.bestStreak()
@@ -32,4 +33,17 @@ class UnblockJamAchievementsManager(
             }
         }
     }
+
+    /** Re-derives the per-pack completion achievements from the set of solved level ids. */
+    fun onPackCompletionChanged(completed: Set<String>) {
+        onProgressUpdated("all_levels_pack_0", completedIn(completed, listOf(0)))
+        onProgressUpdated("all_wall_packs", completedIn(completed, LevelPack.WALL_PACK_INDICES))
+    }
+
+    // One stats map covers every shipped pack, so its raw size would let one pack's progress
+    // unlock another pack's achievement.
+    private fun completedIn(completed: Set<String>, packs: List<Int>): Int =
+        packs.sumOf { index ->
+            LevelPack.PACKS[index].levels.count { completed.contains(it.id) }
+        }
 }
