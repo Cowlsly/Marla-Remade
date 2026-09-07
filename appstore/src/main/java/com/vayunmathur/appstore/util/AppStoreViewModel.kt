@@ -24,6 +24,7 @@ import com.vayunmathur.appstore.data.accrescent.AccrescentRepository
 import com.vayunmathur.appstore.data.grapheneos.GrapheneOSRepository
 import com.vayunmathur.appstore.data.grapheneos.toUnifiedApp
 import com.vayunmathur.appstore.data.installer.InstallCoordinator
+import com.vayunmathur.appstore.data.installer.InstallFailureBatch
 import com.vayunmathur.appstore.data.installer.InstallStage
 import com.vayunmathur.appstore.data.play.PlayAuthState
 import com.vayunmathur.appstore.data.play.PlayHttpClient
@@ -146,6 +147,7 @@ class AppStoreViewModel(
 
     private var searchJob: Job? = null
     private var detailJob: Job? = null
+    private var updateAllJob: Job? = null
 
     // --- Derived state ----------------------------------------------------------------
 
@@ -932,17 +934,84 @@ class AppStoreViewModel(
         }
     }
 
+    /**
+     * Update everything, and report the run once when it is over.
+     *
+     * Sequential on purpose: updates this store isn't the update owner of still get a
+     * system confirmation dialog, and firing them concurrently buries the user in prompts.
+     *
+     * The reporting is the other half of issue #630. A run used to say nothing itself and
+     * let each app's failure raise its own snackbar, so a phone whose updates were all
+     * failing the same way — Play refusing the lot for going too fast, typically — showed
+     * the user the same error once per app. Now the failures are collected and summarised,
+     * and a reason that keeps coming back ends the run rather than being demonstrated
+     * another dozen times.
+     */
     override fun updateAll() {
-        viewModelScope.launch {
-            // Sequential on purpose: updates this store isn't the update owner of still get a
-            // system confirmation dialog, and firing them concurrently buries the user in
-            // prompts.
-            for (app in updates.value) {
-                installer.install(app)
+        if (updateAllJob?.isActive == true) return
+        updateAllJob = viewModelScope.launch {
+            val batch = updates.value
+            if (batch.isEmpty()) return@launch
+            val failures = mutableListOf<String>()
+            var started = 0
+            var repeats = 0
+            var previousReason: String? = null
+            InstallFailureBatch.begin()
+            try {
+                for ((index, app) in batch.withIndex()) {
+                    _statusMessage.value = context.getString(
+                        R.string.updates_progress, app.name, index + 1, batch.size
+                    )
+                    val outcome = installer.install(app)
+                    if (outcome.started) {
+                        started++
+                        previousReason = null
+                        repeats = 0
+                        continue
+                    }
+                    val reason = outcome.verification.reason()
+                    failures += reason
+                    repeats = if (reason == previousReason) repeats + 1 else 1
+                    previousReason = reason
+                    if (repeats >= REPEATED_FAILURE_LIMIT) break
+                }
+                // PackageInstaller commits asynchronously, so the last app's real verdict
+                // is still on its way. Wait for it before summarising, or it lands on its
+                // own afterwards — which is the repetition this is here to stop.
+                delay(INSTALL_SETTLE_MS)
+            } finally {
+                _statusMessage.value = ""
+                failures += InstallFailureBatch.end()
             }
-            delay(INSTALL_SETTLE_MS)
+
+            AppMessages.show(
+                if (failures.isEmpty()) {
+                    context.resources.getQuantityString(
+                        R.plurals.updates_batch_installed, started, started
+                    )
+                } else {
+                    context.getString(
+                        R.string.updates_batch_partial,
+                        started,
+                        batch.size,
+                        failures.first(),
+                    )
+                },
+                duration = if (failures.isEmpty()) {
+                    AppMessages.Duration.Short
+                } else {
+                    AppMessages.Duration.Long
+                },
+            )
             installedRepo.refresh()
         }
+    }
+
+    /** What to tell the user a failed install went wrong with. */
+    private fun VerificationResult.reason(): String = when (this) {
+        is VerificationResult.Rejected -> reason
+        is VerificationResult.Unverified -> reason
+        is VerificationResult.Verified -> context.getString(R.string.install_failure_unknown)
     }
 
     /** Turn fully unattended (no-tap) background update installation on or off. */
@@ -997,6 +1066,12 @@ class AppStoreViewModel(
         const val RECENT_LIMIT = 30
         const val CAROUSEL_LIMIT = 20
         const val PLAY_CLUSTER_LIMIT = 4
+
+        /**
+         * How many times in a row an update may fail for the same reason before the rest
+         * of the run is abandoned. Three is enough to tell a bad app from a bad afternoon.
+         */
+        const val REPEATED_FAILURE_LIMIT = 3
     }
 }
 

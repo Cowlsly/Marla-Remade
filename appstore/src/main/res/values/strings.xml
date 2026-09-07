@@ -99,6 +99,15 @@
         <item quantity="one">Installed %1$d update</item>
         <item quantity="other">Installed %1$d updates</item>
     </plurals>
+    <!-- Updates screen, status line under the buttons during Update all. %1$s is the app being updated. -->
+    <string name="updates_progress">Updating %1$s — %2$d of %3$d</string>
+    <!-- Message after Update all finishes with nothing having gone wrong. -->
+    <plurals name="updates_batch_installed">
+        <item quantity="one">Updated %1$d app</item>
+        <item quantity="other">Updated %1$d apps</item>
+    </plurals>
+    <!-- Message after Update all when some apps failed. %3$s is the reason the first one gave. -->
+    <string name="updates_batch_partial">Updated %1$d of %2$d. The rest failed: %3$s</string>
 
     <!-- Install actions and progress. -->
     <string name="action_install">Install</string>

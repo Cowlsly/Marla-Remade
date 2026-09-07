@@ -69,11 +69,54 @@ class InstallStatusReceiver : BroadcastReceiver() {
                     else -> message?.takeIf { it.isNotBlank() }
                         ?: context.getString(R.string.install_failure_unknown)
                 }
-                AppMessages.show(
-                    context.getString(R.string.install_failed_reason, pkg.orEmpty(), reason),
-                    duration = AppMessages.Duration.Long,
-                )
+                val text = context.getString(R.string.install_failed_reason, pkg.orEmpty(), reason)
+                if (!InstallFailureBatch.collect(text)) {
+                    AppMessages.show(text, duration = AppMessages.Duration.Long)
+                }
             }
         }
+    }
+}
+
+/**
+ * Holds install failures back while something is updating several apps in a row.
+ *
+ * [AppMessages] already drops a repeat of an identical message posted within a few
+ * seconds (issue #630). That does not cover an "update all": the installs are sequential,
+ * so the failures are minutes apart, and each message names its own package, so no two of
+ * them are the same string — the user got one snackbar per app, every one saying the same
+ * thing. While a batch is running the failures are collected here instead, and whoever
+ * started the batch reports them once.
+ *
+ * A failure that arrives outside a batch is not this object's business and is shown
+ * immediately, which is why [collect] reports whether it took ownership.
+ */
+object InstallFailureBatch {
+
+    private val collected = mutableListOf<String>()
+    private var active = false
+
+    /** Start collecting. Any reasons left over from a previous batch are dropped. */
+    @Synchronized
+    fun begin() {
+        active = true
+        collected.clear()
+    }
+
+    /** Stop collecting and hand back what came in, for a single summary. */
+    @Synchronized
+    fun end(): List<String> {
+        active = false
+        val reasons = collected.toList()
+        collected.clear()
+        return reasons
+    }
+
+    /** True when [reason] was collected, false when the caller should show it itself. */
+    @Synchronized
+    fun collect(reason: String): Boolean {
+        if (!active) return false
+        collected += reason
+        return true
     }
 }
