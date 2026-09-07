@@ -10,6 +10,7 @@ import android.telecom.InCallService
 import android.telecom.VideoProfile
 import com.vayunmathur.communicate.MainActivity
 import com.vayunmathur.communicate.R
+import com.vayunmathur.communicate.data.CommunicateRepository
 import com.vayunmathur.library.util.ensureNotificationChannel
 
 /** In-call bridge for carrier/SIM calls that lets Communicate expose notification controls. */
@@ -74,7 +75,7 @@ class CommunicateInCallService : InCallService() {
         val number = call.details.handle?.schemeSpecificPart.orEmpty()
         val builder = Notification.Builder(this, CHANNEL_ID)
             .setContentTitle(title)
-            .setContentText(number.ifBlank { getString(R.string.app_name) })
+            .setContentText(callerLabel(number).ifBlank { getString(R.string.app_name) })
             .setSmallIcon(if (incoming) android.R.drawable.sym_call_incoming else android.R.drawable.sym_action_call)
             .setCategory(Notification.CATEGORY_CALL)
             .setPriority(Notification.PRIORITY_HIGH)
@@ -96,6 +97,18 @@ class CommunicateInCallService : InCallService() {
 
         val nm = getSystemService(NotificationManager::class.java) ?: return
         nm.notify(NOTIFICATION_ID, builder.build())
+    }
+
+    /**
+     * Memoised because the notification is rebuilt on every state and details change, and the
+     * lookup is a synchronous provider query on the main thread.
+     */
+    private fun callerLabel(number: String): String {
+        if (number != lookedUpNumber) {
+            lookedUpNumber = number
+            lookedUpName = CommunicateRepository.findContactName(this, number)
+        }
+        return lookedUpName ?: number
     }
 
     private fun clearNotification() {
@@ -126,5 +139,7 @@ class CommunicateInCallService : InCallService() {
         private const val ACTION_DISCONNECT = "com.vayunmathur.communicate.regularcall.DISCONNECT"
 
         private var currentCall: Call? = null
+        private var lookedUpNumber: String? = null
+        private var lookedUpName: String? = null
     }
 }
