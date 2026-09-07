@@ -2,7 +2,7 @@
 <resources xmlns:xliff="urn:oasis:names:tc:xliff:document:1.2">
     <string name="app_name">Contatti</string>
     <string name="contact_not_found">Contatto non trovato</string>
-    <string name="name_nickname_format">%1$s (%2$s)</string>
+    <string name="name_nickname_format"><xliff:g id="name" example="John Doe">%1$s</xliff:g> (<xliff:g id="nickname" example="Johnny">%2$s</xliff:g>)</string>
     <string name="share_contact">Condividi contatto</string>
     <string name="about_name">Informazioni su <xliff:g id="first_name" example="John">%1$s</xliff:g></string>
     <string name="birthday">Compleanno</string>
@@ -18,7 +18,7 @@
     <string name="nickname">Soprannome</string>
     <string name="company">Azienda</string>
     <string name="account">Account</string>
-    <string name="account_display_format">%1$s (%2$s)</string>
+    <string name="account_display_format"><xliff:g id="account_name" example="Personal">%1$s</xliff:g> (<xliff:g id="account_type" example="com.google">%2$s</xliff:g>)</string>
     <string name="add_phone">Aggiungi telefono</string>
     <string name="remove_phone">Rimuovi telefono</string>
     <string name="add_email">Aggiungi email</string>
@@ -40,7 +40,7 @@
     <string name="account_name">Nome account</string>
     <string name="delete_contact_title">Elimina contatto</string>
     <string name="delete_contact_confirm">Sei sicuro di voler eliminare questo contatto? Questa operazione è irreversibile.</string>
-    <string name="delete_contact_name_confirm">Sei sicuro di volere eliminare \"%1$s\"? Questa operazione è irreversibile.</string>
+    <string name="delete_contact_name_confirm">Sei sicuro di voler eliminare \"<xliff:g id="contact_name" example="John Doe">%1$s</xliff:g>\"? Questa operazione non può essere annullata.</string>
     <string name="grant_contacts_permission">Concedi autorizzazione dei contatti</string>
     <string name="select_contact_hint">Seleziona un contatto per visualizzare i dettagli</string>
     <string name="import_contacts">Importa contatti</string>
@@ -84,4 +84,33 @@
     <string name="select_ringtone">Seleziona suoneria</string>
     <string name="rename_account">Rinomina account</string>
     <string name="delete_account">Elimina account</string>
+    <string name="name_prefix">Prefisso</string>
+    <string name="name_suffix">Suffisso</string>
+    <string name="name_affix_none">Nessuno</string>
+    <string name="delete_local_account_confirm">Eliminare questo account e tutti i suoi contatti? Questa operazione non può essere annullata.</string>
+    <string name="account_name_exists">Un account con questo nome esiste già</string>
+    <string name="import_vcf_file">Importa file .vcf</string>
+    <string name="import_to_existing_account">Importa in un account esistente</string>
+    <string name="create_new_account_option">Crea nuovo account</string>
+    <string name="no_contacts_found">Nessun contatto trovato</string>
+    <plurals name="import_summary_contacts">
+        <item quantity="one"><xliff:g id="count" example="10">%1$d</xliff:g> contatto pronto per l\'importazione</item>
+        <item quantity="many"><xliff:g id="count" example="10">%1$d</xliff:g> contatti pronti per l\'importazione</item>
+        <item quantity="other"><xliff:g id="count" example="10">%1$d</xliff:g> contatti pronti per l\'importazione</item>
+    </plurals>
+    <string name="select_account">Seleziona account</string>
+    <string name="no_name">(Nessun nome)</string>
+    <string name="add_number_to_contact">Aggiungi numero al contatto</string>
+    <string name="create_new_contact">Crea nuovo contatto</string>
+    <string name="crop_photo">Ritaglia foto</string>
+    <string name="import_contacts_from_vcf_files">Importa contatti da file .vcf</string>
+    <string name="custom_label">Etichetta personalizzata</string>
+    <string name="enter_custom_label">Inserisci etichetta personalizzata</string>
+    <string name="sim_limited_fields_hint">I contatti della SIM memorizzano solamente nome, numero di telefono e email.</string>
+    <string name="save_failed">Salvataggio non riuscito</string>
+    <string name="importing">Importazione…</string>
+    <string name="no_contacts_yet">Nessun contatto presente</string>
+    <string name="no_contacts_yet_message">Tocca il pulsante Aggiungi per creare il tuo primo contatto.</string>
+    <string name="no_groups_yet">Nessun gruppo presente</string>
+    <string name="no_groups_yet_message">Tocca il pulsante Aggiungi per raggruppare i contatti.</string>
 </resources>
