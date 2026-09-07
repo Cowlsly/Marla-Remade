@@ -804,45 +804,45 @@ class SolitaireViewModel(application: Application) : AndroidViewModel(applicatio
     private fun isSingleCardDrag(sourceId: String): Boolean = draggedCards(sourceId).size == 1
 
     fun tryMoveByDrag(sourceId: String, dropOffset: Offset, cardSize: androidx.compose.ui.unit.IntSize = androidx.compose.ui.unit.IntSize.Zero) {
-        val targetId = resolveDropTarget(dropOffset, cardSize) ?: return
-
-        when (_uiState.value.gameMode) {
-            GameMode.KLONDIKE -> handleKlondikeDrop(sourceId, targetId)
-            GameMode.SPIDER -> handleSpiderDrop(sourceId, targetId)
-            GameMode.FREECELL -> handleFreeCellDrop(sourceId, targetId)
-            GameMode.PYRAMID -> {} // Pyramid is tap-based, not drag-based.
-            null -> {}
+        val mode = _uiState.value.gameMode ?: return
+        for (targetId in candidateDropTargets(dropOffset, cardSize)) {
+            val before = _uiState.value
+            when (mode) {
+                GameMode.KLONDIKE -> handleKlondikeDrop(sourceId, targetId)
+                GameMode.SPIDER -> handleSpiderDrop(sourceId, targetId)
+                GameMode.FREECELL -> handleFreeCellDrop(sourceId, targetId)
+                GameMode.PYRAMID -> return // Pyramid is tap-based, not drag-based.
+            }
+            if (_uiState.value !== before) return
         }
     }
 
     /**
-     * Resolves the drop target for the leading (top) card of the dragged stack.
+     * The drop targets the leading (top) card of the dragged stack is over, best first.
      *
-     * The previous implementation picked the target whose bounds contained the
-     * single pointer-derived point (`dropOffset`). For a large tableau stack
-     * the user drops by the bottom and the center point of the dragged card
-     * can fall outside a short destination column (or land on an adjacent
-     * pile), causing valid moves to be silently discarded — the symptom of
-     * issue #505.
+     * Ranking is by overlap area of the leading card's bounds rather than by which rect
+     * contains the pointer: dropping a large tableau stack is done by its bottom, so the
+     * pointer-derived centre can fall outside a short destination column (issue #505).
      *
-     * The fix uses the bounds of the leading card being dropped (top of the
-     * moving run, centered on the finger) and picks the target with the
-     * greatest overlap area. A non-overlapping point-in-rect check is kept as
-     * a fallback for very small drags or zero-size rects.
+     * All of them are returned, not just the winner, because a pile that overlaps the card
+     * most is not necessarily one that can take it — an empty column's rect is only one card
+     * tall while its neighbours grow with every card in them, so a tall neighbour that cannot
+     * legally accept the run outscores the empty column the player is aiming at. Trying the
+     * candidates in order lets [tryMoveByDrag] fall through to the first that accepts the
+     * move instead of silently discarding it (issue #628).
      */
-    private fun resolveDropTarget(dropOffset: Offset, cardSize: androidx.compose.ui.unit.IntSize): String? {
-        // Prefer overlap-area of the leading card's bounds.
+    private fun candidateDropTargets(dropOffset: Offset, cardSize: androidx.compose.ui.unit.IntSize): List<String> {
         if (cardSize.width > 0 && cardSize.height > 0) {
             val w = cardSize.width.toFloat()
             val h = cardSize.height.toFloat()
             val cardRect = Rect(dropOffset.x - w / 2f, dropOffset.y - h / 2f, dropOffset.x + w / 2f, dropOffset.y + h / 2f)
-            val overlapped = dropTargets.maxByOrNull { (_, rect) -> overlapArea(cardRect, rect) }
-            if (overlapped != null && overlapArea(cardRect, overlapped.value) > 0f) {
-                return overlapped.key
-            }
+            val overlapping = dropTargets
+                .mapNotNull { (id, rect) -> overlapArea(cardRect, rect).takeIf { it > 0f }?.let { id to it } }
+                .sortedByDescending { it.second }
+            if (overlapping.isNotEmpty()) return overlapping.map { it.first }
         }
-        // Fallback: any rect containing the center point.
-        return dropTargets.entries.find { (_, rect) -> rect.contains(dropOffset) }?.key
+        // Fallback for a zero-size card: any rect containing the centre point.
+        return dropTargets.entries.filter { (_, rect) -> rect.contains(dropOffset) }.map { it.key }
     }
 
     private fun handleKlondikeDrop(sourceId: String, targetId: String) {

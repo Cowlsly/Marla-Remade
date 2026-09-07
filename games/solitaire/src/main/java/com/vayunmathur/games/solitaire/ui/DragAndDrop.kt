@@ -6,6 +6,7 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.offset
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -136,6 +137,13 @@ fun DropTarget(
     modifier: Modifier = Modifier,
     content: @Composable () -> Unit
 ) {
+    // The map outlives the board — it hangs off the view model, which is scoped to the
+    // activity. A pile that leaves the composition has to take its rectangle with it, or a
+    // mode with fewer piles (or piles somewhere else) keeps resolving drops against the
+    // previous mode's geometry.
+    DisposableEffect(targetId) {
+        onDispose { actions.dropTargets.remove(targetId) }
+    }
     Box(
         modifier = modifier.onGloballyPositioned { coords ->
             val pos = coords.positionInRoot()
