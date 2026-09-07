@@ -47,7 +47,6 @@
     <string-array name="name_prefixes">
         <item>Dr</item>
         <item>Mr</item>
-        <item>Mrs</item>
         <item>Ms</item>
     </string-array>
     <!-- Name suffixes offered in the dropdown. The roman numerals are generational and are

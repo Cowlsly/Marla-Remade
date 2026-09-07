@@ -46,7 +46,6 @@
         <item>Dr.</item>
         <item>Herr</item>
         <item>Frau</item>
-        <item>Frau</item>
     </string-array>
     <!-- Name suffixes offered in the dropdown. The roman numerals are generational and are
          normally left as-is; translate Jr and Sr. -->
