@@ -10,6 +10,7 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
 import com.vayunmathur.library.ui.AppScaffold
 import com.vayunmathur.library.ui.MaterialTheme
@@ -18,6 +19,7 @@ import com.vayunmathur.library.ui.SettingsRow
 import com.vayunmathur.library.ui.SettingsSection
 import com.vayunmathur.library.ui.Text
 import com.vayunmathur.library.ui.appBarScrollBehavior
+import com.vayunmathur.measure.R
 import com.vayunmathur.measure.platform.DiagnosticsActions
 import com.vayunmathur.measure.platform.DiagnosticsUiState
 
@@ -27,40 +29,74 @@ fun DiagnosticsContent(
     actions: DiagnosticsActions,
     onBack: () -> Unit = {},
 ) {
-    AppScaffold(title = "Diagnostics", onNavigateBack = onBack, scrollBehavior = appBarScrollBehavior()) { padding ->
+    AppScaffold(
+        title = stringResource(R.string.diagnostics_title),
+        onNavigateBack = onBack,
+        scrollBehavior = appBarScrollBehavior(),
+    ) { padding ->
         Column(
             modifier = Modifier.fillMaxSize().padding(padding)
                 .verticalScroll(rememberScrollState())
         ) {
-            SettingsSection(title = "Engine") {
-                DiagRow("Native engine", if (state.nativeEngineAvailable) "loaded" else "unavailable")
-                DiagRow("Landmarks", state.landmarkCount.toString())
-                DiagRow("Scale confidence", "%.2f".format(state.scaleConfidence))
-            }
-            SettingsDivider()
-            SettingsSection(title = "Tracking") {
-                DiagRow("Features detected", state.featureCount.toString())
-                DiagRow("Features tracked", state.trackedCount.toString())
-                DiagRow("Frame rate", "%.1f Hz".format(state.frameRateHz))
-            }
-            SettingsDivider()
-            SettingsSection(title = "Sensors") {
-                DiagRow("IMU rate", "%.0f Hz".format(state.imuRateHz))
+            SettingsSection(title = stringResource(R.string.diagnostics_section_engine)) {
                 DiagRow(
-                    "Camera/IMU clock skew",
+                    stringResource(R.string.diagnostics_native_engine),
+                    stringResource(
+                        if (state.nativeEngineAvailable) R.string.diagnostics_loaded
+                        else R.string.diagnostics_unavailable
+                    ),
+                )
+                DiagRow(
+                    stringResource(R.string.diagnostics_landmarks),
+                    state.landmarkCount.toString(),
+                )
+                DiagRow(
+                    stringResource(R.string.diagnostics_scale_confidence),
+                    "%.2f".format(state.scaleConfidence),
+                )
+            }
+            SettingsDivider()
+            SettingsSection(title = stringResource(R.string.diagnostics_section_tracking)) {
+                DiagRow(
+                    stringResource(R.string.diagnostics_features_detected),
+                    state.featureCount.toString(),
+                )
+                DiagRow(
+                    stringResource(R.string.diagnostics_features_tracked),
+                    state.trackedCount.toString(),
+                )
+                DiagRow(
+                    stringResource(R.string.diagnostics_frame_rate),
+                    "%.1f Hz".format(state.frameRateHz),
+                )
+            }
+            SettingsDivider()
+            SettingsSection(title = stringResource(R.string.diagnostics_section_sensors)) {
+                DiagRow(
+                    stringResource(R.string.diagnostics_imu_rate),
+                    "%.0f Hz".format(state.imuRateHz),
+                )
+                DiagRow(
+                    stringResource(R.string.diagnostics_clock_skew),
                     "%.1f ms".format(state.timestampSkewMs),
                 )
             }
             SettingsDivider()
-            SettingsSection(title = "Intrinsics") {
-                DiagRow("Focal length", "%.1f px".format(state.focalPx))
+            SettingsSection(title = stringResource(R.string.diagnostics_section_intrinsics)) {
                 DiagRow(
-                    "Principal point",
+                    stringResource(R.string.diagnostics_focal_length),
+                    "%.1f px".format(state.focalPx),
+                )
+                DiagRow(
+                    stringResource(R.string.diagnostics_principal_point),
                     "%.1f, %.1f".format(state.principalPointPx.first, state.principalPointPx.second),
                 )
             }
             SettingsDivider()
-            SettingsRow(title = "Reset tracking", onClick = actions::resetTracking)
+            SettingsRow(
+                title = stringResource(R.string.diagnostics_reset_tracking),
+                onClick = actions::resetTracking,
+            )
         }
     }
 }

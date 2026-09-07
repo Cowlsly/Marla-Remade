@@ -1,4 +1,233 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <string name="app_name">Measure</string>
+
+    <!-- Bottom navigation tab label and screen title for the compass tool. -->
+    <string name="tool_compass">Compass</string>
+    <!-- Bottom navigation tab label and screen title for the spirit-level tool, which shows
+         whether a surface is horizontal. This is a builder's level (a bubble level), NOT a
+         level in a game and NOT a fill level. Noun. -->
+    <string name="tool_level">Level</string>
+    <!-- Bottom navigation tab label and screen title for the on-screen ruler tool. Noun. -->
+    <string name="tool_ruler">Ruler</string>
+    <!-- Bottom navigation tab label and screen title for the augmented-reality distance
+         measuring tool. Noun, the name of the tool; also the app name. -->
+    <string name="tool_measure">Measure</string>
+
+    <!-- CompassContent: caption under the bearing, when the reading is corrected for magnetic
+         declination and so points at the geographic north pole. -->
+    <string name="compass_true_north">True north</string>
+    <!-- CompassContent: caption under the bearing, when the reading is uncorrected and so
+         points at the magnetic north pole. -->
+    <string name="compass_magnetic_north">Magnetic north</string>
+    <!-- CompassContent: warning shown when the phone is tilted too far for the magnetometer
+         reading to be trusted. -->
+    <string name="compass_tilt_warning">Hold the phone flat for an accurate bearing</string>
+    <!-- CompassContent: magnetic declination readout. %1$s is a signed angle already formatted
+         with a degree sign, e.g. "-3.4°". -->
+    <string name="compass_declination">Declination %1$s</string>
+    <!-- CompassContent: shown instead of the declination when there is no location fix, so the
+         declination correction cannot be computed. -->
+    <string name="compass_no_location">No location — showing magnetic north only</string>
+    <!-- CompassContent: button that switches the readout from true north to magnetic north. -->
+    <string name="compass_show_magnetic">Show magnetic</string>
+    <!-- CompassContent: button that switches the readout from magnetic north to true north. -->
+    <string name="compass_show_true_north">Show true north</string>
+    <!-- CompassContent: button that freezes a marker on the dial at the current bearing. -->
+    <string name="compass_hold_bearing">Hold bearing</string>
+    <!-- CompassContent: button that removes the frozen bearing marker from the dial. -->
+    <string name="compass_release_bearing">Release bearing</string>
+
+    <!-- CompassContent: the sixteen compass points, in clockwise order starting at north.
+         Used both for the N/E/S/W letters drawn on the dial (entries 1, 5, 9 and 13) and for
+         the abbreviation shown next to the numeric bearing. These are abbreviations, not full
+         words: keep them short (1-3 characters) or they will not fit on the dial. The order is
+         fixed and must not be changed. -->
+    <string-array name="compass_cardinals">
+        <item>N</item>
+        <item>NNE</item>
+        <item>NE</item>
+        <item>ENE</item>
+        <item>E</item>
+        <item>ESE</item>
+        <item>SE</item>
+        <item>SSE</item>
+        <item>S</item>
+        <item>SSW</item>
+        <item>SW</item>
+        <item>WSW</item>
+        <item>W</item>
+        <item>WNW</item>
+        <item>NW</item>
+        <item>NNW</item>
+    </string-array>
+
+    <!-- LevelContent: caption shown when the phone is lying flat, so the level is reading the
+         tilt of the surface underneath it in two axes. -->
+    <string name="level_surface_level">Surface level</string>
+    <!-- LevelContent: caption naming how the phone is currently being held - upright. -->
+    <string name="level_orientation_portrait">Portrait</string>
+    <!-- LevelContent: caption naming how the phone is currently being held - upright but
+         rotated a half turn, so the top edge points at the ground. -->
+    <string name="level_orientation_portrait_upside_down">Portrait, upside down</string>
+    <!-- LevelContent: caption naming how the phone is currently being held - sideways, with
+         its left-hand edge resting on the ground. -->
+    <string name="level_orientation_landscape_left">Landscape, left edge down</string>
+    <!-- LevelContent: caption naming how the phone is currently being held - sideways, with
+         its right-hand edge resting on the ground. -->
+    <string name="level_orientation_landscape_right">Landscape, right edge down</string>
+    <!-- LevelContent: caption naming how the phone is currently being held - lying flat on
+         its back. -->
+    <string name="level_orientation_flat">Flat</string>
+    <!-- LevelContent: button that discards the stored zero offset and returns the level to
+         the raw sensor reading. -->
+    <string name="level_clear_calibration">Clear calibration</string>
+    <!-- LevelContent: button that stores the current tilt as the new zero, so a surface known
+         to be flat reads as level. -->
+    <string name="level_set_zero">Set zero here</string>
+    <!-- LevelContent caption and SettingsContent supporting text: the level has a stored zero
+         offset taken from a surface the user declared flat. -->
+    <string name="level_zeroed">Zeroed against a reference surface</string>
+
+    <!-- RulerContent: instruction under the reading, explaining how to use the on-screen
+         ruler. "the line" is the draggable marker line across the screen. -->
+    <string name="ruler_hint">Drag the line; read against either edge</string>
+
+    <!-- ArMeasureContent: button that joins the last placed point back to the first, turning
+         an open chain of points into a closed shape so its area can be measured. -->
+    <string name="ar_close_shape">Close shape</string>
+    <!-- ArMeasureContent: button that removes every placed measuring point. Verb. -->
+    <string name="ar_clear_points">Clear</string>
+    <!-- ArMeasureContent: coaching banner while tracking starts up. The app genuinely cannot
+         work out real-world scale until the phone is physically moved, so this is an
+         instruction, not a progress message. -->
+    <string name="ar_tracking_initialising">Move the phone sideways and turn it slightly to start tracking</string>
+    <!-- ArMeasureContent: coaching banner when tracking is unreliable. "texture" means visible
+         detail or pattern on the surface, which the camera needs in order to track. -->
+    <string name="ar_tracking_limited">Tracking is weak — move slowly and keep texture in view</string>
+    <!-- ArMeasureContent: coaching banner when tracking has failed entirely. -->
+    <string name="ar_tracking_lost">Tracking lost — point at a textured surface to recover</string>
+    <!-- ArMeasureContent: coaching banner when tracking is good and a surface has been found,
+         so the user can start measuring. -->
+    <string name="ar_tracking_ready">Ready — tap to place points</string>
+    <!-- ArMeasureContent: coaching banner when tracking is good but no surface has been
+         detected yet to place points on. -->
+    <string name="ar_tracking_ready_no_surface">Ready — no surface found yet</string>
+    <!-- ArMeasureContent: area readout. %1$s is an already-formatted area with its unit,
+         e.g. "2.40 m²". -->
+    <string name="ar_area">Area %1$s</string>
+    <!-- ArMeasureContent: perimeter readout for a closed shape. %1$s is an already-formatted
+         length with its unit, e.g. "6.20 m". -->
+    <string name="ar_perimeter">Perimeter %1$s</string>
+    <!-- ArMeasureContent: heading shown in place of the camera view when AR measuring cannot
+         run at all. -->
+    <string name="ar_unavailable_title">AR measure unavailable</string>
+    <!-- ArMeasureContent: reason shown under ar_unavailable_title when the device does not
+         ship the native tracking library. -->
+    <string name="ar_unavailable_native">AR measuring needs the native tracking engine, which isn\'t available on this device.</string>
+    <!-- ArMeasureContent: reason shown under ar_unavailable_title when the camera permission
+         has not been granted. -->
+    <string name="ar_unavailable_camera">Camera access is needed to measure in AR.</string>
+
+    <!-- SavedMeasurementsContent: screen title for the list of measurements the user kept. -->
+    <string name="saved_title">Saved</string>
+    <!-- SavedMeasurementsContent: heading of the empty state. -->
+    <string name="saved_empty_title">No saved measurements</string>
+    <!-- SavedMeasurementsContent: body of the empty state, telling the user how to add one. -->
+    <string name="saved_empty_body">Measure something in AR and tap save</string>
+    <!-- MeasureViewModel: name given to a saved measurement when the user left the name
+         blank. Shown as the row title in the saved list. Noun. -->
+    <string name="saved_default_label">Measurement</string>
+
+    <!-- SettingsContent: screen title. -->
+    <string name="settings_title">Settings</string>
+    <!-- SettingsContent: section heading over the unit-system options. Noun, plural - units of
+         measurement such as metres or feet. -->
+    <string name="settings_section_units">Units</string>
+    <!-- SettingsContent: switch that shows lengths in feet and inches instead of metres. -->
+    <string name="settings_imperial_units">Imperial units</string>
+    <!-- SettingsContent: supporting text under settings_imperial_units. -->
+    <string name="settings_imperial_units_summary">Feet and inches instead of metres</string>
+    <!-- SettingsContent: switch that shows inches as tape-measure fractions rather than as a
+         decimal. -->
+    <string name="settings_fractional_inches">Fractional inches</string>
+    <!-- SettingsContent: supporting text under settings_fractional_inches. The two examples
+         are the same length written both ways; the straight quote is the inch symbol and
+         should be kept. -->
+    <string name="settings_fractional_inches_summary">Show 3/16\" rather than 0.19\"</string>
+    <!-- SettingsContent: switch that corrects compass bearings for magnetic declination. -->
+    <string name="settings_use_true_north">Use true north</string>
+    <!-- SettingsContent: supporting text under settings_use_true_north. -->
+    <string name="settings_use_true_north_summary">Corrects for magnetic declination at your location</string>
+    <!-- SettingsContent: section heading over the level calibration row. Noun. -->
+    <string name="settings_section_calibration">Calibration</string>
+    <!-- SettingsContent: supporting text on the level calibration row when no zero offset has
+         been stored, so the level shows the raw accelerometer reading. -->
+    <string name="settings_level_uncalibrated_summary">Using raw gravity reading</string>
+    <!-- SettingsContent: trailing action on the level calibration row, which discards the
+         stored zero offset. Verb. -->
+    <string name="settings_clear">Clear</string>
+    <!-- SettingsContent: section heading over the miscellaneous options. -->
+    <string name="settings_section_general">General</string>
+    <!-- SettingsContent: switch for vibration on interaction. -->
+    <string name="settings_haptic_feedback">Haptic feedback</string>
+    <!-- SettingsContent: switch that stops the display sleeping. -->
+    <string name="settings_keep_screen_on">Keep screen on</string>
+    <!-- SettingsContent: supporting text under settings_keep_screen_on. -->
+    <string name="settings_keep_screen_on_summary">While a measuring tool is open</string>
+    <!-- SettingsContent: row that opens the list of saved measurements. -->
+    <string name="settings_saved_measurements">Saved measurements</string>
+    <!-- SettingsContent: section heading over the developer-facing options. -->
+    <string name="settings_section_advanced">Advanced</string>
+    <!-- SettingsContent: switch that reveals the AR tracking diagnostics screen. -->
+    <string name="settings_tracking_diagnostics">Tracking diagnostics</string>
+    <!-- SettingsContent: supporting text under settings_tracking_diagnostics. "IMU" is the
+         inertial measurement unit, the accelerometer and gyroscope; keep the abbreviation. -->
+    <string name="settings_tracking_diagnostics_summary">Feature counts, IMU rate and clock skew</string>
+    <!-- SettingsContent: row that opens the tracking diagnostics screen. -->
+    <string name="settings_open_diagnostics">Open diagnostics</string>
+
+    <!-- DiagnosticsContent: screen title. Technical readouts for the AR tracker. -->
+    <string name="diagnostics_title">Diagnostics</string>
+    <!-- DiagnosticsContent: section heading over readouts from the native tracking engine. -->
+    <string name="diagnostics_section_engine">Engine</string>
+    <!-- DiagnosticsContent: row label for whether the native tracking library loaded. -->
+    <string name="diagnostics_native_engine">Native engine</string>
+    <!-- DiagnosticsContent: value of the diagnostics_native_engine row when the native library
+         loaded successfully. Lowercase intentional - it sits in a value column. -->
+    <string name="diagnostics_loaded">loaded</string>
+    <!-- DiagnosticsContent: value of the diagnostics_native_engine row when the native library
+         is missing. Lowercase intentional - it sits in a value column. -->
+    <string name="diagnostics_unavailable">unavailable</string>
+    <!-- DiagnosticsContent: row label for the number of 3D points the tracker is holding. -->
+    <string name="diagnostics_landmarks">Landmarks</string>
+    <!-- DiagnosticsContent: row label for how confident the tracker is in its real-world
+         scale estimate. -->
+    <string name="diagnostics_scale_confidence">Scale confidence</string>
+    <!-- DiagnosticsContent: section heading over per-frame tracking readouts. -->
+    <string name="diagnostics_section_tracking">Tracking</string>
+    <!-- DiagnosticsContent: row label for how many image features were found this frame. -->
+    <string name="diagnostics_features_detected">Features detected</string>
+    <!-- DiagnosticsContent: row label for how many of those features were matched to the
+         previous frame. -->
+    <string name="diagnostics_features_tracked">Features tracked</string>
+    <!-- DiagnosticsContent: row label for the camera frame rate. -->
+    <string name="diagnostics_frame_rate">Frame rate</string>
+    <!-- DiagnosticsContent: section heading over readouts from the motion sensors. -->
+    <string name="diagnostics_section_sensors">Sensors</string>
+    <!-- DiagnosticsContent: row label for the sample rate of the inertial measurement unit.
+         Keep the "IMU" abbreviation. -->
+    <string name="diagnostics_imu_rate">IMU rate</string>
+    <!-- DiagnosticsContent: row label for the timestamp gap between the camera and the
+         inertial measurement unit. Keep the "IMU" abbreviation. -->
+    <string name="diagnostics_clock_skew">Camera/IMU clock skew</string>
+    <!-- DiagnosticsContent: section heading over the camera's calibration constants. Noun,
+         plural - the camera intrinsic parameters. -->
+    <string name="diagnostics_section_intrinsics">Intrinsics</string>
+    <!-- DiagnosticsContent: row label for the camera's focal length in pixels. -->
+    <string name="diagnostics_focal_length">Focal length</string>
+    <!-- DiagnosticsContent: row label for the camera's optical centre, in pixels. -->
+    <string name="diagnostics_principal_point">Principal point</string>
+    <!-- DiagnosticsContent: row that restarts the AR tracking session from scratch. -->
+    <string name="diagnostics_reset_tracking">Reset tracking</string>
 </resources>

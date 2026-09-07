@@ -1,5 +1,6 @@
 package com.vayunmathur.measure.ui
 
+import androidx.annotation.StringRes
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
@@ -14,6 +15,7 @@ import androidx.compose.ui.draw.rotate
 import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
 import com.vayunmathur.library.ui.AppScaffold
 import com.vayunmathur.library.ui.IconButton
@@ -22,6 +24,8 @@ import com.vayunmathur.library.ui.MaterialTheme
 import com.vayunmathur.library.ui.OutlinedButton
 import com.vayunmathur.library.ui.Text
 import com.vayunmathur.library.ui.appBarScrollBehavior
+import com.vayunmathur.measure.R
+import com.vayunmathur.measure.domain.HeldOrientation
 import com.vayunmathur.measure.domain.Units
 import com.vayunmathur.measure.platform.LevelActions
 import com.vayunmathur.measure.platform.LevelUiState
@@ -37,7 +41,7 @@ fun LevelContent(
     bottomBar: @Composable () -> Unit = {},
 ) {
     AppScaffold(
-        title = "Level",
+        title = stringResource(R.string.tool_level),
         actions = { IconButton(onClick = onOpenSettings) { IconSettings() } },
         bottomBar = bottomBar,
         scrollBehavior = appBarScrollBehavior(),
@@ -67,7 +71,11 @@ fun LevelContent(
                 },
             )
             Text(
-                if (state.isFlat) "Surface level" else state.orientation.label,
+                if (state.isFlat) {
+                    stringResource(R.string.level_surface_level)
+                } else {
+                    stringResource(state.orientation.labelRes())
+                },
                 style = MaterialTheme.typography.bodyMedium,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
@@ -97,11 +105,16 @@ fun LevelContent(
             OutlinedButton(onClick = {
                 if (state.isCalibrated) actions.clearCalibration() else actions.calibrateZero()
             }) {
-                Text(if (state.isCalibrated) "Clear calibration" else "Set zero here")
+                Text(
+                    stringResource(
+                        if (state.isCalibrated) R.string.level_clear_calibration
+                        else R.string.level_set_zero
+                    )
+                )
             }
             if (state.isCalibrated) {
                 Text(
-                    "Zeroed against a reference surface",
+                    stringResource(R.string.level_zeroed),
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
@@ -196,3 +209,18 @@ private fun EdgeBubble(angleDeg: Double, uiRotationDeg: Float, modifier: Modifie
 /** Deflection at which the bubble reaches the edge of its travel. */
 private const val MAX_DISPLAY_DEG = 15.0
 private const val LEVEL_TOLERANCE_DEG = 0.35
+
+/**
+ * Caption for how the phone is being held.
+ *
+ * The mapping lives here rather than on the enum so [HeldOrientation] stays free of
+ * Android resource ids.
+ */
+@StringRes
+private fun HeldOrientation.labelRes(): Int = when (this) {
+    HeldOrientation.Portrait -> R.string.level_orientation_portrait
+    HeldOrientation.PortraitUpsideDown -> R.string.level_orientation_portrait_upside_down
+    HeldOrientation.LandscapeLeft -> R.string.level_orientation_landscape_left
+    HeldOrientation.LandscapeRight -> R.string.level_orientation_landscape_right
+    HeldOrientation.Flat -> R.string.level_orientation_flat
+}

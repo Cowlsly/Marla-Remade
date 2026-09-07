@@ -5,6 +5,7 @@ import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.vayunmathur.library.sensor.OrientationManager
 import com.vayunmathur.library.util.DataStoreUtils
+import com.vayunmathur.measure.R
 import com.vayunmathur.measure.data.model.Anchor
 import com.vayunmathur.measure.data.model.MeasurementKind
 import com.vayunmathur.measure.data.model.SavedMeasurement
@@ -241,7 +242,9 @@ class MeasureViewModel(app: Application) : AndroidViewModel(app),
         }
         val m = SavedMeasurement(
             id = nextMeasurementId++,
-            label = label.ifBlank { "Measurement" },
+            label = label.ifBlank {
+                getApplication<Application>().getString(R.string.saved_default_label)
+            },
             kind = kind,
             value = value,
             recordedAtEpochMs = System.currentTimeMillis(),

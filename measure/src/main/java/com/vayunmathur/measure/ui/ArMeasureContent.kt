@@ -19,6 +19,7 @@ import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.onSizeChanged
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
 import com.vayunmathur.library.ui.AppScaffold
 import com.vayunmathur.library.ui.IconButton
@@ -28,6 +29,7 @@ import com.vayunmathur.library.ui.MaterialTheme
 import com.vayunmathur.library.ui.OutlinedButton
 import com.vayunmathur.library.ui.Text
 import com.vayunmathur.library.ui.appBarScrollBehavior
+import com.vayunmathur.measure.R
 import com.vayunmathur.measure.data.model.TrackingQuality
 import com.vayunmathur.measure.domain.MeasureNative
 import com.vayunmathur.measure.domain.Units
@@ -46,7 +48,7 @@ fun ArMeasureContent(
     bottomBar: @Composable () -> Unit = {},
 ) {
     AppScaffold(
-        title = "Measure",
+        title = stringResource(R.string.tool_measure),
         actions = { IconButton(onClick = onOpenSettings) { IconSettings() } },
         bottomBar = bottomBar,
         scrollBehavior = appBarScrollBehavior(),
@@ -54,14 +56,11 @@ fun ArMeasureContent(
         Box(Modifier.fillMaxSize().padding(padding)) {
 
             if (!MeasureNative.available) {
-                UnavailableNotice(
-                    "AR measuring needs the native tracking engine, which isn't available " +
-                        "on this device."
-                )
+                UnavailableNotice(stringResource(R.string.ar_unavailable_native))
                 return@Box
             }
             if (!state.cameraPermissionGranted) {
-                UnavailableNotice("Camera access is needed to measure in AR.")
+                UnavailableNotice(stringResource(R.string.ar_unavailable_camera))
                 return@Box
             }
 
@@ -97,11 +96,11 @@ fun ArMeasureContent(
                     OutlinedButton(
                         onClick = { actions.closePolygon() },
                         enabled = state.anchors.size >= 3 && !state.polygonClosed,
-                    ) { Text("Close shape") }
+                    ) { Text(stringResource(R.string.ar_close_shape)) }
                     OutlinedButton(
                         onClick = { actions.clearAnchors() },
                         enabled = state.anchors.isNotEmpty(),
-                    ) { Text("Clear") }
+                    ) { Text(stringResource(R.string.ar_clear_points)) }
                 }
             }
         }
@@ -119,20 +118,21 @@ fun ArMeasureContent(
 private fun TrackingBanner(quality: TrackingQuality, hasPlane: Boolean) {
     val (message, color) = when (quality) {
         TrackingQuality.Initialising ->
-            "Move the phone sideways and turn it slightly to start tracking" to
+            stringResource(R.string.ar_tracking_initialising) to
                 MaterialTheme.colorScheme.tertiaryContainer
 
         TrackingQuality.Limited ->
-            "Tracking is weak — move slowly and keep texture in view" to
+            stringResource(R.string.ar_tracking_limited) to
                 MaterialTheme.colorScheme.tertiaryContainer
 
         TrackingQuality.Lost ->
-            "Tracking lost — point at a textured surface to recover" to
+            stringResource(R.string.ar_tracking_lost) to
                 MaterialTheme.colorScheme.errorContainer
 
         TrackingQuality.Good ->
-            (if (hasPlane) "Ready — tap to place points" else "Ready — no surface found yet") to
-                MaterialTheme.colorScheme.primaryContainer
+            stringResource(
+                if (hasPlane) R.string.ar_tracking_ready else R.string.ar_tracking_ready_no_surface
+            ) to MaterialTheme.colorScheme.primaryContainer
     }
     Box(
         Modifier
@@ -162,13 +162,16 @@ private fun ReadoutCard(state: ArMeasureUiState) {
             }
             state.areaM2?.let {
                 Text(
-                    "Area ${Units.formatArea(it, state.unitSystem)}",
+                    stringResource(R.string.ar_area, Units.formatArea(it, state.unitSystem)),
                     style = MaterialTheme.typography.bodyMedium,
                 )
             }
             state.perimeterM?.let {
                 Text(
-                    "Perimeter ${Units.formatLength(it, state.unitSystem)}",
+                    stringResource(
+                        R.string.ar_perimeter,
+                        Units.formatLength(it, state.unitSystem),
+                    ),
                     style = MaterialTheme.typography.bodyMedium,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
@@ -233,7 +236,10 @@ private fun UnavailableNotice(message: String) {
         horizontalAlignment = Alignment.CenterHorizontally,
         verticalArrangement = Arrangement.Center,
     ) {
-        Text("AR measure unavailable", style = MaterialTheme.typography.titleMedium)
+        Text(
+            stringResource(R.string.ar_unavailable_title),
+            style = MaterialTheme.typography.titleMedium,
+        )
         Text(
             message,
             style = MaterialTheme.typography.bodyMedium,

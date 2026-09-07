@@ -15,6 +15,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.drawText
 import androidx.compose.ui.text.rememberTextMeasurer
@@ -26,6 +27,7 @@ import com.vayunmathur.library.ui.IconSettings
 import com.vayunmathur.library.ui.MaterialTheme
 import com.vayunmathur.library.ui.Text
 import com.vayunmathur.library.ui.appBarScrollBehavior
+import com.vayunmathur.measure.R
 import com.vayunmathur.measure.data.model.UnitSystem
 import com.vayunmathur.measure.domain.Units
 import com.vayunmathur.measure.platform.RulerUiState
@@ -39,7 +41,7 @@ fun RulerContent(
     var markerY by remember { mutableFloatStateOf(0f) }
 
     AppScaffold(
-        title = "Ruler",
+        title = stringResource(R.string.tool_ruler),
         actions = { IconButton(onClick = onOpenSettings) { IconSettings() } },
         bottomBar = bottomBar,
         scrollBehavior = appBarScrollBehavior(),
@@ -56,7 +58,7 @@ fun RulerContent(
                 modifier = Modifier.padding(top = 8.dp),
             )
             Text(
-                "Drag the line; read against either edge",
+                stringResource(R.string.ruler_hint),
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 modifier = Modifier.padding(bottom = 4.dp),

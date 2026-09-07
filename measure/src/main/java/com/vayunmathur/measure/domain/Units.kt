@@ -112,13 +112,15 @@ object Units {
      */
     fun bearingDelta(from: Double, to: Double): Double = ((to - from + 540.0) % 360.0) - 180.0
 
-    private val CARDINALS = listOf(
-        "N", "NNE", "NE", "ENE", "E", "ESE", "SE", "SSE",
-        "S", "SSW", "SW", "WSW", "W", "WNW", "NW", "NNW",
-    )
+    /** Number of named compass points on the sixteen-point rose. */
+    const val CARDINAL_POINTS = 16
 
-    fun cardinal(degrees: Double): String {
-        val idx = ((normalizeDegrees(degrees) / 22.5) + 0.5).toInt() % 16
-        return CARDINALS[idx]
-    }
+    /**
+     * Index into the sixteen-point compass rose, clockwise from north.
+     *
+     * Returns an index rather than a label because the labels are localised and live in
+     * `R.array.compass_cardinals`; this package holds no Android dependencies.
+     */
+    fun cardinalIndex(degrees: Double): Int =
+        ((normalizeDegrees(degrees) / (360.0 / CARDINAL_POINTS)) + 0.5).toInt() % CARDINAL_POINTS
 }

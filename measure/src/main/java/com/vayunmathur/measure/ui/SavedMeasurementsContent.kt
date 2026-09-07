@@ -9,6 +9,7 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
 import com.vayunmathur.library.ui.AppScaffold
 import com.vayunmathur.library.ui.IconButton
@@ -17,6 +18,7 @@ import com.vayunmathur.library.ui.MaterialTheme
 import com.vayunmathur.library.ui.SettingsRow
 import com.vayunmathur.library.ui.Text
 import com.vayunmathur.library.ui.appBarScrollBehavior
+import com.vayunmathur.measure.R
 import com.vayunmathur.measure.data.model.MeasurementKind
 import com.vayunmathur.measure.data.model.SavedMeasurement
 import com.vayunmathur.measure.data.model.UnitSystem
@@ -30,16 +32,23 @@ fun SavedMeasurementsContent(
     actions: SavedActions,
     onBack: () -> Unit = {},
 ) {
-    AppScaffold(title = "Saved", onNavigateBack = onBack, scrollBehavior = appBarScrollBehavior()) { padding ->
+    AppScaffold(
+        title = stringResource(R.string.saved_title),
+        onNavigateBack = onBack,
+        scrollBehavior = appBarScrollBehavior(),
+    ) { padding ->
         if (state.measurements.isEmpty()) {
             Column(
                 modifier = Modifier.fillMaxSize().padding(padding).padding(32.dp),
                 horizontalAlignment = Alignment.CenterHorizontally,
                 verticalArrangement = Arrangement.Center,
             ) {
-                Text("No saved measurements", style = MaterialTheme.typography.titleMedium)
                 Text(
-                    "Measure something in AR and tap save",
+                    stringResource(R.string.saved_empty_title),
+                    style = MaterialTheme.typography.titleMedium,
+                )
+                Text(
+                    stringResource(R.string.saved_empty_body),
                     style = MaterialTheme.typography.bodyMedium,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )

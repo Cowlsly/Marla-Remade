@@ -19,6 +19,8 @@ import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.drawscope.DrawScope
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.drawscope.rotate
+import androidx.compose.ui.res.stringArrayResource
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.TextMeasurer
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.rememberTextMeasurer
@@ -33,6 +35,7 @@ import com.vayunmathur.library.ui.MaterialTheme
 import com.vayunmathur.library.ui.OutlinedButton
 import com.vayunmathur.library.ui.Text
 import com.vayunmathur.library.ui.appBarScrollBehavior
+import com.vayunmathur.measure.R
 import com.vayunmathur.measure.domain.Units
 import com.vayunmathur.measure.platform.CompassActions
 import com.vayunmathur.measure.platform.CompassUiState
@@ -51,8 +54,9 @@ fun CompassContent(
     } else {
         state.azimuthMagDeg
     }
+    val cardinals = stringArrayResource(R.array.compass_cardinals)
     AppScaffold(
-        title = "Compass",
+        title = stringResource(R.string.tool_compass),
         actions = { IconButton(onClick = onOpenSettings) { IconSettings() } },
         bottomBar = bottomBar,
         scrollBehavior = appBarScrollBehavior(),
@@ -63,13 +67,16 @@ fun CompassContent(
             verticalArrangement = Arrangement.spacedBy(12.dp),
         ) {
             Text(
-                "${Units.formatBearing(heading)} ${Units.cardinal(heading)}",
+                "${Units.formatBearing(heading)} ${cardinals[Units.cardinalIndex(heading)]}",
                 style = MaterialTheme.typography.displaySmall,
             )
             Text(
                 // Without a location fix declination is unknown, so "true north" would
                 // be a claim the app cannot back up.
-                if (state.useTrueNorth && state.hasLocation) "True north" else "Magnetic north",
+                stringResource(
+                    if (state.useTrueNorth && state.hasLocation) R.string.compass_true_north
+                    else R.string.compass_magnetic_north
+                ),
                 style = MaterialTheme.typography.bodyMedium,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
@@ -77,6 +84,7 @@ fun CompassContent(
             CompassDial(
                 headingDeg = heading,
                 heldBearingDeg = state.heldBearingDeg,
+                cardinals = cardinals,
                 // Height-driven so the dial shrinks to fit a landscape window rather
                 // than pushing the controls off the bottom.
                 modifier = Modifier
@@ -88,20 +96,23 @@ fun CompassContent(
             CompassCalibrationBanner(state.accuracy)
             if (state.tiltWarning) {
                 Text(
-                    "Hold the phone flat for an accurate bearing",
+                    stringResource(R.string.compass_tilt_warning),
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.error,
                 )
             }
             if (state.hasLocation) {
                 Text(
-                    "Declination ${Units.formatAngle(state.declinationDeg)}",
+                    stringResource(
+                        R.string.compass_declination,
+                        Units.formatAngle(state.declinationDeg),
+                    ),
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
             } else {
                 Text(
-                    "No location — showing magnetic north only",
+                    stringResource(R.string.compass_no_location),
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
@@ -116,7 +127,12 @@ fun CompassContent(
                     onClick = { actions.setUseTrueNorth(!state.useTrueNorth) },
                     enabled = state.hasLocation,
                 ) {
-                    Text(if (state.useTrueNorth) "Show magnetic" else "Show true north")
+                    Text(
+                        stringResource(
+                            if (state.useTrueNorth) R.string.compass_show_magnetic
+                            else R.string.compass_show_true_north
+                        )
+                    )
                 }
                 OutlinedButton(
                     onClick = {
@@ -124,7 +140,12 @@ fun CompassContent(
                         else actions.clearHeldBearing()
                     }
                 ) {
-                    Text(if (state.heldBearingDeg == null) "Hold bearing" else "Release bearing")
+                    Text(
+                        stringResource(
+                            if (state.heldBearingDeg == null) R.string.compass_hold_bearing
+                            else R.string.compass_release_bearing
+                        )
+                    )
                 }
             }
         }
@@ -139,6 +160,7 @@ fun CompassContent(
 private fun CompassDial(
     headingDeg: Double,
     heldBearingDeg: Double?,
+    cardinals: Array<String>,
     modifier: Modifier = Modifier,
 ) {
     val measurer = rememberTextMeasurer()
@@ -156,7 +178,7 @@ private fun CompassDial(
 
             rotate(-headingDeg.toFloat(), center) {
                 drawTicks(center, radius, onSurface, variant)
-                drawCardinals(measurer, center, radius, onSurface, error)
+                drawCardinals(measurer, cardinals, center, radius, onSurface, error)
                 if (heldBearingDeg != null) {
                     drawHeldBearing(center, radius, heldBearingDeg.toFloat(), primary)
                 }
@@ -192,18 +214,22 @@ private fun DrawScope.drawTicks(center: Offset, radius: Float, major: Color, min
 
 private fun DrawScope.drawCardinals(
     measurer: TextMeasurer,
+    cardinals: Array<String>,
     center: Offset,
     radius: Float,
     normal: Color,
     northColor: Color,
 ) {
-    val labels = listOf(0 to "N", 90 to "E", 180 to "S", 270 to "W")
-    for ((deg, label) in labels) {
-        val rad = Math.toRadians(deg.toDouble() - 90.0)
+    // Only the four quarter points fit on the dial; the intercardinals in the same array
+    // are for the numeric readout.
+    for (quarter in 0 until 4) {
+        val index = quarter * (Units.CARDINAL_POINTS / 4)
+        val label = cardinals[index]
+        val rad = Math.toRadians(quarter * 90.0 - 90.0)
         val r = radius * 0.78f
         val style = TextStyle(
             fontSize = 20.sp,
-            color = if (label == "N") northColor else normal,
+            color = if (index == 0) northColor else normal,
         )
         val layout = measurer.measure(label, style)
         drawText(

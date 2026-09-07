@@ -70,11 +70,11 @@ class UnitsTest {
 
     @Test
     fun `cardinal points map to the nearest sixteenth`() {
-        assertEquals("N", Units.cardinal(0.0))
-        assertEquals("N", Units.cardinal(359.0))
-        assertEquals("NE", Units.cardinal(45.0))
-        assertEquals("S", Units.cardinal(180.0))
-        assertEquals("W", Units.cardinal(270.0))
+        assertEquals(0, Units.cardinalIndex(0.0))
+        assertEquals(0, Units.cardinalIndex(359.0))
+        assertEquals(2, Units.cardinalIndex(45.0))
+        assertEquals(8, Units.cardinalIndex(180.0))
+        assertEquals(12, Units.cardinalIndex(270.0))
     }
 
     @Test
