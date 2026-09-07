@@ -16,6 +16,7 @@ import androidx.core.app.NotificationCompat
 import androidx.core.net.toUri
 import com.vayunmathur.clock.R
 import com.vayunmathur.clock.platform.ALARM_CHANNEL_ID
+import com.vayunmathur.clock.platform.ALARM_RING_NOTIFICATION_ID
 import com.vayunmathur.clock.platform.createAlarmChannel
 import com.vayunmathur.clock.data.ClockRepository
 import com.vayunmathur.library.ui.RINGTONE_SILENT
@@ -31,6 +32,14 @@ class AlarmSoundService : Service() {
     private var mediaPlayer: MediaPlayer? = null
     private var vibrator: Vibrator? = null
     private var started = false
+
+    /** Whether the MediaPlayer is actually producing sound, so the ring notification is spare. */
+    @Volatile
+    private var sounding = false
+
+    @Volatile
+    private var destroyed = false
+
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
     override fun onCreate() {
@@ -61,52 +70,75 @@ class AlarmSoundService : Service() {
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         val alarmId = intent?.getLongExtra("ALARM_ID", -1L) ?: -1L
 
-        // We are alive and foreground, so take the ring off the system before doing anything
-        // slow: the insistent notification and the MediaPlayer must not overlap for longer than
-        // this handover.
-        if (alarmId != -1L) {
-            getSystemService(NotificationManager::class.java).cancel(alarmId.toInt())
+        if (started) {
+            // A second alarm has fired and posted its own ring notification over the first.
+            // We are already the ringer, so take it back off the system at once; if we are not
+            // sounding yet, the launch below is still on its way to doing so.
+            if (sounding) cancelRingNotification()
+            return START_STICKY
         }
+        started = true
 
-        // Now handle the hardware, using this alarm's per-alarm settings.
-        if (!started) {
-            started = true
-            scope.launch {
-                val alarm = if (alarmId != -1L) {
-                    runCatching {
-                        ClockRepository.get(applicationContext).getAlarm(alarmId)
-                    }.getOrNull()
-                } else null
+        scope.launch {
+            val alarm = if (alarmId != -1L) {
+                runCatching {
+                    ClockRepository.get(applicationContext).getAlarm(alarmId)
+                }.getOrNull()
+            } else null
 
-                val ringtoneUri = alarm?.ringtoneUri
-                val vibrate = alarm?.vibrate ?: true
-                val gradualSeconds = alarm?.gradualVolumeSeconds ?: 0
+            val ringtoneUri = alarm?.ringtoneUri
+            val vibrate = alarm?.vibrate ?: true
+            val gradualSeconds = alarm?.gradualVolumeSeconds ?: 0
 
-                // setDataSource()/prepare() are blocking; run them on the IO
-                // dispatcher (this coroutine) instead of the main thread.
-                //
-                // Vibration comes first: a stored ringtone can be a content:// URI owned by
-                // another app, and one that no longer resolves used to throw out of playAlarm
-                // and take the vibration down with it.
-                if (vibrate) {
-                    withContext(Dispatchers.Main) { startVibration() }
-                }
-                if (ringtoneUri != RINGTONE_SILENT) {
-                    runCatching { playAlarm(resolveRingtone(ringtoneUri), gradualSeconds) }
-                        .onFailure { failure ->
-                            Log.e(TAG, "Alarm $alarmId: ringtone $ringtoneUri failed to play", failure)
-                            releasePlayer()
-                            runCatching { playAlarm(resolveRingtone(null), gradualSeconds) }
-                                .onFailure { fallbackFailure ->
-                                    Log.e(TAG, "Alarm $alarmId: default ringtone failed too", fallbackFailure)
-                                    releasePlayer()
-                                }
-                        }
-                }
+            // setDataSource()/prepare() are blocking; run them on the IO
+            // dispatcher (this coroutine) instead of the main thread.
+            //
+            // Vibration comes first: a stored ringtone can be a content:// URI owned by
+            // another app, and one that no longer resolves used to throw out of playAlarm
+            // and take the vibration down with it.
+            if (vibrate) {
+                withContext(Dispatchers.Main) { startVibration() }
+            }
+
+            val silent = ringtoneUri == RINGTONE_SILENT
+            sounding = !silent && (
+                tryPlay(resolveRingtone(ringtoneUri), gradualSeconds, alarmId) ||
+                    tryPlay(resolveRingtone(null), gradualSeconds, alarmId)
+                )
+
+            // Only now hand the ring over. Cancelling on entry to onStartCommand instead would
+            // drop the safety net during the database read and prepare() above - the slow part,
+            // on exactly the hardware this is meant to fix - and drop it permanently if neither
+            // ringtone plays, which is the one case it exists for.
+            if (silent || sounding) {
+                cancelRingNotification()
+            } else {
+                Log.e(TAG, "Alarm $alarmId: no ringtone played; leaving the ring notification up")
             }
         }
 
         return START_STICKY
+    }
+
+    private fun tryPlay(uri: Uri?, gradualSeconds: Int, alarmId: Long): Boolean {
+        val playing = runCatching { playAlarm(uri, gradualSeconds) }
+            .onFailure {
+                Log.e(TAG, "Alarm $alarmId: ringtone $uri failed to play", it)
+                releasePlayer()
+            }
+            .getOrDefault(false)
+        // prepare() blocks and is not cancellable, so onDestroy can have come and gone while we
+        // were inside it - releasing a player that did not exist yet and leaving this one with
+        // nothing left alive to stop it.
+        if (playing && destroyed) {
+            releasePlayer()
+            return false
+        }
+        return playing
+    }
+
+    private fun cancelRingNotification() {
+        getSystemService(NotificationManager::class.java).cancel(ALARM_RING_NOTIFICATION_ID)
     }
 
     private fun resolveRingtone(uriString: String?): Uri? = when (uriString) {
@@ -116,8 +148,8 @@ class AlarmSoundService : Service() {
         else -> runCatching { uriString.toUri() }.getOrNull()
     }
 
-    private fun playAlarm(alarmUri: Uri?, gradualSeconds: Int) {
-        alarmUri ?: return
+    private fun playAlarm(alarmUri: Uri?, gradualSeconds: Int): Boolean {
+        alarmUri ?: return false
         mediaPlayer = MediaPlayer().apply {
             setDataSource(applicationContext, alarmUri)
             setAudioAttributes(
@@ -132,6 +164,7 @@ class AlarmSoundService : Service() {
             start()
         }
         if (gradualSeconds > 0) rampVolume(gradualSeconds)
+        return true
     }
 
     private fun releasePlayer() {
@@ -161,6 +194,7 @@ class AlarmSoundService : Service() {
     }
 
     override fun onDestroy() {
+        destroyed = true
         scope.cancel()
         mediaPlayer?.stop()
         mediaPlayer?.release()

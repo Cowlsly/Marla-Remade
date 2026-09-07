@@ -48,14 +48,14 @@ class AlarmActivity : ComponentActivity() {
     private fun dismissAlarm() {
         stopService(Intent(this, AlarmSoundService::class.java))
         val nm = getSystemService(NotificationManager::class.java)
-        nm.cancel(alarmId.toInt()); finish()
+        nm.cancel(ALARM_RING_NOTIFICATION_ID); finish()
     }
 
     private fun snoozeAlarm() {
         stopService(Intent(this, AlarmSoundService::class.java))
         // The ring notification is insistent, so it keeps sounding until cancelled. Snoozing
         // used to leave it posted, which only went unnoticed while the service owned the sound.
-        getSystemService(NotificationManager::class.java).cancel(alarmId.toInt())
+        getSystemService(NotificationManager::class.java).cancel(ALARM_RING_NOTIFICATION_ID)
         val snoozeTime = Clock.System.now().plus(snoozeMinutes.minutes)
         val triggerMillis = snoozeTime.toEpochMilliseconds()
         val intent = Intent(this, AlarmReceiver::class.java).apply { putExtra("ALARM_ID", alarmId); putExtra("IS_SNOOZE", true) }

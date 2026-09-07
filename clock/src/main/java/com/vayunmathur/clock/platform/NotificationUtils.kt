@@ -31,6 +31,20 @@ const val ALARM_CHANNEL_ID = "alarm_channel_v2"
  */
 const val ALARM_RING_CHANNEL_ID = "alarm_ring_channel"
 
+/**
+ * The one and only id the insistent ring notification is ever posted under.
+ *
+ * It is deliberately not per-alarm. An insistent notification rings until it is cancelled, so
+ * every cancel site has to be able to name it without knowing which alarm posted it - which
+ * AlarmActivity cannot, being `singleInstance` and holding whichever id it was first created
+ * with. One id also means a second alarm replaces the first rather than adding a second thing
+ * that rings, so at most one can ever be outstanding.
+ *
+ * Kept well clear of the row-id range: timer notifications are posted under `timer.id.hashCode()`,
+ * which for a Room row id is just the id, so anything small eventually collides with one.
+ */
+const val ALARM_RING_NOTIFICATION_ID = 100_002
+
 private const val LEGACY_ALARM_CHANNEL_ID = "ALARM_CHANNEL_ID"
 
 fun createNotificationChannels(context: Context) {

@@ -47,6 +47,9 @@ class AlarmReceiver : BroadcastReceiver() {
             .setCategory(NotificationCompat.CATEGORY_ALARM)
             // This is the key: it launches the activity automatically if the phone is locked
             .setFullScreenIntent(pendingIntent, true)
+            // Without a content intent, tapping the notification does nothing and autoCancel
+            // never fires, so the shade offers no way to stop the ring but a swipe.
+            .setContentIntent(pendingIntent)
             .setAutoCancel(true)
             // Backstop: an insistent notification rings forever, so bound it in case every
             // dismiss path is missed (process killed before the UI ever appeared, say).
@@ -77,7 +80,7 @@ class AlarmReceiver : BroadcastReceiver() {
             Log.w(TAG, "Alarm $alarmId: USE_FULL_SCREEN_INTENT not granted; ringing UI may not appear")
         }
         notificationManager.notify(
-            alarmId.toInt(),
+            ALARM_RING_NOTIFICATION_ID,
             builder.build().apply { flags = flags or Notification.FLAG_INSISTENT },
         )
 
