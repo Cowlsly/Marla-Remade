@@ -307,7 +307,15 @@ class ContactViewModel(application: Application) : AndroidViewModel(application)
         )
         val accountSet = mutableSetOf<ContactAccount>()
         try {
-            val cursor = app.contentResolver.query(uri, projection, null, null, null)
+            // Tombstoned raw contacts keep their account columns, so without this filter an
+            // account whose every contact has been deleted stays in the account list forever.
+            val cursor = app.contentResolver.query(
+                uri,
+                projection,
+                "${ContactsContract.RawContacts.DELETED} = 0",
+                null,
+                null,
+            )
             cursor?.use {
                 while (it.moveToNext()) {
                     val name = it.getString(0) ?: ""

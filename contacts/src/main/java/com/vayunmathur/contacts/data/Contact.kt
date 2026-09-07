@@ -444,9 +444,18 @@ data class Contact(
 
             val rawContacts = mutableListOf<RawContactInfo>()
             try {
+                // DELETED = 0 matters even though delete() hard-deletes: an account with a real
+                // sync adapter legitimately leaves a tombstone until that adapter runs, and a
+                // tombstoned row still carries DISPLAY_NAME_PRIMARY while its Data rows are
+                // already gone. Without this filter processDetails() rebuilds a name-only
+                // contact from that column, so the contact appears to survive deletion and any
+                // edit to it silently fails to persist.
                 contentResolver.query(
                     ContactsContract.RawContacts.CONTENT_URI, projection,
-                    contactId?.let { "${ContactsContract.RawContacts._ID} = ?" },
+                    buildString {
+                        append("${ContactsContract.RawContacts.DELETED} = 0")
+                        if (contactId != null) append(" AND ${ContactsContract.RawContacts._ID} = ?")
+                    },
                     contactId?.let { arrayOf(it.toString()) },
                     null
                 )?.use { cursor ->
