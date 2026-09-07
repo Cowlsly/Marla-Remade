@@ -299,6 +299,13 @@ AppMessages.show(...)           // from a ViewModel, Worker, or Activity
 
 Use a notification when the message has to outlive the current screen.
 
+Per-file opt-out, for a UI-less component with no scaffold collecting `AppMessages` — a
+notification trampoline that finishes immediately, for instance:
+
+```kotlin
+// TOAST EXCEPTION: <reason>
+```
+
 ### Never animate directly with `androidx.compose.animation`
 
 The other `fatal` rule, `DirectComposeAnimation`. Motion written at a call site carries no

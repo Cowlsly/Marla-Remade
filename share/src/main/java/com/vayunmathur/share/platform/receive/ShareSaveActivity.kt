@@ -83,6 +83,7 @@ class ShareSaveActivity : ComponentActivity() {
         val targets = uris()
         val next = targets.getOrNull(index)
         if (next == null) {
+            // TOAST EXCEPTION: no UI to host a snackbar.
             // A Toast, not `AppMessages`: that is collected by the app's scaffold, and this
             // trampoline has no UI and may well be the only thing the user has open.
             Toast.makeText(
