@@ -37,6 +37,8 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Mutex;
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().collect();
@@ -339,44 +341,81 @@ fn run(out_path: &Path, specs: &[FeedSpec]) -> Result<(), String> {
     let (mut kept, mut without_shape, mut deduped, mut fell_back) = (0usize, 0usize, 0usize, 0usize);
     let (mut shapes_read, mut merged) = (0usize, 0usize);
 
-    for spec in specs {
-        let feed = read_feed(spec)?;
-        kept += feed.routes_kept;
-        without_shape += feed.routes_without_shape;
-        shapes_read += feed.shapes_read;
-        let mut new = 0usize;
-        for line in feed.lines {
-            // Across feeds as well as within one, so an alignment published by both a city
-            // feed and the regional feed that merges it draws once.
-            //
-            // Keyed on the colour too, which the hash alone was not: two services running
-            // the same track are routinely published against one `shape_id`, and dropping
-            // one of them because its geometry had been seen is how a corridor loses a
-            // line. This is only the fast path for the subtraction below, which would reach
-            // the same answer the slow way.
-            if !seen.insert((polyline_hash(&line.points), line.color)) {
-                deduped += 1;
-                continue;
+    // Feeds are parsed in parallel and folded in sequentially.
+    //
+    // Parsing is pure per feed and was most of the wall clock: a world-scale set spent ~40 of
+    // its 54 minutes here, single-threaded, on machines with dozens of idle cores. The fold
+    // below cannot move — `seen`, `by_color` and `by_mode` are order-dependent, and feed order
+    // is what decides which duplicate of a shared alignment survives — so only the reads are
+    // spread out, and their results are put back into spec order before any of them is folded.
+    // The output is therefore bit-identical to the sequential version.
+    //
+    // Chunked rather than read-all-then-fold: a chunk of twice the pool keeps every core busy
+    // while capping how many parsed feeds are alive at once, so peak memory follows the pool
+    // size and not the number of feeds.
+    let threads = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1);
+    let chunk_size = threads.saturating_mul(2).max(1);
+
+    for chunk in specs.chunks(chunk_size) {
+        let next = AtomicUsize::new(0);
+        let parsed: Mutex<Vec<(usize, Result<FeedLines, String>)>> =
+            Mutex::new(Vec::with_capacity(chunk.len()));
+        std::thread::scope(|scope| {
+            for _ in 0..threads.min(chunk.len()) {
+                scope.spawn(|| loop {
+                    let i = next.fetch_add(1, Ordering::Relaxed);
+                    if i >= chunk.len() {
+                        break;
+                    }
+                    let read = read_feed(&chunk[i]);
+                    parsed.lock().expect("feed reader pool").push((i, read));
+                });
             }
-            let mode_cover = by_mode.entry(line.mode).or_default();
-            let redundant = if line.fallback {
-                mode_cover.contains(&line.points)
-            } else {
-                by_color.entry((line.mode, line.color)).or_default().contains(&line.points)
-            };
-            if redundant {
-                merged += 1;
-                continue;
+        });
+        let mut parsed = parsed.into_inner().expect("feed reader pool");
+        // Back into spec order, so the fold below sees exactly the sequence it used to.
+        parsed.sort_unstable_by_key(|(i, _)| *i);
+
+        for (i, feed) in parsed {
+            let spec = &chunk[i];
+            let feed = feed?;
+            kept += feed.routes_kept;
+            without_shape += feed.routes_without_shape;
+            shapes_read += feed.shapes_read;
+            let mut new = 0usize;
+            for line in feed.lines {
+                // Across feeds as well as within one, so an alignment published by both a city
+                // feed and the regional feed that merges it draws once.
+                //
+                // Keyed on the colour too, which the hash alone was not: two services running
+                // the same track are routinely published against one `shape_id`, and dropping
+                // one of them because its geometry had been seen is how a corridor loses a
+                // line. This is only the fast path for the subtraction below, which would reach
+                // the same answer the slow way.
+                if !seen.insert((polyline_hash(&line.points), line.color)) {
+                    deduped += 1;
+                    continue;
+                }
+                let mode_cover = by_mode.entry(line.mode).or_default();
+                let redundant = if line.fallback {
+                    mode_cover.contains(&line.points)
+                } else {
+                    by_color.entry((line.mode, line.color)).or_default().contains(&line.points)
+                };
+                if redundant {
+                    merged += 1;
+                    continue;
+                }
+                mode_cover.add(&line.points);
+                by_color.entry((line.mode, line.color)).or_default().add(&line.points);
+                if line.fallback {
+                    fell_back += 1;
+                }
+                lines.push(line);
+                new += 1;
             }
-            mode_cover.add(&line.points);
-            by_color.entry((line.mode, line.color)).or_default().add(&line.points);
-            if line.fallback {
-                fell_back += 1;
-            }
-            lines.push(line);
-            new += 1;
+            eprintln!("transit_shapes: feed '{}': {new} new line(s)", spec.0);
         }
-        eprintln!("transit_shapes: feed '{}': {new} new line(s)", spec.0);
     }
     drop(by_color);
     drop(by_mode);

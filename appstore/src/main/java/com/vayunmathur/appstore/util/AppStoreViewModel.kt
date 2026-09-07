@@ -344,6 +344,7 @@ class AppStoreViewModel(
             if (AppSource.PLAYSTORE in enabled) play.restore()
             loadHome(enabled)
             refreshPlayInstalledPackages(enabled)
+            syncIfNeverSynced(enabled)
         }
         viewModelScope.launch { loadAccrescent(settings.readEnabledSources()) }
         viewModelScope.launch {
@@ -565,6 +566,27 @@ class AppStoreViewModel(
     }
 
     override fun refresh() = syncSources()
+
+    /**
+     * Populate the offline catalogues the first time the store is opened.
+     *
+     * Nothing else fetches them on startup: [loadHome] only refreshes GrapheneOS's index, and
+     * the periodic [com.vayunmathur.appstore.work.UpdateCheckWorker] may be hours away. That
+     * left a fresh install showing an empty store until the user thought to pull to refresh.
+     *
+     * Keyed off the catalogue being empty rather than a "first run" flag, so it also recovers
+     * a store whose first sync failed or whose data was cleared - and so it stays quiet on
+     * every later launch, when re-fetching two full catalogues on the user's connection would
+     * be a poor trade for data that is at most a few hours stale.
+     */
+    private fun syncIfNeverSynced(enabled: Set<AppSource>) {
+        if (_recentlyUpdated.value.isNotEmpty()) return
+        // Nothing to fetch if both offline sources are switched off; syncSources() would only
+        // report "all sources off" at someone who never asked for a sync.
+        val offlineSources = setOf(DefaultRepos.FDROID.source, DefaultRepos.MODERN_APPS.source)
+        if (enabled.intersect(offlineSources).isEmpty()) return
+        syncSources()
+    }
 
     /** Re-download both offline catalogues, then reload the home rows from them. */
     fun syncSources() {
@@ -820,10 +842,10 @@ class AppStoreViewModel(
     /**
      * Install the Sandboxed Google Play bundle in dependency order.
      *
-     * Sequential and awaited, like [updateAll]: GSF and GMS provide the accounts and the
-     * provider Vending talks to, so they must land first, and each first-time install shows
-     * its own PackageInstaller confirmation — firing them at once would bury the user in
-     * prompts and let the store client install before the services it needs.
+     * Sequential and awaited, like [updateAll]: Play Services provides the provider Vending
+     * talks to, so it must land first, and each first-time install shows its own
+     * PackageInstaller confirmation - firing them at once would bury the user in prompts and
+     * let the store client install before the services it needs.
      */
     override fun installSandboxedGooglePlay() {
         viewModelScope.launch {

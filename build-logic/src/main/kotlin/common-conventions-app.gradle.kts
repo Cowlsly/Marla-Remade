@@ -25,7 +25,23 @@ fun readVersionInfo(): Pair<Int, String> {
 val proguardFile
     get() = File(rootDir, "proguard-rules.pro")
 
-val (appVersionCode, appVersionName) = readVersionInfo()
+val (releaseVersionCode, appVersionName) = readVersionInfo()
+
+/**
+ * `-PversionCodeOverride=N` — for sideloading over a preinstalled Modern App on MAOS.
+ *
+ * The platform refuses to update a system package to the same versionCode, so an APK built
+ * from the same `version.txt` as the running OS image can never be installed over it. Passing
+ * a higher code makes the dev loop work without touching the release version every time.
+ *
+ * Keep the bump small (`+1`). The update lives in /data and keeps shadowing the system app
+ * across OS flashes until the image's own versionCode overtakes it, so a wild value would
+ * pin the sideloaded build in place indefinitely.
+ *
+ * Read at configuration time, which the configuration cache requires.
+ */
+val appVersionCode: Int =
+    (findProperty("versionCodeOverride") as String?)?.trim()?.toIntOrNull() ?: releaseVersionCode
 
 // Adaptive launcher icons are generated at build time from Material Symbols
 // instead of committing an ic_launcher_foreground.xml per app. Each app declares
@@ -198,7 +214,15 @@ configure<com.android.build.api.dsl.ApplicationExtension> {
                 enableV1Signing = true
                 enableV2Signing = true
                 enableV3Signing = true
-                enableV4Signing = false
+                // Emits the `<apk>.idsig` sidecar. PackageInstallerSession calls
+                // enableFsVerityToAddedApksWithIdsig() for any non-incremental install that
+                // stages one, which is the only way to get fs-verity onto an APK - and
+                // GrapheneOS refuses to update a preinstalled system app without it. Incremental
+                // install, the other route to fs-verity, is barred for system packages. So
+                // without this a preinstalled Modern App can only be changed by a full OS build.
+                // The APK itself is unchanged; consumers that copy `*-release.apk` (collect-apks.sh,
+                // the F-Droid publish) simply ignore the sidecar.
+                enableV4Signing = true
             }
         }
     }

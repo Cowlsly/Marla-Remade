@@ -5,6 +5,7 @@ import android.util.Log
 import com.vayunmathur.appstore.data.AppDatabase
 import com.vayunmathur.appstore.data.AppSource
 import com.vayunmathur.appstore.data.PinnedStampEntity
+import com.vayunmathur.appstore.data.SandboxedGooglePlay
 import com.vayunmathur.appstore.data.UnifiedApp
 import com.vayunmathur.appstore.data.accrescent.AccrescentRepository
 import com.vayunmathur.appstore.data.accrescent.IncompatibleDeviceException
@@ -221,7 +222,16 @@ class InstallCoordinator(
      */
     private suspend fun installFromGrapheneOS(app: UnifiedApp): SessionInstaller.Outcome =
         withContext(Dispatchers.IO) {
+            // The index is fetched when the home screen loads, so tapping install before that
+            // lands - a cold start, or a refresh that failed while the network was down - would
+            // otherwise report that GrapheneOS does not vouch for a package it plainly does.
+            // Fetch it here rather than fail on the timing: refresh() is mutex-guarded, so a
+            // sync already in flight is awaited rather than duplicated.
             val entry = grapheneOS.packageFor(app.packageName)
+                ?: run {
+                    grapheneOS.refresh(SandboxedGooglePlay.PACKAGES)
+                    grapheneOS.packageFor(app.packageName)
+                }
                 ?: return@withContext SessionInstaller.Outcome(
                     false,
                     VerificationResult.Rejected(

@@ -1,9 +1,15 @@
-package android.telephony.euicc;
+package android.service.euicc;
 
 /**
  * Compile-only stub of the {@code @SystemApi}
- * {@code android.telephony.euicc.EuiccProfileInfo}. Only the members the LPA
+ * {@code android.service.euicc.EuiccProfileInfo}. Only the members the LPA
  * constructs are declared. Not packaged; the framework provides the real class.
+ *
+ * <p>Note the package: this class lives in {@code android.service.euicc}, unlike its
+ * siblings {@code DownloadableSubscription} and {@code EuiccInfo} which really are in
+ * {@code android.telephony.euicc}. Declaring the stub in the latter compiles, then fails
+ * at runtime with {@code ClassNotFoundException} the first time the framework calls
+ * {@code onGetEuiccProfileInfoList}.
  */
 public final class EuiccProfileInfo {
     public static final int PROFILE_STATE_UNSET = -1;

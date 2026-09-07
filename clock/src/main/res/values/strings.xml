@@ -41,6 +41,10 @@
     <string name="channel_alarms_name">Alarms</string>
     <!-- System channel description for alarm notifications, bypasses DND -->
     <string name="channel_alarms_description">Notifications for scheduled alarms</string>
+    <!-- System channel name for the silent notification shown while an alarm is already ringing -->
+    <string name="channel_alarm_playing_name">Alarm in progress</string>
+    <!-- System channel description for the silent notification shown while an alarm is ringing -->
+    <string name="channel_alarm_playing_description">Shown while an alarm is sounding</string>
     <!-- System channel name for stopwatch -->
     <string name="channel_stopwatch_name">Stopwatch</string>
     <!-- System channel description for stopwatch notification -->

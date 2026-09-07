@@ -74,6 +74,8 @@ use crate::shapes::{distance_m, project, resample};
 use std::cmp::Ordering;
 use std::collections::BTreeMap;
 use std::ops::Range;
+use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
+use std::sync::Mutex;
 
 /// Two polylines closer than this everywhere are the same line, and two tracks closer than
 /// this are one corridor.
@@ -209,20 +211,89 @@ pub fn assign(candidates: &[Candidate]) -> Vec<Vec<Span>> {
     let mut sets: Vec<Vec<u32>> = Vec::new();
     let mut set_ids: BTreeMap<Vec<u32>, u32> = BTreeMap::new();
     let mut per_sample: Vec<u32> = Vec::with_capacity(samples.len());
-    let mut near: Vec<u32> = Vec::new();
-    for sample in &samples {
-        grid.routes_near(&samples, sample, &mut near);
-        let id = match set_ids.get(&near) {
-            Some(id) => *id,
-            None => {
-                let id = sets.len() as u32;
-                sets.push(near.clone());
-                set_ids.insert(near.clone(), id);
-                id
+
+    // The probe is the whole cost of a large run — one per 10 m of every line, 287 million of
+    // them on a world feed set — and it ran on one core for the better part of an hour.
+    //
+    // It splits in two. Finding which routes are near a sample is a pure read of the grid, so
+    // that part goes wide: the samples are cut into one contiguous range per core and each
+    // thread writes its answers into its own flat buffer. Interning those answers into set ids
+    // cannot go wide, because an id is assigned on first sight and the ids have to come out in
+    // sample order or every downstream lane moves. So the threads hand back their buffers in
+    // range order and the interning walks them sequentially — cheap, since it is `BTreeMap`
+    // lookups over an answer already computed.
+    //
+    // Flat `(values, ends)` buffers rather than `Vec<Vec<u32>>`: 287 million heap allocations
+    // is its own kind of slow, and the whole point of interning is not to hold that many
+    // vectors at once.
+    let threads = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1);
+    let span = samples.len().div_ceil(threads.max(1)).max(1);
+    let probed = AtomicUsize::new(0);
+    let parts: Mutex<Vec<(usize, Vec<u32>, Vec<u32>)>> = Mutex::new(Vec::new());
+    {
+        let grid = &grid;
+        let samples = &samples;
+        let parts = &parts;
+        let probed = &probed;
+        let total = samples.len();
+        std::thread::scope(|scope| {
+            for t in 0..threads {
+                let lo = t * span;
+                if lo >= total {
+                    break;
+                }
+                let hi = ((t + 1) * span).min(total);
+                scope.spawn(move || {
+                    // Per thread, so the stamp trick in `routes_near` needs no sharing: a
+                    // stamp only has to be unique against this thread's own array.
+                    let mut seen: Vec<u32> = vec![0; route_count];
+                    let mut stamp: u32 = 0;
+                    let mut near: Vec<u32> = Vec::new();
+                    let mut values: Vec<u32> = Vec::new();
+                    let mut ends: Vec<u32> = Vec::with_capacity(hi - lo);
+                    for (i, sample) in samples[lo..hi].iter().enumerate() {
+                        stamp += 1;
+                        grid.routes_near(samples, sample, &mut near, &mut seen, stamp);
+                        values.extend_from_slice(&near);
+                        ends.push(values.len() as u32);
+                        // Batched, because an atomic per probe would cost more than the probe.
+                        if i % 65_536 == 0 {
+                            let n = probed.fetch_add(65_536, AtomicOrdering::Relaxed) + 65_536;
+                            eprint!(
+                                "\r{:<28} [{:>3}%] {total} sample(s)",
+                                "Corridor probe",
+                                (n * 100 / total.max(1)).min(100)
+                            );
+                        }
+                    }
+                    parts.lock().expect("probe pool").push((t, values, ends));
+                });
             }
-        };
-        per_sample.push(id);
+        });
     }
+    eprintln!("\r{:<28} [100%] {} sample(s)", "Corridor probe", samples.len());
+
+    // Back in sample order, then interned sequentially: first-seen order is what fixes the ids.
+    let mut parts = parts.into_inner().expect("probe pool");
+    parts.sort_unstable_by_key(|(t, _, _)| *t);
+    for (_, values, ends) in &parts {
+        let mut start = 0usize;
+        for &end in ends {
+            let near = &values[start..end as usize];
+            start = end as usize;
+            let id = match set_ids.get(near) {
+                Some(id) => *id,
+                None => {
+                    let id = sets.len() as u32;
+                    sets.push(near.to_vec());
+                    set_ids.insert(near.to_vec(), id);
+                    id
+                }
+            };
+            per_sample.push(id);
+        }
+    }
+    drop(parts);
 
     // Distance along each candidate, for its own geometry and for its probes. `resample`
     // walks *along* the polyline, so probe `k` is exactly `k * SAMPLE_M` along it and the
@@ -253,6 +324,9 @@ pub fn assign(candidates: &[Candidate]) -> Vec<Vec<Span>> {
         named[candidate.route as usize].get_or_insert((candidate.color, candidate.name));
     }
 
+    // Named too: on a large set the work after the probe loop is still minutes, and without a
+    // line here the run goes silent again the moment the bar reaches 100%.
+    eprintln!("{:<28} {} candidate(s)", "Corridor spans", candidates.len());
     let corridors = corridors_of(candidates, &sets, &runs, &named, &own_cum, &probe_cum);
 
     if std::env::var_os("TRANSIT_BUNDLE_DEBUG").is_some() {
@@ -274,20 +348,68 @@ pub fn assign(candidates: &[Candidate]) -> Vec<Vec<Span>> {
         }
     }
 
-    candidates
-        .iter()
-        .enumerate()
-        .map(|(at, candidate)| {
-            spans_of(
-                candidate,
-                &runs[at],
-                &samples[blocks[at].clone()],
-                &probe_cum[at],
-                &own_cum[at],
-                &corridors,
-            )
-        })
-        .collect()
+    // The last phase, and per candidate independent: each one cuts its own runs against
+    // corridors it only reads. Left sequential it was the tail that made a world set look
+    // hung again after the corridor bar hit 100%.
+    //
+    // Handed out one candidate at a time rather than in equal contiguous ranges, because the
+    // cost per candidate is wildly uneven — a transcontinental line carries orders of magnitude
+    // more runs than a tram loop. Splitting the range evenly gave whichever thread drew the
+    // long-distance rail all the work and left the rest idle: a world set sat at 98% on one
+    // core for ten minutes with sixty-three threads finished. Sample probes are uniform enough
+    // for a range split; candidates are not.
+    let total = candidates.len();
+    let cut_next = AtomicUsize::new(0);
+    let cut_done = AtomicUsize::new(0);
+    let cut_parts: Mutex<Vec<(usize, Vec<Span>)>> = Mutex::new(Vec::with_capacity(total));
+    {
+        let corridors = &corridors;
+        let cut_parts = &cut_parts;
+        let cut_done = &cut_done;
+        let cut_next = &cut_next;
+        let samples = &samples;
+        let runs = &runs;
+        let blocks = &blocks;
+        let probe_cum = &probe_cum;
+        let own_cum = &own_cum;
+        std::thread::scope(|scope| {
+            for _ in 0..threads.min(total.max(1)) {
+                scope.spawn(move || {
+                    let mut local: Vec<(usize, Vec<Span>)> = Vec::new();
+                    loop {
+                        let at = cut_next.fetch_add(1, AtomicOrdering::Relaxed);
+                        if at >= total {
+                            break;
+                        }
+                        local.push((
+                            at,
+                            spans_of(
+                                &candidates[at],
+                                &runs[at],
+                                &samples[blocks[at].clone()],
+                                &probe_cum[at],
+                                &own_cum[at],
+                                corridors,
+                            ),
+                        ));
+                        let n = cut_done.fetch_add(1, AtomicOrdering::Relaxed) + 1;
+                        if n % 64 == 0 {
+                            eprint!(
+                                "\r{:<28} [{:>3}%] {total} line(s)",
+                                "Corridor cut",
+                                n * 100 / total.max(1)
+                            );
+                        }
+                    }
+                    cut_parts.lock().expect("cut pool").extend(local);
+                });
+            }
+        });
+    }
+    eprintln!("\r{:<28} [100%] {total} line(s)", "Corridor cut");
+    let mut cut_parts = cut_parts.into_inner().expect("cut pool");
+    cut_parts.sort_unstable_by_key(|(at, _)| *at);
+    cut_parts.into_iter().map(|(_, spans)| spans).collect()
 }
 
 /// A maximal stretch of one candidate's samples holding the same membership, as inclusive
@@ -406,9 +528,72 @@ fn corridors_of(
         }
     }
     let length = |at: usize| own_cum[at].last().copied().unwrap_or(0.0);
-    members
-        .into_iter()
-        .map(|(set, in_corridor)| {
+    // Every corridor projects every member onto the reference geometry, so the work is members
+    // times reference length per corridor, and on a world set that ran for the better part of
+    // an hour on one core.
+    //
+    // Each corridor is an independent pure function of read-only shared state — it reads
+    // `candidates`, `sets`, `named` and `own_cum` and writes only its own entry — so the loop
+    // spreads across the machine with no coordination beyond handing out indices. Results go
+    // into a `BTreeMap` keyed by set id, which is ordered by key rather than by insertion, so
+    // the output is byte-identical however the threads interleave.
+    let entries: Vec<(u32, Vec<(usize, f64, f64)>)> = members.into_iter().collect();
+    let total = entries.len();
+    let threads = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1);
+    let next = AtomicUsize::new(0);
+    let finished = AtomicUsize::new(0);
+    let collected: Mutex<Vec<(u32, Corridor)>> = Mutex::new(Vec::with_capacity(total));
+    std::thread::scope(|scope| {
+        for _ in 0..threads.min(total.max(1)) {
+            scope.spawn(|| {
+                // Accumulated per thread and merged once at the end: locking per corridor
+                // would serialise the very loop this is spreading out.
+                let mut local: Vec<(u32, Corridor)> = Vec::new();
+                loop {
+                    let i = next.fetch_add(1, AtomicOrdering::Relaxed);
+                    if i >= total {
+                        break;
+                    }
+                    let (set, in_corridor) = &entries[i];
+                    local.push((
+                        *set,
+                        one_corridor(*set, in_corridor, candidates, sets, named, own_cum, &length),
+                    ));
+                    // Redrawn on a count, not a percentage: the threads finish out of order, so
+                    // "the whole number changed" is not a thing any one of them can see.
+                    let n = finished.fetch_add(1, AtomicOrdering::Relaxed) + 1;
+                    if n % 128 == 0 {
+                        eprint!(
+                            "\r{:<28} [{:>3}%] {total} corridor(s)",
+                            "Corridor order",
+                            n * 100 / total.max(1)
+                        );
+                    }
+                }
+                collected.lock().expect("corridor pool").extend(local);
+            });
+        }
+    });
+    eprintln!("\r{:<28} [100%] {total} corridor(s)", "Corridor order");
+    collected.into_inner().expect("corridor pool").into_iter().collect()
+}
+
+/// One corridor's reference geometry and the order its colours sit in across it.
+///
+/// Split out of [`corridors_of`] so the loop there can run on every core: this reads only
+/// shared immutable state and returns an owned value, which is what makes that safe.
+#[allow(clippy::too_many_arguments)]
+fn one_corridor(
+    set: u32,
+    in_corridor: &[(usize, f64, f64)],
+    candidates: &[Candidate],
+    sets: &[Vec<u32>],
+    named: &[Option<(u32, &str)>],
+    own_cum: &[Vec<f64>],
+    length: &dyn Fn(usize) -> f64,
+) -> Corridor {
+    {
+        {
             // Whose geometry the corridor draws — and only that. It no longer decides the
             // direction, which is canonical, nor the order, which is the approaches. The
             // first member by colour and then name, so it does not move when a feed reorders
@@ -462,7 +647,7 @@ fn corridors_of(
             let margin = TAPER_M.min((extent.1 - extent.0) / 4.0);
             let extent = (extent.0 + margin, extent.1 - margin);
             let mut sides: BTreeMap<u32, (f64, u32)> = BTreeMap::new();
-            for &(at, from, to) in &in_corridor {
+            for &(at, from, to) in in_corridor {
                 let side = approach_offset(
                     &reference,
                     extent,
@@ -496,9 +681,9 @@ fn corridors_of(
             ordered.sort_by(|a, b| a.0.total_cmp(&b.0).then(a.1.cmp(&b.1)).then(a.2.cmp(b.2)));
             let mut colours: Vec<u32> = ordered.into_iter().map(|(_, c, _)| c).collect();
             colours.dedup();
-            (set, Corridor { colours, ..reference })
-        })
-        .collect()
+            Corridor { colours, ..reference }
+        }
+    }
 }
 
 /// Fold a polyline into a fixed half-plane: northward, or exactly east-west and eastward.
@@ -999,19 +1184,40 @@ impl Covered {
     }
 
     /// Is this point already drawn, by track running parallel to it?
+    ///
+    /// Returns on the first match, so the order the nine cells are visited in decides how much
+    /// of the neighbourhood is scanned. The point's own cell is by far the likeliest to hold
+    /// the match \u2014 a corridor of 30 m inside a cell of 40 m \u2014 so it goes first, then the four
+    /// edge neighbours, then the corners, which can only match across a cell join. Visiting
+    /// them in `-1..=1` order put a corner first and scanned most of the neighbourhood before
+    /// reaching the answer.
+    ///
+    /// This is a pure reordering: the set of samples examined is unchanged, so the result is
+    /// too. It matters because the buckets are unbounded \u2014 [`add`](Self::add) records every
+    /// sample of every line it draws, and a trunk alignment republished by a dozen feeds is a
+    /// dozen overlapping sample runs in the same cells.
     fn covers(&self, point: (i32, i32), ux: f64, uy: f64) -> bool {
+        const NEIGHBOURHOOD: [(i32, i32); 9] = [
+            (0, 0),
+            (1, 0),
+            (-1, 0),
+            (0, 1),
+            (0, -1),
+            (1, 1),
+            (1, -1),
+            (-1, 1),
+            (-1, -1),
+        ];
         let (cx, cy) = cell_of(point);
-        for dx in -1..=1 {
-            for dy in -1..=1 {
-                let Some(bucket) = self.cells.get(&(cx + dx, cy + dy)) else { continue };
-                for &i in bucket {
-                    let (other, oux, ouy) = self.points[i as usize];
-                    if (ux * oux + uy * ouy).abs() < COS_FOLD {
-                        continue;
-                    }
-                    if distance_m(point, other) <= CORRIDOR_M {
-                        return true;
-                    }
+        for (dx, dy) in NEIGHBOURHOOD {
+            let Some(bucket) = self.cells.get(&(cx + dx, cy + dy)) else { continue };
+            for &i in bucket {
+                let (other, oux, ouy) = self.points[i as usize];
+                if (ux * oux + uy * ouy).abs() < COS_FOLD {
+                    continue;
+                }
+                if distance_m(point, other) <= CORRIDOR_M {
+                    return true;
                 }
             }
         }
@@ -1066,21 +1272,44 @@ impl Grid {
 
     /// The routes with a sample within [`CORRIDOR_M`] of `at` running parallel to it,
     /// ascending and deduplicated. Always contains `at`'s own route.
-    fn routes_near(&self, samples: &[Sample], at: &Sample, out: &mut Vec<u32>) {
+    ///
+    /// `seen` is a caller-owned scratch array of one slot per route, holding the `stamp` of
+    /// the sample a route was last accepted for. It replaces an `out.contains()` linear scan
+    /// that ran once per neighbouring sample: a 40 m cell holds ~4 samples per line at
+    /// [`SAMPLE_M`], so the nine-cell neighbourhood holds ~36 per route in the corridor, and
+    /// scanning `out` for each made the probe quadratic in *local route density*. On a
+    /// world-scale set that is the whole cost — dense metros carry the same trunk track
+    /// republished by every feed covering the city, so density there is far higher than the
+    /// feed count suggests, and the run time grows much faster than the input does.
+    ///
+    /// A route is stamped only when it is **accepted**, never when the angle or distance test
+    /// rejects it. That is what the `contains` check did — it tested membership of `out`, not
+    /// of everything examined — and a route rejected against one sample must stay eligible
+    /// against a nearer one in the same neighbourhood.
+    fn routes_near(
+        &self,
+        samples: &[Sample],
+        at: &Sample,
+        out: &mut Vec<u32>,
+        seen: &mut [u32],
+        stamp: u32,
+    ) {
         out.clear();
         out.push(at.route);
+        seen[at.route as usize] = stamp;
         let (cx, cy) = cell_of(at.point);
         for dx in -1..=1 {
             for dy in -1..=1 {
                 for &(_, i) in bucket(&self.entries, (cx + dx, cy + dy)) {
                     let other = &samples[i as usize];
-                    if other.route == at.route || out.contains(&other.route) {
+                    if seen[other.route as usize] == stamp {
                         continue;
                     }
                     if (at.ux * other.ux + at.uy * other.uy).abs() < COS_FOLD {
                         continue;
                     }
                     if distance_m(at.point, other.point) <= CORRIDOR_M {
+                        seen[other.route as usize] = stamp;
                         out.push(other.route);
                     }
                 }

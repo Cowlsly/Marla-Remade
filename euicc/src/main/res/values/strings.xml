@@ -1,7 +1,96 @@
 <?xml version="1.0" encoding="utf-8"?>
+<!--
+  Wording follows Google's eSIM LPA (com.google.android.euicc) so a user arriving from
+  Settings reads the same phrases MAOS replaced. Strings that exist there are copied
+  verbatim; the rest describe behaviour it does not have.
+-->
 <resources>
     <string name="app_name" translatable="false">EUICC</string>
-    <string name="eid_title">EID</string>
-    <string name="euicc_info_title">eUICC info</string>
+
+    <!-- Home / profile list -->
+    <string name="esim_enabled">eSIM enabled</string>
+    <string name="available_carriers">Available carriers</string>
+    <string name="add_profile_title">Add SIM</string>
+    <string name="add_new_carrier">Add new carrier</string>
+    <string name="show_details">Show details</string>
+    <string name="no_profiles_title">Set up an eSIM</string>
+    <string name="no_profiles_body">Add a SIM from your carrier to connect this device to a mobile network. You will need a QR code or an activation code.</string>
     <string name="no_euicc">No eUICC available on this device.</string>
+
+    <!-- Profile status -->
+    <string name="profile_status_enabled">Enabled</string>
+    <string name="profile_status_disabled">Disabled</string>
+    <string name="profile_iccid">ICCID</string>
+    <string name="profile_status">Status</string>
+    <string name="profile_provider">Provider</string>
+
+    <!-- Profile actions -->
+    <string name="enable_profile_title">Enable</string>
+    <string name="disable_profile_title">Disable</string>
+    <string name="erase_sim_confirm_button">Erase</string>
+    <string name="rename_profile_title">Rename</string>
+
+    <!-- Confirmations. %1$s is the carrier being switched to, %2$s the one being left. -->
+    <string name="enable_carrier_dialog_title">Switch carrier?</string>
+    <string name="enable_carrier_dialog_text">This device will connect to %1$s instead of %2$s.</string>
+    <string name="enable_carrier_dialog_text_no_current">This device will connect to %1$s.</string>
+    <string name="disable_carrier_dialog_title">Disable carrier?</string>
+    <string name="disable_carrier_dialog_text">This device will be immediately disconnected from %1$s.</string>
+    <string name="erase_sim_dialog_title">Erase %1$s?</string>
+    <string name="erase_sim_dialog_text">This removes %1$s service on this device, but your %1$s plan won\'t be canceled.</string>
+
+    <!-- Device info -->
+    <string name="device_info_title">Device info</string>
+    <string name="eid_title">EID</string>
+    <string name="eid_number">EID number</string>
+    <string name="eid_qr_code_dialog_title">Your device EID</string>
+    <string name="eid_not_found">Device EID not found</string>
+    <string name="euicc_info_title">eUICC info</string>
+    <string name="sgp22_version">SGP.22 version</string>
+    <string name="notifications_title">Pending notifications</string>
+    <string name="no_notifications">No pending notifications</string>
+    <string name="remove">Remove</string>
+    <string name="copy_action">Copy</string>
+    <string name="unknown">Unknown</string>
+
+    <!-- Add SIM -->
+    <string name="add_sim_body">Your carrier can give you a QR code, or an activation code to type in.</string>
+    <string name="scan_qr_button">Scan QR code</string>
+    <string name="activation_code_scan_button">Scan QR code instead</string>
+    <string name="enter_code_button">Enter activation code</string>
+
+    <!-- Activation code entry -->
+    <string name="activation_code_title">Enter activation code</string>
+    <string name="activation_code_text">You should have a code from your carrier. Enter it to connect to the network.</string>
+    <string name="activation_code_hint">Look for a code from your carrier that starts with 1$ or LPA:1$</string>
+    <string name="activation_code_label">Activation code</string>
+    <string name="continue_button">Continue</string>
+    <string name="cancel">Cancel</string>
+    <string name="camera_permission_required">Camera permission is required to scan a QR code.</string>
+    <string name="done">Done</string>
+    <string name="try_again">Try again</string>
+
+    <!-- Carrier confirmation -->
+    <string name="carrier_confirm_title">Confirm your network</string>
+    <string name="carrier_confirm_subtitle">You should already be signed up with the network</string>
+    <string name="download_esim_button">Set up eSIM</string>
+
+    <!-- Confirmation code -->
+    <string name="confirmation_code_title">Enter confirmation code</string>
+    <string name="confirmation_code_text">%1$s requires a confirmation code to set up this eSIM.</string>
+    <string name="confirmation_code_text_no_carrier">Your carrier requires a confirmation code to set up this eSIM.</string>
+    <string name="confirmation_code_label">Confirmation code</string>
+    <string name="confirmation_code_wrong">That code was not accepted. Check it and try again.</string>
+
+    <!-- Installing -->
+    <string name="installing_title">Setting up your eSIM</string>
+    <string name="installing_text">This can take a few minutes. Stay connected to the internet.</string>
+
+    <!-- Complete -->
+    <string name="download_complete_title">Activate your eSIM</string>
+    <string name="download_complete_text">Go to Settings to turn on this eSIM</string>
+
+    <!-- Failure -->
+    <string name="download_fail_dialog_title">Couldn\'t set up eSIM</string>
+    <string name="download_fail_generic">Something went wrong. Check your connection and your activation code, then try again.</string>
 </resources>

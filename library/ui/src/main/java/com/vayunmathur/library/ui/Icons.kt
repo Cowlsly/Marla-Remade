@@ -189,6 +189,8 @@ import androidx.compose.material.icons.filled.Menu
 import androidx.compose.material.icons.filled.Mic
 import androidx.compose.material.icons.filled.MicOff
 import androidx.compose.material.icons.filled.MusicNote
+import androidx.compose.material.icons.filled.QrCodeScanner
+import androidx.compose.material.icons.filled.SimCard
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.MyLocation
 import androidx.compose.material.icons.filled.Navigation
@@ -1388,8 +1390,18 @@ fun IconMine(modifier: Modifier = Modifier, tint: Color = LocalContentColor.curr
     AppIcon(Icons.Filled.Brightness7, "Mine", modifier, tint)
 
 // --- Music detection ---
-
 /** A single quaver - music is playing. */
 @Composable
 fun IconMusicNote(modifier: Modifier = Modifier, tint: Color = LocalContentColor.current) =
     AppIcon(Icons.Filled.MusicNote, "Music", modifier, tint)
+
+// --- eSIM ---
+/** A SIM card - an eSIM profile, or the eUICC itself. */
+@Composable
+fun IconSim(modifier: Modifier = Modifier, tint: Color = LocalContentColor.current) =
+    AppIcon(Icons.Filled.SimCard, "SIM", modifier, tint)
+
+/** A QR code in a viewfinder - scan an eSIM activation code. */
+@Composable
+fun IconQrCode(modifier: Modifier = Modifier, tint: Color = LocalContentColor.current) =
+    AppIcon(Icons.Filled.QrCodeScanner, "QR code", modifier, tint)

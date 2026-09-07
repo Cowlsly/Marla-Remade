@@ -39,8 +39,56 @@ class EuiccViewModel(app: Application) : AndroidViewModel(app) {
     var state by mutableStateOf(EuiccScreenState())
         private set
 
+    /**
+     * The activation flow's own state, kept separate from [state] because the two have
+     * different lifetimes: [state] mirrors the eUICC and is replaced on every reload,
+     * while a download survives across those reloads until the user leaves the screen.
+     */
+    var download by mutableStateOf<DownloadState>(DownloadState.Idle)
+        private set
+
     init {
         reload()
+    }
+
+    /**
+     * Runs the download for [activationCode].
+     *
+     * Goes straight from [DownloadState.Preparing] to [DownloadState.Installing] because
+     * `nativeDownloadProfile` is atomic - it authenticates, binds and installs in one call,
+     * with no point in between where it can report the carrier or ask for a confirmation
+     * code. Splitting it is what makes those states reachable.
+     */
+    fun startDownload(activationCode: String) {
+        if (download is DownloadState.Preparing || download is DownloadState.Installing) return
+        download = DownloadState.Preparing
+        viewModelScope.launch {
+            download = DownloadState.Installing()
+            val outcome = withContext(Dispatchers.IO) {
+                runCatching {
+                    channelManager.withIsdrChannel { EuiccNative.nativeDownloadProfile(activationCode) }
+                }
+            }
+            download = outcome.fold(
+                onSuccess = { raw ->
+                    val result = runCatching { json.decodeFromString<DownloadResult>(raw) }.getOrNull()
+                    when {
+                        result == null -> DownloadState.Failed(null)
+                        result.success -> DownloadState.Complete(null)
+                        else -> DownloadState.Failed(result.message.ifBlank { null })
+                    }
+                },
+                onFailure = { DownloadState.Failed(it.message) },
+            )
+            // The eUICC changed either way: a success installed a profile, and a failure may
+            // still have left a notification behind.
+            reload()
+        }
+    }
+
+    /** Clears the activation flow, so leaving and re-entering it starts clean. */
+    fun clearDownload() {
+        download = DownloadState.Idle
     }
 
     /** Reads EID, eUICC info, profiles, and notifications in one channel session. */
@@ -67,32 +115,6 @@ class EuiccViewModel(app: Application) : AndroidViewModel(app) {
             state = outcome.getOrElse {
                 state.copy(loading = false, error = it.message ?: "eUICC unavailable")
             }
-        }
-    }
-
-    /** Downloads and installs the profile for an activation code, then reloads. */
-    fun downloadProfile(activationCode: String) {
-        state = state.copy(loading = true, error = null, message = null)
-        viewModelScope.launch {
-            val outcome = withContext(Dispatchers.IO) {
-                runCatching {
-                    channelManager.withIsdrChannel { EuiccNative.nativeDownloadProfile(activationCode) }
-                }
-            }
-            outcome.fold(
-                onSuccess = { raw ->
-                    val result = runCatching { json.decodeFromString<DownloadResult>(raw) }.getOrNull()
-                    when {
-                        result == null -> state = state.copy(loading = false, error = "Download failed")
-                        result.success -> {
-                            state = state.copy(message = result.message)
-                            reload()
-                        }
-                        else -> state = state.copy(loading = false, error = result.message)
-                    }
-                },
-                onFailure = { state = state.copy(loading = false, error = it.message ?: "Download failed") },
-            )
         }
     }
 

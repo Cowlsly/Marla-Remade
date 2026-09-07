@@ -11,7 +11,10 @@ import android.service.euicc.GetDownloadableSubscriptionMetadataResult
 import android.service.euicc.GetEuiccProfileInfoListResult
 import android.telephony.euicc.DownloadableSubscription
 import android.telephony.euicc.EuiccInfo as FrameworkEuiccInfo
-import android.telephony.euicc.EuiccProfileInfo
+// EuiccProfileInfo is in android.service.euicc, not android.telephony.euicc where its
+// siblings above live. Importing the latter compiles against the stubs but throws
+// ClassNotFoundException the first time the framework asks for the profile list.
+import android.service.euicc.EuiccProfileInfo
 import com.vayunmathur.euicc.EuiccNative
 import com.vayunmathur.euicc.data.EuiccInfo
 import com.vayunmathur.euicc.data.Profile

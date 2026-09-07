@@ -50,8 +50,15 @@ param(
     # A prepared land polygon (the OSMCoastline land-polygons .shp), passed through to
     # mamaps_build as --coastline so `earth` carries the mainland. The builder requires it
     # whenever `earth` is selected and offers no way to decline, so this is required too unless
-    # -Layers leaves `earth` out. Consumed in stage A, so it cannot combine with -ReuseStore.
+    # -Layers leaves `earth` out. Read in stage A, but still name it under -ReuseStore: the
+    # spill's fingerprint records which side inputs built it, and a reuse has to declare the
+    # same ones to prove it is tiling the spill it thinks it is.
     [string] $Coastline,
+    # A prepared GTFS export (gtfs_ingest's transit_shapes .geojsonseq), passed through to
+    # mamaps_build as --transit-routes so `transit` carries its coloured rail lines. Omitting it
+    # builds an archive whose transit layer is empty — the lines come from GTFS, not the .pbf.
+    # Same -ReuseStore rule as -Coastline.
+    [string] $TransitRoutes,
     [string] $Exe,
     [string] $Dump
 )
@@ -135,8 +142,10 @@ $flags = @()
 if ($KeepStore)  { $flags += "--keep-store" }
 if ($ReuseStore) { $flags += "--reuse-store" }
 if ($Coastline) {
-    if ($ReuseStore) { throw "-Coastline is consumed in stage A and cannot combine with -ReuseStore" }
     $flags += @("--coastline", (Resolve-Path $Coastline).Path)
+}
+if ($TransitRoutes) {
+    $flags += @("--transit-routes", (Resolve-Path $TransitRoutes).Path)
 }
 
 Write-Output ("=== {0} -> {1}   z{2}..z{3}{4}{5}{6} ===" -f `

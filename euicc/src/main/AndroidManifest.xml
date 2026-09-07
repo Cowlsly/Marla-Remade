@@ -26,7 +26,25 @@
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
-            <intent-filter android:priority="10">
+        </activity>
+
+        <!--
+          The LUI the platform opens from Settings. Guarded by BIND_EUICC_SERVICE because
+          EuiccConnector.isValidEuiccComponent applies that requirement to the resolving
+          activity, not just to the EuiccService - without it the platform finds no LUI and
+          the Settings row silently does nothing. It cannot live on MainActivity, since
+          android:permission constrains the caller and the launcher holds no signature
+          permission. See LuiActivity.
+        -->
+        <activity
+            android:configChanges="mcc|mnc|colorMode|density|fontScale|fontWeightAdjustment|keyboard|keyboardHidden|layoutDirection|navigation|orientation|screenLayout|screenSize|smallestScreenSize|touchscreen|uiMode"
+            android:name=".platform.LuiActivity"
+            android:exported="true"
+            android:permission="android.permission.BIND_EUICC_SERVICE"
+            android:excludeFromRecents="true"
+            android:taskAffinity=""
+            android:theme="@style/Theme.General">
+            <intent-filter android:priority="100">
                 <action android:name="android.service.euicc.action.MANAGE_EMBEDDED_SUBSCRIPTIONS" />
                 <action android:name="android.service.euicc.action.PROVISION_EMBEDDED_SUBSCRIPTION" />
                 <category android:name="android.intent.category.DEFAULT" />

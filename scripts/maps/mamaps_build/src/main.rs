@@ -611,6 +611,11 @@ fn usage() {
 /// Building without land is still reachable, but only by saying what you mean: leave `earth` out
 /// of `--layers`, which produces an archive that has no land layer rather than one whose land
 /// layer is quietly wrong.
+///
+/// This applies to `--reuse-store` too, even though that skips the stage A which reads the
+/// shapefile. The spill's fingerprint records whether it was built with a coastline, and a reuse
+/// has to declare the same flags for the check to pass — so the path is still named, still
+/// required, and simply never re-read.
 fn check_coastline(coastline: Option<&std::path::Path>, earth: bool) -> Result<(), String> {
     if coastline.is_some() && !earth {
         return Err("--coastline was given but the earth layer is not selected".to_string());
