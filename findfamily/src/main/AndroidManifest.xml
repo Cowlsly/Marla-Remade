@@ -50,6 +50,13 @@
 
                 <data android:scheme="findfamily" android:host="add" />
             </intent-filter>
+            <!-- Long-pressing a Quick Settings tile resolves this action; without it the
+                 system falls back to the App Info page (GitHub #545). -->
+            <intent-filter>
+                <action android:name="android.service.quicksettings.action.QS_TILE_PREFERENCES" />
+
+                <category android:name="android.intent.category.DEFAULT" />
+            </intent-filter>
         </activity>
 
         <service
