@@ -198,18 +198,20 @@ fun EditContactPage(backStack: NavBackStack<Route>, viewModel: ContactViewModel,
             }
 
             Spacer(Modifier.height(8.dp))
-            AddPictureSection(
-                photo = currentDraft.photo?.photo,
-                viewModel = viewModel,
-                onClick = {
-                    pickMedia.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly))
-                },
-                removePhoto = {
-                    viewModel.updateEditDraft { it.copy(photo = null) }
-                },
-                sharedKey = editRoute.contactId,
-            )
-            Spacer(Modifier.height(24.dp))
+            if (!isSimAccount) {
+                AddPictureSection(
+                    photo = currentDraft.photo?.photo,
+                    viewModel = viewModel,
+                    onClick = {
+                        pickMedia.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly))
+                    },
+                    removePhoto = {
+                        viewModel.updateEditDraft { it.copy(photo = null) }
+                    },
+                    sharedKey = editRoute.contactId,
+                )
+                Spacer(Modifier.height(24.dp))
+            }
 
 
             // Plain Column rather than FormSection: DetailScaffold already insets its content
@@ -254,20 +256,22 @@ fun EditContactPage(backStack: NavBackStack<Route>, viewModel: ContactViewModel,
                         }
                     },
                 )
-                LabeledTextField(
-                    value = currentDraft.nickname,
-                    onValueChange = { v -> viewModel.updateEditDraft { it.copy(nickname = v) } },
-                    label = stringResource(R.string.nickname),
-                    sharedTextKey = id?.let { "contact-nickname-$it" },
-                    modifier = Modifier.fillMaxWidth().expandFromLine(),
-                )
-                LabeledTextField(
-                    value = currentDraft.company,
-                    onValueChange = { v -> viewModel.updateEditDraft { it.copy(company = v) } },
-                    label = stringResource(R.string.company),
-                    sharedTextKey = id?.let { "contact-company-$it" },
-                    modifier = Modifier.fillMaxWidth().expandFromLine(),
-                )
+                if (!isSimAccount) {
+                    LabeledTextField(
+                        value = currentDraft.nickname,
+                        onValueChange = { v -> viewModel.updateEditDraft { it.copy(nickname = v) } },
+                        label = stringResource(R.string.nickname),
+                        sharedTextKey = id?.let { "contact-nickname-$it" },
+                        modifier = Modifier.fillMaxWidth().expandFromLine(),
+                    )
+                    LabeledTextField(
+                        value = currentDraft.company,
+                        onValueChange = { v -> viewModel.updateEditDraft { it.copy(company = v) } },
+                        label = stringResource(R.string.company),
+                        sharedTextKey = id?.let { "contact-company-$it" },
+                        modifier = Modifier.fillMaxWidth().expandFromLine(),
+                    )
+                }
             }
 
             // A contact always offers a mobile number and a home email, even when blank, so there is
@@ -350,81 +354,83 @@ fun EditContactPage(backStack: NavBackStack<Route>, viewModel: ContactViewModel,
                 isMandatory = { it == homeEmailIndex },
                 expandOnEnter = true,
             )
-            Spacer(Modifier.height(16.dp))
-            val addressCtx = LocalContext.current
-            FormDetailGroup(
-                items = currentDraft.addresses,
-                label = stringResource(R.string.addresses),
-                addLabel = stringResource(R.string.add_address),
-                typeOptions = listOf(CDKStructuredPostal.TYPE_HOME, CDKStructuredPostal.TYPE_WORK, CDKStructuredPostal.TYPE_OTHER, CDKStructuredPostal.TYPE_CUSTOM),
-                value = { it.value },
-                onValueChange = { idx, v -> viewModel.updateEditDraft { it.copy(addresses = it.addresses.toMutableList().also { l -> l[idx] = l[idx].withValue(v) }) } },
-                typeLabel = { it.typeString(addressCtx) },
-                optionLabel = { opt -> ContactDetail.default<Address>().withType(opt).typeString(addressCtx) },
-                onTypeChange = { idx, opt -> viewModel.updateEditDraft { it.copy(addresses = it.addresses.toMutableList().also { l -> l[idx] = l[idx].withType(opt) }) } },
-                onRemove = { idx -> viewModel.updateEditDraft { it.copy(addresses = it.addresses.toMutableList().also { l -> l.removeAt(idx) }) } },
-                onAdd = { viewModel.updateEditDraft { it.copy(addresses = it.addresses + ContactDetail.default<Address>()) } },
-                currentType = { it.type },
-                isCustom = { it.type == CDKStructuredPostal.TYPE_CUSTOM },
-                customLabel = { it.label },
-                onLabelChange = { idx, v -> viewModel.updateEditDraft { it.copy(addresses = it.addresses.toMutableList().also { l -> l[idx] = l[idx].withLabel(v) }) } },
-                customLabelText = stringResource(R.string.custom_label),
-                customPlaceholder = stringResource(R.string.enter_custom_label),
-                addIcon = { IconLocationOn() },
-                expandOnEnter = true,
-            )
-            Spacer(Modifier.height(12.dp))
-            Birthday(backStack, currentDraft.birthday) { v ->
-                viewModel.updateEditDraft { it.copy(birthday = v) }
-            }
-            DateDetailsSection(
-                backStack = backStack,
-                details = currentDraft.dates,
-                onDetailsChange = { list -> viewModel.updateEditDraft { it.copy(dates = list) } },
-                icon = { IconEvent() },
-                options = listOf(CDKEvent.TYPE_ANNIVERSARY, CDKEvent.TYPE_OTHER, CDKEvent.TYPE_CUSTOM)
-            )
-            Spacer(Modifier.height(16.dp))
-            Text(
-                text = stringResource(R.string.note),
-                style = MaterialTheme.typography.labelMedium,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                modifier = Modifier.fillMaxWidth(),
-            )
-            Spacer(Modifier.height(4.dp))
-            com.vayunmathur.library.ui.OdfMarkdownEditorField(
-                controller = noteController,
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .heightIn(min = 96.dp)
-                    .border(1.dp, MaterialTheme.colorScheme.outline, RoundedCornerShape(8.dp))
-                    .padding(12.dp),
-            )
-            Spacer(Modifier.height(16.dp))
+            if (!isSimAccount) {
+                Spacer(Modifier.height(16.dp))
+                val addressCtx = LocalContext.current
+                FormDetailGroup(
+                    items = currentDraft.addresses,
+                    label = stringResource(R.string.addresses),
+                    addLabel = stringResource(R.string.add_address),
+                    typeOptions = listOf(CDKStructuredPostal.TYPE_HOME, CDKStructuredPostal.TYPE_WORK, CDKStructuredPostal.TYPE_OTHER, CDKStructuredPostal.TYPE_CUSTOM),
+                    value = { it.value },
+                    onValueChange = { idx, v -> viewModel.updateEditDraft { it.copy(addresses = it.addresses.toMutableList().also { l -> l[idx] = l[idx].withValue(v) }) } },
+                    typeLabel = { it.typeString(addressCtx) },
+                    optionLabel = { opt -> ContactDetail.default<Address>().withType(opt).typeString(addressCtx) },
+                    onTypeChange = { idx, opt -> viewModel.updateEditDraft { it.copy(addresses = it.addresses.toMutableList().also { l -> l[idx] = l[idx].withType(opt) }) } },
+                    onRemove = { idx -> viewModel.updateEditDraft { it.copy(addresses = it.addresses.toMutableList().also { l -> l.removeAt(idx) }) } },
+                    onAdd = { viewModel.updateEditDraft { it.copy(addresses = it.addresses + ContactDetail.default<Address>()) } },
+                    currentType = { it.type },
+                    isCustom = { it.type == CDKStructuredPostal.TYPE_CUSTOM },
+                    customLabel = { it.label },
+                    onLabelChange = { idx, v -> viewModel.updateEditDraft { it.copy(addresses = it.addresses.toMutableList().also { l -> l[idx] = l[idx].withLabel(v) }) } },
+                    customLabelText = stringResource(R.string.custom_label),
+                    customPlaceholder = stringResource(R.string.enter_custom_label),
+                    addIcon = { IconLocationOn() },
+                    expandOnEnter = true,
+                )
+                Spacer(Modifier.height(12.dp))
+                Birthday(backStack, currentDraft.birthday) { v ->
+                    viewModel.updateEditDraft { it.copy(birthday = v) }
+                }
+                DateDetailsSection(
+                    backStack = backStack,
+                    details = currentDraft.dates,
+                    onDetailsChange = { list -> viewModel.updateEditDraft { it.copy(dates = list) } },
+                    icon = { IconEvent() },
+                    options = listOf(CDKEvent.TYPE_ANNIVERSARY, CDKEvent.TYPE_OTHER, CDKEvent.TYPE_CUSTOM)
+                )
+                Spacer(Modifier.height(16.dp))
+                Text(
+                    text = stringResource(R.string.note),
+                    style = MaterialTheme.typography.labelMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.fillMaxWidth(),
+                )
+                Spacer(Modifier.height(4.dp))
+                com.vayunmathur.library.ui.OdfMarkdownEditorField(
+                    controller = noteController,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .heightIn(min = 96.dp)
+                        .border(1.dp, MaterialTheme.colorScheme.outline, RoundedCornerShape(8.dp))
+                        .padding(12.dp),
+                )
+                Spacer(Modifier.height(16.dp))
 
-            // Last, to match the detail page. Anything on both pages is in the same order on both, so
-            // a value does not have to be hunted for after the morph, and nothing has to travel past
-            // the whole form to reach its counterpart.
-            val allGroups by viewModel.groups.collectAsStateWithLifecycle()
-            val draftGroupIds = currentDraft.groupMemberships.map { it.groupId }.toSet()
-            val memberGroups = allGroups.filter { it.id in draftGroupIds && it.name.trim().isNotEmpty() }
-            val availableGroups = allGroups.filter { it.id !in draftGroupIds && it.name.trim().isNotEmpty() }
-            GroupMembershipSection(
-                memberGroups = memberGroups,
-                availableGroups = availableGroups,
-                onAddGroup = { groupId ->
-                    viewModel.updateEditDraft { it.copy(
-                        groupMemberships = it.groupMemberships + GroupMembership(0, groupId)
-                    )}
-                },
-                onRemoveGroup = { groupId ->
-                    viewModel.updateEditDraft { it.copy(
-                        groupMemberships = it.groupMemberships.filter { gm -> gm.groupId != groupId }
-                    )}
-                },
-                sharedId = editRoute.contactId,
-            )
-            Spacer(Modifier.height(16.dp))
+                // Last, to match the detail page. Anything on both pages is in the same order on both, so
+                // a value does not have to be hunted for after the morph, and nothing has to travel past
+                // the whole form to reach its counterpart.
+                val allGroups by viewModel.groups.collectAsStateWithLifecycle()
+                val draftGroupIds = currentDraft.groupMemberships.map { it.groupId }.toSet()
+                val memberGroups = allGroups.filter { it.id in draftGroupIds && it.name.trim().isNotEmpty() }
+                val availableGroups = allGroups.filter { it.id !in draftGroupIds && it.name.trim().isNotEmpty() }
+                GroupMembershipSection(
+                    memberGroups = memberGroups,
+                    availableGroups = availableGroups,
+                    onAddGroup = { groupId ->
+                        viewModel.updateEditDraft { it.copy(
+                            groupMemberships = it.groupMemberships + GroupMembership(0, groupId)
+                        )}
+                    },
+                    onRemoveGroup = { groupId ->
+                        viewModel.updateEditDraft { it.copy(
+                            groupMemberships = it.groupMemberships.filter { gm -> gm.groupId != groupId }
+                        )}
+                    },
+                    sharedId = editRoute.contactId,
+                )
+                Spacer(Modifier.height(16.dp))
+            }
 
             Spacer(Modifier.height(16.dp))
         }

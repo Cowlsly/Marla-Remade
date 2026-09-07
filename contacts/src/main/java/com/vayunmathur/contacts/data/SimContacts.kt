@@ -8,6 +8,7 @@ import android.net.Uri
 import android.telephony.SubscriptionManager
 import android.util.Log
 import androidx.core.content.ContextCompat
+import com.vayunmathur.contacts.R
 
 /**
  * SIM ADN (Abbreviated Dialling Numbers) data source.
@@ -177,6 +178,44 @@ object SimContactsDataSource {
         }
     }
 
+    /**
+     * Edits a row in place. The provider identifies the existing row by `tag`/`number` in the
+     * values and replaces it with `newTag`/`newNumber`.
+     *
+     * Preferred over delete-then-insert, which cannot be made reliable: the ICC provider parses
+     * the selection string itself and ignores selectionArgs (see [deleteSingle]).
+     */
+    fun updateSimContact(
+        context: Context,
+        old: SimContact,
+        name: String,
+        number: String,
+        email: String? = null,
+        subscriptionId: Int? = null
+    ): Boolean {
+        if (name.isBlank() && number.isBlank()) return false
+        return try {
+            val targetSubId = subscriptionId ?: old.subscriptionId
+            val uri = if (targetSubId != null) Uri.parse("$BASE_URI/subId/$targetSubId") else Uri.parse(BASE_URI)
+            val values = ContentValues().apply {
+                put("tag", old.name)
+                put("number", old.number)
+                put("newTag", name)
+                put("newNumber", number)
+                // Unconditional: an omitted key leaves the old address in place, so clearing an
+                // email would report success without changing anything.
+                put("newEmails", email.orEmpty())
+            }
+            context.contentResolver.update(uri, values, null, null) > 0
+        } catch (e: SecurityException) {
+            Log.e(TAG, "SecurityException updating SIM contact", e)
+            false
+        } catch (e: Exception) {
+            Log.e(TAG, "updateSimContact failed", e)
+            false
+        }
+    }
+
     fun deleteSimContact(context: Context, simContact: SimContact): Boolean {
         return try {
             val uri = if (simContact.subscriptionId != null) {
@@ -203,17 +242,21 @@ object SimContactsDataSource {
     }
 
     private fun deleteSingle(context: Context, uri: Uri, simContact: SimContact): Boolean {
-        // ADN provider typically deletes via where tag=? AND number=?
-        val variants = listOf(
-            "tag=? AND number=?" to arrayOf(simContact.name, simContact.number),
-            "name=? AND number=?" to arrayOf(simContact.name, simContact.number),
-            "tag=? AND newTag=? AND number=? AND newNumber=?" to arrayOf(simContact.name, simContact.name, simContact.number, simContact.number),
-            // Fallback: number only
-            "number=?" to arrayOf(simContact.number),
+        // The ICC provider parses this selection itself - splitting on "AND" then "=" and stripping
+        // surrounding quotes - and never looks at selectionArgs, so a bound "?" is compared
+        // literally and matches nothing. The values have to be inlined.
+        val tag = simContact.name.asIccLiteral()
+        val number = simContact.number.asIccLiteral()
+        val variants = listOfNotNull(
+            "tag=$tag AND number=$number",
+            "name=$tag AND number=$number",
+            // Fallback: number only. Skipped for a contact with no number, where it would become
+            // number='' and match every other numberless record on the SIM.
+            "number=$number".takeIf { simContact.number.isNotBlank() },
         )
-        for ((where, args) in variants) {
+        for (where in variants) {
             try {
-                val count = context.contentResolver.delete(uri, where, args)
+                val count = context.contentResolver.delete(uri, where, null)
                 if (count > 0) return true
             } catch (_: Exception) { }
         }
@@ -221,6 +264,13 @@ object SimContactsDataSource {
         // Not supported uniformly — return false
         return false
     }
+
+    /**
+     * Quotes a value for the ICC provider's own selection parser, which strips one leading and one
+     * trailing quote and leaves the rest alone - so an apostrophe inside the value survives and
+     * must not be escaped.
+     */
+    private fun String.asIccLiteral(): String = "'$this'"
 
     fun hasSim(context: Context): Boolean {
         return try {
@@ -274,9 +324,11 @@ object SimContactsDataSource {
         }
     }
 
-    fun getSimAccountDisplayLabel(info: SimSubscriptionInfo): String {
-        val slotNum = if (info.slotIndex >= 0) info.slotIndex + 1 else 1
-        val base = "SIM $slotNum"
+    /** 1-based SIM slot number, for display. */
+    fun slotNumberFor(info: SimSubscriptionInfo): Int = if (info.slotIndex >= 0) info.slotIndex + 1 else 1
+
+    fun getSimAccountDisplayLabel(context: Context, info: SimSubscriptionInfo): String {
+        val base = context.getString(R.string.sim_slot_label, slotNumberFor(info))
         val carrier = info.carrierName?.toString()?.trim()?.takeIf { it.isNotEmpty() }
             ?: info.displayName?.trim()?.takeIf { it.isNotEmpty() && !it.equals(base, ignoreCase = true) }
         return if (carrier != null) "$base — $carrier" else base

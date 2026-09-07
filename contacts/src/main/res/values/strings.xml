@@ -245,6 +245,10 @@
 
     <!-- SIM contacts (now virtual accounts) -->
     <string name="sim_limited_fields_hint">SIM contacts only store name, phone, and email.</string>
+    <!-- Error under the Save button in the contact editor when a SIM contact has neither a name nor a number -->
+    <string name="sim_name_or_phone_required">Enter a name or a phone number</string>
+    <!-- Storage label on a contact row and in the account picker, naming the SIM slot a contact lives on. %1$d is the 1-based slot number. -->
+    <string name="sim_slot_label">SIM %1$d</string>
     <string name="save_failed">Save failed</string>
     <string name="importing">Importing…</string>
 

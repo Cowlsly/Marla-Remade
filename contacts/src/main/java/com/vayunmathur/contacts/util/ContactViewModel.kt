@@ -12,6 +12,7 @@ import androidx.collection.LruCache
 import androidx.core.graphics.scale
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
+import com.vayunmathur.contacts.R
 import com.vayunmathur.contacts.data.Address
 import com.vayunmathur.contacts.data.CDKEmail
 import com.vayunmathur.contacts.data.CDKEvent
@@ -114,6 +115,19 @@ class ContactViewModel(application: Application) : AndroidViewModel(application)
 
     fun simDisplayLabel(account: ContactAccount): String? = _simAccountLabels.value["${account.type}|${account.name}"]
     fun simDisplayLabelFor(type: String?, name: String?): String? = _simAccountLabels.value["${type ?: ""}|${name ?: ""}"]
+
+    // Short form of the above ("SIM N", no carrier) for the storage badge on a contact row, which
+    // has room for a name but not a name plus a carrier.
+    private val _simSlotLabels = MutableStateFlow<Map<String, String>>(emptyMap())
+    val simSlotLabels: StateFlow<Map<String, String>> = _simSlotLabels.asStateFlow()
+
+    private fun simSlotLabelsFor(infos: List<SimContactsDataSource.SimSubscriptionInfo>): Map<String, String> {
+        val app = getApplication<Application>()
+        return infos.associate { info ->
+            "$SIM_ACCOUNT_TYPE|${SimContactsDataSource.accountNameFor(info)}" to
+                app.getString(R.string.sim_slot_label, SimContactsDataSource.slotNumberFor(info))
+        }
+    }
 
     val groups: StateFlow<List<ContactGroup>> = callbackFlow {
         val resolver = getApplication<Application>().contentResolver
@@ -265,9 +279,10 @@ class ContactViewModel(application: Application) : AndroidViewModel(application)
             val infos = SimContactsDataSource.getSimSubscriptionInfos(app)
             val labels = infos.associate { info ->
                 val acc = ContactAccount(SimContactsDataSource.accountNameFor(info), SIM_ACCOUNT_TYPE)
-                "${acc.type}|${acc.name}" to SimContactsDataSource.getSimAccountDisplayLabel(info)
+                "${acc.type}|${acc.name}" to SimContactsDataSource.getSimAccountDisplayLabel(app, info)
             }
             _simAccountLabels.value = labels
+            _simSlotLabels.value = simSlotLabelsFor(infos)
             // Also refresh the accounts list to include current SIM accounts (in case SIM inserted/removed)
             // Do it by launching loadAccounts() if needed; but we can update _accounts directly
             // to avoid double query. However loadAccounts() also merges DataStore saved accounts,
@@ -323,9 +338,10 @@ class ContactViewModel(application: Application) : AndroidViewModel(application)
         }
         val simLabels = simInfos.associate { info ->
             val acc = ContactAccount(SimContactsDataSource.accountNameFor(info), SIM_ACCOUNT_TYPE)
-            "${acc.type}|${acc.name}" to SimContactsDataSource.getSimAccountDisplayLabel(info)
+            "${acc.type}|${acc.name}" to SimContactsDataSource.getSimAccountDisplayLabel(app, info)
         }
         _simAccountLabels.value = simLabels
+        _simSlotLabels.value = simSlotLabelsFor(simInfos)
 
         // Sort: SIM accounts by display label, others by name
         val all = (accountSet + savedAccounts + simAccounts).toList()
@@ -728,6 +744,14 @@ class ContactViewModel(application: Application) : AndroidViewModel(application)
                     if (oldSc.name == name && oldSc.number == number && oldSc.emails == email && oldSc.subscriptionId == subId) {
                         return true
                     }
+                    // Edit in place where possible. Moving a contact to a different SIM is not an
+                    // in-place edit, so that still falls through to delete-then-insert.
+                    if (subId == null || subId == oldSc.subscriptionId) {
+                        if (SimContactsDataSource.updateSimContact(getApplication(), oldSc, name, number, email, subId)) {
+                            syncFromSystem()
+                            return true
+                        }
+                    }
                     SimContactsDataSource.deleteSimContact(getApplication(), oldSc)
                 }
             }
@@ -983,7 +1007,7 @@ class ContactViewModel(application: Application) : AndroidViewModel(application)
             val nameVal = listOfNotNull(draft.namePrefix.ifEmpty { null }, draft.firstName.ifEmpty { null }, draft.middleName.ifEmpty { null }, draft.lastName.ifEmpty { null }, draft.nameSuffix.ifEmpty { null }).joinToString(" ").trim()
             val phoneVal = draft.phoneNumbers.firstOrNull()?.number?.trim() ?: ""
             if (nameVal.isEmpty() && phoneVal.isEmpty()) {
-                onResult?.invoke(false, "Name or phone required")
+                onResult?.invoke(false, getApplication<Application>().getString(R.string.sim_name_or_phone_required))
                 return
             }
         }

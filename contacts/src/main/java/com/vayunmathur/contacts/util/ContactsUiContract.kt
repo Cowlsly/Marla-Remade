@@ -16,6 +16,8 @@ data class ContactListUiState(
     val groups: List<ContactGroup> = emptyList(),
     val searchQuery: String = "",
     val showAccountLabels: Boolean = true,
+    /** Storage badge text per contact, keyed "accountType|accountName". Absent keys fall back to the raw account name. */
+    val accountLabels: Map<String, String> = emptyMap(),
     /** Contact open in the detail pane, highlighted in the list on a wide screen. */
     val openContactId: Long? = null,
     val showAddButton: Boolean = true,

@@ -109,6 +109,7 @@ fun ContactList(
     val contacts by viewModel.contacts.collectAsStateWithLifecycle()
     val groups by viewModel.groups.collectAsStateWithLifecycle()
     val showAccountLabels by viewModel.showAccountLabels.collectAsStateWithLifecycle()
+    val simSlotLabels by viewModel.simSlotLabels.collectAsStateWithLifecycle()
     val searchQuery by viewModel.searchQuery.collectAsStateWithLifecycle()
     val hasLoadedContacts by viewModel.hasLoadedContacts.collectAsStateWithLifecycle()
 
@@ -120,6 +121,7 @@ fun ContactList(
             groups = groups,
             searchQuery = searchQuery,
             showAccountLabels = showAccountLabels,
+            accountLabels = simSlotLabels,
             openContactId = when (last) {
                 is Route.ContactDetail -> last.contactId
                 is Route.EditContact -> last.contactId
@@ -309,6 +311,7 @@ fun ContactListScreen(state: ContactListUiState, actions: ContactsActions) {
                         // moment it began morphing into the detail page.
                         isSelected = isSelectionMode && contact.id in selectedIds,
                         showAccountLabels = state.showAccountLabels,
+                        accountLabels = state.accountLabels,
                         allGroups = state.groups,
                         decodePhoto = actions::decodePhoto,
                         embeddedInCard = true,
@@ -334,6 +337,7 @@ fun ContactListScreen(state: ContactListUiState, actions: ContactsActions) {
                         contact = contact,
                         isSelected = isSelectionMode && contact.id in selectedIds,
                         showAccountLabels = state.showAccountLabels,
+                        accountLabels = state.accountLabels,
                         allGroups = state.groups,
                         decodePhoto = actions::decodePhoto,
                         embeddedInCard = true,
@@ -530,6 +534,7 @@ fun ContactItem(
     showAccountLabels: Boolean,
     onClick: () -> Unit,
     modifier: Modifier = Modifier,
+    accountLabels: Map<String, String> = emptyMap(),
     allGroups: List<ContactGroup> = emptyList(),
     decodePhoto: ((String) -> Bitmap?)? = null,
     onLongClick: (() -> Unit)? = null,
@@ -655,7 +660,8 @@ fun ContactItem(
                     Spacer(Modifier.width(16.dp))
                     val onDevice = stringResource(R.string.on_device)
                     Text(
-                        text = contact.accountName ?: onDevice,
+                        text = accountLabels["${contact.accountType}|${contact.accountName}"]
+                            ?: contact.accountName ?: onDevice,
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                         maxLines = 1,
