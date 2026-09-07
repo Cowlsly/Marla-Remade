@@ -52,7 +52,10 @@ fun HomeScreen(backStack: NavBackStack<Route>, viewModel: SolitaireViewModel) {
     AppScaffold(
         title = stringResource(R.string.app_name),
         actions = {
-            GameTopBarActions(onOpenGameCenter = { backStack.add(Route.GameCenter) })
+            GameTopBarActions(
+                onOpenGameCenter = { backStack.add(Route.GameCenter) },
+                onOpenSettings = { backStack.add(Route.Settings) },
+            )
         },
         scrollBehavior = appBarScrollBehavior(),
     ) { paddingValues ->

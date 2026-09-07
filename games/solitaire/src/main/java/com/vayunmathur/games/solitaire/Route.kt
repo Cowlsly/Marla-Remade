@@ -12,4 +12,6 @@ sealed interface Route : NavKey {
     data class Game(val mode: GameMode) : Route
     @Serializable
     data object GameCenter : Route
+    @Serializable
+    data object Settings : Route
 }

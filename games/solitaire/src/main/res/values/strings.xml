@@ -49,4 +49,11 @@
     <string name="won">won</string>
     <!-- SpiderBoard: Top bar progress indicator for completed suits. %1$s = completed suits count string e.g. 2, always out of 8 -->
     <string name="completed_8">Completed: <xliff:g id="completed" example="2">%1$s</xliff:g>/8</string>
+
+    <!-- SettingsScreen: Label for the row choosing how suits are coloured on the card faces. Noun phrase -->
+    <string name="card_colors">Card Colours</string>
+    <!-- SettingsScreen: Card colour option, the traditional deck of red hearts/diamonds and black spades/clubs. Noun phrase -->
+    <string name="card_colors_two">Two colours (traditional)</string>
+    <!-- SettingsScreen: Card colour option, a colourblind-friendly deck giving each suit its own colour. Noun phrase -->
+    <string name="card_colors_four">Four colours (colourblind friendly)</string>
 </resources>

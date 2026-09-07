@@ -2,6 +2,7 @@ package com.vayunmathur.games.solitaire.ui
 
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.unit.Dp
 import com.vayunmathur.games.solitaire.data.Card
 import com.vayunmathur.games.solitaire.data.Suit
@@ -20,8 +21,14 @@ fun FoundationSlot(
         if (cards.isNotEmpty()) {
             CardFace(cards.last(), cardWidth = cardWidth, cardHeight = cardHeight)
         } else {
-            val hint = Suit.entries.getOrNull(index)?.symbol ?: ""
-            EmptySlot(label = hint, cardWidth = cardWidth, cardHeight = cardHeight)
+            val suit = Suit.entries.getOrNull(index)
+            EmptySlot(
+                label = suit?.symbol ?: "",
+                labelColor = suit?.let { LocalCardColorScheme.current.colorFor(it).copy(alpha = 0.5f) }
+                    ?: Color.Gray,
+                cardWidth = cardWidth,
+                cardHeight = cardHeight
+            )
         }
     }
 }

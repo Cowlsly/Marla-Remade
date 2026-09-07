@@ -36,7 +36,16 @@ class SolitaireViewModel(application: Application) : AndroidViewModel(applicatio
     override val dragInfo: StateFlow<DragInfo?> = _dragInfo.asStateFlow()
 
     private val statsRepository = SolitaireStatsRepository(application)
+    private val settingsRepository = SolitaireSettingsRepository(application)
     override val dropTargets: MutableMap<String, Rect> = mutableMapOf()
+
+    private val _cardColorScheme = MutableStateFlow(settingsRepository.getCardColorScheme())
+    val cardColorScheme: StateFlow<CardColorScheme> = _cardColorScheme.asStateFlow()
+
+    fun setCardColorScheme(scheme: CardColorScheme) {
+        settingsRepository.setCardColorScheme(scheme)
+        _cardColorScheme.value = scheme
+    }
 
     val achievementsManager: AchievementsManager = run {
         val json = application.assets.open("achievements.json")

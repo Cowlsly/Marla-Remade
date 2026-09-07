@@ -10,6 +10,8 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import com.vayunmathur.library.ui.Surface
 import com.vayunmathur.library.ui.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.ProvidableCompositionLocal
+import androidx.compose.runtime.staticCompositionLocalOf
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.drawBehind
@@ -22,14 +24,22 @@ import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.vayunmathur.games.solitaire.data.Card
+import com.vayunmathur.games.solitaire.data.CardColorScheme
 
 val CARD_WIDTH = 60.dp
 val CARD_HEIGHT = 84.dp
-private val RedColor = Color(0xFFCC0000)
+
+/**
+ * The suit colouring every card face reads. Provided once around the whole app rather than
+ * threaded through each board, because a card is drawn from six call sites that have no other
+ * reason to know about settings.
+ */
+val LocalCardColorScheme: ProvidableCompositionLocal<CardColorScheme> =
+    staticCompositionLocalOf { CardColorScheme.TWO_COLOUR }
 
 @Composable
 fun CardFace(card: Card, modifier: Modifier = Modifier, cardWidth: Dp = CARD_WIDTH, cardHeight: Dp = CARD_HEIGHT) {
-    val color = if (card.suit.isRed) RedColor else Color.Black
+    val color = LocalCardColorScheme.current.colorFor(card.suit)
     val scale = cardWidth.value / CARD_WIDTH.value
     val rankSize = (20 * scale).sp
     val suitSize = (24 * scale).sp
@@ -83,7 +93,13 @@ fun CardBack(modifier: Modifier = Modifier, cardWidth: Dp = CARD_WIDTH, cardHeig
 }
 
 @Composable
-fun EmptySlot(modifier: Modifier = Modifier, label: String = "", cardWidth: Dp = CARD_WIDTH, cardHeight: Dp = CARD_HEIGHT) {
+fun EmptySlot(
+    modifier: Modifier = Modifier,
+    label: String = "",
+    labelColor: Color = Color.Gray,
+    cardWidth: Dp = CARD_WIDTH,
+    cardHeight: Dp = CARD_HEIGHT
+) {
     val scale = cardWidth.value / CARD_WIDTH.value
     val cornerSize = (8 * scale).dp
     val dashedStroke = Stroke(
@@ -104,7 +120,7 @@ fun EmptySlot(modifier: Modifier = Modifier, label: String = "", cardWidth: Dp =
         contentAlignment = Alignment.Center
     ) {
         if (label.isNotEmpty()) {
-            Text(label, color = Color.Gray, fontSize = (16 * scale).sp)
+            Text(label, color = labelColor, fontSize = (16 * scale).sp)
         }
     }
 }
