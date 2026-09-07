@@ -56,6 +56,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.stringArrayResource
 import androidx.compose.ui.res.stringResource
@@ -101,6 +102,7 @@ import com.vayunmathur.library.util.expandFromLine
 import com.vayunmathur.library.util.sharedContainer
 import com.vayunmathur.library.util.sharedContent
 import kotlinx.datetime.LocalDate
+import java.util.Locale
 import kotlin.io.encoding.Base64
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -588,7 +590,7 @@ private fun Birthday(
     }
     Box {
         OutlinedTextField(
-            value = birthday?.formatDisplay() ?: "",
+            value = birthday?.formatDisplay(LocalConfiguration.current.locales[0] ?: Locale.getDefault()) ?: "",
             onValueChange = { },
             readOnly = true,
             label = {Text(stringResource(R.string.birthday))},
@@ -633,6 +635,7 @@ private fun ColumnScope.DateDetailsSection(
 ) {
     val detailType = stringResource(R.string.dates)
     val context = LocalContext.current
+    val locale = LocalConfiguration.current.locales[0] ?: Locale.getDefault()
     details.forEachIndexed { index, detail ->
         if(detail.type == CDKEvent.TYPE_BIRTHDAY) return@forEachIndexed
         val isCustom = detail.type == CDKEvent.TYPE_CUSTOM
@@ -641,7 +644,7 @@ private fun ColumnScope.DateDetailsSection(
                 onDetailsChange(details.toMutableList().also { list -> list[index] = detail.withValue(newDate.toString()) })
             }
             OutlinedTextField(
-                value = detail.startDate.formatDisplay(),
+                value = detail.startDate.formatDisplay(locale),
                 onValueChange = { },
                 readOnly = true,
                 label = { Text(detailType) },

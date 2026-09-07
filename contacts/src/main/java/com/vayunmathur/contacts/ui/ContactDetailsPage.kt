@@ -66,6 +66,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.platform.ClipEntry
 import androidx.compose.ui.platform.LocalClipboard
+import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.AnnotatedString
@@ -125,6 +126,7 @@ import kotlinx.datetime.format
 import kotlinx.datetime.toLocalDateTime
 import kotlin.time.Clock
 import kotlin.time.ExperimentalTime
+import java.util.Locale
 
 /** Binds [ContactViewModel] to the stateless [ContactDetailsScreen]. */
 @Composable
@@ -378,10 +380,11 @@ fun ContactDetailsScreen(
             if(details.dates.isNotEmpty()) {
                 item {
                     val clipboard = LocalClipboard.current
+                    val locale = LocalConfiguration.current.locales[0] ?: Locale.getDefault()
                     GroupedSection(title = stringResource(R.string.about_name, contact.name.firstName)) {
                         val birthday = contact.birthday
                         if (birthday != null) {
-                            val birthdayText = birthday.startDate.formatDisplay()
+                            val birthdayText = birthday.startDate.formatDisplay(locale)
                             val age = calculateAge(birthday.startDate)
                             val displayText = if (age != null) "$birthdayText ($age)" else birthdayText
                             ListItem(
@@ -398,7 +401,7 @@ fun ContactDetailsScreen(
                             )
                         }
                         for (event in details.dates.filter { it.type != CDKEvent.TYPE_BIRTHDAY }) {
-                            val eventText = event.startDate.formatDisplay()
+                            val eventText = event.startDate.formatDisplay(locale)
                             ListItem(
                                 content = { Text(eventText) },
                                 supportingContent = { Text(event.typeString(context)) },

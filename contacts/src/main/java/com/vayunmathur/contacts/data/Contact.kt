@@ -1,5 +1,4 @@
 package com.vayunmathur.contacts.data
-import com.vayunmathur.library.util.DateNameStyle
 import android.content.ContentProviderOperation
 import android.content.ContentUris
 import android.content.Context
@@ -12,26 +11,23 @@ import androidx.core.database.getStringOrNull
 import kotlinx.datetime.LocalDate
 import kotlinx.datetime.TimeZone
 import kotlinx.datetime.format
-import kotlinx.datetime.format.MonthNames
 import kotlinx.datetime.toLocalDateTime
-import com.vayunmathur.library.util.localizedMonthNames
+import com.vayunmathur.library.ui.DateString
 import com.vayunmathur.library.ui.RINGTONE_SILENT
 import kotlinx.serialization.Serializable
 import kotlin.io.encoding.Base64
 import kotlin.time.Clock
 import kotlin.time.ExperimentalTime
+import java.util.Locale
 
 val LocalDate.hasYear: Boolean get() = year >= 1901
 
-fun LocalDate.formatDisplay(): String = format(LocalDate.Format {
-    monthName(MonthNames(localizedMonthNames(DateNameStyle.FULL)))
-    chars(" ")
-    day()
-    if (hasYear) {
-        chars(", ")
-        year()
-    }
-})
+/**
+ * Field order, month name and punctuation all follow [locale] - the same source the date picker
+ * uses - so the detail view and the picker cannot disagree.
+ */
+fun LocalDate.formatDisplay(locale: Locale = Locale.getDefault()): String =
+    DateString.dateWithOptionalYear(this, hasYear, locale)
 
 
 @Serializable
