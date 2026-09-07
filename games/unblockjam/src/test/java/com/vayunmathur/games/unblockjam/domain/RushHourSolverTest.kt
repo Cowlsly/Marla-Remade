@@ -32,6 +32,10 @@ class RushHourSolverTest {
         listOf("walls_1_pack.json", "walls_2_pack.json", "walls_3_pack.json").map(::loadPack)
     }
 
+    private val sizePacks: List<LevelPack> by lazy {
+        listOf("size_7_pack.json", "size_8_pack.json", "size_9_pack.json").map(::loadPack)
+    }
+
     @Test
     fun matchesShippedOptimalMoves() {
         // Every 7th level covers the whole difficulty range without solving all of them, plus
@@ -75,10 +79,34 @@ class RushHourSolverTest {
     }
 
     @Test
+    fun matchesSizePackOptimalMoves() {
+        // These are the only packs on boards other than 6x6, and the only ones whose exit is not
+        // on the middle row, so the board shape and the main block's row are pinned down here as
+        // well as the move count. Board.of returns null when the two disagree.
+        for ((pack, side) in sizePacks.zip(listOf(7, 8, 9))) {
+            assertEquals(100, pack.levels.size, "${pack.name} level count")
+            for (level in pack.levels) {
+                assertEquals(side, level.dimension.width, "${pack.name} level ${level.id} width")
+                assertEquals(side, level.dimension.height, "${pack.name} level ${level.id} height")
+                assertEquals(
+                    level.exit.y,
+                    level.blocks[0].position.y,
+                    "${pack.name} level ${level.id} main block is off the exit row"
+                )
+                assertEquals(
+                    level.optimalMoves,
+                    RushHourSolver.optimalMoves(level),
+                    "${pack.name} level ${level.id}"
+                )
+            }
+        }
+    }
+
+    @Test
     fun levelIdsAreUniqueAcrossPacks() {
         // Ids key the persisted LevelStats map, so a collision across packs would silently share
         // one player's progress between two different levels.
-        val ids = (listOf(loadPack("original_pack.json")) + wallPacks)
+        val ids = (listOf(loadPack("original_pack.json")) + wallPacks + sizePacks)
             .flatMap { pack -> pack.levels.map { it.id } }
         assertEquals(ids.size, ids.toSet().size, "duplicate level ids across packs")
     }

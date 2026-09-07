@@ -34,12 +34,19 @@ data class LevelPack(
             "original_pack.json",
             "walls_1_pack.json",
             "walls_2_pack.json",
-            "walls_3_pack.json"
+            "walls_3_pack.json",
+            "size_7_pack.json",
+            "size_8_pack.json",
+            "size_9_pack.json"
         )
 
         /** The wall packs share one combined completion achievement. */
         val WALL_PACK_INDICES: List<Int> =
             PACK_FILES.indices.filter { PACK_FILES[it].startsWith("walls_") }
+
+        /** So do the larger-board packs. */
+        val SIZE_PACK_INDICES: List<Int> =
+            PACK_FILES.indices.filter { PACK_FILES[it].startsWith("size_") }
 
         var PACKS: List<LevelPack> = listOf()
             private set

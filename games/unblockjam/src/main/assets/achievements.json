@@ -17,6 +17,12 @@
     "targetProgress": 300
   },
   {
+    "id": "all_size_packs",
+    "name": "Big Thinker",
+    "description": "Complete every level in the Large, Larger and Largest packs.",
+    "targetProgress": 300
+  },
+  {
     "id": "moves_1000",
     "name": "Smooth Mover",
     "description": "Make 1000 total block movements.",

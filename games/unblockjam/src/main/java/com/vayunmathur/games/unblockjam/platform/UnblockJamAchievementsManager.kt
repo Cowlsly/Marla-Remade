@@ -38,6 +38,7 @@ class UnblockJamAchievementsManager(
     fun onPackCompletionChanged(completed: Set<String>) {
         onProgressUpdated("all_levels_pack_0", completedIn(completed, listOf(0)))
         onProgressUpdated("all_wall_packs", completedIn(completed, LevelPack.WALL_PACK_INDICES))
+        onProgressUpdated("all_size_packs", completedIn(completed, LevelPack.SIZE_PACK_INDICES))
     }
 
     // One stats map covers every shipped pack, so its raw size would let one pack's progress
