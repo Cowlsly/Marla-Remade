@@ -2,17 +2,25 @@ package com.vayunmathur.keyboard.ui
 
 import androidx.compose.ui.res.stringResource
 import com.vayunmathur.keyboard.R
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.RowScope
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
@@ -99,7 +107,8 @@ private fun EmojiSearchStrip(state: KeyboardState, actions: ImeActions) {
 private fun Strip(state: KeyboardState, actions: ImeActions) {
     // A fresh clip outranks suggestions because the two never really compete: the chip is
     // offered before anything has been typed and the service drops it on the first keypress,
-    // which is exactly when suggestions appear.
+    // which is exactly when suggestions appear. The chip carries its own open button, so it
+    // stands in for the whole strip rather than sitting beside the clipboard key.
     val clip = state.clipSuggestion
     if (clip != null) {
         ClipboardStrip(
@@ -120,20 +129,46 @@ private fun Strip(state: KeyboardState, actions: ImeActions) {
     if (!textPage) return
     // Nor do layouts that have nothing to put in it: the one dictionary we ship is English.
     val layout = state.settings.activeLayout
-    when {
-        // Candidates are not a suggestion the user can decline — on a Chinese layout they
-        // are the only way a character gets typed — so the "show suggestions" preference
-        // does not apply to them.
-        layout.offersCandidates -> CandidateStrip(
-            height = StripHeight,
-            candidates = state.suggestions,
-            onPick = actions::commitSuggestion,
-        )
-        layout.englishDictionary && state.settings.showSuggestions -> SuggestionStrip(
-            height = StripHeight,
-            suggestions = state.suggestions,
-            onPick = actions::commitSuggestion,
-        )
+    // Candidates are not a suggestion the user can decline — on a Chinese layout they
+    // are the only way a character gets typed — so the "show suggestions" preference
+    // does not apply to them.
+    val candidates = layout.offersCandidates
+    val words = layout.englishDictionary && state.settings.showSuggestions
+    val clipboard = state.settings.clipboardEnabled
+    if (!candidates && !words && !clipboard) return
+    Row(Modifier.fillMaxWidth().height(StripHeight)) {
+        Box(Modifier.weight(1f)) {
+            when {
+                candidates -> CandidateStrip(
+                    height = StripHeight,
+                    candidates = state.suggestions,
+                    onPick = actions::commitSuggestion,
+                )
+                words -> SuggestionStrip(
+                    height = StripHeight,
+                    suggestions = state.suggestions,
+                    onPick = actions::commitSuggestion,
+                )
+            }
+        }
+        // The clipboard lives here rather than on the bottom row (issue #515): it gives the
+        // space bar and its neighbours back a key's width, and this row is present on the
+        // symbol pages too, so the clipboard does not vanish behind ?123.
+        if (clipboard) {
+            Box(
+                modifier = Modifier
+                    .fillMaxHeight()
+                    .clip(RoundedCornerShape(8.dp))
+                    .clickable { actions.setPage(KeyboardPage.CLIPBOARD) }
+                    .padding(horizontal = 12.dp),
+                contentAlignment = Alignment.Center,
+            ) {
+                IconPaste(
+                    modifier = Modifier.size(18.dp),
+                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+        }
     }
 }
 
@@ -496,9 +531,6 @@ private fun BottomRow(
             Text(leftLabel, fontSize = 14.sp)
         }
         SpecialKey(keyHeight, 1f, onClick = { actions.setPage(KeyboardPage.EMOJI) }) { IconEmoji() }
-        if (state.settings.clipboardEnabled) {
-            SpecialKey(keyHeight, 1f, onClick = { actions.setPage(KeyboardPage.CLIPBOARD) }) { IconPaste() }
-        }
         CharKey(
             label = commaChar,
             height = keyHeight,
