@@ -54,4 +54,6 @@
     <string name="snooze_length">Edasilükkamise kestus</string>
     <string name="gradually_increase_volume">Keera helivaljus aegamööda valjemaks</string>
     <string name="alarm_label_hint">Äratuse nimi (kui tahad lisada)</string>
+    <string name="channel_alarm_playing_name">Äratus on käivitunud</string>
+    <string name="channel_alarm_playing_description">Seda näidatakse äratuse ajal</string>
 </resources>
