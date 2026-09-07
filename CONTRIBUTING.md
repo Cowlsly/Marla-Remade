@@ -64,9 +64,9 @@ gate experimental work on it so R8 strips it from release builds.
 
 ## What is actually enforced
 
-Be aware of the gap between intent and enforcement — most rules below are declared
-`Severity.ERROR` but `abortOnError = false` in the app convention, so they are **reported,
-not blocking**.
+Mind the gap between intent and enforcement. Most rules below are declared `Severity.ERROR`,
+but the app convention demotes them to `warning`, so they are **reported, not blocking**. Only
+the two rules listed as `fatal` can fail a build.
 
 | Check | Blocks? | Where |
 | :--- | :--- | :--- |

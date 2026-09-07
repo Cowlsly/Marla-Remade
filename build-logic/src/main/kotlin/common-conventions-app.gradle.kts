@@ -102,12 +102,55 @@ configure<com.android.build.api.dsl.ApplicationExtension> {
 
     lint {
         checkDependencies = true
-        warning += listOf("HardcodedText")
-        abortOnError = false
-        // Don't fail on missing translations - empty skeletons exist for Weblate
+        // `abortOnError` is the only switch that lets lint fail anything. AGP's
+        // AndroidLintTextOutputTask returns early on lint's error exit code unless it is
+        // set, and it reads the same DSL value for `lintVitalRelease` — so while this was
+        // off, `fatal` below was decorative and neither `./gradlew lint` nor
+        // `assembleRelease` could fail on a Toast.
+        //
+        // It does not distinguish Error from Fatal, so the two gates below only work if
+        // every other issue is demoted to `warning` first. There is no wildcard for that:
+        // `lintConfig` with `id="all"` would also enable every default-off check, so the
+        // backlog is listed by id. A new Error-severity check appearing (an AGP bump, a
+        // new detector) will fail every module until it is triaged into this list or
+        // fixed - that is the intended failure mode, not a surprise.
+        abortOnError = true
+        // Don't fail on missing translations - empty skeletons exist for Weblate.
         disable += listOf("MissingTranslation")
+        // Advisory: reported by `./gradlew lint`, never blocking. Each of these is Error
+        // (ExtraTranslation is Fatal) by default and has a pre-existing backlog.
+        warning += listOf(
+            "HardcodedText",
+            // Repo rules from :lint-rules. Only the two gates below are not advisory.
+            "DirectBuildDatabase",
+            "OneComposablePerFile",
+            "PackageStructure",
+            "RawScaffoldInApp",
+            "Room2Usage",
+            // Built-in checks.
+            "ContextCastToActivity",
+            "ExtraTranslation",
+            "ForegroundServicePermission",
+            "GestureBackNavigation",
+            "LintError",
+            "LocalContextGetResourceValueCall",
+            "MissingIntentFilterForMediaSearch",
+            "MissingPermission",
+            "MissingQuantity",
+            "NewApi",
+            "NonObservableLocale",
+            "NotificationPermission",
+            "PermissionImpliesUnsupportedChromeOsHardware",
+            "ProtectedPermissions",
+            "QueryAllPackagesPermission",
+            "RestrictedApi",
+            "StartActivityAndCollapseDeprecated",
+            "StateFlowValueCalledInComposition",
+            "UnsafeOptInUsageError",
+            "WrongConstant",
+        )
         // Toast is banned repo-wide; this one fails the build even though
-        // abortOnError is off for everything else. See :lint-rules.
+        // everything else is advisory. See :lint-rules.
         // DirectComposeAnimation keeps motion in the shared helpers, so the same
         // interaction cannot pick up a different duration on every screen.
         fatal += listOf("ToastUsage", "DirectComposeAnimation")
