@@ -8,6 +8,8 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.res.stringResource
+import com.vayunmathur.launcher.R
 import com.vayunmathur.launcher.platform.LauncherViewModel
 import com.vayunmathur.launcher.platform.SettingsActions
 import com.vayunmathur.launcher.platform.SettingsUiState
@@ -15,6 +17,7 @@ import com.vayunmathur.library.ui.AppScaffold
 import com.vayunmathur.library.ui.IconApps
 import com.vayunmathur.library.ui.IconGrid
 import com.vayunmathur.library.ui.IconHome
+import com.vayunmathur.library.ui.IconList
 import com.vayunmathur.library.ui.IconWallpaper
 import com.vayunmathur.library.ui.IconWidgets
 import com.vayunmathur.library.ui.SettingsDivider
@@ -118,6 +121,18 @@ fun SettingsContent(
                     modifier = Modifier
                         .fillMaxWidth()
                         .padding(horizontal = Spacing.lg, vertical = Spacing.xs),
+                )
+            }
+
+            SettingsDivider()
+
+            SettingsSection(title = stringResource(R.string.settings_app_drawer)) {
+                SettingsSwitchRow(
+                    title = stringResource(R.string.settings_drawer_list_title),
+                    supportingText = stringResource(R.string.settings_drawer_list_summary),
+                    checked = state.drawerListLayout,
+                    onCheckedChange = actions::setDrawerListLayout,
+                    leadingContent = { IconList() },
                 )
             }
         }

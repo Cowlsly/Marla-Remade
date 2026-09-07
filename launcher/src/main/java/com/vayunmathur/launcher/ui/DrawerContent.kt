@@ -40,6 +40,7 @@ import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.layout.layout
 import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import com.vayunmathur.launcher.domain.CellRect
@@ -51,6 +52,7 @@ import com.vayunmathur.launcher.platform.DrawerUiState
 import com.vayunmathur.launcher.ui.components.DragPayload
 import com.vayunmathur.launcher.ui.components.FastScrollStrip
 import com.vayunmathur.launcher.ui.components.LauncherAppIcon
+import com.vayunmathur.launcher.ui.components.LauncherIconSize
 import com.vayunmathur.launcher.ui.components.dragSource
 import com.vayunmathur.launcher.ui.components.onAppWindowBounds
 import com.vayunmathur.library.ui.Badge
@@ -198,7 +200,12 @@ fun DrawerContent(
 
             Box(modifier = Modifier.fillMaxSize()) {
                 LazyVerticalGrid(
-                    columns = GridCells.Adaptive(DRAWER_CELL_MIN),
+                    // One column is what makes this a list: the same lazy grid, the same hoisted
+                    // state, so the swipe-to-close gesture and the fast scroller carry over
+                    // untouched rather than needing a second code path for a LazyColumn.
+                    columns =
+                        if (state.listLayout) GridCells.Fixed(1)
+                        else GridCells.Adaptive(DRAWER_CELL_MIN),
                     state = gridState,
                     contentPadding = PaddingValues(Spacing.sm),
                     modifier = Modifier.fillMaxSize(),
@@ -209,6 +216,7 @@ fun DrawerContent(
                             state = state,
                             actions = actions,
                             draggable = draggable,
+                            listLayout = state.listLayout,
                         )
                     }
                 }
@@ -274,6 +282,7 @@ private fun DrawerCell(
     draggable: Boolean,
     modifier: Modifier = Modifier,
     keyPrefix: String = "drawer",
+    listLayout: Boolean = false,
 ) {
     var bounds by remember { mutableStateOf(Rect.Zero) }
     val icon = @Composable {
@@ -281,8 +290,20 @@ private fun DrawerCell(
             key = app.key,
             label = app.label,
             scale = state.iconScale,
-            showLabel = state.showLabels,
+            // A row whose name sits beside the icon would otherwise carry it twice. The name is
+            // always drawn in list mode: an unlabelled list of icons is just a narrow grid.
+            showLabel = state.showLabels && !listLayout,
         )
+    }
+    val badgedIcon = @Composable {
+        if (app.isWorkProfile) {
+            // The badge the system draws on a work icon is part of the icon bitmap, which the
+            // drawer's own list cannot rely on when an icon fails to rasterise - so the profile is
+            // marked here too, where it cannot be lost.
+            BadgedBox(badge = { Badge() }) { icon() }
+        } else {
+            icon()
+        }
     }
 
     Box(
@@ -315,13 +336,23 @@ private fun DrawerCell(
             }
             .padding(vertical = Spacing.sm),
     ) {
-        if (app.isWorkProfile) {
-            // The badge the system draws on a work icon is part of the icon bitmap, which the
-            // drawer's own list cannot rely on when an icon fails to rasterise - so the profile is
-            // marked here too, where it cannot be lost.
-            BadgedBox(badge = { Badge() }) { icon() }
+        if (listLayout) {
+            Row(
+                modifier = Modifier.fillMaxWidth().padding(horizontal = Spacing.md),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Box(Modifier.width(LauncherIconSize * state.iconScale)) { badgedIcon() }
+                Text(
+                    app.label,
+                    style = MaterialTheme.typography.bodyLarge,
+                    color = MaterialTheme.colorScheme.onSurface,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.padding(start = Spacing.lg),
+                )
+            }
         } else {
-            icon()
+            badgedIcon()
         }
     }
 }

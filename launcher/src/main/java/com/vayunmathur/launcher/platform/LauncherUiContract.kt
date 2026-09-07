@@ -209,6 +209,11 @@ data class DrawerUiState(
     val showLabels: Boolean = true,
     val iconScale: Float = 1f,
     /**
+     * Draw the drawer as one app per row — icon, then name beside it — rather than as a grid of
+     * tiles. Bigger targets and left-aligned names, which is what makes the list easier to read.
+     */
+    val listLayout: Boolean = false,
+    /**
      * Whether the work profile is paused, or null when this build cannot pause it.
      *
      * Null on every ordinary device: pausing needs `MODIFY_QUIET_MODE`, which is privileged, so the
@@ -339,6 +344,7 @@ data class SettingsUiState(
     val hotseatSlots: Int = DefaultGrid.hotseatSlots,
     val showLabels: Boolean = true,
     val iconScale: Float = 1f,
+    val drawerListLayout: Boolean = false,
     val isDefaultHome: Boolean = false,
 )
 
@@ -348,6 +354,9 @@ interface SettingsActions {
     fun setHotseatSlots(slots: Int) {}
     fun setShowLabels(show: Boolean) {}
     fun setIconScale(scale: Float) {}
+
+    /** Switches the app drawer between the tile grid and one app per row. */
+    fun setDrawerListLayout(list: Boolean) {}
     fun pickWallpaper() {}
     fun requestDefaultHome() {}
 

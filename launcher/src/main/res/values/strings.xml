@@ -1,4 +1,10 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <string name="app_name">Launcher</string>
+    <!-- Settings screen, section heading above the app drawer options. -->
+    <string name="settings_app_drawer">App drawer</string>
+    <!-- Settings screen, app drawer section, switch title. -->
+    <string name="settings_drawer_list_title">List layout</string>
+    <!-- Settings screen, app drawer section, text under the "List layout" switch. -->
+    <string name="settings_drawer_list_summary">One app per row with its name beside the icon, instead of a grid of tiles</string>
 </resources>

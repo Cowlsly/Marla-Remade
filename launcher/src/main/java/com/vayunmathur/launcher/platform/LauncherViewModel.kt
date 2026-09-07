@@ -183,6 +183,7 @@ class LauncherViewModel(app: Application) : AndroidViewModel(app),
         val hotseat = ds.getLong(KEY_HOTSEAT)?.toInt() ?: DefaultGrid.hotseatSlots
         val showLabels = ds.getBoolean(KEY_SHOW_LABELS, true)
         val iconScale = (ds.getDouble(KEY_ICON_SCALE) ?: 1.0).toFloat()
+        val drawerListLayout = ds.getBoolean(KEY_DRAWER_LIST_LAYOUT, false)
 
         _settings.value = SettingsUiState(
             columns = columns,
@@ -190,13 +191,18 @@ class LauncherViewModel(app: Application) : AndroidViewModel(app),
             hotseatSlots = hotseat,
             showLabels = showLabels,
             iconScale = iconScale,
+            drawerListLayout = drawerListLayout,
         )
         _home.value = _home.value.copy(
             grid = GridSpec(columns, rows, hotseat),
             showLabels = showLabels,
             iconScale = iconScale,
         )
-        _drawer.value = _drawer.value.copy(showLabels = showLabels, iconScale = iconScale)
+        _drawer.value = _drawer.value.copy(
+            showLabels = showLabels,
+            iconScale = iconScale,
+            listLayout = drawerListLayout,
+        )
     }
 
     private fun observeWorkspace() {
@@ -877,6 +883,12 @@ class LauncherViewModel(app: Application) : AndroidViewModel(app),
         viewModelScope.launch { ds.setDouble(KEY_ICON_SCALE, clamped.toDouble()) }
     }
 
+    override fun setDrawerListLayout(list: Boolean) {
+        _settings.value = _settings.value.copy(drawerListLayout = list)
+        _drawer.value = _drawer.value.copy(listLayout = list)
+        viewModelScope.launch { ds.setBoolean(KEY_DRAWER_LIST_LAYOUT, list) }
+    }
+
     override fun pickWallpaper() {
         bridge?.pickWallpaper()
     }
@@ -935,6 +947,7 @@ class LauncherViewModel(app: Application) : AndroidViewModel(app),
         private const val KEY_HOTSEAT = "launcher_hotseat_slots"
         private const val KEY_SHOW_LABELS = "launcher_show_labels"
         private const val KEY_ICON_SCALE = "launcher_icon_scale"
+        private const val KEY_DRAWER_LIST_LAYOUT = "launcher_drawer_list_layout"
         private const val KEY_LAUNCH_COUNTS = "launcher_launch_counts"
 
         /** A single row of the drawer's grid, which is all a predictions row should ever be. */
