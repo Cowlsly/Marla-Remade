@@ -36,10 +36,20 @@ class AlarmReceiver : BroadcastReceiver() {
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
         )
 
-        // 3. Build the Notification. This is what actually rings: FLAG_INSISTENT below repeats
-        // the ring channel's sound until something cancels it, so the alarm sounds even when
-        // AlarmSoundService never reaches startForeground.
-        val builder = NotificationCompat.Builder(context, ALARM_RING_CHANNEL_ID)
+        // 3. Build the Notification. For most alarms this is what actually rings: FLAG_INSISTENT
+        // below repeats the ring channel's sound until something cancels it, so the alarm sounds
+        // even when AlarmSoundService never reaches startForeground.
+        //
+        // Gradual-volume alarms opt out. The ring channel's sound is fixed and plays at full
+        // volume, so they would blast, cut to silence and then fade in from zero - the opposite
+        // of the setting. They ring only once the service starts, and give up the safety net.
+        // Read from the intent, not the database: putting a read in front of the ring is the
+        // latency this whole design exists to avoid.
+        val gradual = intent.getIntExtra(AlarmScheduler.EXTRA_GRADUAL_SECONDS, 0) > 0
+        val builder = NotificationCompat.Builder(
+            context,
+            if (gradual) ALARM_CHANNEL_ID else ALARM_RING_CHANNEL_ID,
+        )
             .setSmallIcon(R.drawable.baseline_access_alarm_24)
             .setContentTitle(context.getString(R.string.label_alarm))
             .setContentText(context.getString(R.string.alarm_notification_wake_up))
@@ -81,7 +91,9 @@ class AlarmReceiver : BroadcastReceiver() {
         }
         notificationManager.notify(
             ALARM_RING_NOTIFICATION_ID,
-            builder.build().apply { flags = flags or Notification.FLAG_INSISTENT },
+            builder.build().apply {
+                if (!gradual) flags = flags or Notification.FLAG_INSISTENT
+            },
         )
 
         // 4. Start the Sound Service immediately so we hear it even if Activity doesn't launch

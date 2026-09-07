@@ -11,6 +11,7 @@ import androidx.lifecycle.viewModelScope
 import com.vayunmathur.appstore.R
 import com.vayunmathur.appstore.data.AppDatabase
 import com.vayunmathur.appstore.data.AppSource
+import com.vayunmathur.appstore.data.DefaultRepos
 import com.vayunmathur.appstore.data.CatalogRepository
 import com.vayunmathur.appstore.data.InstalledAppsRepository
 import com.vayunmathur.appstore.data.InstalledInfo

@@ -85,7 +85,10 @@ fun AlarmPage(backStack: NavBackStack<Route>, clockViewModel: ClockViewModel, ne
             }
 
             override fun setGradualVolumeSeconds(alarm: Alarm, seconds: Int) {
-                clockViewModel.upsert(alarm.copy(gradualVolumeSeconds = seconds))
+                // Must reschedule, not just upsert: the pending broadcast carries this value so
+                // AlarmReceiver can pick a channel without a database read, and a plain upsert
+                // would leave the already-scheduled intent holding the old one.
+                save(alarm.copy(gradualVolumeSeconds = seconds))
             }
         }
     }

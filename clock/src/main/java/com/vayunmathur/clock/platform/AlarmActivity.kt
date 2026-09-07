@@ -22,6 +22,7 @@ import kotlinx.coroutines.withContext
 class AlarmActivity : ComponentActivity() {
     private var alarmId: Long = -1L
     private var snoozeMinutes: Int = 5
+    private var gradualSeconds: Int = 0
 
     override fun onCreate(savedInstanceState: Bundle?) {
         setShowWhenLocked(true); setTurnScreenOn(true); super.onCreate(savedInstanceState)
@@ -33,7 +34,12 @@ class AlarmActivity : ComponentActivity() {
             val alarm by androidx.compose.runtime.produceState<com.vayunmathur.clock.data.Alarm?>(initialValue = null) {
                 value = withContext(Dispatchers.IO) { repository.getAlarm(alarmId) }
             }
-            androidx.compose.runtime.LaunchedEffect(alarm) { alarm?.let { snoozeMinutes = it.snoozeMinutes } }
+            androidx.compose.runtime.LaunchedEffect(alarm) {
+                alarm?.let {
+                    snoozeMinutes = it.snoozeMinutes
+                    gradualSeconds = it.gradualVolumeSeconds
+                }
+            }
             DynamicTheme {
                 AlarmRingingScreen(
                     alarmTime = alarm?.let { formatAlarmTime(this@AlarmActivity, it.time) } ?: "--:--",
@@ -58,7 +64,13 @@ class AlarmActivity : ComponentActivity() {
         getSystemService(NotificationManager::class.java).cancel(ALARM_RING_NOTIFICATION_ID)
         val snoozeTime = Clock.System.now().plus(snoozeMinutes.minutes)
         val triggerMillis = snoozeTime.toEpochMilliseconds()
-        val intent = Intent(this, AlarmReceiver::class.java).apply { putExtra("ALARM_ID", alarmId); putExtra("IS_SNOOZE", true) }
+        val intent = Intent(this, AlarmReceiver::class.java).apply {
+            putExtra("ALARM_ID", alarmId)
+            putExtra("IS_SNOOZE", true)
+            // Snooze builds its own intent rather than going through AlarmScheduler, so it has
+            // to carry this itself or the snoozed alarm would ring on the wrong channel.
+            putExtra(AlarmScheduler.EXTRA_GRADUAL_SECONDS, gradualSeconds)
+        }
         val pendingIntent = PendingIntent.getBroadcast(this, alarmId.toInt(), intent, PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE)
         val alarmManager = getSystemService(AlarmManager::class.java)
         alarmManager.setAlarmClock(AlarmManager.AlarmClockInfo(triggerMillis, pendingIntent), pendingIntent); finish()

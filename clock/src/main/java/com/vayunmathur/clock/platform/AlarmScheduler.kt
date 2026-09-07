@@ -14,12 +14,19 @@ import kotlin.time.Clock
 import kotlin.time.Duration.Companion.days
 
 object AlarmScheduler {
+    /**
+     * Whether this alarm fades in, carried in the broadcast so AlarmReceiver can pick a channel
+     * without a database read. Absent means zero, which is the fail-safe answer: an alarm we
+     * know nothing about gets the insistent ring rather than silently losing it.
+     */
+    const val EXTRA_GRADUAL_SECONDS = "GRADUAL_SECONDS"
 
     fun schedule(context: Context, alarm: Alarm) {
         val alarmManager = context.getSystemService(AlarmManager::class.java)
 
         val intent = Intent(context, AlarmReceiver::class.java).apply {
             putExtra("ALARM_ID", alarm.id)
+            putExtra(EXTRA_GRADUAL_SECONDS, alarm.gradualVolumeSeconds)
         }
         
         val pendingIntent = PendingIntent.getBroadcast(
