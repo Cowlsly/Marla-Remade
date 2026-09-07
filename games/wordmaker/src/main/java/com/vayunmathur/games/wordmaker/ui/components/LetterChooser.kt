@@ -26,6 +26,7 @@ import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -63,6 +64,12 @@ fun LetterChooser(
     wordShakeTranslation: Float
 ) {
     val coroutineScope = rememberCoroutineScope()
+
+    // The drag handler below lives in a pointerInput keyed on `letters`, so its coroutine keeps
+    // running the closure it started with. Calling the captured parameter directly would submit
+    // against the found/bonus word sets as they were when the board loaded, which is why an
+    // already-accepted word could be entered again until the app was restarted (#543).
+    val submitWord by rememberUpdatedState(onWordSubmitted)
 
     var selectedLettersIndices by remember(letters) { mutableStateOf(listOf<Int>()) }
     val formedWord = selectedLettersIndices.map { letters[it].char }.joinToString("")
@@ -140,7 +147,7 @@ fun LetterChooser(
                             val word = selectedLettersIndices.map { letters[it].char }.joinToString("")
                             val ids = selectedLettersIndices.map { letters[it].id }
                             coroutineScope.launch {
-                                onWordSubmitted(word, ids)
+                                submitWord(word, ids)
                                 selectedLettersIndices = emptyList()
                             }
                         }
@@ -174,7 +181,7 @@ fun LetterChooser(
                             onDragEnd = {
                                 coroutineScope.launch {
                                     if (selectedLettersIndices.isNotEmpty()) {
-                                        onWordSubmitted(
+                                        submitWord(
                                             selectedLettersIndices.map { letters[it].char }.joinToString(""),
                                             selectedLettersIndices.map { letters[it].id }
                                         )
