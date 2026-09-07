@@ -59,4 +59,7 @@
     <string name="cd_submit">Submit</string>
     <!-- WordGameScreen tap mode: Accessibility description for backspace button to delete last selected letter. Noun -->
     <string name="cd_backspace">Backspace</string>
+
+    <!-- DefinitionDialog: Body shown when the bundled dictionary has no entry for the tapped word. Sentence -->
+    <string name="no_definition_available">No definition available for this word.</string>
 </resources>

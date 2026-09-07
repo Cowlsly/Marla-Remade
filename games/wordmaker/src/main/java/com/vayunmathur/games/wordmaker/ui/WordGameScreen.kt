@@ -255,10 +255,7 @@ fun WordGameScreen(
                     onCellClicked = { row, col ->
                         val word = crosswordData.getWordAt(row, col, foundWords)
                         if (word != null && word in foundWords) {
-                            val definition = actions.getDefinition(word)
-                            if (definition.isNotEmpty()) {
-                                wordWithDefinition = Pair(word, definition)
-                            }
+                            wordWithDefinition = Pair(word, actions.getDefinition(word))
                         }
                     }, {
                         scale = it

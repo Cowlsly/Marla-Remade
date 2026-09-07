@@ -29,7 +29,14 @@ fun DefinitionDialog(word: String, definition: List<String>, onDismiss: () -> Un
         title = { Text(text = word.replaceFirstChar { it.uppercase() }) },
         text = {
             Column(modifier = Modifier.verticalScroll(rememberScrollState())) {
-                Text(text = definition.joinToString("\n\n"))
+                // The bundled dictionary does not cover every word the puzzles use, so an
+                // empty list is a normal outcome and has to be said out loud — otherwise the
+                // tap looks like it did nothing (#627).
+                if (definition.isEmpty()) {
+                    Text(text = stringResource(R.string.no_definition_available))
+                } else {
+                    Text(text = definition.joinToString("\n\n"))
+                }
             }
         },
         confirmButton = {
