@@ -55,6 +55,8 @@ class CalculatorWidgetSettingsActivity : ComponentActivity() {
             return
         }
 
+        requestInitialUpdate()
+
         enableEdgeToEdge()
         setContent {
             DynamicTheme {
@@ -94,6 +96,21 @@ class CalculatorWidgetSettingsActivity : ComponentActivity() {
                 )
             }
         }
+    }
+
+    /**
+     * A provider that declares `android:configure` is not sent `APPWIDGET_UPDATE` when a widget
+     * is placed - asking for that first update is the configuration activity's job. Without it a
+     * widget placed through this screen keeps the provider's `initialLayout` and never renders,
+     * and Glance has no id bound for [glanceId] to resolve.
+     */
+    private fun requestInitialUpdate() {
+        sendBroadcast(
+            Intent(this, CalculatorGlanceWidgetReceiver::class.java).apply {
+                action = AppWidgetManager.ACTION_APPWIDGET_UPDATE
+                putExtra(AppWidgetManager.EXTRA_APPWIDGET_IDS, intArrayOf(appWidgetId))
+            },
+        )
     }
 
     private suspend fun readTransparent(): Boolean {
