@@ -21,6 +21,7 @@ import com.vayunmathur.library.util.BackupFormat
 import com.vayunmathur.library.util.DbBackupCodec
 import com.vayunmathur.library.util.ZipBackupFormat
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.File
@@ -136,6 +137,20 @@ fun BackupButtons(format: BackupFormat) {
 
 private enum class PasswordDialogAction { EXPORT, IMPORT }
 
+/** Long enough for the import message to be read before the process goes away. */
+private const val RESTART_DELAY_MS = 1500L
+
+private fun relaunch(context: android.content.Context) {
+    context.packageManager.getLaunchIntentForPackage(context.packageName)?.let { intent ->
+        intent.addFlags(
+            android.content.Intent.FLAG_ACTIVITY_NEW_TASK or
+                android.content.Intent.FLAG_ACTIVITY_CLEAR_TASK
+        )
+        context.startActivity(intent)
+    }
+    Runtime.getRuntime().exit(0)
+}
+
 private suspend fun runExport(
     context: android.content.Context,
     format: BackupFormat,
@@ -170,6 +185,12 @@ private suspend fun runImport(
         withContext(Dispatchers.Main) {
             AppMessages.show(context.getString(R.string.backup_import_success))
         }
+        // DataStore and Room assume exclusive ownership of their files and keep the contents
+        // cached, so a live process neither picks up the files the import just replaced nor stops
+        // writing the pre-restore state back over them - which silently undid the restore before
+        // the user got round to restarting (#548). Give the message a moment, then relaunch.
+        delay(RESTART_DELAY_MS)
+        withContext(Dispatchers.Main) { relaunch(context) }
     } catch (e: Exception) {
         Log.e("BackupButtons", "Import FAILED", e)
         withContext(Dispatchers.Main) {

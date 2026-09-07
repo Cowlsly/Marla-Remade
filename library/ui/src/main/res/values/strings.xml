@@ -11,8 +11,8 @@
     <string name="backup_export_success">Backup exported successfully</string>
     <!-- Shared library: UI – BackupButtons: Toast when export fails. %1$s = raw exception message, do not translate placeholder content -->
     <string name="backup_export_failed_format">Backup export failed: <xliff:g id="error" example="permission denied">%1$s</xliff:g></string>
-    <!-- Shared library: UI – BackupButtons: Toast when import succeeds, asks user to restart app. Long duration -->
-    <string name="backup_import_success">Backup imported successfully. Please restart the app.</string>
+    <!-- Shared library: UI – BackupButtons: Toast when import succeeds, shown just before the app relaunches itself so the restored files take effect. Long duration -->
+    <string name="backup_import_success">Backup imported successfully. Restarting the app…</string>
     <!-- Shared library: UI – BackupButtons: Toast when import fails. %1$s = raw exception message, do not translate placeholder content -->
     <string name="backup_import_failed_format">Backup import failed: <xliff:g id="error" example="invalid file">%1$s</xliff:g></string>
     <!-- Shared library: UI – TimePickerDialog: Dialog title for time picker, shown in top of picker. Noun phrase, keep short -->
