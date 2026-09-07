@@ -114,4 +114,6 @@
     <string name="name_prefix">Tiitel</string>
     <string name="name_suffix">Järelliide</string>
     <string name="name_affix_none">Puudub</string>
+    <string name="sim_name_or_phone_required">Sisesta nimi või telefoninumber</string>
+    <string name="sim_slot_label">SIM-kaart %1$d</string>
 </resources>
