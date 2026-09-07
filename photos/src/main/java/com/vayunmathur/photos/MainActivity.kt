@@ -249,24 +249,46 @@ fun Navigation(
     secureFolderViewModel: SecureFolderViewModel,
     viewUri: Uri? = null,
 ) {
-    val backStack = rememberNavBackStack<Route>(Route.Gallery)
+    // Opened via ACTION_VIEW from another app (e.g. the camera): that one photo is the whole app
+    // for this launch, so it is the root of the stack and the gallery is not underneath it. Back
+    // then belongs to the system, which finishes this Activity straight back to whoever fired the
+    // intent - the same task they started us in - and runs the cross-activity predictive back
+    // animation itself. An in-app back handler would swallow that gesture, animate nothing, and
+    // land the user on a home screen they never asked for.
+    //
+    // The MediaStore _id in a content URI equals Photo.id, so the page can be named up front and
+    // render the incoming URI directly while the background index writes the row and the full sync
+    // populates the rest of the library for swiping. PhotoPage reconciles to the DB-backed pager.
+    val viewerRoute = remember(viewUri) {
+        viewUri?.let {
+            Route.PhotoPage(
+                runCatching { ContentUris.parseId(it) }.getOrNull() ?: -1L,
+                null,
+                it.toString(),
+            )
+        }
+    }
+
+    val backStack = rememberNavBackStack<Route>(viewerRoute ?: Route.Gallery)
     val vaultPhotoDao by secureFolderViewModel.vaultPhotoDao.collectAsState()
     val vaultPassword by secureFolderViewModel.vaultPassword.collectAsState()
 
-    // Opened via ACTION_VIEW from another app (e.g. the camera): open the
-    // swipeable PhotoPage immediately, rendering the incoming URI directly so
-    // there's no wait. The MediaStore _id in a content URI equals Photo.id, so
-    // once the background index writes the row (and the full sync populates the
-    // rest of the library for swiping), PhotoPage reconciles to the DB-backed
-    // pager. Done once per URI, even across configuration changes.
-    var handledViewUri by rememberSaveable { mutableStateOf(false) }
+    // Indexed once per incoming URI, and `rememberSaveable` rather than the LaunchedEffect key so
+    // a configuration change does not re-run it.
+    var indexedViewUri by rememberSaveable { mutableStateOf(false) }
     LaunchedEffect(viewUri) {
-        if (viewUri != null && !handledViewUri) {
-            handledViewUri = true
-            val parsedId = runCatching { ContentUris.parseId(viewUri) }.getOrNull() ?: -1L
-            backStack.add(Route.PhotoPage(parsedId, null, viewUri.toString()))
-            galleryViewModel.resolveAndIndex(viewUri) {}
-        }
+        if (viewUri == null || indexedViewUri) return@LaunchedEffect
+        indexedViewUri = true
+        galleryViewModel.resolveAndIndex(viewUri) {}
+    }
+
+    // PhotoPage pops itself when its last remaining photo is deleted. With the viewer as the root
+    // there is nothing under it to pop to, and leaving the viewer here means leaving the app: hand
+    // back to whoever sent us rather than hand NavDisplay an empty stack, which it rejects.
+    val activity = LocalActivity.current
+    if (backStack.backStack.isEmpty()) {
+        LaunchedEffect(Unit) { activity?.finish() }
+        return
     }
 
     MainNavigation(backStack) {
