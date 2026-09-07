@@ -237,7 +237,7 @@ fun ContactListScreen(state: ContactListUiState, actions: ContactsActions) {
                             value = state.searchQuery,
                             onValueChange = { actions.setSearchQuery(it) },
                             placeholder = stringResource(R.string.search_contacts),
-                            padding = PaddingValues(0.dp),
+                            padding = PaddingValues(bottom = 8.dp),
                             modifier = Modifier
                                 .focusProperties { canFocus = isFocusableBySystem }
                                 .pointerInput(Unit) {
@@ -273,7 +273,7 @@ fun ContactListScreen(state: ContactListUiState, actions: ContactsActions) {
                 }
             }
         },
-        horizontalPadding = 8.dp,
+        horizontalPadding = 16.dp,
         // 2dp is the gap *within* a grouped card, now that each contact is its own lazy item rather
         // than a row inside one item per letter. The headers carry the extra 6dp that keeps the gap
         // between groups at the 16dp it has always been.
