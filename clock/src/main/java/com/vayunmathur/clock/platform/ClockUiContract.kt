@@ -51,7 +51,12 @@ data class WorldClock(val city: String, val zone: TimeZone)
 
 /** Everything the clock tab draws. */
 data class ClockUiState(
-    val now: Instant,
+    /**
+     * The current instant, as a getter so the tick is read inside the header and the individual
+     * world-clock rows rather than in the screen's own scope. Read high, a tick invalidates the
+     * whole screen and re-composes every visible row; the rows only render minutes.
+     */
+    val now: () -> Instant,
     val zone: TimeZone,
     val is24Hour: Boolean = false,
     val worldClocks: List<WorldClock> = emptyList(),
@@ -59,7 +64,8 @@ data class ClockUiState(
 
 /** Everything the timer tab draws. */
 data class TimerUiState(
-    val now: Instant,
+    /** See [ClockUiState.now]. Read inside each timer's own row. */
+    val now: () -> Instant,
     val timers: List<Timer> = emptyList(),
 )
 

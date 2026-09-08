@@ -26,8 +26,6 @@ object SetupIntents {
     const val ACTION_BIOMETRIC_ENROLL = "android.settings.BIOMETRIC_ENROLL"
     const val ACTION_GESTURE_SANDBOX = "com.android.quickstep.action.GESTURE_SANDBOX"
 
-    private const val UPDATER_PACKAGE = "app.seamlessupdate.client"
-    private const val ACTION_SECURITY_PREVIEW = "app.seamlessupdate.client.SECURITY_PREVIEW_SETTINGS"
 
     /**
      * The restore entry point.
@@ -59,13 +57,6 @@ object SetupIntents {
     fun gestureTutorial(): Intent = Intent(ACTION_GESTURE_SANDBOX).setupFlow()
 
     fun accessibilitySettings(): Intent = Intent(ACTION_ACCESSIBILITY).setupFlow()
-
-    /** Null when the updater is not in this image, in which case the step skips itself. */
-    fun securityPreview(context: Context): Intent? = Intent(ACTION_SECURITY_PREVIEW)
-        .setPackage(UPDATER_PACKAGE)
-        .addCategory(Intent.CATEGORY_DEFAULT)
-        .setupFlow()
-        .takeIfResolvable(context)
 
     /** Null when nothing handles a restore, in which case the step skips itself. */
     fun restoreBackup(context: Context): Intent? =

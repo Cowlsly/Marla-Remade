@@ -299,10 +299,18 @@ fun ContactListScreen(state: ContactListUiState, actions: ContactsActions) {
         }
 
         if (favorites.isNotEmpty()) {
-            item(key = "favorites-header") {
+            item(key = "favorites-header", contentType = "header") {
                 FavoritesHeader(Modifier.animateItem().padding(vertical = 6.dp))
             }
-            itemsIndexed(favorites, key = { _, c -> "favorite-${c.id}" }) { idx, contact ->
+            itemsIndexed(
+                favorites,
+                key = { _, c -> "favorite-${c.id}" },
+                // Headers and rows are structurally different subtrees. Left untyped they all
+                // share the default null content type, so the list will happily try to reuse a
+                // header's slot for a contact row - the reuse then fails and the row composes
+                // from scratch anyway, having wasted the attempt.
+                contentType = { _, _ -> "contact" },
+            ) { idx, contact ->
                 GroupedContactRow(idx, favorites.size, itemMotion()) {
                     ContactItem(
                         contact = contact,
@@ -328,10 +336,14 @@ fun ContactListScreen(state: ContactListUiState, actions: ContactsActions) {
         }
 
         groupedContacts.forEach { (letter, contactsInGroup) ->
-            item(key = "letter-header-$letter") {
+            item(key = "letter-header-$letter", contentType = "header") {
                 LetterHeader(letter, Modifier.animateItem().padding(vertical = 6.dp))
             }
-            itemsIndexed(contactsInGroup, key = { _, c -> "contact-${c.id}" }) { idx, contact ->
+            itemsIndexed(
+                contactsInGroup,
+                key = { _, c -> "contact-${c.id}" },
+                contentType = { _, _ -> "contact" },
+            ) { idx, contact ->
                 GroupedContactRow(idx, contactsInGroup.size, itemMotion()) {
                     ContactItem(
                         contact = contact,
@@ -563,7 +575,9 @@ fun ContactItem(
         modifier
     }
 
-    val contactGroups = contactGroupsOf(contact, allGroups)
+    // Remembered per (contact, group list): this filters every group and trims each name, and
+    // without the remember it re-ran on every composition of every visible row while scrolling.
+    val contactGroups = remember(contact, allGroups) { contactGroupsOf(contact, allGroups) }
 
     val trimmedOrg = contact.org.company.trim()
     val showOrg = trimmedOrg.isNotEmpty()

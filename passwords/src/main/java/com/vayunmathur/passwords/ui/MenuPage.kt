@@ -27,6 +27,11 @@ fun MenuPage(
     val ticker = viewModel.tickerFlow.collectAsState()
     val passwords by viewModel.passwords.collectAsState()
     val passkeys by viewModel.passkeys.collectAsState()
+    val loaded by viewModel.loaded.collectAsState()
     val now = remember(ticker) { { ticker.value } }
-    MenuScreen(backStack, MenuUiState(passwords, passkeys, now), viewModel)
+    MenuScreen(
+        backStack,
+        MenuUiState(passwords = passwords, passkeys = passkeys, loading = !loaded, now = now),
+        viewModel,
+    )
 }

@@ -116,6 +116,7 @@ include(":library:euicc-stubs")
 include(":library:backup-stubs")
 include(":library:remotedisplay-stubs")
 include(":library:nearby-stubs")
+include(":library:updateengine-stubs")
 include(":networklocation")
 include(":fooddelivery")
 include(":musicbrainz")
@@ -133,6 +134,7 @@ include(":mapcompare")
 include(":tuner")
 include(":setupwizard")
 include(":logviewer")
+include(":updater")
 
 // Personal / private app modules live under personal/ (gitignored). Included only
 // when present so the public repo still configures without them.

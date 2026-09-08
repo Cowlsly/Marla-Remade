@@ -60,18 +60,97 @@ fun getThumbnail(context: Context, uri: Uri): Bitmap? {
 fun albumArtistPairs(music: List<Music>, artists: List<Artist>, albums: List<Album>): List<Pair<Album, Artist>> {
     val albumMap = albums.associateBy { it.id }
     val artistMap = artists.associateBy { it.id }
-    return music.mapNotNull { song ->
+    var unmatched = 0
+    val pairs = music.mapNotNull { song ->
         val album = albumMap[song.albumId]
         val artist = artistMap[song.artistId]
-        if (album != null && artist != null) album to artist
-        else {
-            if (album == null) Log.w("MusicUtil", "Song '${song.title}' has albumId ${song.albumId} but no matching album found")
-            if (artist == null) Log.w("MusicUtil", "Song '${song.title}' has artistId ${song.artistId} but no matching artist found")
+        // Counted, not logged per song. A library whose Albums table is out of step with its Media
+        // table produces one of these per track, and a few thousand Log.w calls on the refresh path
+        // cost considerably more than the pairing itself.
+        if (album == null || artist == null) {
+            unmatched++
             null
-        }
-    }.distinct().also {
-        Log.d("MusicUtil", "Computed ${it.size} unique album-artist pairs from ${music.size} songs")
+        } else album to artist
+    }.distinct()
+    if (unmatched > 0) {
+        Log.w("MusicUtil", "$unmatched of ${music.size} songs had no matching album or artist")
     }
+    return pairs
+}
+
+/**
+ * The whole song library, straight from the MediaStore cursor.
+ *
+ * Deliberately no [MediaMetadataRetriever] here: opening each file to read a tag costs tens of
+ * milliseconds, and this runs on every refresh. Fields MediaStore leaves blank - usually `year`,
+ * occasionally `duration` - are backfilled separately and cached, see
+ * `MusicRepository.backfillTags`.
+ */
+suspend fun getSongs(context: Context): List<Music> = withContext(Dispatchers.IO) {
+    val songs = mutableListOf<Music>()
+    val projection = arrayOf(
+        MediaStore.Audio.Media._ID,
+        MediaStore.Audio.Media.TITLE,
+        MediaStore.Audio.Media.ARTIST,
+        MediaStore.Audio.Media.ARTIST_ID,
+        MediaStore.Audio.Media.ALBUM,
+        MediaStore.Audio.Media.ALBUM_ID,
+        MediaStore.Audio.Media.DURATION,
+        MediaStore.Audio.Media.TRACK,
+        MediaStore.Audio.Media.YEAR,
+    )
+    try {
+        context.contentResolver.query(
+            MediaStore.Audio.Media.EXTERNAL_CONTENT_URI,
+            projection,
+            "${MediaStore.Audio.Media.IS_MUSIC} != 0",
+            null,
+            // Sorted here rather than in the list screen. SQLite does it once per refresh over the
+            // whole table; the client-side comparator ran again on every recomposition that changed
+            // the data, and NOCASE is closer to what a reader expects than Kotlin's case-sensitive
+            // String.compareTo, which files everything lowercase after everything uppercase.
+            "${MediaStore.Audio.Media.TITLE} COLLATE NOCASE ASC",
+        )?.use { cursor ->
+            val idColumn = cursor.getColumnIndexOrThrow(MediaStore.Audio.Media._ID)
+            val titleColumn = cursor.getColumnIndexOrThrow(MediaStore.Audio.Media.TITLE)
+            val artistColumn = cursor.getColumnIndexOrThrow(MediaStore.Audio.Media.ARTIST)
+            val albumColumn = cursor.getColumnIndexOrThrow(MediaStore.Audio.Media.ALBUM)
+            val artistIDColumn = cursor.getColumnIndexOrThrow(MediaStore.Audio.Media.ARTIST_ID)
+            val albumIDColumn = cursor.getColumnIndexOrThrow(MediaStore.Audio.Media.ALBUM_ID)
+            val durationColumn = cursor.getColumnIndexOrThrow(MediaStore.Audio.Media.DURATION)
+            val trackColumn = cursor.getColumnIndexOrThrow(MediaStore.Audio.Media.TRACK)
+            val yearColumn = cursor.getColumnIndexOrThrow(MediaStore.Audio.Media.YEAR)
+            while (cursor.moveToNext()) {
+                val id = cursor.getLong(idColumn)
+                val uri = ContentUris.withAppendedId(
+                    MediaStore.Audio.Media.EXTERNAL_CONTENT_URI, id,
+                ).toString()
+                val rawTrack = cursor.getInt(trackColumn)
+                // MediaStore encodes multi-disc numbers as disc*1000 + track, so a value of
+                // 2005 is disc 2, track 5. Split them apart instead of discarding the disc.
+                val discNumber = if (rawTrack >= 1000) rawTrack / 1000 else 1
+                val trackNumber = if (rawTrack >= 1000) rawTrack % 1000 else rawTrack
+                songs.add(
+                    Music(
+                        id = id,
+                        title = cursor.getString(titleColumn),
+                        artist = cursor.getString(artistColumn),
+                        artistId = cursor.getLong(artistIDColumn),
+                        album = cursor.getString(albumColumn),
+                        albumId = cursor.getLong(albumIDColumn),
+                        uri = uri,
+                        duration = cursor.getLong(durationColumn),
+                        trackNumber = trackNumber,
+                        year = cursor.getInt(yearColumn).takeIf { it > 0 } ?: 0,
+                        discNumber = discNumber,
+                    )
+                )
+            }
+        }
+    } catch (e: Exception) {
+        Log.e("MusicUtil", "Error querying songs", e)
+    }
+    return@withContext songs
 }
 
 suspend fun getAlbums(context: Context): List<Album> = withContext(Dispatchers.IO) {
@@ -84,7 +163,7 @@ suspend fun getAlbums(context: Context): List<Album> = withContext(Dispatchers.I
     )
 
     // Filter to only get music files
-    val sortOrder = "${MediaStore.Audio.Albums.ALBUM} ASC"
+    val sortOrder = "${MediaStore.Audio.Albums.ALBUM} COLLATE NOCASE ASC"
 
     try {
         context.contentResolver.query(
@@ -121,7 +200,7 @@ suspend fun getArtists(context: Context): List<Artist> = withContext(Dispatchers
     )
 
     // Filter to only get music files
-    val sortOrder = "${MediaStore.Audio.Artists.ARTIST} ASC"
+    val sortOrder = "${MediaStore.Audio.Artists.ARTIST} COLLATE NOCASE ASC"
 
     try {
         context.contentResolver.query(

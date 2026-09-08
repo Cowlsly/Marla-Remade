@@ -3,16 +3,17 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
-import androidx.room3.Entity
-import androidx.room3.PrimaryKey
 import com.vayunmathur.library.util.DatabaseItem
 import com.vayunmathur.music.platform.MusicViewModel
 import kotlinx.serialization.Serializable
 
+/**
+ * An album as MediaStore reports it. Not persisted - albums are re-read from
+ * `MediaStore.Audio.Albums` on every refresh, so there is nothing to migrate or invalidate.
+ */
 @Serializable
-@Entity
 data class Album(
-    @PrimaryKey(autoGenerate = true) override val id: Long,
+    override val id: Long,
     val name: String,
     val uri: String
 ): DatabaseItem {

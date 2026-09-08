@@ -19,17 +19,25 @@ sealed interface SpecificFeature {
         val name: String
     }
 
+    /**
+     * A country. [iso] and [wikipedia] are optional because the basemap archive carries neither:
+     * a picked label supplies a name and a position, and the Wikidata round trip that fills these
+     * in needs the network. Requiring them meant tapping a country did nothing at all offline.
+     */
     @Serializable
-    data class Admin0Label(@SerialName("iso3166_1") val iso: String, val wikipedia: String, val name: String) : SpecificFeature
+    data class Admin0Label(@SerialName("iso3166_1") val iso: String? = null, val wikipedia: String? = null, val name: String) : SpecificFeature
+    /** A state or region. [iso] and [wikipedia] are optional for the same reason as [Admin0Label]. */
     @Serializable
-    data class Admin1Label(@SerialName("iso3166_2") val iso: String, val wikipedia: String, val name: String) : SpecificFeature
+    data class Admin1Label(@SerialName("iso3166_2") val iso: String? = null, val wikipedia: String? = null, val name: String) : SpecificFeature
     /**
      * A city / town. Unlike the country and region labels there is no ISO code to
      * key on — the baked `admin_city` layer carries only `name` / `name_en` — so
      * the border highlight matches on the name instead.
+     *
+     * [wikipedia] is optional for the same reason as [Admin0Label].
      */
     @Serializable
-    data class Admin2Label(val wikipedia: String, val name: String) : SpecificFeature
+    data class Admin2Label(val wikipedia: String? = null, val name: String) : SpecificFeature
     @Serializable
     data class Restaurant(override val name: String, val phone: String?, val website: String?, val menu: String?, val openingHours: OpeningHours?,
                           override val position: Position): RoutableFeature
@@ -93,35 +101,34 @@ fun JsonObject.string(key: String): String? = this[key]?.jsonPrimitive?.content
  */
 suspend fun parse(feature: Feature1): SpecificFeature? {
     val properties = feature.properties ?: return null
-    return when(properties.string("kind")) {
-        "country" -> {
-            // Each of these tags may be missing on tiles for small/disputed
-            // territories or when Wikidata returns no result. Skip the feature
-            // rather than crashing the bottom sheet.
-            val wikidataId = properties.string("wikidata") ?: return null
-            val wiki = try { Wikidata.get(wikidataId) } catch (_: Exception) { return null }
-            val iso = wiki.getProperty("P297") ?: return null
-            val wikipediaUrl = wiki.getWikipedia() ?: return null
-            val name = properties.string("name:en") ?: properties.string("name") ?: return null
-            SpecificFeature.Admin0Label(iso, wikipediaUrl, name)
-        }
-        "region" -> {
-            val wikidataId = properties.string("wikidata") ?: return null
-            val wiki = try { Wikidata.get(wikidataId) } catch (_: Exception) { return null }
-            val iso = wiki.getProperty("P300") ?: return null
-            val wikipediaUrl = wiki.getWikipedia() ?: return null
-            val name = properties.string("name:en") ?: properties.string("name") ?: return null
-            SpecificFeature.Admin1Label(iso, wikipediaUrl, name)
-        }
-        "locality" -> {
-            // No ISO lookup: a city has no ISO 3166 code, so the Wikidata round
-            // trip is only for the article URL.
-            val wikidataId = properties.string("wikidata") ?: return null
-            val wiki = try { Wikidata.get(wikidataId) } catch (_: Exception) { return null }
-            val wikipediaUrl = wiki.getWikipedia() ?: return null
-            val name = properties.string("name:en") ?: properties.string("name") ?: return null
-            SpecificFeature.Admin2Label(wikipediaUrl, name)
-        }
+    // The name is the only thing an admin label truly needs. Everything below it is enrichment
+    // from Wikidata, which the basemap archive does not carry and which needs the network.
+    //
+    // Requiring that enrichment is what made tapping a city, state or country do nothing: a
+    // picked label supplies `kind`, `name` and `name:en` and nothing else, so `wikidata` was
+    // always absent, every branch returned null, and the tap fell through to reverse-geocode —
+    // which is online-only and therefore silent offline. Two `runCatching` swallows on the path
+    // meant it failed without a trace.
+    val name = properties.string("name:en") ?: properties.string("name") ?: return null
+    // Absent id, or a lookup that fails or times out, leaves the article and ISO code unset
+    // rather than losing the whole feature.
+    val wiki = properties.string("wikidata")?.let { id ->
+        try { Wikidata.get(id) } catch (_: Exception) { null }
+    }
+    return when (properties.string("kind")) {
+        "country" -> SpecificFeature.Admin0Label(
+            iso = wiki?.getProperty("P297"),
+            wikipedia = wiki?.getWikipedia(),
+            name = name,
+        )
+        "region" -> SpecificFeature.Admin1Label(
+            iso = wiki?.getProperty("P300"),
+            wikipedia = wiki?.getWikipedia(),
+            name = name,
+        )
+        // No ISO lookup: a city has no ISO 3166 code, so the Wikidata round trip is only for the
+        // article URL.
+        "locality" -> SpecificFeature.Admin2Label(wikipedia = wiki?.getWikipedia(), name = name)
         else -> null
     }
 }

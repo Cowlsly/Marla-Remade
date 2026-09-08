@@ -1270,9 +1270,30 @@ impl Covered {
     /// Walked at [`SAMPLE_M`] rather than at the line's own vertices, whose spacing is a
     /// feed's business and is sometimes hundreds of metres.
     pub fn contains(&self, line: &[(i32, i32)]) -> bool {
+        self.covered_fraction(line) >= 1.0
+    }
+
+    /// How much of `line` is already drawn, from 0 to 1. A line too short to walk covers nothing,
+    /// so it reports 0 and is kept — matching what the all-or-nothing test used to do with it.
+    ///
+    /// The all-or-nothing [`contains`](Self::contains) is too strict for one real case: a route
+    /// published twice at slightly different *lengths*. A short-turn, or one feed's version
+    /// running two stops further than another's, shares 95% of its alignment with what is already
+    /// drawn, adds a little genuinely new track at one end, and is therefore kept **whole** —
+    /// duplicating the 95%. On the ground that draws the A line as two strands about a metre
+    /// apart, each fanned into its own corridor lane and tapered, so one line reads as two
+    /// diverging and reconverging.
+    ///
+    /// Subtracting the covered part instead is not the answer and was tried: it cut every route
+    /// into fragments and left holes where a piece fell below the length worth emitting. A
+    /// fraction keeps the whole-line rule and only moves where the threshold sits.
+    pub fn covered_fraction(&self, line: &[(i32, i32)]) -> f64 {
         let walked = walk(line);
-        !walked.is_empty()
-            && walked.iter().all(|&(point, ux, uy)| self.covers(point, ux, uy))
+        if walked.is_empty() {
+            return 0.0;
+        }
+        let drawn = walked.iter().filter(|&&(point, ux, uy)| self.covers(point, ux, uy)).count();
+        drawn as f64 / walked.len() as f64
     }
 
     /// Is this point already drawn, by track running parallel to it?
@@ -1988,6 +2009,39 @@ mod tests {
             3,
             "a line overlapping a crowded trunk for half its length is crowded"
         );
+    }
+
+    /// A re-publication that runs a little further is still a duplicate of the part it shares.
+    ///
+    /// The case that drew the LA A line as two strands a metre apart: two feeds publish the same
+    /// alignment at slightly different lengths, the longer one "adds new track" at one end, and an
+    /// all-or-nothing rule therefore keeps it whole — duplicating everything they share. Each copy
+    /// then gets its own corridor lane and taper, so one line reads as two that diverge and
+    /// reconverge.
+    #[test]
+    fn a_longer_republication_of_the_same_track_is_mostly_drawn() {
+        let short = north(37.7, -122.4, 100.0, 60);
+        let long = north(37.7, -122.4, 100.0, 63);
+        let mut covered = Covered::default();
+        covered.add(&short);
+        assert!(!covered.contains(&long), "it does add a little new track at the end");
+        let fraction = covered.covered_fraction(&long);
+        assert!(fraction > 0.9, "but nearly all of it is already drawn: {fraction}");
+        assert!(fraction < 1.0, "and not quite all");
+    }
+
+    /// A branch is not a duplicate. Half shared, half genuinely new track, so it must survive
+    /// whatever threshold the duplicate test uses.
+    #[test]
+    fn a_route_that_branches_away_is_not_mostly_drawn() {
+        let trunk = north(37.7, -122.4, 100.0, 60);
+        let mut covered = Covered::default();
+        covered.add(&trunk);
+        // Same start, then off to its own alignment well outside the corridor.
+        let mut branch: Vec<(i32, i32)> = trunk[..30].to_vec();
+        branch.extend(shifted(&north(37.72, -122.4, 100.0, 30), 500.0));
+        let fraction = covered.covered_fraction(&branch);
+        assert!(fraction < 0.9, "half of it is new track: {fraction}");
     }
 
     /// Survey noise is not new track. Two agencies' surveys of one track disagree by a few

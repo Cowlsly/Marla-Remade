@@ -285,7 +285,17 @@ fun MainPage(
             userNamesByLocationName = usersByLocationName
         ),
         person = selectedUser?.let {
-            PersonUiState(it, userPositions[it.id], waypoints, globalSharingEnabled, crowdFindingEnabled)
+            PersonUiState(
+                it,
+                userPositions[it.id],
+                waypoints,
+                globalSharingEnabled,
+                crowdFindingEnabled,
+                // Only the user's own sheet shows the powered-off controls, and it is the only
+                // one that needs a peer list. Passing it unconditionally keeps the state a plain
+                // projection rather than something that depends on which row was tapped.
+                connectedUsers,
+            )
         }
     )
 
@@ -784,7 +794,7 @@ fun PersonDetailSheet(state: PersonUiState, actions: PersonActions) {
         // from the network without giving back, or giving without getting.
         if (user.id == Networking.userid) {
             Spacer(Modifier.height(4.dp))
-            PoweredOffFindingSetting()
+            PoweredOffFindingSetting(state.connectedUsers.filter { it.id != user.id })
             Spacer(Modifier.height(8.dp))
             CrowdFindingRow(state.crowdFindingEnabled) { actions.setCrowdFinding(it) }
         }

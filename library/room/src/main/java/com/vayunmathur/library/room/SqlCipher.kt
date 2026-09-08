@@ -137,6 +137,25 @@ private fun <T : RoomDatabase> Context.openRoomDatabase(
 
     builder.setDriver(SQLCipherDriver(password.toByteArray(Charsets.UTF_8), null, null))
 
+    // One connection, not Room's default pool of five.
+    //
+    // Room picks the pool from the journal mode in `RoomDatabase.Builder.build()`: TRUNCATE gets
+    // `SingleConnection`, anything else - including the AUTOMATIC default, which resolves to WAL -
+    // gets `MultipleConnection(4, 1)`. That is fine for plain SQLite, where opening a connection is
+    // cheap, but SQLCipher derives the page key on every open, and at the default 256,000 PBKDF2
+    // iterations that is on the order of a second each. Five of them is the several-second blank
+    // screen on a cold start.
+    //
+    // This is a restoration rather than a new tuning decision: before the Room 3 migration the
+    // builder set `setJournalMode(TRUNCATE)`, which under Room 3 means exactly this pool. The
+    // migration swapped the open-helper for the driver and dropped that line, silently turning one
+    // key derivation into five. Keeping WAL and asking for a single connection explicitly is
+    // strictly better than going back to TRUNCATE, which would also slow every write down.
+    //
+    // The cost is that reads no longer run concurrently with a write. These are single-user apps
+    // with small databases, and it is what they did for their whole history before the migration.
+    builder.setSingleConnectionPool()
+
     return builder.build()
 }
 

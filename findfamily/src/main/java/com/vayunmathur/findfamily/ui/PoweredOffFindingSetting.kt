@@ -21,6 +21,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
 import com.vayunmathur.findfamily.R
+import com.vayunmathur.findfamily.data.User
 import com.vayunmathur.findfamily.platform.PoweredOffBeacon
 import com.vayunmathur.library.ui.Switch
 import kotlinx.coroutines.launch
@@ -39,7 +40,7 @@ import kotlinx.coroutines.launch
  *   up front, not left to conclude it was broken.
  */
 @Composable
-fun PoweredOffFindingSetting() {
+fun PoweredOffFindingSetting(peers: List<User>) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     var supported by remember { mutableStateOf<Boolean?>(null) }
@@ -97,6 +98,10 @@ fun PoweredOffFindingSetting() {
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
+            // Only once the beacon is on: there is nothing to grant access to before that, and
+            // offering the choice first would imply the phone is already findable.
+            Spacer(Modifier.height(8.dp))
+            PoweredOffGrantSetting(peers)
         }
     }
 }

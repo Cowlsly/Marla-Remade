@@ -121,10 +121,16 @@ class ClockViewModel(
     }
 
     /**
-     * Current wall-clock time, updated every 100ms. Pauses when no screen
-     * collects (via [SharingStarted.WhileSubscribed]).
+     * Wall-clock time at [TICK_MS], for the stopwatch only. Pauses when nothing collects.
+     *
+     * Private on purpose. This is 100ms because the stopwatch renders centiseconds, and it used to
+     * be shared with the clock and timer tabs - which show seconds and minutes, and so recomposed
+     * ten times a second to redraw a label that changes once a second, or once a minute. Screens
+     * that need a displayable clock should use `rememberClock` from `:library:ui`, which lets them
+     * pick their own period and hands back a getter so the tick reaches only the labels that show
+     * it.
      */
-    val now: StateFlow<Instant> = tick.stateIn(
+    private val now: StateFlow<Instant> = tick.stateIn(
         viewModelScope,
         SharingStarted.WhileSubscribed(STOP_TIMEOUT_MS),
         Clock.System.now(),

@@ -1,13 +1,11 @@
 package com.vayunmathur.music.data
-import androidx.room3.Entity
-import androidx.room3.PrimaryKey
 import com.vayunmathur.library.util.DatabaseItem
 import kotlinx.serialization.Serializable
 
+/** See [Album]: read from `MediaStore.Audio.Artists` on every refresh, never persisted. */
 @Serializable
-@Entity
 data class Artist(
-    @PrimaryKey(autoGenerate = true) override val id: Long,
+    override val id: Long,
     val name: String,
     val uri: String
 ): DatabaseItem

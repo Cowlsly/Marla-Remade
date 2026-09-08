@@ -55,7 +55,6 @@ fun ClockScreen(
     state: ClockUiState,
     onReorder: (List<String>) -> Unit = {},
 ) {
-    val time = state.now.toLocalDateTime(state.zone)
     val haptics = LocalHapticFeedback.current
     val listState = rememberLazyListState()
     var localClocks by remember { mutableStateOf(state.worldClocks) }
@@ -86,6 +85,7 @@ fun ClockScreen(
     }, state = listState, verticalArrangement = Arrangement.spacedBy(4.dp), scrollBehavior = appBarScrollBehavior()) {
         item {
             val is24h = state.is24Hour
+            val time = state.now().toLocalDateTime(state.zone)
             Row(Modifier.fillParentMaxWidth(), horizontalArrangement = Arrangement.Center, verticalAlignment = Alignment.Bottom) {
                 Text(DateString.timeSecondsNumeric(time.time, is24h), style = MaterialTheme.typography.displayLarge)
                 if (!is24h) {
@@ -98,10 +98,11 @@ fun ClockScreen(
             }
         }
         item {
+            val time = state.now().toLocalDateTime(state.zone)
             Text(DateString.dateWeekdayNoYear(time.date), Modifier.fillParentMaxWidth(), textAlign = TextAlign.Center)
         }
         itemsIndexed(localClocks, key = { _, worldClock -> worldClock.city }) { index, worldClock ->
-            val timeHere = state.now.toLocalDateTime(worldClock.zone)
+            val timeHere = state.now().toLocalDateTime(worldClock.zone)
             val is24h = state.is24Hour
             val amPm = if (is24h) "" else if (timeHere.time.hour >= 12) stringResource(R.string.time_pm) else stringResource(R.string.time_am)
             ReorderableItem(reorderState, key = worldClock.city, modifier = Modifier.fillParentMaxWidth().animateItem()) { isDragging ->

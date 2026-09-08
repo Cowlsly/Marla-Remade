@@ -1576,6 +1576,27 @@ mod tests {
             }
             admitted.sort_unstable();
             drawn.sort_unstable();
+            // Kinds we deliberately do not draw, and why. Checked explicitly so the assertion
+            // below still catches an *accidental* divergence from upstream, which is what it is
+            // for — a silent one would mean a kind quietly stopped rendering.
+            //
+            // `protected_area` and `nature_reserve` are the tags the world's MARINE protected
+            // areas carry. The sea has no geometry, so nothing is drawn over them, and on a planet
+            // build they painted green across open water — the reported bug. Deriving sea geometry
+            // to cover them was attempted twice and failed twice; see `mamaps_build`'s
+            // `tiler::add_ocean` for both failure modes. Not drawing them is the fix that works.
+            //
+            // The cost, stated plainly: a protected area or nature reserve *on land* is no longer
+            // green. Restore them here the day the sea can paint over them.
+            const NOT_DRAWN: &[&str] = &["protected_area", "nature_reserve"];
+            let (skipped, admitted): (Vec<String>, Vec<String>) =
+                admitted.into_iter().partition(|k| NOT_DRAWN.contains(&k.as_str()));
+            for kind in &skipped {
+                assert!(
+                    !drawn.contains(kind),
+                    "`{kind}` is in NOT_DRAWN but a flat layer still draws it",
+                );
+            }
             // Every kind exactly once: two flat layers claiming the same kind would draw it
             // twice, in whichever colour came last.
             assert_eq!(

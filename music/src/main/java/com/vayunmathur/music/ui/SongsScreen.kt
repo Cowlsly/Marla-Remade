@@ -20,6 +20,8 @@ import com.vayunmathur.library.ui.MaterialTheme
 import com.vayunmathur.library.ui.Text
 import com.vayunmathur.library.ui.appBarScrollBehavior
 import com.vayunmathur.library.util.NavBackStack
+import com.vayunmathur.library.util.sharedContainer
+import com.vayunmathur.library.util.sharedText
 import com.vayunmathur.music.R
 import com.vayunmathur.music.Route
 import com.vayunmathur.music.data.Music
@@ -39,20 +41,34 @@ internal const val SOURCE_ALL_SONGS_NAME = "All Songs"
  * the TopAppBar with the embedded search bar and the shuffle FAB).
  */
 @Composable
-fun SongsScreen(state: SongsUiState, actions: MusicActions, backStack: NavBackStack<Route>) {
+fun SongsScreen(
+    state: SongsUiState,
+    actions: MusicActions,
+    backStack: NavBackStack<Route>,
+    onSongTapped: () -> Unit = {},
+) {
+    // Only the row for the song that is about to play can be the morph origin, and only when this
+    // list - rather than the mini-player - is the one the player was opened from.
+    @Composable
+    fun songKey(song: Music, slot: String): Modifier =
+        if (!state.rowOwnsSongKeys) Modifier
+        else Modifier.sharedText("music-song-$slot-${song.id}")
+
     ListPage<Music, Route, Route.Song>(backStack, state.songs, stringResource(R.string.page_title_music), { song ->
         val isPlaying = song.id == state.playingSongId
         Text(
             text = song.title,
             color = if (isPlaying) MaterialTheme.colorScheme.primary else Color.Unspecified,
-            fontWeight = if (isPlaying) FontWeight.Bold else FontWeight.Normal
+            fontWeight = if (isPlaying) FontWeight.Bold else FontWeight.Normal,
+            modifier = songKey(song, "title"),
         )
-    }, {
-        Text(it.artist)
+    }, { song ->
+        Text(song.artist, modifier = songKey(song, "artist"))
     }, { toPlay ->
         val allSongs = state.songs
         val toPlayIndex = allSongs.indexOfFirst { it.id == toPlay }
         actions.playSong(allSongs, toPlayIndex, sourceId = SOURCE_ALL_SONGS, sourceName = SOURCE_ALL_SONGS_NAME)
+        onSongTapped()
         Route.Song
     }, leadingContent = { song ->
         val isPlaying = song.id == state.playingSongId
@@ -60,7 +76,13 @@ fun SongsScreen(state: SongsUiState, actions: MusicActions, backStack: NavBackSt
             if (isPlaying) {
                 IconPlay(modifier = Modifier.size(24.dp).padding(end = 8.dp))
             }
-            AlbumArt(song.uri.toUri(), Modifier.size(40.dp))
+            AlbumArt(
+                song.uri.toUri(),
+                Modifier.size(40.dp).then(
+                    if (!state.rowOwnsSongKeys) Modifier
+                    else Modifier.sharedContainer("music-song-art-${song.id}")
+                ),
+            )
         }
     }, trailingContent = { song ->
         AddToPlaylistButton(backStack, song)
@@ -81,5 +103,11 @@ fun SongsScreen(state: SongsUiState, actions: MusicActions, backStack: NavBackSt
         ShufflePlayFab(state.songs) {
             actions.playShuffled(state.songs, sourceId = SOURCE_ALL_SONGS, sourceName = SOURCE_ALL_SONGS_NAME)
         }
-    }, sortOrder = Comparator.comparing { it.title }, scrollBehavior = appBarScrollBehavior())
+    },
+    // Without this the default is `it.toString()`, which on a data class is the whole row -
+    // "Music(id=42, title=..., artistId=..., albumId=...)". That allocated a long string per song
+    // per keystroke and matched on field names and numeric ids, so typing "1" hit everything.
+    searchString = { "${it.title} ${it.artist} ${it.album}" },
+    // No sortOrder: getSongs already returns the library sorted by title.
+    scrollBehavior = appBarScrollBehavior(), loading = state.loading)
 }

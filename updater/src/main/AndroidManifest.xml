@@ -1,0 +1,79 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
+    <uses-permission android:name="android.permission.WAKE_LOCK" />
+
+    <!--
+      signature|privileged, so all four require an entry in
+      vendor/modern-apps/privapp-permissions-modern-apps.xml whose package= byte-matches
+      com.vayunmathur.updater. A mismatch there is boot-fatal under
+      ro.control_privapp_permissions=enforce, not a silent no-op.
+    -->
+    <!-- Reboot into the freshly written slot once the payload is applied. -->
+    <uses-permission android:name="android.permission.REBOOT" />
+    <!-- update_engine stages payload metadata under /cache. -->
+    <uses-permission android:name="android.permission.ACCESS_CACHE_FILESYSTEM" />
+    <!-- Lets update_engine reclaim space aggressively when the inactive slot is tight. -->
+    <uses-permission android:name="android.permission.ALLOCATE_AGGRESSIVE" />
+
+    <application
+        android:allowBackup="false"
+        android:dataExtractionRules="@xml/data_extraction_rules"
+        android:icon="@mipmap/ic_launcher"
+        android:label="@string/app_name"
+        android:roundIcon="@mipmap/ic_launcher"
+        android:supportsRtl="true"
+        android:theme="@style/Theme.General">
+
+        <activity
+            android:configChanges="mcc|mnc|colorMode|density|fontScale|fontWeightAdjustment|keyboard|keyboardHidden|layoutDirection|navigation|orientation|screenLayout|screenSize|smallestScreenSize|touchscreen|uiMode"
+            android:name=".MainActivity"
+            android:exported="true"
+            android:launchMode="singleTask"
+            android:theme="@style/Theme.General">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+
+        <!--
+          specialUse, not dataSync: Android 15 caps dataSync at six cumulative hours a day and
+          Android 13/14 refuse to let a boot receiver start one. Neither suits a 1-2 GB transfer
+          followed by an A/B slot write that must not be abandoned halfway.
+        -->
+        <service
+            android:name=".service.UpdateInstallService"
+            android:exported="false"
+            android:foregroundServiceType="specialUse">
+            <property
+                android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                android:value="Downloads, signature-verifies and applies a full system OTA to the inactive A/B slot. The transfer is 1-2 GB and the slot write cannot be interrupted partway without leaving the update unusable." />
+        </service>
+
+        <!-- Re-schedules the periodic check; see the class doc for why it does not install. -->
+        <receiver
+            android:name=".platform.UpdateBootReceiver"
+            android:exported="false">
+            <intent-filter>
+                <action android:name="android.intent.action.BOOT_COMPLETED" />
+                <action android:name="android.intent.action.MY_PACKAGE_REPLACED" />
+            </intent-filter>
+        </receiver>
+
+        <!--
+          Not exported: the only intents it accepts come from this app's own PendingIntents, and
+          what they lead to is rebooting the device.
+        -->
+        <receiver
+            android:name=".platform.IdleRebootReceiver"
+            android:exported="false" />
+    </application>
+
+</manifest>

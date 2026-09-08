@@ -107,7 +107,13 @@ class ContactViewModel(application: Application) : AndroidViewModel(application)
             key !in hidden && c.accountName !in hidden
         }
         filterBySearch(filtered, query)
-    }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
+    }
+        // viewModelScope is Main.immediate, so without this the whole address book was filtered
+        // on the UI thread on every keystroke - and filterBySearch builds a fresh concatenated,
+        // lowercased haystack per contact, so that is O(contacts x fields) of string allocation
+        // between one frame and the next.
+        .flowOn(Dispatchers.Default)
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
 
     // Virtual SIM account display labels: key is "type|name" -> "SIM N — Carrier"
     private val _simAccountLabels = MutableStateFlow<Map<String, String>>(emptyMap())

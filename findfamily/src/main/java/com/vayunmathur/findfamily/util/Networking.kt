@@ -227,7 +227,12 @@ object Networking {
     // the EIDs it armed with and the server just remembers them, after which the existing
     // 0x07/0x09/0x0A path resolves and carries reports unchanged. Additive: a server that
     // predates this ignores 0x0C, and the only symptom is that no sightings are ever resolved.
-    private const val WS_OP_POF_REGISTER: Byte = 0x0C // [0x0C][u64 userid][u16 count]([20B eid]×count)
+    //
+    // The trailing recovery bundle is what finders seal to, in place of the owner's identity
+    // bundle — the change that makes a sighting readable by a family member rather than only by
+    // the dead phone. Additive in the other direction too: the server sizes the EID array from
+    // `count`, so a relay that predates the bundle never reads those trailing bytes.
+    private const val WS_OP_POF_REGISTER: Byte = 0x0C // [0x0C][u64 userid][u16 count]([20B eid]×count)[u16 bundleLen][bundle]
 
     private const val WS_KEY_NONE = 0
     private const val WS_KEY_CLASSIC = 1
@@ -667,14 +672,31 @@ object Networking {
 
     /**
      * Beacon: register the EIDs this device armed its Bluetooth controller with before shutting
-     * down, so finders can resolve them to this device's ML-KEM public bundle.
+     * down, together with the public half of the **recovery** keypair finders should seal to.
      *
      * Must be sent *before* the device powers off — once it is off it cannot re-register, and
      * unlike a live tracker it will not self-heal on the next heartbeat. Registrations are held
      * in memory server-side, so a relay restart during the powered-off window silently ends
      * findability until the device boots again.
+     *
+     * ## [recoveryBundle] and what it depends on
+     * The relay's `ff_pof_eids` maps an EID to a *userid* and then answers RESOLVE with that
+     * user's ordinary identity bundle from `pqc_keys_db`. That is the reason the feature could
+     * not be shared: the only key that opened a sighting was `ff_pqcKemPriv`, and handing that to
+     * a family member hands them every live location this user will ever publish. Sightings are
+     * therefore sealed to a dedicated recovery bundle instead — see
+     * [com.vayunmathur.findfamily.tracker.PoweredOffRecovery].
+     *
+     * The bundle is appended after the EID array as `[u16 bundleLen][bundle]`, and is optional:
+     * a relay that predates it sizes the array from `count` and never reads those trailing bytes.
+     * When the relay has no bundle for an EID set it falls back to the owner's identity bundle
+     * exactly as before, so an old client and an old server both keep working.
      */
-    suspend fun registerPoweredOffEids(userId: Long, eids: List<ByteArray>): Boolean {
+    suspend fun registerPoweredOffEids(
+        userId: Long,
+        eids: List<ByteArray>,
+        recoveryBundle: ByteArray,
+    ): Boolean {
         val session = wsSession ?: return false
         if (eids.isEmpty()) return false
         val n = eids.size.coerceAtMost(PoweredOffProtocol.ARMED_SLOTS)
@@ -682,7 +704,7 @@ object Networking {
             // u16 count, not u8: the controller addresses 256 keys (index 0..255) and 256 does
             // not fit in a byte. Getting this wrong would silently drop the last EID, costing the
             // final 17 minutes of the window.
-            val frame = ByteArray(11 + n * PoweredOffProtocol.EID_LEN)
+            val frame = ByteArray(11 + n * PoweredOffProtocol.EID_LEN + 2 + recoveryBundle.size)
             frame[0] = WS_OP_POF_REGISTER
             putU64Be(frame, 1, userId.toULong())
             frame[9] = (n ushr 8).toByte()
@@ -692,6 +714,9 @@ object Networking {
                 eids[i].copyInto(frame, off, 0, PoweredOffProtocol.EID_LEN)
                 off += PoweredOffProtocol.EID_LEN
             }
+            frame[off] = (recoveryBundle.size ushr 8).toByte()
+            frame[off + 1] = recoveryBundle.size.toByte()
+            recoveryBundle.copyInto(frame, off + 2)
             session.send(frame)
             true
         } catch (e: Exception) {
@@ -806,6 +831,26 @@ object Networking {
             return res.bundle
         }
         return null
+    }
+
+    /**
+     * Sign [data] with this device's ML-DSA identity key, or null if PQC is unavailable.
+     *
+     * Used to authenticate powered-off recovery grants. The peer channel encrypts to the
+     * recipient but leaves the sender field self-declared, which is tolerable for a UWB handshake
+     * and is not tolerable for handing over decryption keys.
+     */
+    fun signAsMe(data: ByteArray): ByteArray? {
+        if (!pqcReady) return null
+        return runCatching { pqcIdentity.sign(data) }
+            .onFailure { Log.w(TAG, "signAsMe failed", it) }.getOrNull()
+    }
+
+    /** Whether [signature] over [data] was really produced by [userId]'s identity key. */
+    suspend fun verifyFrom(userId: Long, data: ByteArray, signature: ByteArray): Boolean {
+        val user = runCatching { repository.getUser(userId) }.getOrNull() ?: return false
+        val bundle = peerPqcBundle(user) ?: return false
+        return Pqc.verify(bundle, data, signature)
     }
 
     /** The post-quantum capability of a peer, used to gate connecting/sharing. */

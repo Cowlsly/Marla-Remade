@@ -18,6 +18,16 @@ data class SongsUiState(
     val songs: List<Music> = emptyList(),
     /** Row to highlight — the loaded track, but only while it is playing from this list. */
     val playingSongId: Long? = null,
+    /**
+     * True until the first MediaStore read lands. Without it an empty library and a library that
+     * has not been read yet render identically, so a slow first launch looks like no music.
+     */
+    val loading: Boolean = false,
+    /**
+     * Whether a row is the counterpart of the now-playing screen for the current transition. False
+     * when the mini-player is instead - see `MusicTabsScreen`, which owns that decision.
+     */
+    val rowOwnsSongKeys: Boolean = false,
 )
 
 /** Everything the album detail screen draws. */
@@ -44,6 +54,11 @@ data class NowPlayingUiState(
     val artist: String = "",
     /** Album name of the loaded track, empty when unknown. */
     val album: String = "",
+    /**
+     * Id of the loaded track, or null when it is not in the library. Keys the shared elements this
+     * screen exchanges with the songs list and the mini-player.
+     */
+    val songId: Long? = null,
     val artworkUri: Uri? = null,
     val isPlaying: Boolean = false,
     val positionMs: Long = 0,

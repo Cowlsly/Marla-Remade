@@ -60,12 +60,19 @@ object ContactSorting {
     /** Sort a list of contacts locale-aware. */
     fun List<Contact>.sortedLocale(): List<Contact> {
         val col = collator()
-        return sortedWith(compareBy(col) { it.name.value })
+        // Collation keys, not repeated compares. Collator.compare re-analyses both strings on
+        // every comparison, so an n-element sort pays O(n log n) analyses; generating a key per
+        // contact makes it O(n), and the sort itself then compares cheap byte arrays. This runs
+        // on the UI thread from the contact list's grouping, on every change to the list.
+        return map { it to col.getCollationKey(it.name.value) }
+            .sortedWith(compareBy { it.second })
+            .map { it.first }
     }
-
     /** Sort a list of groups by name locale-aware. */
     fun <T> List<T>.sortedByNameLocale(selector: (T) -> String): List<T> {
         val col = collator()
-        return sortedWith(compareBy(col, selector))
+        return map { it to col.getCollationKey(selector(it)) }
+            .sortedWith(compareBy { it.second })
+            .map { it.first }
     }
 }

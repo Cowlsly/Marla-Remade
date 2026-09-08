@@ -36,7 +36,10 @@ import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.emitAll
 import kotlinx.coroutines.flow.flow
+import kotlinx.coroutines.flow.flowOn
+import kotlinx.coroutines.flow.onEach
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
@@ -67,17 +70,35 @@ class PasswordsViewModel(
 
     // -- Data -------------------------------------------------------------
 
-    val passwords: StateFlow<List<Password>> = repository.passwords.stateIn(
-        viewModelScope,
-        SharingStarted.WhileSubscribed(5_000),
-        emptyList(),
-    )
+    /**
+     * False until the vault's first rows have arrived, so the list can tell "still opening the
+     * database" apart from "you have no passwords" - which look identical when both are an empty
+     * list, and the difference is several seconds of blank screen on launch.
+     */
+    private val _loaded = MutableStateFlow(false)
+    val loaded: StateFlow<Boolean> = _loaded.asStateFlow()
 
-    val passkeys: StateFlow<List<Passkey>> = repository.passkeys.stateIn(
-        viewModelScope,
-        SharingStarted.WhileSubscribed(5_000),
-        emptyList(),
-    )
+    // `flow { emitAll(...) }` rather than `repository.passwords` directly: the property getter
+    // touches the lazy database, and evaluating it here would build it - loading the SQLCipher
+    // native library, unwrapping the Keystore passphrase and deriving the page key - on whichever
+    // thread constructed this ViewModel, which is the main thread during composition. Wrapping it
+    // defers that to first collection, and flowOn puts that collection on IO.
+    val passwords: StateFlow<List<Password>> = flow { emitAll(repository.passwords) }
+        .onEach { _loaded.value = true }
+        .flowOn(Dispatchers.IO)
+        .stateIn(
+            viewModelScope,
+            SharingStarted.WhileSubscribed(5_000),
+            emptyList(),
+        )
+
+    val passkeys: StateFlow<List<Passkey>> = flow { emitAll(repository.passkeys) }
+        .flowOn(Dispatchers.IO)
+        .stateIn(
+            viewModelScope,
+            SharingStarted.WhileSubscribed(5_000),
+            emptyList(),
+        )
 
     fun deletePasskey(passkey: Passkey) {
         viewModelScope.launch(Dispatchers.IO) {

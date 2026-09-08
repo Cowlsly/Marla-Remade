@@ -1,15 +1,27 @@
+@file:OptIn(kotlin.uuid.ExperimentalUuidApi::class)
+
 package com.vayunmathur.findfamily.platform
 
 import android.content.Context
 import android.nearby.NearbyManager
 import android.os.Build
 import android.util.Log
+import com.vayunmathur.e2ee.E2eeKeyStore
 import com.vayunmathur.findfamily.BuildConfig
 import com.vayunmathur.findfamily.data.DirectBootStore
 import com.vayunmathur.findfamily.tracker.PoweredOffKeyStore
 import com.vayunmathur.findfamily.tracker.PoweredOffProtocol
+import com.vayunmathur.findfamily.tracker.PoweredOffRecovery
+import com.vayunmathur.findfamily.tracker.RecoveryDistribution
+import com.vayunmathur.findfamily.tracker.poweredOffGrantSigningBytes
 import com.vayunmathur.findfamily.util.Networking
+import com.vayunmathur.findfamily.uwb.PoweredOffGrant
+import com.vayunmathur.findfamily.uwb.UwbEnvelope
+import com.vayunmathur.findfamily.uwb.UwbEnvelopeKind
+import com.vayunmathur.library.util.DataStoreUtils
 import java.security.SecureRandom
+import kotlin.io.encoding.Base64
+import kotlin.uuid.Uuid
 
 /**
  * Powered-off finding, beacon half: hands the Bluetooth controller a batch of rotating ephemeral
@@ -76,6 +88,27 @@ object PoweredOffBeacon {
      */
     private fun keys(context: Context) = PoweredOffKeyStore(DirectBootStore.store(context))
 
+    /** Adapts the direct-boot store to the e2ee module's storage abstraction. */
+    private class DirectBootKeyStore(private val ds: DataStoreUtils) : E2eeKeyStore {
+        override suspend fun getBytes(name: String): ByteArray? = ds.getByteArrayAwait(name)
+        override suspend fun setBytes(name: String, value: ByteArray, onlyIfAbsent: Boolean) =
+            ds.setByteArray(name, value, onlyIfAbsent)
+    }
+
+    /**
+     * The recovery keypair and its grant roster, on the **same** direct-boot store as [keys] for
+     * the reason spelled out above: two stores is how this feature has already broken once, and
+     * the recovery private key has to be filed into [PoweredOffKeyStore] alongside the beacon
+     * secret anyway.
+     *
+     * Device-protected storage is not credential-encrypted, so this is a key sitting outside the
+     * passcode. That is not a regression — the identity key it replaces was already mirrored here
+     * as `ff_pqcKemPriv` — and it is a strict improvement, because what is exposed now only opens
+     * powered-off sightings instead of every location the user has ever shared.
+     */
+    private fun recovery(context: Context) =
+        PoweredOffRecovery(DirectBootKeyStore(DirectBootStore.store(context)))
+
     /**
      * Opt-in, default OFF, and it must stay default OFF. A phone the user believes is switched
      * off does not start advertising because a default said so.
@@ -86,16 +119,28 @@ object PoweredOffBeacon {
     /**
      * Turn the beacon on or off.
      *
-     * Turning it on mints the beacon secret and files it, with this device's ML-KEM private
-     * bundle, under the owner's own userid — so sightings are readable from the user's other
-     * devices rather than only by the phone that is lost and switched off.
+     * Turning it on mints the beacon secret and a dedicated recovery keypair, and files both
+     * under the owner's own userid — so sightings are readable here, and can be made readable by
+     * a family member the user explicitly picks. Nobody is picked by default; see
+     * [grantRecovery].
      *
      * Turning it off clears the controller as well as the flag, so a device armed by an earlier
-     * shutdown stops at the next one instead of running out its three days.
+     * shutdown stops at the next one instead of running out its three days. It also drops the
+     * recovery keypair and the whole grant roster: leaving the roster behind would silently
+     * re-entitle everyone on it the next time the switch went back on, which is not what "off"
+     * looked like it meant.
      */
     suspend fun setEnabled(context: Context, enabled: Boolean) {
         DirectBootStore.store(context).setBoolean(KEY_ENABLED, enabled)
-        if (enabled) provisionKeys(context) else disarm(context)
+        if (enabled) {
+            provisionKeys(context)
+        } else {
+            recovery(context).clear()
+            // Also drop this device's own entry, or `canRead` stays true and the retrieval loop
+            // keeps querying 258 handles every five minutes for a beacon that is switched off.
+            Networking.userid.takeIf { it != 0L }?.let { keys(context).forget(it) }
+            disarm(context)
+        }
     }
 
     /**
@@ -135,25 +180,26 @@ object PoweredOffBeacon {
      * Done at opt-in rather than at shutdown because it writes to storage and the shutdown window
      * is measured in seconds.
      *
-     * What gets filed is the **raw ML-KEM private DER** — `ff_pqcKemPriv`, one of the four
-     * separate `ff_pqc*` blobs in the direct-boot identity mirror — and NOT a composite
-     * `[4B kemPrivLen][kemPriv][dsaPriv]` bundle of the kind `TrackerProtocol` uses. A tracker's
-     * identity is minted by the phone on the tracker's behalf and is carried as that composite; a
-     * powered-off phone is not a tracker and reuses its own existing identity, so there is no
-     * bundle to carry. The distinction is invisible at the type level — both are `ByteArray` —
-     * and getting it wrong is silent: the bundle parser reads the DER's leading SEQUENCE header
-     * as a length field and every decrypt fails into a log line. It has already happened once.
+     * What gets filed is the **raw ML-KEM private DER** of the dedicated recovery keypair, and
+     * NOT a composite `[4B kemPrivLen][kemPriv][dsaPriv]` bundle of the kind `TrackerProtocol`
+     * uses. A tracker's identity is minted by the phone on the tracker's behalf and is carried as
+     * that composite; a powered-off phone is not a tracker. The distinction is invisible at the
+     * type level — both are `ByteArray` — and getting it wrong is silent: the bundle parser reads
+     * the DER's leading SEQUENCE header as a length field and every decrypt fails into a log
+     * line. It has already happened once.
      *
-     * The sealing side needs no equivalent care: finders seal with `Pqc.encryptTo`, which takes a
-     * public bundle, and the relay already holds this user's public bundle in that shape.
+     * ## Why this is no longer `ff_pqcKemPriv`
+     * It used to be, and that is exactly what made the feature unshareable. A powered-off phone
+     * cannot decrypt its own sightings, so somebody else has to hold the key — and the identity
+     * private key decrypts every live location this user publishes to anyone, forever. Handing
+     * that to a family member to help find a lost phone is not a trade worth making, so sightings
+     * are sealed to a key that opens sightings and nothing else. See [PoweredOffRecovery] for the
+     * grant model and for the two things rotation cannot undo.
      *
-     * NOT DONE, and the feature is much weaker without it: sharing these keys with a chosen family
-     * member. A powered-off phone cannot decrypt its own sightings, so today this only helps a
-     * user who has a second device of their own signed in. `PoweredOffKeyStore` is already keyed
-     * by userid to hold a peer's keys; the distribution path over the e2ee peer channel, and the
-     * UI to choose who gets them, are not written. Handing someone this key lets them locate the
-     * device for as long as it lives, so it must never be synced to the whole roster by default.
-     * Whoever writes it: file the raw DER here too, not a bundle.
+     * Unconditionally re-files rather than returning early when the store already has something:
+     * [PoweredOffRecovery.revoke] rotates, and a stale private key left here would leave the
+     * owner's own device unable to read its own sightings — silently, like every other failure in
+     * this feature.
      */
     private suspend fun provisionKeys(context: Context) {
         val userId = Networking.userid
@@ -162,16 +208,115 @@ object PoweredOffBeacon {
             return
         }
         val store = keys(context)
-        if (store.canRead(userId)) return
         val secret = store.secret(userId)
             ?: ByteArray(32).also { SecureRandom().nextBytes(it) }
-        val priv = DirectBootStore.store(context).getByteArrayAwait("ff_pqcKemPriv")
-        if (priv == null) {
-            Log.i(TAG, "identity mirror not seeded, deferring key provisioning")
-            return
-        }
-        store.save(userId, secret, priv)
+        store.save(userId, secret, recovery(context).ensure().kemPrivate)
     }
+
+    // ------------------------------------------------------------------
+    // Recovery-key sharing: who, besides this device, can find it when it is off
+    // ------------------------------------------------------------------
+
+    /** Peers currently able to decrypt this device's sightings. Empty until an explicit grant. */
+    suspend fun recoveryGrantees(context: Context): Set<Long> = recovery(context).grantees()
+
+    /**
+     * Let [peerId] find this phone while it is switched off, and send them the keys to do it.
+     *
+     * Returns false when there is nothing to send yet (no identity, or the beacon has never been
+     * switched on so there is no secret) or the peer could not be reached. A false here leaves
+     * the roster updated but the peer without keys; re-granting redelivers, which is the intended
+     * repair and is why [PoweredOffRecovery.grant] is not idempotent about delivery.
+     *
+     * What [peerId] can do afterwards, stated because the UI has to say it: decrypt this device's
+     * powered-off sightings, *and* derive its EIDs from the beacon secret and recognise it in the
+     * wild. The secret is not optional — [PoweredOffProtocol.recentHandles] is what tells them
+     * which handles to ask the relay for — so the second capability comes with the first.
+     */
+    suspend fun grantRecovery(context: Context, peerId: Long): Boolean {
+        val userId = Networking.userid
+        if (userId == 0L) return false
+        val secret = keys(context).secret(userId) ?: run {
+            Log.i(TAG, "no beacon secret yet, cannot grant recovery")
+            return false
+        }
+        val distribution = recovery(context).grant(peerId)
+        return deliver(distribution, secret)
+    }
+
+    /**
+     * Withdraw [peerId]'s ability to find this phone when it is off.
+     *
+     * Rotates **both** halves of what they were given, because they do two different things and
+     * only rotating one leaves the other alive:
+     *  - the recovery keypair, so nothing sealed from now on is readable with their copy;
+     *  - the beacon secret, so they can no longer derive this phone's EIDs. Without this they
+     *    could go on recognising and following the powered-off phone indefinitely — the exact
+     *    capability the grant UI warns about, and therefore the exact capability revoking has to
+     *    take back.
+     *
+     * Re-files both locally so this device can still read its own sightings, then redelivers to
+     * everyone still granted. Returns false if any redelivery failed; the revocation itself has
+     * already taken effect locally either way.
+     *
+     * **Forward-only.** [peerId] can still open any ciphertext they already fetched, and the new
+     * public half does not reach finders until this phone next registers on shutdown, so a beacon
+     * window already in flight keeps being sealed to the old key. Rotation also retires the
+     * previous private key, so sightings still sitting on the relay from the current window
+     * become unreadable to the owner as well.
+     */
+    suspend fun revokeRecovery(context: Context, peerId: Long): Boolean {
+        val userId = Networking.userid
+        if (userId == 0L) return false
+        val store = keys(context)
+        val distribution = recovery(context).revoke(peerId)
+        val freshSecret = ByteArray(32).also { SecureRandom().nextBytes(it) }
+        // Before anything goes out: the owner reads their own sightings through the same store,
+        // so a rotation that forgot this would revoke the user from themselves.
+        store.save(userId, freshSecret, distribution.kemPrivate)
+        return deliver(distribution, freshSecret)
+    }
+
+    /** Seal [distribution] to each recipient's own public bundle and send. */
+    private suspend fun deliver(distribution: RecoveryDistribution, secret: ByteArray): Boolean {
+        val owner = Networking.userid
+        var allOk = true
+        for (peer in distribution.to) {
+            // Signed per recipient, because the recipient is inside the signed bytes: a grant
+            // lifted off one peer cannot be replayed at another.
+            val signature = Networking.signAsMe(
+                poweredOffGrantSigningBytes(owner, peer, distribution.epoch, secret, distribution.kemPrivate)
+            )
+            if (signature == null) {
+                Log.w(TAG, "cannot sign recovery grant, not delivering to ${peer.toULong()}")
+                allOk = false
+                continue
+            }
+            val grant = PoweredOffGrant(
+                epoch = distribution.epoch,
+                secretB64 = Base64.encode(secret),
+                recoveryPrivB64 = Base64.encode(distribution.kemPrivate),
+                sigB64 = Base64.encode(signature),
+            )
+            // publishUwbMessage resolves the peer's existing ML-KEM bundle and seals with
+            // Pqc.encryptTo before the frame reaches the socket, so the relay only ever forwards
+            // bytes it has no key for.
+            val ok = Networking.publishUwbMessage(grantEnvelope(grant), peer)
+            if (!ok) Log.w(TAG, "could not deliver recovery keys to ${peer.toULong()}")
+            allOk = allOk && ok
+        }
+        return allOk
+    }
+
+    private fun grantEnvelope(grant: PoweredOffGrant) = UwbEnvelope(
+        // Nothing correlates these to a ranging session; the field is required by the shared
+        // envelope and a fresh id keeps them from matching any `UwbSessionManager` await.
+        sessionId = Uuid.random().toString(),
+        sender = Networking.userid.toULong(),
+        senderPlatform = "android",
+        kind = UwbEnvelopeKind.POF_GRANT,
+        recovery = grant,
+    )
 
     /**
      * Hand a fresh batch to the controller and, if [ARM_CONTROLLER], switch advertising on.
@@ -201,7 +346,17 @@ object PoweredOffBeacon {
         // Before the radios go down, and before the controller is told anything. Once the phone
         // is off it cannot re-register and will not self-heal, so a beacon the relay has never
         // heard of would advertise for three days into nothing.
-        if (!Networking.registerPoweredOffEids(userId, eids)) {
+        //
+        // The recovery bundle goes up with the EIDs because this is the only moment it can: it is
+        // what finders will seal to for the whole window, and a rotation since the last shutdown
+        // does not reach the relay until now.
+        val recoveryKeys = recovery(context).ensure()
+        // `ensure` mints when the keypair is blank, and it is blank after `setEnabled(false)`.
+        // Registering a public half whose private half is not in the sighting store would leave
+        // the owner unable to read their own sightings, so re-file before registering — the same
+        // trap `revokeRecovery` guards against.
+        keys(context).save(userId, secret, recoveryKeys.kemPrivate)
+        if (!Networking.registerPoweredOffEids(userId, eids, recoveryKeys.publicBundle)) {
             Log.i(TAG, "relay did not accept the EID list, not arming")
             return null
         }

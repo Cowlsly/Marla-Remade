@@ -25,7 +25,48 @@ data class UwbEnvelope(
     /** Envelope kind: `"request"`, `"ack"`, `"config"`, `"cancel"`. */
     val kind: String,
     /** Optional payload — see [UwbHandshake]. */
-    val payload: UwbHandshake? = null
+    val payload: UwbHandshake? = null,
+    /**
+     * Powered-off recovery key material, for the [UwbEnvelopeKind.POF_GRANT] kind only.
+     * Null on every UWB envelope.
+     *
+     * This rides the UWB channel rather than getting a channel of its own because that channel is
+     * already end-to-end encrypted to the peer's ML-KEM bundle, already routed by the relay into
+     * a queue the relay cannot read, and needs no server change to carry a new kind. The name is
+     * now wrong for what the envelope carries; a second flag bit would have been cleaner but the
+     * relay maps every unset bit0 to the *location* queue (`ff_kind`, findfamily.rs), where an
+     * iOS peer would drain it and fail to parse it as a location.
+     */
+    val recovery: PoweredOffGrant? = null,
+)
+
+/**
+ * The keys a peer needs to find this device once it is switched off, sealed to that peer's own
+ * public bundle before it ever reaches the relay.
+ *
+ * Both halves are necessary and neither is sufficient:
+ *  - [secretB64] is the beacon secret, which drives [com.vayunmathur.findfamily.tracker.PoweredOffProtocol.recentHandles]
+ *    and so decides *what to ask the relay for*. It is also, unavoidably, the ability to derive
+ *    this device's EIDs and recognise it in the wild.
+ *  - [recoveryPrivB64] is the raw ML-KEM private DER that opens the sightings. Deliberately the
+ *    dedicated recovery key and never `ff_pqcKemPriv`, which would hand over every live location
+ *    this user publishes rather than only their powered-off sightings.
+ *
+ * [epoch] exists because delivery is asynchronous and rotation is not: a redistribution triggered
+ * by a revoke can overtake an older grant still in the queue, and a peer that stored the older
+ * one last would sit there polling with a dead key. Recipients keep the highest epoch they have
+ * seen and drop anything below it.
+ *
+ * [sigB64] authenticates the sender, which the channel itself does not — see
+ * [com.vayunmathur.findfamily.tracker.poweredOffGrantSigningBytes] for why an unsigned grant
+ * would let one connected peer put forged locations on the map under another's name.
+ */
+@Serializable
+data class PoweredOffGrant(
+    val epoch: Long,
+    val secretB64: String,
+    val recoveryPrivB64: String,
+    val sigB64: String,
 )
 
 /**
@@ -66,4 +107,21 @@ object UwbEnvelopeKind {
     const val ACK = "ack"
     const val CONFIG = "config"
     const val CANCEL = "cancel"
+
+    /**
+     * Powered-off recovery key delivery, carried in [UwbEnvelope.recovery].
+     *
+     * Additive on purpose. Every existing consumer matches these kinds by equality — Android's
+     * [UwbInbox] caches only REQUEST/CANCEL, `UwbSessionManager` waits on a matching `sessionId`,
+     * and iOS `UwbInbox.swift` acts only on request/cancel — so a peer that predates this drops
+     * the envelope on the floor and behaves exactly as it does today. Swift's `JSONDecoder`
+     * likewise ignores the unknown `recovery` key rather than failing the whole decode.
+     *
+     * There is deliberately **no matching "forget these keys" message**. It would be a remote
+     * delete triggered by an unauthenticated `sender` field, so any connected peer could wipe the
+     * keys a third party had sent us; and it would buy nothing, because revoking rotates both the
+     * recovery keypair and the beacon secret. A revoked peer keeps bytes that no longer decrypt
+     * anything and no longer derive any live identifier.
+     */
+    const val POF_GRANT = "pofgrant"
 }

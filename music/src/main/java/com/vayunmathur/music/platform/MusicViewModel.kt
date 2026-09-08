@@ -61,6 +61,24 @@ class MusicViewModel(
     private val matchings: StateFlow<List<ManyManyMatching>> = repository.matchings
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
 
+    /** False until the first MediaStore read lands; lets a tab show a spinner, not an empty list. */
+    val loaded: StateFlow<Boolean> = repository.loaded
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), false)
+
+    /**
+     * Re-reads the library from MediaStore, then backfills the tags MediaStore does not carry.
+     *
+     * Two steps so the list is on screen after the first: the backfill has to open files to read
+     * their tags, which is slow enough that waiting for it is what an empty launch screen looks
+     * like.
+     */
+    fun refreshLibrary() {
+        viewModelScope.launch {
+            repository.refresh()
+            repository.backfillTags()
+        }
+    }
+
     // --- PlaybackManager state mirror ---
     val isPlaying: StateFlow<Boolean> = playbackManager.isPlaying
     val currentPosition: StateFlow<Long> = playbackManager.currentPosition
@@ -111,6 +129,7 @@ class MusicViewModel(
             title = metadata.title?.toString() ?: unknownTitle,
             artist = metadata.artist?.toString() ?: unknownArtist,
             album = song?.album ?: metadata.albumTitle?.toString() ?: "",
+            songId = song?.id,
             artworkUri = metadata.artworkUri,
             isPlaying = playing,
             positionMs = position,

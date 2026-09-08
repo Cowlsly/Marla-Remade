@@ -1116,45 +1116,39 @@ fn timed<R>(on: bool, counter: &std::sync::atomic::AtomicU64, f: impl FnOnce() -
 /// need no atomics and a million tiles do not contend on three cache lines.
 type Encoded = (u64, Option<(Vec<u8>, usize)>, crate::rings::Stats, crate::coalesce::Stats);
 
-/// Derive the sea for one tile as `buffered tile rectangle − land`, and add it to `water`.
+/// Derive the sea for one tile as the tile rectangle with land cut out of it.
 ///
-/// Called from [`encode_batch`] after coalescing and before stage C, which is the first point at
-/// which a tile's land is complete, clipped and in tile-local coordinates.
+/// **Currently disabled** — [`Settings::ocean`] is hard-off. Kept because the analysis is worth
+/// more than the code, and whoever tries this next should read it first.
 ///
-/// # Why the land is both `earth` polygons and nothing else
+/// # Two attempts, two structural failures
 ///
-/// `earth` carries the coastline mainland (kind `NONE`), `place=island` areas, and a `cliff`
-/// *line*. Only the polygons are land; the line is filtered out by `geom_type`. Islands count as
-/// land, so kind is deliberately not filtered — an island subtracted from the sea is exactly right.
+/// The sea has no geometry in OpenStreetMap: water is defined by the absence of land. So it can
+/// only be derived, and both derivations available here break on real coastline.
 ///
-/// # How the sea is cut out, and why not with a boolean
+/// **Subtracting land with the polygon clipper.** [`crate::clip`] uses Sutherland-Hodgman, which
+/// returns a *self-touching* ring when a concave polygon clips into disjoint pieces, joined by a
+/// zero-area sliver along the tile boundary. A coastline in a tile is exactly that shape, and a
+/// sweep-line boolean requires simple polygons. The result was a visibly shredded coast.
 ///
-/// The sea is one polygon per tile: the buffered tile rectangle as the exterior, and every land
-/// ring as a hole. The tessellator already fills exterior-minus-holes — it is how every lake in
-/// every island is drawn — so the shape falls out of the format with no geometry computed here.
+/// **Land rings as holes in a rectangle**, which is what this code does. No boolean is involved
+/// and `crate::rings` accepts the result, but the tessellator does not: one tile's sea is a single
+/// polygon with hundreds of holes — 64,091 points at z0 on a North America build — and the land
+/// rings *share edges*, because the OSMCoastline product is split into abutting pieces.
+/// `library/map`'s `tess/fill.rs` says earcut cannot triangulate self-touching rings reliably, and
+/// it does not: land filled as sea, differently at every zoom, so panning between zooms made the
+/// same coastline flip between land and water.
 ///
-/// Subtracting the land with the polygon clipper was tried first and produced a visibly broken
-/// coastline. The clipper is correct, but its input was not: [`crate::clip`] uses
-/// Sutherland-Hodgman, which returns a **self-touching** ring when a concave polygon clips into
-/// disjoint pieces, joined by a zero-area sliver along the tile boundary. A coastline in a tile is
-/// exactly that shape, and a sweep-line boolean assumes simple polygons. Holes have no such
-/// precondition: the same self-touching rings already reach earcut as land and draw correctly.
+/// # What would actually work
 ///
-/// # Why the rectangle is bigger than the tile's own buffer
+/// Union the land pieces into one ring per landmass before using them as holes, so no two holes
+/// touch. That needs a boolean whose input is *not* Sutherland-Hodgman output — i.e. union the
+/// land at ingest, before clipping, not per tile. `tile_build::boolean` is verified for difference
+/// and intersection and could do it, but it is a different pipeline stage and its own piece of
+/// work.
 ///
-/// Features are clipped to the tile plus [`geom::buffer_for`], so land runs right out to that
-/// edge. `crate::rings` drops a hole that is not *strictly* inside its exterior, counting a point
-/// on the boundary as outside, so a sea rectangle at the same buffer would have every coastal
-/// hole thrown away — and paint the whole tile blue. The rectangle therefore clears the land's
-/// own clip edge. Anything past the tile is discarded on device.
-///
-/// # Tiles with nothing in them
-///
-/// A tile with no features never reaches the encoder, so open ocean far from any coast gets no
-/// polygon and none is needed — the renderer's background is already the water colour, which is
-/// why that colour is the water one rather than the land one. What matters is that a tile holding
-/// *something* over open water — a marine protected area, say — does reach here, and does get a
-/// sea drawn over it. That is the whole point.
+/// Until then the style does not paint marine areas green, which removes the symptom without
+/// inventing geometry.
 fn add_ocean(layers: &mut Vec<ChunkEntry>) {
     if !OCEAN.load(Ordering::Relaxed) {
         return;

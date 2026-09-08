@@ -89,8 +89,8 @@ class Projection internal constructor(
      *
      * The [queryRenderedFeatures]-equivalent the maps `FeatureSource` adapter
      * needs: `source = { box, layerIds -> projection.queryRenderedLabels(box,
-     * layerIds).map { it.toFeature1() } }`. Empty until a rendered surface
-     * registers its native pick (and when nothing placed hits).
+     * layerIds).map { it.toFeature1() } }`. Registered by `VulkanMapSurface`, so this
+     * is empty only when nothing placed is under the query box.
      */
     fun queryRenderedLabels(box: DpRect, layerIds: Set<String>): List<PlacedLabel> =
         labelQuery?.invoke(box, layerIds) ?: emptyList()

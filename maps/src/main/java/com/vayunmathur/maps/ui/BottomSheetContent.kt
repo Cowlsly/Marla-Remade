@@ -142,7 +142,7 @@ fun BottomSheetContent(
  * it read as noise and — being plain text — could not actually be opened.
  */
 @Composable
-private fun AdminLabelHeader(name: String, wikipedia: String, modifier: Modifier = Modifier) {
+private fun AdminLabelHeader(name: String, wikipedia: String?, modifier: Modifier = Modifier) {
     val context = LocalContext.current
     Row(modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
         Text(
@@ -150,8 +150,13 @@ private fun AdminLabelHeader(name: String, wikipedia: String, modifier: Modifier
             style = MaterialTheme.typography.titleLarge,
             modifier = Modifier.weight(1f),
         )
-        TextButton(onClick = { goto(context, wikipedia) }) {
-            Text(stringResource(R.string.wikipedia))
+        // Only when there is an article to open. The name comes from the basemap and is always
+        // there; the article is a Wikidata lookup that needs the network, so offline the sheet
+        // shows the place with no button rather than not opening at all.
+        if (wikipedia != null) {
+            TextButton(onClick = { goto(context, wikipedia) }) {
+                Text(stringResource(R.string.wikipedia))
+            }
         }
     }
 }

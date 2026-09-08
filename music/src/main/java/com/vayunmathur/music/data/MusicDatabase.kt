@@ -27,30 +27,6 @@ interface MusicDao {
 }
 
 @Dao
-interface AlbumDao {
-    @Query("SELECT * FROM Album")
-    fun getAllFlow(): Flow<List<Album>>
-    @Query("SELECT * FROM Album")
-    suspend fun getAll(): List<Album>
-    @Upsert
-    suspend fun upsertAll(items: List<Album>)
-    @Query("DELETE FROM Album")
-    suspend fun deleteAll()
-}
-
-@Dao
-interface ArtistDao {
-    @Query("SELECT * FROM Artist")
-    fun getAllFlow(): Flow<List<Artist>>
-    @Query("SELECT * FROM Artist")
-    suspend fun getAll(): List<Artist>
-    @Upsert
-    suspend fun upsertAll(items: List<Artist>)
-    @Query("DELETE FROM Artist")
-    suspend fun deleteAll()
-}
-
-@Dao
 interface PlaylistDao {
     @Query("SELECT * FROM Playlist")
     fun getAllFlow(): Flow<List<Playlist>>
@@ -62,17 +38,24 @@ interface PlaylistDao {
     suspend fun deleteById(id: Long)
 }
 
+/**
+ * Playlists, the playlist-to-song matchings, and a cache of the tag data MediaStore does not have.
+ *
+ * Songs, albums and artists are **not** stored here: they come from MediaStore on every refresh (see
+ * [com.vayunmathur.music.data.MusicRepository]). The `Music` table survives only as a cache of
+ * `duration` and `year` for files whose MediaStore rows leave those blank, because recovering them
+ * means opening each file with a `MediaMetadataRetriever` and we only want to pay that once.
+ */
 @ColumnTypeConverters(DefaultConverters::class)
-@Database(entities = [Music::class, Album::class, Artist::class, Playlist::class, ManyManyMatching::class], version = 4, exportSchema = false)
+@Database(entities = [Music::class, Playlist::class, ManyManyMatching::class], version = 5, exportSchema = false)
 abstract class MusicDatabase: RoomDatabase() {
     abstract fun musicDao(): MusicDao
-    abstract fun albumDao(): AlbumDao
-    abstract fun artistDao(): ArtistDao
     abstract fun playlistDao(): PlaylistDao
     abstract fun matchingDao(): MatchingDao
 
     companion object : com.vayunmathur.library.util.DatabaseMigrations {
-        override val migrations: List<Migration> = listOf(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4)
+        override val migrations: List<Migration> =
+            listOf(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5)
     }
 }
 
@@ -103,4 +86,18 @@ val MIGRATION_2_3 = Migration(2, 3) {
 
 val MIGRATION_3_4 = Migration(3, 4) {
     it.execSQL("ALTER TABLE Music ADD COLUMN discNumber INTEGER NOT NULL DEFAULT 1")
+}
+
+/**
+ * Albums and artists moved to MediaStore, which is where they came from in the first place; the
+ * mirrored tables were only ever a copy that had to be kept in sync.
+ *
+ * The derived album-to-artist matchings go with them - they are recomputed in memory from the song
+ * list on every refresh. Playlist matchings (`TYPE_MUSIC_PLAYLIST`) are the user's own data and are
+ * deliberately left alone.
+ */
+val MIGRATION_4_5 = Migration(4, 5) {
+    it.execSQL("DROP TABLE IF EXISTS Album")
+    it.execSQL("DROP TABLE IF EXISTS Artist")
+    it.execSQL("DELETE FROM ManyManyMatching WHERE type = $TYPE_ALBUM_ARTIST")
 }

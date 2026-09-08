@@ -20,7 +20,7 @@ fun Navigation(musicViewModel: MusicViewModel) {
         entry<Route.Home> {
             MusicTabsScreen(backStack, musicViewModel)
         }
-        entry<Route.Song> {
+        entry<Route.Song>(metadata = MorphPage()) {
             SongScreen(backStack, musicViewModel)
         }
         entry<Route.AlbumDetail>(metadata = MorphPage()) {

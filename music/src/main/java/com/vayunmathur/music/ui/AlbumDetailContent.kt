@@ -34,6 +34,7 @@ import com.vayunmathur.library.ui.appBarScrollBehavior
 import com.vayunmathur.library.util.NavBackStack
 import com.vayunmathur.library.util.sharedContainer
 import com.vayunmathur.library.util.sharedText
+import com.vayunmathur.library.util.isNavLeaving
 import com.vayunmathur.music.R
 import com.vayunmathur.music.Route
 import com.vayunmathur.music.ui.components.PlayShuffleRow
@@ -53,6 +54,8 @@ fun AlbumDetailContent(
     bottomBar: @Composable () -> Unit = {},
 ) {
     val sourceId = "album_${state.albumId}"
+    // See the artist line below: which shared key it carries depends on which way we are going.
+    val leaving = isNavLeaving()
 
     DetailLazyColumn(
         title = {},
@@ -88,11 +91,21 @@ fun AlbumDetailContent(
                                     state.artistName,
                                     color = if (artistId != null) MaterialTheme.colorScheme.primary
                                     else Color.Unspecified,
+                                    // One element, two roles, picked by direction of travel. On the
+                                    // way in from the albums tab it is the album's artist line; on
+                                    // the way out to the artist page it is the artist's name. It
+                                    // cannot carry both keys at once.
                                     modifier = (if (artistId != null) {
                                         Modifier.clickable { backStack.add(Route.ArtistDetail(artistId)) }
                                     } else {
                                         Modifier
-                                    }).sharedText("music-album-artist-${state.albumId}"),
+                                    }).then(
+                                        if (artistId != null && leaving) {
+                                            Modifier.sharedText("music-artist-name-$artistId")
+                                        } else {
+                                            Modifier.sharedText("music-album-artist-${state.albumId}")
+                                        }
+                                    ),
                                 )
                             }
                             Text(state.info)

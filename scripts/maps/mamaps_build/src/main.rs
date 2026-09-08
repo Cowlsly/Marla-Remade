@@ -327,10 +327,10 @@ fn run(
         build_id,
         // Beside the archive, as the feature spill is. One zoom at a time, removed as each finishes.
         scratch: scratch_path(out),
-        // Only when `earth` is being built, because deriving the sea from the absence of land is
-        // only sound if land is authoritative. `check_coastline` already guarantees that selecting
-        // `earth` means a real coastline was supplied.
-        ocean: layers.earth,
+        // OFF. Deriving sea geometry per tile was tried twice and failed twice; see
+        // `tiler::add_ocean`. The green-over-water problem it existed to solve is handled in the
+        // style instead, by not painting marine protected areas green in the first place.
+        ocean: false,
     };
     let (bytes, per_zoom) = tiler::build(&store, &settings).map_err(|e| e.to_string())?;
     tiler::check_not_empty(&per_zoom).map_err(|e| e.to_string())?;

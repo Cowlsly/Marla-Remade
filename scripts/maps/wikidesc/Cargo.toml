@@ -1,0 +1,21 @@
+[package]
+name = "wikidesc"
+version = "0.1.0"
+edition = "2021"
+
+# DETACHED from both workspaces (the empty `[workspace]` table below), like every other host tool
+# under `scripts/maps`: it is built for the host toolchain, not for Android.
+[workspace]
+
+[lib]
+name = "wikidesc"
+path = "src/lib.rs"
+
+[[bin]]
+name = "wikidesc_build"
+path = "src/bin/wikidesc_build.rs"
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1

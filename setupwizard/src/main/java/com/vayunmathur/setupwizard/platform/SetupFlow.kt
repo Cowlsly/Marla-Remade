@@ -18,10 +18,8 @@ object SetupFlow {
     private val primaryUserSteps = listOf(
         Route.Welcome,
         Route.Wifi,
-        Route.DateTime,
         Route.Location,
         Route.Security,
-        Route.UpdaterSecurityPreview,
         Route.Migration,
         Route.Gestures,
         Route.Finish,

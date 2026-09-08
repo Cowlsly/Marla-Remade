@@ -24,6 +24,12 @@ data class MenuUiState(
     val passwords: List<Password> = emptyList(),
     val passkeys: List<Passkey> = emptyList(),
     /**
+     * True while the encrypted vault is still being opened. Without it an empty list is
+     * indistinguishable from a vault that has not loaded, and opening a SQLCipher database costs
+     * a key derivation - seconds on a cold start - which read as the app being broken.
+     */
+    val loading: Boolean = false,
+    /**
      * Wall-clock millis, normally ticked once a second by [PasswordsViewModel.tickerFlow].
      * It is state rather than a `System.currentTimeMillis()` call inside the screen so a
      * preview can pin it and get the same TOTP code and countdown ring every render.

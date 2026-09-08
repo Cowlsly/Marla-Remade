@@ -91,12 +91,25 @@ class MetadataPreviews {
 
     private val backStack = NavBackStack<Route>(arrayOf(Route.Home))
 
-    private val nowPlayingPlayer = PreviewPlayer(
-        title = nowPlaying.title,
-        artist = nowPlaying.artist,
-        durationMs = nowPlaying.durationMs,
-        positionMs = nowPlaying.positionMs,
-    )
+    /**
+     * The docked mini player. [NowPlayingBar] takes plain values now rather than a `Player`, so the
+     * preview feeds it straight from [nowPlaying] - no fake player needed. Shared keys are off:
+     * there is no navigation here to morph into.
+     */
+    @Composable
+    private fun PreviewNowPlayingBar() {
+        NowPlayingBar(
+            songId = nowPlaying.songId,
+            title = nowPlaying.title,
+            artist = nowPlaying.artist,
+            artworkUri = nowPlaying.artworkUri,
+            isPlaying = nowPlaying.isPlaying,
+            owsSharedKeys = false,
+            onOpen = {},
+            onTogglePlayPause = {},
+            onSkipNext = {},
+        )
+    }
 
     /**
      * The tab scaffolding [MusicTabsScreen] puts around every tab: the mini player docked
@@ -109,7 +122,7 @@ class MetadataPreviews {
             Scaffold(
                 bottomBar = {
                     Column(Modifier.fillMaxWidth()) {
-                        NowPlayingBar(nowPlayingPlayer, onOpen = {})
+                        PreviewNowPlayingBar()
                         MusicTabsBar(selectedTab = selectedTab, onSelectTab = {})
                     }
                 },
@@ -170,7 +183,7 @@ class MetadataPreviews {
                 ),
                 actions = MusicActions.Noop,
                 backStack = backStack,
-                bottomBar = { NowPlayingBar(nowPlayingPlayer, onOpen = {}) },
+                bottomBar = { PreviewNowPlayingBar() },
             )
         }
     }

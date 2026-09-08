@@ -1,4 +1,4 @@
-//! The JNI surface: five entry points, and nothing per-feature or per-vertex.
+//! The JNI surface: ten entry points, and nothing per-feature or per-vertex.
 //!
 //! Kotlin creates and destroys the renderer for a `Surface`, resizes it, tells it whether
 //! the device is online, and hands it **one camera snapshot per frame**. Tile selection,

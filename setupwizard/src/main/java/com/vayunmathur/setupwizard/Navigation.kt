@@ -19,7 +19,6 @@ import com.vayunmathur.library.util.rememberNavBackStack
 import com.vayunmathur.setupwizard.platform.SetupFlow
 import com.vayunmathur.setupwizard.platform.SetupIntents
 import com.vayunmathur.setupwizard.platform.SetupViewModel
-import com.vayunmathur.setupwizard.ui.DateTimeScreen
 import com.vayunmathur.setupwizard.ui.FinishScreen
 import com.vayunmathur.setupwizard.ui.GesturesScreen
 import com.vayunmathur.setupwizard.ui.HandoffScreen
@@ -107,18 +106,6 @@ fun Navigation(viewModel: SetupViewModel) {
             )
         }
 
-        entry<Route.DateTime> {
-            DateTimeScreen(
-                state = state,
-                timeZones = viewModel::timeZones,
-                onTimeZoneSelected = viewModel::setTimeZone,
-                onDateSelected = viewModel::setDate,
-                onTimeSelected = viewModel::setTime,
-                onClockTick = viewModel::refreshClock,
-                onNext = { advance(Route.DateTime) },
-            )
-        }
-
         entry<Route.Location> {
             LocationScreen(
                 state = state,
@@ -136,15 +123,6 @@ fun Navigation(viewModel: SetupViewModel) {
                 onCancelled = { viewModel.refreshSecurity(); backStack.pop() },
                 onCompleted = { viewModel.refreshSecurity(); advanceReplacing(Route.Security) },
                 onUnavailable = { advanceReplacing(Route.Security) },
-            )
-        }
-
-        entry<Route.UpdaterSecurityPreview> {
-            HandoffScreen(
-                intent = { SetupIntents.securityPreview(context) },
-                onCancelled = backStack::pop,
-                onCompleted = { advanceReplacing(Route.UpdaterSecurityPreview) },
-                onUnavailable = { advanceReplacing(Route.UpdaterSecurityPreview) },
             )
         }
 

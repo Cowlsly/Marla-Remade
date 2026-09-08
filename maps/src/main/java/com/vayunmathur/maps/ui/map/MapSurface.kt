@@ -199,8 +199,10 @@ fun MapSurface(
 
                 // Fall back to the basemap's own place labels from the native pick.
                 // Resolving one may make a Wikidata round-trip, so the ViewModel owns
-                // that rather than this handler. Empty until the renderer registers
-                // its pick (and when nothing placed hits) — then this falls through
+                // that rather than this handler. `VulkanMapSurface` registers the native
+                // pick, so this is populated whenever a placed label is under the finger;
+                // when nothing is, it falls through to reverse-geocode exactly like a
+                // blank tap.
                 // to reverse-geocode exactly like a blank tap.
                 val label = viewModel.resolveAdminLabel(
                     projection.queryRenderedLabels(

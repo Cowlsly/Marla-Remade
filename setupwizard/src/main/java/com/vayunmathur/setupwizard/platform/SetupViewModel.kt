@@ -2,7 +2,6 @@ package com.vayunmathur.setupwizard.platform
 
 import android.app.Activity
 import android.app.Application
-import android.text.format.DateFormat
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
@@ -10,7 +9,6 @@ import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
-import java.util.Calendar
 import java.util.Locale
 
 /** How long the unlocked-bootloader step makes the user wait before it can be dismissed. */
@@ -36,9 +34,6 @@ data class SetupUiState(
     val locationEnabled: Boolean = false,
     val wifiScanningEnabled: Boolean = false,
     val deviceSecure: Boolean = false,
-    val date: String = "",
-    val time: String = "",
-    val timeZone: String = "",
     /** Seconds left before the bootloader step's "continue" button can be used. */
     val bootloaderAckSeconds: Int = OEM_UNLOCK_ACK_SECONDS,
     /** Whether the final step's OEM-unlocking checkbox starts ticked. */
@@ -90,7 +85,6 @@ class SetupViewModel(app: Application) : AndroidViewModel(app) {
         refreshOemUnlockState()
         refreshLocation()
         refreshSecurity()
-        refreshClock()
     }
 
     // ---- welcome --------------------------------------------------------------------------
@@ -186,53 +180,18 @@ class SetupViewModel(app: Application) : AndroidViewModel(app) {
         state = state.copy(deviceSecure = system.isDeviceSecure())
     }
 
-    // ---- clock ----------------------------------------------------------------------------
-
-    fun setDate(year: Int, month: Int, dayOfMonth: Int) {
-        val calendar = Calendar.getInstance()
-        calendar.set(Calendar.YEAR, year)
-        calendar.set(Calendar.MONTH, month)
-        calendar.set(Calendar.DAY_OF_MONTH, dayOfMonth)
-        system.setTimeMillis(calendar.timeInMillis)
-        refreshClock()
-    }
-
-    fun setTime(hourOfDay: Int, minute: Int) {
-        val calendar = Calendar.getInstance()
-        calendar.set(Calendar.HOUR_OF_DAY, hourOfDay)
-        calendar.set(Calendar.MINUTE, minute)
-        calendar.set(Calendar.SECOND, 0)
-        calendar.set(Calendar.MILLISECOND, 0)
-        system.setTimeMillis(calendar.timeInMillis)
-        refreshClock()
-    }
-
-    fun setTimeZone(zoneId: String) {
-        system.setTimeZone(zoneId)
-        refreshClock()
-    }
-
-    /** Re-reads the clock. Also driven by the minute tick while the date step is on screen. */
-    fun refreshClock() {
-        val app = getApplication<Application>()
-        val now = Calendar.getInstance().time
-        state = state.copy(
-            date = DateFormat.getDateFormat(app).format(now),
-            time = DateFormat.getTimeFormat(app).format(now),
-            timeZone = TimeZoneCatalog.current().standardName,
-        )
-    }
-
-    fun timeZones(): List<ZoneInfo> = TimeZoneCatalog.all(getApplication())
-
     // ---- finish ---------------------------------------------------------------------------
 
     /**
-     * Ends setup: optionally turns OEM unlocking off, records that the device and this user are
-     * provisioned, clears the wizard out of recents and disables its package so it stops
-     * winning HOME resolution.
+     * Ends setup: turns on network time, optionally turns OEM unlocking off, records that the
+     * device and this user are provisioned, clears the wizard out of recents and disables its
+     * package so it stops winning HOME resolution.
      */
     fun finishSetup(activity: Activity, disableOemUnlocking: Boolean) {
+        // There is no date-and-time step any more, so this is what makes the clock correct
+        // itself as soon as there is a network. Done here rather than at the Wi-Fi step so it
+        // still happens on a device that finished setup offline.
+        system.enableAutomaticTime()
         if (disableOemUnlocking) system.setOemUnlockAllowedByUser(false)
         system.markSetupComplete(activity)
         system.finishAllTasks(activity)

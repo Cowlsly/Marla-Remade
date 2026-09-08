@@ -61,6 +61,12 @@ data class PersonUiState(
     val sharingGloballyEnabled: Boolean = true,
     /** Whether this phone has opted in to finding other people's powered-off devices. */
     val crowdFindingEnabled: Boolean = false,
+    /**
+     * Connected family members, offered on the user's own entry as the choice of who may locate
+     * this phone once it is switched off. Empty for anyone else's sheet — the powered-off
+     * controls are properties of this device, not of a relationship.
+     */
+    val connectedUsers: List<User> = emptyList(),
 )
 
 /** Person-sheet callbacks. Same no-op-default arrangement as [FamilyListActions]. */

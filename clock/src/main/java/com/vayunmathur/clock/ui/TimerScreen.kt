@@ -63,7 +63,7 @@ fun TimerScreen(
                 }
             }
         } else {
-            items(timers, key = { it.id }) { timer -> TimerCard(timer, state.now, actions) }
+            items(timers, key = { it.id }) { timer -> TimerCard(timer, state.now(), actions) }
         }
     }
 }

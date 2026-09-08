@@ -3,6 +3,7 @@ package com.vayunmathur.library.util
 import androidx.compose.animation.AnimatedVisibilityScope
 import androidx.compose.animation.BoundsTransform
 import androidx.compose.animation.ContentTransform
+import androidx.compose.animation.EnterExitState
 import androidx.compose.animation.ExperimentalSharedTransitionApi
 import androidx.compose.animation.SharedTransitionLayout
 import androidx.compose.animation.SharedTransitionScope
@@ -641,6 +642,24 @@ fun Modifier.expandFromLine(): Modifier {
 @Composable
 fun isNavMorphing(): Boolean =
     LocalSharedTransitionScope.current?.isTransitionActive == true
+
+/**
+ * True while this destination is being pushed away from, false while it is being returned to.
+ *
+ * For a graph that loops, where an element's counterpart is not the one it came from. Music is the
+ * case this exists for: tapping a song carries it from the list row up to the now-playing screen,
+ * but coming back it belongs in the mini-player, not in the row. Both the row and the mini-player
+ * are composed the whole time, so a static key would give the morph two origins to choose between;
+ * asking which way the entry is travelling picks exactly one.
+ *
+ * Only meaningful during a transition. Outside one - and outside a [MainNavigation] - it is false,
+ * which reads as "arriving", so a screen sitting still keeps whichever element it settled on.
+ */
+@Composable
+fun isNavLeaving(): Boolean {
+    val animated = LocalEntryAnimatedScope.current ?: return false
+    return animated.transition.targetState == EnterExitState.PostExit
+}
 
 fun DialogPage() = DialogSceneStrategy.dialog()
 

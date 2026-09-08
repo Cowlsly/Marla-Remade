@@ -28,10 +28,6 @@ sealed interface Route : NavKey {
     @Serializable
     data object Wifi : Route
 
-    /** Time zone, date and time. */
-    @Serializable
-    data object DateTime : Route
-
     /** Location services, and Wi-Fi scanning for the device owner. */
     @Serializable
     data object Location : Route
@@ -39,10 +35,6 @@ sealed interface Route : NavKey {
     /** Hands off to lock-screen and biometric enrolment. No UI of its own. */
     @Serializable
     data object Security : Route
-
-    /** Hands off to the updater's security-preview settings. No UI of its own. */
-    @Serializable
-    data object UpdaterSecurityPreview : Route
 
     /** Offers to restore apps and data from a backup. */
     @Serializable

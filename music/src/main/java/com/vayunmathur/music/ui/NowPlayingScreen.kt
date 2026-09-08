@@ -62,6 +62,9 @@ import com.vayunmathur.library.ui.TopAppBar
 import com.vayunmathur.library.ui.TopAppBarDefaults
 import com.vayunmathur.library.ui.IconNavigation
 import com.vayunmathur.library.util.NavBackStack
+import com.vayunmathur.library.util.isNavLeaving
+import com.vayunmathur.library.util.sharedContainer
+import com.vayunmathur.library.util.sharedText
 import com.vayunmathur.music.R
 import com.vayunmathur.music.Route
 import com.vayunmathur.music.platform.AlbumArt
@@ -82,6 +85,12 @@ fun NowPlayingScreen(
 ) {
     // UI States
     var showLyrics by remember { mutableStateOf(false) }
+    // The song this screen is showing, for the shared-element keys it exchanges with the songs list
+    // and the mini-player.
+    val songId = state.songId
+    // Whether this screen is on its way out. The artist and album lines are morph origins when it
+    // is, and part of the song's own group when it is not - one element cannot be both at once.
+    val leaving = isNavLeaving()
     // Lyrics are read from the playing file's embedded tags (see EmbeddedLyrics); when a
     // track carries none this is Lyrics.None and the overlay says so gracefully.
     val lyrics = remember(state.lyrics) { classifyLyrics(state.lyrics) }
@@ -100,11 +109,21 @@ fun NowPlayingScreen(
                     val sourceName = state.sourceName
                     if (state.sourceId != null && sourceName != null) {
                         TextButton(onClick = {
+                            // setLast, not reset: replacing the top of the stack keeps this an
+                            // ordinary transition that the shared elements can animate across,
+                            // where rebuilding the stack wholesale gave them no pair of endpoints.
+                            // Popping instead when the source is already the entry underneath
+                            // avoids stacking a second copy of a screen the user came from.
+                            fun goTo(route: Route) {
+                                val stack = backStack.backStack
+                                if (stack.getOrNull(stack.lastIndex - 1) == route) backStack.pop()
+                                else backStack.setLast(route)
+                            }
                             when (val src = PlaybackSource.parse(state.sourceId)) {
-                                PlaybackSource.AllSongs -> backStack.reset(Route.Home)
-                                is PlaybackSource.Album -> backStack.reset(Route.Home, Route.AlbumDetail(src.albumId))
-                                is PlaybackSource.Playlist -> backStack.reset(Route.Home, Route.PlaylistDetail(src.playlistId))
-                                is PlaybackSource.Artist -> backStack.reset(Route.Home, Route.ArtistDetail(src.artistId))
+                                PlaybackSource.AllSongs -> goTo(Route.Home)
+                                is PlaybackSource.Album -> goTo(Route.AlbumDetail(src.albumId))
+                                is PlaybackSource.Playlist -> goTo(Route.PlaylistDetail(src.playlistId))
+                                is PlaybackSource.Artist -> goTo(Route.ArtistDetail(src.artistId))
                                 null -> {}
                             }
                         }) {
@@ -147,7 +166,13 @@ fun NowPlayingScreen(
                             shape = RoundedCornerShape(24.dp),
                             elevation = CardDefaults.cardElevation(12.dp)
                         ) {
-                            AlbumArt(state.artworkUri, Modifier.fillMaxSize())
+                            AlbumArt(
+                                state.artworkUri,
+                                Modifier.fillMaxSize().then(
+                                    if (songId == null) Modifier
+                                    else Modifier.sharedContainer("music-song-art-$songId")
+                                ),
+                            )
                         }
                     }
                 }
@@ -166,7 +191,9 @@ fun NowPlayingScreen(
                         fontWeight = FontWeight.Bold,
                         color = MaterialTheme.colorScheme.onSurface,
                         maxLines = 1,
-                        overflow = TextOverflow.Ellipsis
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = if (songId == null) Modifier
+                        else Modifier.sharedText("music-song-title-$songId"),
                     )
                     val artistId = state.artistId
                     Text(
@@ -176,10 +203,24 @@ fun NowPlayingScreen(
                         else MaterialTheme.colorScheme.onSurfaceVariant,
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis,
-                        modifier = if (artistId != null) {
-                            Modifier.clickable { backStack.add(Route.ArtistDetail(artistId)) }
-                        } else {
-                            Modifier
+                        // Two roles, and which one applies depends on where this screen is headed.
+                        // Leaving for the artist page it is the origin of the artist morph; the rest
+                        // of the time it is the song's artist line arriving from, or returning to,
+                        // the list and the mini-player.
+                        modifier = when {
+                            artistId != null && leaving ->
+                                Modifier
+                                    .clickable { backStack.add(Route.ArtistDetail(artistId)) }
+                                    .sharedText("music-artist-name-$artistId")
+                            artistId != null ->
+                                Modifier
+                                    .clickable { backStack.add(Route.ArtistDetail(artistId)) }
+                                    .then(
+                                        if (songId == null) Modifier
+                                        else Modifier.sharedText("music-song-artist-$songId")
+                                    )
+                            songId != null -> Modifier.sharedText("music-song-artist-$songId")
+                            else -> Modifier
                         },
                     )
                     val albumId = state.albumId
@@ -192,7 +233,12 @@ fun NowPlayingScreen(
                             maxLines = 1,
                             overflow = TextOverflow.Ellipsis,
                             modifier = if (albumId != null) {
-                                Modifier.clickable { backStack.add(Route.AlbumDetail(albumId)) }
+                                Modifier
+                                    .clickable { backStack.add(Route.AlbumDetail(albumId)) }
+                                    .then(
+                                        if (leaving) Modifier.sharedText("music-album-title-$albumId")
+                                        else Modifier
+                                    )
                             } else {
                                 Modifier
                             },

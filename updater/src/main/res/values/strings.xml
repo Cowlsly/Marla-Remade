@@ -1,0 +1,51 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources xmlns:xliff="urn:oasis:names:tc:xliff:document:1.2">
+    <string name="app_name">System update</string>
+
+    <string name="checking">Checking for updates…</string>
+    <string name="up_to_date">Your system is up to date</string>
+    <string name="not_checked_yet">Not checked yet</string>
+    <string name="check_failed">Could not check for updates</string>
+    <string name="update_available">Update available: <xliff:g id="build" example="2026090700">%1$s</xliff:g></string>
+
+    <string name="current_build">Current build <xliff:g id="build" example="2026090500">%1$s</xliff:g></string>
+    <string name="build_unknown">Current build unknown</string>
+
+    <string name="check_now">Check now</string>
+
+    <string name="auto_install">Install updates automatically</string>
+    <string name="auto_install_desc">Download and apply updates in the background, then restart when the device is idle.</string>
+
+    <string name="metered_allowed">Use mobile data</string>
+    <string name="metered_allowed_desc">Allow automatic updates over a metered connection. A full update can be over a gigabyte.</string>
+
+    <!-- Notification channel: the ongoing progress of a download and installation. -->
+    <string name="channel_progress">Installing updates</string>
+    <string name="channel_progress_desc">Progress while a system update downloads and installs.</string>
+    <!-- Notification channel: one-off results, e.g. an update finished or failed. -->
+    <string name="channel_result">Update status</string>
+    <string name="channel_result_desc">Whether a system update is waiting, finished or failed.</string>
+
+    <!-- Progress notification titles, shown one at a time on a single notification. -->
+    <string name="notify_preparing">Preparing system update…</string>
+    <string name="notify_downloading">Downloading system update…</string>
+    <string name="notify_verifying">Verifying system update…</string>
+    <string name="notify_installing">Installing system update…</string>
+
+    <!-- Notification shown once the update is installed and only a restart is left. -->
+    <string name="notify_reboot_title">Restart to finish updating</string>
+    <string name="notify_reboot_text">Build <xliff:g id="build" example="2026090700">%1$s</xliff:g> is ready. Your device will restart when you are not using it.</string>
+    <!-- Action button on the restart notification. -->
+    <string name="notify_restart_now">Restart now</string>
+
+    <!-- Notification shown when an update exists but automatic installation is held back. -->
+    <string name="notify_available_title">System update available</string>
+    <string name="notify_available_text">Build <xliff:g id="build" example="2026090700">%1$s</xliff:g> is ready to download.</string>
+
+    <!-- Notification shown when an update could not be installed; the body is the reason. -->
+    <string name="notify_failed_title">System update failed</string>
+
+    <!-- Failure reasons, shown in the notification body. -->
+    <string name="error_unknown_build">The running build could not be identified.</string>
+    <string name="error_no_package">No update package has been published for this build.</string>
+</resources>

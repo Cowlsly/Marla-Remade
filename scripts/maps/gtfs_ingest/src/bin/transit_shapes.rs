@@ -47,6 +47,20 @@ use gtfs_ingest::manifest::{parse_feed_spec, read_manifest, FeedSpec};
 /// `route_type`. Fifteen lines over one railway is not fifteen services; it is one service seen
 /// fifteen times.
 const MAX_SERVICES_PER_TRACK: usize = 4;
+
+/// How much of a line must already be drawn in its colour for it to count as a duplicate.
+///
+/// Not 100%, which is what "is this line already drawn" used to mean. A route published twice at
+/// slightly different lengths — a short-turn, or one feed running two stops further than another —
+/// shares nearly all of its alignment with what is drawn, adds a little new track at one end, and
+/// under an all-or-nothing rule is kept whole. That duplicates the shared 95%: the A line came out
+/// as two strands a metre apart, each fanned into its own corridor lane and tapered, so one line
+/// read as two diverging and reconverging.
+///
+/// High enough that a genuine branch survives. A route sharing a trunk and then diverging is well
+/// under this — the branch is the point of it — while a re-publication with a couple of extra
+/// stops is well over.
+const MOSTLY_DRAWN: f64 = 0.95;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};
@@ -413,9 +427,13 @@ fn run(out_path: &Path, specs: &[FeedSpec]) -> Result<(), String> {
                 }
                 let mode_cover = by_mode.entry(line.mode).or_default();
                 let redundant = if line.fallback {
-                    mode_cover.contains(&line.points)
+                    mode_cover.covered_fraction(&line.points) >= MOSTLY_DRAWN
                 } else {
-                    by_color.entry((line.mode, line.color)).or_default().contains(&line.points)
+                    by_color
+                        .entry((line.mode, line.color))
+                        .or_default()
+                        .covered_fraction(&line.points)
+                        >= MOSTLY_DRAWN
                 };
                 if redundant {
                     merged += 1;

@@ -6,6 +6,7 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
@@ -31,32 +32,111 @@ import com.vayunmathur.library.util.NavKey
 import com.vayunmathur.library.util.DatabaseItem
 import kotlinx.coroutines.launch
 
+/**
+ * A searchable, sortable list screen with the standard bar, FAB and row layout.
+ *
+ * Only [EditPage] needs reifying - to recognise the edit destination on the back stack - so this
+ * is a thin inline shell that lowers it to a predicate and hands everything else to
+ * [ListPageContent]. Keeping the body out of here is deliberate: an `inline` composable has no
+ * restart scope, so if the `Scaffold` and `LazyColumn` lived here they would be inlined into the
+ * caller and recompose whenever *anything* the caller reads changes - including the search field's
+ * own state, which lives inside this function. That turned one keystroke into a full re-filter,
+ * re-sort and re-composition of the whole list.
+ *
+ * [sortOrder] must be a stable instance. A `Comparator` built inline at the call site is a new
+ * object on every recomposition, which invalidates the memoised sort and re-sorts the entire list;
+ * wrap it in `remember { }`.
+ */
 @Composable
-inline fun <reified T : DatabaseItem, Route : NavKey, reified EditPage : Route> ListPage(
+inline fun <T : DatabaseItem, Route : NavKey, reified EditPage : Route> ListPage(
     backStack: NavBackStack<Route>,
     data: List<T>,
     title: String,
-    crossinline headlineContent: @Composable (T) -> Unit,
-    crossinline supportingContent: @Composable (T) -> Unit,
-    crossinline viewPage: suspend (id: Long) -> Route,
+    noinline headlineContent: @Composable (T) -> Unit,
+    noinline supportingContent: @Composable (T) -> Unit,
+    noinline viewPage: suspend (id: Long) -> Route,
     scrollBehavior: TopAppBarScrollBehavior,
     noinline editPage: (() -> Route)? = null,
     settingsPage: Route? = null,
-    crossinline otherActions: @Composable () -> Unit = {},
-    crossinline leadingContent: @Composable (T) -> Unit = {},
-    crossinline trailingContent: @Composable (T) -> Unit = {},
+    noinline otherActions: @Composable () -> Unit = {},
+    noinline leadingContent: @Composable (T) -> Unit = {},
+    noinline trailingContent: @Composable (T) -> Unit = {},
     noinline itemModifier: @Composable (T) -> Modifier = { Modifier },
     noinline itemColors: @Composable (T) -> ListItemColors = { ListItemDefaults.colors() },
     searchEnabled: Boolean = false,
     sortOrder: Comparator<T>? = null,
-    crossinline searchString: (T) -> String = { it.toString() },
+    noinline searchString: (T) -> String = { it.toString() },
     noinline bottomBar: @Composable () -> Unit = {},
     noinline fab: (@Composable () -> Unit)? = null,
+    loading: Boolean = false,
+) = ListPageContent(
+    backStack = backStack,
+    data = data,
+    title = title,
+    headlineContent = headlineContent,
+    supportingContent = supportingContent,
+    viewPage = viewPage,
+    scrollBehavior = scrollBehavior,
+    editPage = editPage,
+    settingsPage = settingsPage,
+    otherActions = otherActions,
+    leadingContent = leadingContent,
+    trailingContent = trailingContent,
+    itemModifier = itemModifier,
+    itemColors = itemColors,
+    searchEnabled = searchEnabled,
+    sortOrder = sortOrder,
+    searchString = searchString,
+    bottomBar = bottomBar,
+    fab = fab,
+    loading = loading,
+    isEditPage = { it is EditPage },
+)
+
+/**
+ * The body of [ListPage]. Not inline, so it owns a restart scope and the search field's state, and
+ * skips when its caller recomposes for unrelated reasons.
+ *
+ * Internal - it exists only because [ListPage] has to stay inline to reify its edit route, and a
+ * public inline function cannot call a private one.
+ */
+@PublishedApi
+@Composable
+internal fun <T : DatabaseItem, Route : NavKey> ListPageContent(
+    backStack: NavBackStack<Route>,
+    data: List<T>,
+    title: String,
+    headlineContent: @Composable (T) -> Unit,
+    supportingContent: @Composable (T) -> Unit,
+    viewPage: suspend (id: Long) -> Route,
+    scrollBehavior: TopAppBarScrollBehavior,
+    isEditPage: (Any?) -> Boolean,
+    editPage: (() -> Route)? = null,
+    settingsPage: Route? = null,
+    otherActions: @Composable () -> Unit = {},
+    leadingContent: @Composable (T) -> Unit = {},
+    trailingContent: @Composable (T) -> Unit = {},
+    itemModifier: @Composable (T) -> Modifier = { Modifier },
+    itemColors: @Composable (T) -> ListItemColors = { ListItemDefaults.colors() },
+    searchEnabled: Boolean = false,
+    sortOrder: Comparator<T>? = null,
+    searchString: (T) -> String = { it.toString() },
+    bottomBar: @Composable () -> Unit = {},
+    fab: (@Composable () -> Unit)? = null,
+    loading: Boolean = false,
 ) {
     var searchQuery by remember { mutableStateOf("") }
-    val displayed = remember(data, searchQuery, sortOrder) {
-        val filtered = if (searchQuery.isBlank()) data
-        else data.filter { searchString(it).contains(searchQuery, true) }
+    // Built once per data change, not once per keystroke. `searchString` concatenates several
+    // fields, and doing that (plus a case-insensitive `contains`, which lowercases as it goes) for
+    // every row on every keypress is a whole-list pass between two frames of typing.
+    val haystacks = remember(data, searchString) {
+        if (!searchEnabled) emptyList() else data.map { searchString(it).lowercase() }
+    }
+    val displayed = remember(data, haystacks, searchQuery, sortOrder) {
+        val query = searchQuery.trim().lowercase()
+        val filtered =
+            if (query.isEmpty()) data
+            else data.filterIndexed { index, _ -> haystacks[index].contains(query) }
         if (sortOrder != null) filtered.sortedWith(sortOrder) else filtered
     }
 
@@ -98,7 +178,7 @@ inline fun <reified T : DatabaseItem, Route : NavKey, reified EditPage : Route> 
         floatingActionButton = {
             Column {
                 fab?.invoke()
-                if (editPage != null && backStack.backStack.lastOrNull() !is EditPage) {
+                if (editPage != null && !isEditPage(backStack.backStack.lastOrNull())) {
                     FloatingActionButton(onClick = { backStack.add(editPage()) }) {
                         IconAdd()
                     }
@@ -106,12 +186,19 @@ inline fun <reified T : DatabaseItem, Route : NavKey, reified EditPage : Route> 
             }
         }
     ) { paddingValues ->
+        // An empty list and a list that has not arrived yet are both "no items", and rendering
+        // them the same way means a slow first load reads as an empty vault/library rather than
+        // as work in progress.
+        if (loading && displayed.isEmpty()) {
+            LoadingState(Modifier.fillMaxSize().padding(paddingValues))
+            return@Scaffold
+        }
         LazyColumn(
             state = listState,
             modifier = Modifier.fillMaxSize(),
             contentPadding = paddingValues
         ) {
-            items(displayed, key = { it.id }) { item ->
+            items(displayed, key = { it.id }, contentType = { it::class }) { item ->
                 val modifier = itemModifier(item)
                 ListItem(
                     modifier = modifier.clickable {

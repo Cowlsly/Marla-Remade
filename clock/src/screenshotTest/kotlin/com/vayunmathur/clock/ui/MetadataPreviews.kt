@@ -86,7 +86,7 @@ class MetadataPreviews {
             ClockScreen(
                 backStack = rememberNavBackStack<Route>(Route.Clock),
                 state = ClockUiState(
-                    now = MORNING,
+                    now = { MORNING },
                     zone = TimeZone.of("America/Los_Angeles"),
                     worldClocks = listOf(
                         WorldClock("London", TimeZone.of("Europe/London")),
@@ -108,7 +108,7 @@ class MetadataPreviews {
                 backStack = rememberNavBackStack<Route>(Route.Timer),
                 // No timers yet, which is what puts the keypad up; "1000" is the digits
                 // for a ten-minute timer, mid-entry.
-                state = TimerUiState(now = MORNING),
+                state = TimerUiState(now = { MORNING }),
                 actions = TimerActions.Noop,
                 initialKeypadInput = "1000",
             )

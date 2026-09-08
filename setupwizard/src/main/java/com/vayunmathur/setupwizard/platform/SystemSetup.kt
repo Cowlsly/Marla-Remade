@@ -246,19 +246,25 @@ class SystemSetup(context: Context) {
 
     // ---- clock ----------------------------------------------------------------------------
 
-    fun setTimeMillis(millis: Long) {
-        val alarms = appContext.getSystemService(AlarmManager::class.java) ?: return
-        hidden("AlarmManager.setTime", Unit) {
-            AlarmManager::class.java
-                .getMethod("setTime", Long::class.javaPrimitiveType)
-                .invoke(alarms, millis)
-            Unit
-        }
+    /**
+     * Turn on network time and time zone.
+     *
+     * Setup no longer has a date-and-time step. Asking someone to set a clock by hand is work
+     * the network does better and immediately, and the manual values were being overwritten by
+     * the first NITZ/NTP sync anyway. Both flags are written by the owner only: they are
+     * [Settings.Global], so they belong to the device rather than to a profile.
+     *
+     * Best effort. WRITE_SETTINGS covers these, but a build that has not granted it should lose
+     * the automatic clock, not the whole of setup.
+     */
+    fun enableAutomaticTime() {
+        if (!isPrimaryUser) return
+        runCatching {
+            Settings.Global.putInt(appContext.contentResolver, Settings.Global.AUTO_TIME, 1)
+            Settings.Global.putInt(appContext.contentResolver, Settings.Global.AUTO_TIME_ZONE, 1)
+        }.onFailure { Log.w(TAG, "could not enable automatic time", it) }
     }
 
-    fun setTimeZone(zoneId: String) {
-        appContext.getSystemService(AlarmManager::class.java)?.setTimeZone(zoneId)
-    }
 
     // ---- emergency dialer -----------------------------------------------------------------
 

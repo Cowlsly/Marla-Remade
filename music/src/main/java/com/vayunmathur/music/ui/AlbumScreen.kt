@@ -24,7 +24,6 @@ import com.vayunmathur.music.data.Album
 @Composable
 fun AlbumsTabContent(backStack: NavBackStack<Route>, musicViewModel: MusicViewModel) {
     val albums by musicViewModel.albums.collectAsState()
-
     ListPage<Album, Route, Route.Song>(backStack, albums, stringResource(R.string.page_title_music), {
         Text(it.name, modifier = Modifier.sharedText("music-album-title-${it.id}"))
     }, {
@@ -35,5 +34,7 @@ fun AlbumsTabContent(backStack: NavBackStack<Route>, musicViewModel: MusicViewMo
         AlbumArt(album.uri.toUri(), Modifier.size(40.dp).sharedContainer("music-album-art-${album.id}"))
     }, searchEnabled = true, fab = {
         ShufflePlayFab(musicViewModel)
-    }, sortOrder = Comparator.comparing { it.name }, scrollBehavior = appBarScrollBehavior())
+    }, searchString = { it.name },
+    // getAlbums already returns them sorted by name.
+    scrollBehavior = appBarScrollBehavior())
 }

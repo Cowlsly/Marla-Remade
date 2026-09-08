@@ -5,6 +5,7 @@ import com.vayunmathur.library.ui.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.remember
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
@@ -25,7 +26,11 @@ import com.vayunmathur.music.ui.components.ShufflePlayFab
 @Composable
 fun PlaylistsTabContent(backStack: NavBackStack<Route>, musicViewModel: MusicViewModel) {
     val playlists by musicViewModel.playlists.collectAsState()
-
+    // Playlists come from Room via `SELECT * FROM Playlist`, which has no ORDER BY, so unlike the
+    // MediaStore-backed tabs this one still sorts client-side. Hoisted because a Comparator built
+    // at the call site is a new instance every recomposition, which invalidates ListPage's
+    // memoised sort.
+    val byName = remember { compareBy<Playlist> { it.name } }
     ListPage<Playlist, Route, Route.Song>(backStack, playlists, stringResource(R.string.page_title_playlists), {
         Text(it.name, modifier = Modifier.sharedText("music-playlist-name-${it.id}"))
     }, {
@@ -39,5 +44,5 @@ fun PlaylistsTabContent(backStack: NavBackStack<Route>, musicViewModel: MusicVie
     }, searchEnabled = true, fab = {
         NewPlaylistFab(musicViewModel)
         ShufflePlayFab(musicViewModel)
-    }, sortOrder = Comparator.comparing { it.name }, scrollBehavior = appBarScrollBehavior())
+    }, searchString = { it.name }, sortOrder = byName, scrollBehavior = appBarScrollBehavior())
 }

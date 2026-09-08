@@ -55,6 +55,7 @@ import com.vayunmathur.findfamily.data.UserKind
 import com.vayunmathur.findfamily.tracker.PoweredOffKeyStore
 import com.vayunmathur.findfamily.tracker.PoweredOffReporting
 import com.vayunmathur.findfamily.tracker.PoweredOffScanner
+import com.vayunmathur.findfamily.tracker.poweredOffGrantSigningBytes
 import com.vayunmathur.findfamily.tracker.TrackerBeaconScanner
 import com.vayunmathur.findfamily.tracker.TrackerReporting
 import com.vayunmathur.findfamily.tracker.TrackerStore
@@ -77,6 +78,7 @@ import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withContext
 import java.util.Locale
 import kotlin.coroutines.resume
+import kotlin.io.encoding.Base64
 import kotlin.time.Clock
 import kotlin.time.Duration.Companion.days
 import kotlin.time.Duration.Companion.hours
@@ -461,19 +463,82 @@ class LocationTrackingService : Service(), SensorEventListener {
     /**
      * Forwards decrypted UWB envelopes to [UwbInbox] and fires a local
      * notification for REQUEST envelopes. Driven by the live WebSocket push.
+     *
+     * Powered-off recovery grants ride the same channel (see [UwbEnvelopeKind.POF_GRANT]) and are
+     * handled here instead, deliberately without reaching [UwbInbox]: they are not ranging
+     * traffic and have no business waking the Find Nearby screen.
      */
     private suspend fun handleUwbEnvelopes(list: List<UwbEnvelope>) {
         if (list.isEmpty()) return
         val users = repository.getAllUsers()
         for (envelope in list) {
-            UwbInbox.tryEmit(envelope)
-            if (envelope.kind == UwbEnvelopeKind.REQUEST) {
-                val senderId = envelope.sender.toLong()
-                val senderName = users.firstOrNull { it.id == senderId }?.name
-                    ?: getString(R.string.uwb_unknown_peer_name)
-                createUwbRequestNotification(senderName, senderId)
+            when (envelope.kind) {
+                UwbEnvelopeKind.POF_GRANT -> acceptPoweredOffGrant(envelope)
+                else -> {
+                    UwbInbox.tryEmit(envelope)
+                    if (envelope.kind == UwbEnvelopeKind.REQUEST) {
+                        val senderId = envelope.sender.toLong()
+                        val senderName = users.firstOrNull { it.id == senderId }?.name
+                            ?: getString(R.string.uwb_unknown_peer_name)
+                        createUwbRequestNotification(senderName, senderId)
+                    }
+                }
             }
         }
+    }
+
+    /**
+     * Store a family member's powered-off keys so this device can go and find their lost phone.
+     *
+     * Everything after this is already built: [PoweredOffKeyStore] is keyed by userid and
+     * [pollPoweredOffSightings] already walks every user it can read, so filing the keys here is
+     * the entire receiving side.
+     *
+     * Three reasons to refuse, all of them silent by design — a rejected grant is either an
+     * attack or a stale duplicate, and neither is worth a notification:
+     *  - the sender is not someone we have a [User] row for, so nobody chose to trust them;
+     *  - the signature does not verify against that sender's identity bundle. The envelope is
+     *    encrypted to us but its `sender` field is self-declared, so without this check any
+     *    connected peer could deliver keys under a different family member's userid and have
+     *    every sighting decrypted from them drawn on the map as that person's phone;
+     *  - the grant is older than one we already hold, which happens when a revoke-triggered
+     *    redistribution overtakes the grant it replaces.
+     */
+    private suspend fun acceptPoweredOffGrant(envelope: UwbEnvelope) {
+        val store = poweredOffKeys ?: return
+        val grant = envelope.recovery ?: return
+        val ownerId = envelope.sender.toLong()
+        if (ownerId == 0L || ownerId == Networking.userid) return
+        if (repository.getUser(ownerId) == null) {
+            Log.w(TAG_POWERED_OFF, "recovery grant from unknown sender, ignored")
+            return
+        }
+        val decoded = runCatching {
+            Triple(
+                Base64.decode(grant.secretB64),
+                Base64.decode(grant.recoveryPrivB64),
+                Base64.decode(grant.sigB64),
+            )
+        }.getOrNull() ?: return
+        val (secret, recoveryPriv, signature) = decoded
+
+        val signed = poweredOffGrantSigningBytes(
+            owner = ownerId,
+            recipient = Networking.userid,
+            epoch = grant.epoch,
+            secret = secret,
+            recoveryPrivate = recoveryPriv,
+        )
+        if (!Networking.verifyFrom(ownerId, signed, signature)) {
+            Log.w(TAG_POWERED_OFF, "recovery grant signature did not verify, ignored")
+            return
+        }
+        if (grant.epoch < store.epoch(ownerId)) {
+            Log.i(TAG_POWERED_OFF, "ignoring superseded recovery grant (epoch ${grant.epoch})")
+            return
+        }
+        store.save(ownerId, secret, recoveryPriv, grant.epoch)
+        Log.i(TAG_POWERED_OFF, "stored recovery keys for a peer (epoch ${grant.epoch})")
     }
 
     // -----------------------------------------------------------------

@@ -14,10 +14,8 @@ class SetupFlowTest {
             listOf(
                 Route.Welcome,
                 Route.Wifi,
-                Route.DateTime,
                 Route.Location,
                 Route.Security,
-                Route.UpdaterSecurityPreview,
                 Route.Migration,
                 Route.Gestures,
                 Route.Finish,
@@ -28,12 +26,12 @@ class SetupFlowTest {
 
     /**
      * A secondary user is setting up a profile on a device that is already provisioned, so the
-     * network, the clock, the update channel and the navigation mode are not theirs to change.
+     * network and the navigation mode are not theirs to change.
      */
     @Test
     fun `secondary user is not offered device-wide steps`() {
         val steps = SetupFlow.steps(isPrimaryUser = false)
-        listOf(Route.Wifi, Route.DateTime, Route.UpdaterSecurityPreview, Route.Gestures)
+        listOf(Route.Wifi, Route.Gestures)
             .forEach { assertTrue(it !in steps, "$it should not be offered to a secondary user") }
     }
 

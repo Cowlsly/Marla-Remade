@@ -87,6 +87,11 @@ pub struct CachingRangeReader<F: RangeFetcher> {
     /// Set from Kotlin, which owns the `ConnectivityManager`. When offline the network is
     /// not attempted at all and a stale entry is served instead.
     online: std::sync::atomic::AtomicBool,
+    /// False until the first read of the session has gone to the network.
+    ///
+    /// That read is the archive header, and it is the one entry the cache must not answer from
+    /// itself — see the note in [`RangeReader::read`].
+    prefix_checked: std::sync::atomic::AtomicBool,
 }
 
 impl<F: RangeFetcher> CachingRangeReader<F> {
@@ -96,6 +101,7 @@ impl<F: RangeFetcher> CachingRangeReader<F> {
             cache,
             fetcher,
             online: std::sync::atomic::AtomicBool::new(true),
+            prefix_checked: std::sync::atomic::AtomicBool::new(false),
         }
     }
 
@@ -123,9 +129,25 @@ impl<F: RangeFetcher> RangeReader for CachingRangeReader<F> {
         let range = format!("bytes={}-{}", offset, offset + length as u64 - 1);
         let key = RangeCache::key(&self.url, &range);
 
+        // The archive header decides whether every other entry is still valid, so it cannot be
+        // served from the cache it is meant to validate. Once per session the first read — which
+        // is always the header, because nothing can be located without it — goes to the network.
+        //
+        // Without this the staleness is self-consistent: a cached prefix reports the *previous*
+        // build's id, `basemap_origin` therefore matches, the cache is kept, and every leaf index
+        // in it keeps addressing the previous build's byte offsets. The archive is republished
+        // under a stable URL by design, so nothing else ever catches it, and the entry only
+        // expires on the 24-hour refresh interval. Republishing twice in an afternoon meant a map
+        // built from two different archives at once: bodies that would not inflate, and a
+        // coastline drawn from offsets that had moved.
+        //
+        // One small request per app start, and only when online.
+        let first = !self.prefix_checked.swap(true, std::sync::atomic::Ordering::Relaxed);
+        let revalidate = first && self.is_online();
+
         let cached = self.cache.read(&key);
         if let Some(entry) = &cached {
-            if self.cache.is_fresh(entry) || !self.is_online() {
+            if !revalidate && (self.cache.is_fresh(entry) || !self.is_online()) {
                 return Ok(entry.body.clone());
             }
         }
@@ -341,8 +363,54 @@ mod tests {
         }
         // A second reader over the same directory: the entry is on disk and fresh.
         let r = reader(&f.dir, clock, Fake::ok(vec![9u8; 16]));
-        assert_eq!(r.read(0, 16).unwrap(), vec![7u8; 16], "the cached bytes, not the new ones");
-        assert!(r.fetcher.ranges.borrow().is_empty(), "no request at all");
+        // The first read of a session always revalidates — it is the archive header, and a stale
+        // one would validate the very cache it is meant to invalidate.
+        assert_eq!(r.read(0, 16).unwrap(), vec![9u8; 16], "the header is refetched");
+        assert_eq!(r.fetcher.ranges.borrow().len(), 1);
+        // Everything after it is served from the cache.
+        assert_eq!(r.read(0, 16).unwrap(), vec![9u8; 16], "the cached bytes");
+        assert_eq!(r.fetcher.ranges.borrow().len(), 1, "no second request");
+    }
+
+    /// The archive header cannot be answered from the cache it decides the fate of.
+    ///
+    /// `basemap_origin` keys the cache on the archive's `build_id`, which is read from the header.
+    /// If the header itself comes from the cache it reports the *previous* build's id, the marker
+    /// matches, and every leaf index in the cache goes on addressing byte offsets from an archive
+    /// that no longer exists. Nothing else catches it, because the archive is deliberately
+    /// republished under the same URL, so the entry survives until the 24-hour refresh — which in
+    /// practice meant a map drawn from two different archives at once.
+    #[test]
+    fn the_first_read_of_a_session_bypasses_a_fresh_cache() {
+        let f = Fixture::new("prefix");
+        let clock = Arc::new(AtomicU64::new(1_000_000));
+        {
+            let r = reader(&f.dir, clock.clone(), Fake::ok(vec![1u8; 16]));
+            assert_eq!(r.read(0, 16).unwrap(), vec![1u8; 16]);
+        }
+        // Same directory, same clock, so the entry is unambiguously fresh — and the archive has
+        // been republished behind it.
+        let r = reader(&f.dir, clock, Fake::ok(vec![2u8; 16]));
+        assert_eq!(
+            r.read(0, 16).unwrap(),
+            vec![2u8; 16],
+            "a fresh cache must not hide a republished archive from the header read",
+        );
+    }
+
+    /// Offline, the rule reverses: a stale header beats no map at all.
+    #[test]
+    fn the_first_read_still_uses_the_cache_when_offline() {
+        let f = Fixture::new("prefix_offline");
+        let clock = Arc::new(AtomicU64::new(1_000_000));
+        {
+            let r = reader(&f.dir, clock.clone(), Fake::ok(vec![3u8; 16]));
+            assert_eq!(r.read(0, 16).unwrap(), vec![3u8; 16]);
+        }
+        let r = reader(&f.dir, clock, Fake::ok(vec![4u8; 16]));
+        r.set_online(false);
+        assert_eq!(r.read(0, 16).unwrap(), vec![3u8; 16], "the cached header");
+        assert!(r.fetcher.ranges.borrow().is_empty(), "and no request attempted");
     }
 
     #[test]
