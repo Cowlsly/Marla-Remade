@@ -28,7 +28,7 @@
     <string name="section_recently_updated_subtitle">Najnowsze kompilacje na F-Droid</string>
     <string name="nav_updates">Aktualizacje</string>
     <string name="section_modern_apps">Z Modern Apps</string>
-    <string name="sources_are_fixed">Te źródła są wbudowane i nie można ich zmienić. Inne repozytoria F-Droid udostępniają pliki binarne stworzone przez kogoś innego, więc nie ma możliwości ich porównania.</string>
+    <string name="sources_are_fixed">Te źródła są wbudowane i nie można dodać innych — inne repozytoria F-Droid udostępniają jedynie pliki binarne skompilowane przez kogoś innego, więc nie ma z czym ich zweryfikować. Wyłącz te, z których sklep ma nie korzystać.</string>
     <string name="section_modern_apps_subtitle">Zbudowano w tym repozytorium i podpisano tym samym kluczem co ten sklep</string>
     <string name="section_recently_updated">Nowe i zaktualizowane</string>
     <string name="filter_with_count">%1$s (%2$d)</string>
@@ -203,4 +203,15 @@
     <string name="install_failure_conflict">koliduje z wersją już zainstalowaną</string>
     <string name="install_failure_unknown">odrzucone przez system</string>
     <string name="version_update">%1$s → %2$s</string>
+    <string name="sources_all_disabled">Wszystkie źródła są wyłączone, więc nie ma czego przeglądać, czego szukać ani czego aktualizować.</string>
+    <string name="sync_all_sources_off">Nie ma nic do zsynchronizowania — wszystkie źródła są wyłączone.</string>
+    <string name="play_rate_limited">Sklep Play ogranicza liczbę żądań — poczekaj, zanim spróbujesz ponownie…</string>
+    <string name="updates_progress">Aktualizowanie %1$s — %2$d z %3$d</string>
+    <plurals name="updates_batch_installed">
+        <item quantity="one">Zaktualizowano %1$d aplikację</item>
+        <item quantity="few">Zaktualizowano %1$d aplikacje</item>
+        <item quantity="many">Zaktualizowano %1$d aplikacji</item>
+        <item quantity="other">Zaktualizowano %1$d aplikacji</item>
+    </plurals>
+    <string name="updates_batch_partial">Zaktualizowano %1$d z %2$d. Reszta nie powiodła się: %3$s</string>
 </resources>
