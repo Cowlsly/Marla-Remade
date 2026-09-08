@@ -120,4 +120,6 @@
     <string name="name_prefix">Zwrot grzecznościowy</string>
     <string name="name_suffix">Tytuł pokoleniowy</string>
     <string name="name_affix_none">Brak</string>
+    <string name="sim_name_or_phone_required">Wprowadź nazwę lub numer telefonu</string>
+    <string name="sim_slot_label">SIM %1$d</string>
 </resources>
