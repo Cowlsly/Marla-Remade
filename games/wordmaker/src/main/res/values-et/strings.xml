@@ -28,4 +28,10 @@
     <string name="mode_daily">Päeva ülesanne</string>
     <string name="daily_come_back_tomorrow">Lahendatud! Homme on uus ülesanne.</string>
     <string name="daily_streak"><xliff:g id="days" example="5">%1$d</xliff:g> päeva järjest</string>
+    <string name="wheel_spacing">Tähtede vahel täherattal</string>
+    <string name="wheel_spacing_default">Vaikimisi</string>
+    <string name="wheel_spacing_wide">Lai</string>
+    <string name="wheel_spacing_wider">Laiem</string>
+    <string name="wheel_spacing_widest">Kõige laiem</string>
+    <string name="no_definition_available">Selle sõna definitsiooni pole saadaval.</string>
 </resources>
