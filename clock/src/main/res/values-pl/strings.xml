@@ -54,4 +54,6 @@
     <string name="vibrate">Wibracja</string>
     <string name="timer_name_optional">Nazwa minutnika (opcjonalnie)</string>
     <string name="alarm_label_hint">Nazwa alarmu (opcjonalnie)</string>
+    <string name="channel_alarm_playing_name">Alarm w trakcie</string>
+    <string name="channel_alarm_playing_description">Wyświetlany, gdy dzwoni alarm</string>
 </resources>
