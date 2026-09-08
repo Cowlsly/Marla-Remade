@@ -13,4 +13,5 @@
     <string name="error_inference_timeout">Przekroczono limit czasu wnioskowania</string>
     <string name="error_ai_engine_failed">Silnik SI uległ awarii</string>
     <string name="error_ai_json_schema_mismatch">SI nie zwróciła prawidłowego kodu JSON zgodnego ze schematem.</string>
+    <string name="settings_title">Ustawienia</string>
 </resources>
