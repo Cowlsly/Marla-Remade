@@ -139,4 +139,6 @@
     <string name="notification_channel_departure_desc">Teavita, kui <xliff:g id="person_name" example="Kadri">%1$s</xliff:g> lahkub asukohast</string>
     <string name="notification_settings_arrival">Saabumiste teavitused</string>
     <string name="notification_settings_departure">Lahkumiste teavitused</string>
+    <string name="sharing_tile_label">Pere asukoha jagamine</string>
+    <string name="sharing_paused_note">Jagamine on kõigi jaoks peatatud Kiirseadistuste paanist</string>
 </resources>
