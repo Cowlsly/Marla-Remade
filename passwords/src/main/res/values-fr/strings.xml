@@ -2,7 +2,7 @@
 <resources xmlns:xliff="urn:oasis:names:tc:xliff:document:1.2">
     <string name="sync_section">Synchronisation KDBX</string>
     <string name="sync_create_file">Créer un nouveau fichier</string>
-    <string name="cable_prompt_title">Se connecter sur votre autre appareil ?</string>
+    <string name="cable_prompt_title">Se connecter sur votre autre appareil ?</string>
     <string name="passkey_last_used">Dernière utilisation</string>
     <string name="import_source_firefox">Firefox</string>
     <string name="totp_not_configured">(non configuré)</string>
