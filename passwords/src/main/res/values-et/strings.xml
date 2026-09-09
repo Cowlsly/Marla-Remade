@@ -58,11 +58,33 @@
     <string name="sync_error_wrong_password">Vale salasõnahoidla salasõna. Mitte midagi ei muudetud kohalikus seadmes.</string>
     <string name="sync_error_verify_failed">Mestitud salasõnahoidla õigsuse kontrollimine ei õnnestunud, seega fail jäi salvestamata.</string>
     <string name="sync_error_generic">Sünkroonimine ei õnnestunud: <xliff:g id="reason" example="Andmekandjal pole vaba ruumi">%1$s</xliff:g></string>
-    <string name="cable_channel_name">Seadmetevaheline sisselogimine</string>
-    <string name="cable_starting">Käivitan seadmetevahelise sisselogimise</string>
-    <string name="cable_prompt_title">Kas logid sisse oma muus seadmes?</string>
-    <string name="cable_prompt_subtitle">Verifitseeri kinnitamaks pääsuvõtmepõhist sisselogimist</string>
+    <string name="cable_channel_name">Seadmetevahelised pääsuvõtmed</string>
+    <string name="cable_starting">Käivitan seadmetevahelise päringu</string>
+    <string name="cable_prompt_title">Kas jätkad oma muus seadmes?</string>
+    <string name="cable_prompt_subtitle">Verifitseeri kinnitamaks pääsuvõtme päringut</string>
     <string name="name_required">Nimi ei saa jääda tühjaks</string>
     <string name="import_csv_warning">CSV-faili importimisel sellesse rakendusse liiguvad kasutajatunnused ja salasõnad tavatekstina. Palun kindlasti kustuta ekspordifail pärast importimist.</string>
     <string name="import_source_proton_pass">Proton Pass</string>
+    <string name="section_passkeys">WebAuthn pääsuvõtmed</string>
+    <string name="passkey_link_section">Seotud kirje</string>
+    <string name="passkey_link_none">Pole seotud</string>
+    <string name="passkey_link_auto">Vastendatud automaatselt</string>
+    <string name="passkey_link_manual">Seotud sinu poolt</string>
+    <string name="passkey_link_detached">Ühendus on katkestatud. Teda ei vastendata automaatselt.</string>
+    <string name="passkey_connect">Seo kirjega</string>
+    <string name="passkey_disconnect">Lõpeta sidumine kirjega</string>
+    <string name="passkey_link_use_auto">Vastenda automaatselt</string>
+    <string name="passkey_link_dialog_title">Kirje link</string>
+    <string name="passkey_link_dialog_empty">Pole kirjeid millega siduda</string>
+    <string name="passkey_linked_message">Seotud teenusega <xliff:g id="entry" example="E-posti konto">%1$s</xliff:g></string>
+    <string name="passkey_unlinked_message">Pääsuvõtme sidumine kirjega on lõpetatud</string>
+    <string name="passkey_count">%1$d</string>
+    <string name="cable_status_connecting">Ühendan</string>
+    <string name="cable_status_advertising">Teavitan Bluetoothi vahendusel</string>
+    <string name="cable_status_handshake">Teostan turvalist kätlemist</string>
+    <string name="cable_status_waiting">Ootel teise seadme järgi</string>
+    <string name="cable_status_signed_in">Sisselogitud teises seadmes</string>
+    <string name="cable_status_registered">Pääsuvõti on loodud</string>
+    <string name="cable_status_failed">Päring ei toiminud</string>
+    <string name="cable_status_cancelled">Teine seade katkestas päringu</string>
 </resources>
