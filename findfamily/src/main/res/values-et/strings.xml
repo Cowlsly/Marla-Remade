@@ -141,4 +141,13 @@
     <string name="notification_settings_departure">Lahkumiste teavitused</string>
     <string name="sharing_tile_label">Pere asukoha jagamine</string>
     <string name="sharing_paused_note">Jagamine on kõigi jaoks peatatud Kiirseadistuste paanist</string>
+    <string name="crowd_finding_title">Aitab leida kadunud seadmeid</string>
+    <string name="crowd_finding_explanation">Sinu telefon jälgib vaikselt läheduses olevaid väljalülitatud seadmeid ja saadab nende omanikule krüptitud teate, milles on kirjas, kus sa olid, kui sellest seadmest möödusid. Sa ei saa kunagi teada, kelle seade see oli või kus see asub, ning teadet saab lugeda ainult selle omanik. See peaaegu üldse ei koorma akut ning teiste inimeste telefonid võivad sinu seadme puhul sama teha.</string>
+    <string name="crowd_finding_needs_bluetooth">Läheduses olevate seadmete leidmine eeldab Bluetoothi seadmete otsimise luba</string>
+    <string name="user_card_network_sighting">Mööduv telefon nägi seda <xliff:g id="last_seen" example="2 tundi tagasi">%1$s</xliff:g>\nKusagil hinnangulises asukohas <xliff:g id="location_name" example="Kodu">%2$s</xliff:g></string>
+    <string name="poweroff_finding_title">Leitav väljalülitamisel</string>
+    <string name="poweroff_finding_explanation">Kui lülitad selle telefoni välja, saadab selle Bluetoothi-kiip jätkuvalt välja lühikese anonüümse signaali, nii et mööduv pereliige saab sulle öelda, kus telefon asub. Signaal muutub iga 17 minuti järel ja ainult sinu perekonnaliikmed suudavad seda ära tunda. Keegi, kaasa arvatud meie, ei saa teada, kus seda nähti, välja arvatud sina ise.</string>
+    <string name="poweroff_finding_limit">Selline võimalus kehtib umbes kolme päeva jagu peale telefoni väljalülitamist. Tegemist on Bluetoothi kiibi tehnilise piiranguga ja seda ei saa seadistada.</string>
+    <string name="poweroff_finding_off_hint">Kui lülitad selle seadistuse välja, siis telefon ei edasta väljalülitamisel mitte midagi.</string>
+    <string name="poweroff_finding_unsupported">Selle telefoni Bluetoothi kiip ei suuda olla leitav väljalülitatud olekus.</string>
 </resources>
