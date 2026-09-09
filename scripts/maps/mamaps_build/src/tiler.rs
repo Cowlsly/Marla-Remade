@@ -1247,7 +1247,10 @@ fn encode_batch(batch: Vec<(u64, Vec<ChunkEntry>)>) -> Result<Vec<Encoded>> {
                     // keeps stage C off tens of thousands of features it would only copy through.
                     let mut lines = crate::coalesce::Stats::default();
                     for entry in &mut layers {
-                        lines.add(crate::coalesce::coalesce_lines(&mut entry.layer));
+                        lines.add(crate::coalesce::coalesce_lines_with_ids(
+                            &mut entry.layer,
+                            Some(&mut entry.ids),
+                        ));
                     }
                     // **The sea.** There is no `natural=ocean` in OpenStreetMap — water is defined
                     // by the absence of land — so the only way to have ocean geometry is to
@@ -1268,7 +1271,10 @@ fn encode_batch(batch: Vec<(u64, Vec<ChunkEntry>)>) -> Result<Vec<Encoded>> {
                     let mut rings = crate::rings::Stats::default();
                     timed(on, &STAGE_C_NANOS, || {
                         for entry in &mut layers {
-                            rings.add(crate::rings::normalise(&mut entry.layer));
+                            rings.add(crate::rings::normalise_with_ids(
+                                &mut entry.layer,
+                                Some(&mut entry.ids),
+                            ));
                         }
                         // A layer that ended up empty - every feature in it fell below the minimum
                         // area after clipping, or lost its exterior to stage C - costs bytes in the
@@ -1313,10 +1319,9 @@ fn encode_batch(batch: Vec<(u64, Vec<ChunkEntry>)>) -> Result<Vec<Encoded>> {
                     //
                     // Checked against the feature count rather than assumed. `coalesce_lines`
                     // rebuilds a layer's features and `rings::normalise` retains over them, and
-                    // both leave a pure-point layer alone today — coalesce bails out below two
-                    // line features and a point always keeps its single part. That is emergent,
-                    // not enforced, so if either ever starts dropping a point this fails the build
-                    // instead of silently attributing every id after it to the wrong POI.
+                    // both now rewrite the id table alongside. That is easy to get wrong and
+                    // silent when it is - every id after the first casualty would describe the
+                    // wrong feature - so this fails the build instead.
                     let mut ids: Vec<(u8, Vec<u64>)> = Vec::new();
                     for entry in &mut layers {
                         if entry.ids.is_empty() {
@@ -1365,10 +1370,10 @@ fn encode_batch(batch: Vec<(u64, Vec<ChunkEntry>)>) -> Result<Vec<Encoded>> {
 fn push(entry: &mut ChunkEntry, feature: &Feature, geometry: &IntGeometry) -> (u64, u64) {
     let layer = &mut entry.layer;
     let class = &feature.class;
-    // Only `places` and `poi` carry ids. Pushed in every branch rather than only in the point one
-    // so the two vectors cannot drift apart if a label layer ever emits something that is not a
-    // point — the encoder would refuse a mismatched pair, but this way there is nothing to refuse.
-    let track_ids = crate::extract::is_label(class.layer);
+    // `places`, `poi` and `boundaries` have an id table. Pushed in every branch rather than only
+    // in the point one so the two vectors cannot drift apart - the table is indexed by feature
+    // position, so a feature with no id of its own still needs its `ID_NONE` entry.
+    let track_ids = crate::extract::layer_tracks_ids(class.layer);
     let mut added = (0u64, 0u64);
     match geometry {
         IntGeometry::Polygons(polygons) => {
@@ -1599,6 +1604,77 @@ mod tests {
             );
         }
         assert!(seen, "the poi should reach at least one tile");
+    }
+
+    /// **The grouping property the region mask depends on.** A region is stored as one clipped
+    /// polygon per tile, so the id is the only thing that says those pieces are one region. This
+    /// pins both halves: the id survives into `boundaries`, and it is the *same* id in every tile
+    /// the region touches. Without the second half a mask can only punch out one tile.
+    #[test]
+    fn a_region_area_carries_one_id_across_every_tile_it_touches() {
+        let osm = crate::extract::tagged_id(396_487, crate::extract::ELEMENT_RELATION);
+        // Wide enough at z14 (a tile is ~0.022 deg) to be cut into several pieces.
+        let region = Feature {
+            class: Class::area(
+                dict::LAYER_BOUNDARIES,
+                crate::schema::kind("region_area"),
+                0,
+            ),
+            geometry: square(-120.0, 35.0, 0.1),
+            name: None,
+            id: osm,
+            transit_color: 0,
+            transit_ordinal: 0,
+            transit_lanes: 0,
+            transit_taper: 0,
+        };
+        let border = Feature {
+            class: Class::line(
+                dict::LAYER_BOUNDARIES,
+                crate::schema::kind("region"),
+                0,
+            ),
+            geometry: Geometry::Lines(vec![vec![
+                (-120.05, 34.95),
+                (-119.95, 34.95),
+                (-119.95, 35.05),
+            ]]),
+            name: None,
+            id: tilecodec::mamaps::body::ID_NONE,
+            transit_color: 0,
+            transit_ordinal: 0,
+            transit_lanes: 0,
+            transit_taper: 0,
+        };
+        let (bytes, _) = build(&spilled(&[region, border]), &settings(14, 14)).expect("build");
+        let entries = tilecodec::mamaps::read::read_all(&bytes).expect("read");
+        let mut tiles_with_the_region = 0;
+        for (_, _, body) in &entries {
+            let body = Body::parse(body).expect("parse");
+            let Some(layer) = body.layer(dict::LAYER_BOUNDARIES) else { continue };
+            let mut here = false;
+            for index in 0..layer.features.len() {
+                match body.feature_id(dict::LAYER_BOUNDARIES, index) {
+                    // The region's shape. Every piece must name the same relation, or the pieces
+                    // cannot be gathered back into one region.
+                    Some(id) if id == osm => here = true,
+                    // A border line, which is coalesced and so has no id worth keeping.
+                    Some(id) => assert_eq!(
+                        id,
+                        tilecodec::mamaps::body::ID_NONE,
+                        "only the region shape may carry an id",
+                    ),
+                    None => panic!("the boundaries layer should have an id table"),
+                }
+            }
+            if here {
+                tiles_with_the_region += 1;
+            }
+        }
+        assert!(
+            tiles_with_the_region > 1,
+            "the region should be clipped across several tiles, got {tiles_with_the_region}",
+        );
     }
 
     /// A tile with no land is all sea, and a tile with land has that land cut out of it.

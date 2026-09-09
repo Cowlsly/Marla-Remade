@@ -17,6 +17,7 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.res.pluralStringResource
@@ -26,6 +27,7 @@ import androidx.compose.ui.unit.dp
 import com.vayunmathur.appstore.R
 import com.vayunmathur.appstore.data.SandboxedGooglePlay
 import com.vayunmathur.appstore.data.UnifiedApp
+import com.vayunmathur.appstore.util.AppSection
 import com.vayunmathur.appstore.util.AppStoreViewModel
 import com.vayunmathur.appstore.util.HomeActions
 import com.vayunmathur.appstore.util.HomeUiState
@@ -94,6 +96,23 @@ fun HomeScreen(
         },
         scrollBehavior = appBarScrollBehavior(),
     ) { padding ->
+        // A package can legitimately sit in several sections at once - a new release is also a
+        // top download - but one detail page cannot morph from two origins. The first section
+        // listing a package owns the morph; later copies of it open without one.
+        val morphOwner = remember(state.sections) {
+            buildMap<String, String> {
+                state.sections.forEach { section ->
+                    section.apps.forEach { putIfAbsent(it.packageName, section.id) }
+                }
+            }
+        }
+        fun sharedKeyFor(section: AppSection, app: UnifiedApp): Any? =
+            if (morphOwner[app.packageName] == section.id) {
+                "appstore-app-${app.packageName}"
+            } else {
+                null
+            }
+
         LazyColumn(
             Modifier.fillMaxSize().padding(padding),
             contentPadding = PaddingValues(bottom = 24.dp),
@@ -154,6 +173,7 @@ fun HomeScreen(
                             installedIcons = state.installedIcons,
                             onAppClick = onAppClick,
                             stages = state.stages,
+                            sharedKey = { sharedKeyFor(section, it) },
                         )
                     }
                     SectionLayout.LIST -> items(
@@ -166,6 +186,7 @@ fun HomeScreen(
                             stage = state.stages[app.packageName],
                             installedIcon = state.installedIcons[app.packageName],
                             onClick = { onAppClick(app) },
+                            sharedKey = sharedKeyFor(section, app),
                         )
                     }
                 }

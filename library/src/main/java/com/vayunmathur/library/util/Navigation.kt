@@ -4,6 +4,7 @@ import androidx.compose.animation.AnimatedVisibilityScope
 import androidx.compose.animation.BoundsTransform
 import androidx.compose.animation.ContentTransform
 import androidx.compose.animation.EnterExitState
+import androidx.compose.animation.EnterTransition
 import androidx.compose.animation.ExperimentalSharedTransitionApi
 import androidx.compose.animation.SharedTransitionLayout
 import androidx.compose.animation.SharedTransitionScope
@@ -54,8 +55,11 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.staticCompositionLocalOf
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.RectangleShape
+import androidx.compose.ui.graphics.Shape
 import androidx.compose.ui.graphics.takeOrElse
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
@@ -182,7 +186,7 @@ enum class NavMotion {
 
     /**
      * A component on the previous screen morphs into its counterpart on this one, via
-     * [sharedContainer] or [sharedContent].
+     * [sharedContainer], [sharedCrop], [sharedText] or [sharedContent].
      *
      * The screen itself only crossfades. That is the whole point: if the destination also slid or
      * scaled, the morphing element would be travelling towards a target that is itself still
@@ -217,16 +221,19 @@ fun FullscreenPage(): Map<String, Any> = mapOf(NavMotionKey to NavMotion.Fullscr
 fun SiblingPage(): Map<String, Any> = mapOf(NavMotionKey to NavMotion.Sibling)
 
 /**
- * [NavMotion.Morph]: crossfades the screen so that a [sharedContainer] or [sharedContent] element is
- * the only thing that appears to move.
+ * [NavMotion.Morph]: crossfades the screen so that a [sharedContainer], [sharedCrop], [sharedText]
+ * or [sharedContent] element is the only thing that appears to move.
  *
  * Use this, never [ZoomPage], on a destination that morphs a component out of the previous screen.
  */
 fun MorphPage(): Map<String, Any> = mapOf(NavMotionKey to NavMotion.Morph)
 
 /** The motion the destination asked for, defaulting to [NavMotion.Detail]. */
-private fun Scene<*>.navMotion(): NavMotion =
-    entries.lastOrNull()?.metadata?.get(NavMotionKey) as? NavMotion ?: NavMotion.Detail
+private fun Scene<*>.navMotion(): NavMotion = navMotionIn(entries.lastOrNull()?.metadata)
+
+/** The motion declared in a destination's metadata, defaulting to [NavMotion.Detail]. */
+private fun navMotionIn(metadata: Map<String, Any>?): NavMotion =
+    metadata?.get(NavMotionKey) as? NavMotion ?: NavMotion.Detail
 
 /**
  * Which screen edge the back gesture started from, mirroring `BackEventCompat.EDGE_LEFT`. A plain
@@ -338,6 +345,14 @@ private val NavMorphBounds: FiniteAnimationSpec<Rect> =
 private val NavMorphBoundsTransform = BoundsTransform { _, _ -> NavMorphBounds }
 
 /**
+ * [sharedText]'s resize mode, hoisted because `scaleToBounds` hands back a fresh instance per call
+ * and the modifier node compares it by reference - building it inline rebuilds the node on every
+ * recomposition.
+ */
+@OptIn(ExperimentalSharedTransitionApi::class)
+private val NavTextResize = SharedTransitionScope.ResizeMode.scaleToBounds()
+
+/**
  * The crossfade between the two contents inside a morphing container.
  *
  * Faster than the bounds travel on purpose: the old content should be gone well before the container
@@ -372,6 +387,25 @@ private val LocalNavMultiPane = staticCompositionLocalOf { false }
 internal val LocalEntryAnimatedScope = staticCompositionLocalOf<AnimatedVisibilityScope?> { null }
 
 /**
+ * The [NavMotion] carrying the current transition, so an element can ask what the screen around it
+ * is already doing.
+ *
+ * This is the motion of the destination on top of the stack - the same thing [navMotion] reads off
+ * the scene - and not the motion of the entry the element happens to sit in. Those differ, and the
+ * difference is the point: a list root declares no motion at all, yet it is pushed away from with
+ * whatever motion the *destination* asked for.
+ *
+ * [dropsAway] and [sinksBelow] need this. Three of the five motions translate or scale the whole
+ * screen, and an element that moves as well composes a second spatial transform on top of the first
+ * - the conflict [sharedContainer] warns about, one level down. Publishing the motion lets those
+ * helpers stand down structurally rather than via a comment nobody reads.
+ *
+ * [NavMotion.Detail] outside a [MainNavigation], which reads as "assume the screen is moving" and so
+ * stands the helpers down.
+ */
+private val LocalNavMotion = staticCompositionLocalOf { NavMotion.Detail }
+
+/**
  * Morphs this component into the component carrying the same [key] on the destination: the bounds
  * travel and resize while the two different contents crossfade inside them.
  *
@@ -381,7 +415,11 @@ internal val LocalEntryAnimatedScope = staticCompositionLocalOf<AnimatedVisibili
  *
  * Content is remeasured to the animating bounds rather than scaled, so text reflows at each size
  * instead of stretching. That costs a relayout per frame, which is affordable for one item and would
- * not be for a whole list.
+ * not be for a whole list. It is also what makes this the wrong choice across a *large* size change:
+ * re-wrapping a paragraph at every intermediate width reads as the text garbling rather than
+ * growing. This is one of three ways a morphing container can treat its contents - it reflows them,
+ * [sharedText] scales them, and [sharedCrop] crops them - and the reflow is only convincing while
+ * the two ends are a similar size.
  *
  * Pair with [MorphPage] on the destination, or the screen transition animates too and the two fight.
  *
@@ -410,11 +448,13 @@ fun Modifier.sharedContainer(key: Any): Modifier {
 }
 
 /**
- * A single leaf that keeps its identity through a [sharedContainer] morph - typically the photo or
- * icon, whose pixels are the same on both screens.
+ * A single leaf that keeps its identity through a [sharedContainer] or [sharedCrop] morph -
+ * typically the photo or icon, whose pixels are the same on both screens.
  *
- * Nest inside a [sharedContainer] rather than using alone: on its own it produces exactly the
- * one-thing-glides effect that [sharedContainer] exists to avoid.
+ * Nest inside one of those rather than using alone: on its own it produces exactly the
+ * one-thing-glides effect that [sharedContainer] exists to avoid. Inside a [sharedCrop] it also
+ * earns its keep in a second way - the crop deliberately does not move the contents, so a leaf that
+ * genuinely sits in a different place at the two ends needs its own key to get there.
  */
 @OptIn(ExperimentalSharedTransitionApi::class)
 @Composable
@@ -459,6 +499,15 @@ fun <T: NavKey> MainNavigation(
         .isWidthAtLeastBreakpoint(WindowSizeClass.WIDTH_DP_MEDIUM_LOWER_BOUND)
 
     val resolvedContainerColor = containerColor.takeOrElse { MaterialTheme.colorScheme.background }
+
+    // What nav3 will read off the scene for the transition that is running or about to run. Built
+    // by asking the entry provider for the top destination and looking at its metadata only - the
+    // entry's content lambda is never invoked, so this costs an allocation, not a composition.
+    val topMotion = navMotionIn(
+        backStack.backStack.lastOrNull()?.let { key ->
+            EntryProviderScope(key).apply(entryProvider).result?.metadata
+        }
+    )
 
     // Resolved rather than left to Scaffold's own default, which is `contentColorFor(container)`.
     // That has no answer for a colour outside the scheme and falls back to LocalContentColor -
@@ -512,6 +561,7 @@ fun <T: NavKey> MainNavigation(
                 CompositionLocalProvider(
                     LocalSharedTransitionScope provides this@SharedTransitionLayout,
                     LocalNavMultiPane provides multiPane,
+                    LocalNavMotion provides topMotion,
                 ) {
                     NavDisplay(
                         // consumeWindowInsets before imePadding: when a bottom bar is
@@ -579,7 +629,8 @@ fun <T: NavKey> rememberNavBackStack(vararg elements: T): NavBackStack<T> {
  * frame, which reads as the text garbling rather than growing. Scaling interpolates it smoothly.
  *
  * Use [sharedContainer] instead when the two ends hold genuinely different content - a read-only row
- * becoming a text field - where a reflow is correct and scaling would distort.
+ * becoming a text field - where a reflow is correct and scaling would distort. Use [sharedCrop] when
+ * the text is one part of a whole component that changes size, rather than the thing being morphed.
  */
 @OptIn(ExperimentalSharedTransitionApi::class)
 @Composable
@@ -594,8 +645,76 @@ fun Modifier.sharedText(key: Any): Modifier {
             enter = fadeIn(NavMorphContentFade),
             exit = fadeOut(NavMorphContentFade),
             boundsTransform = NavMorphBoundsTransform,
-            resizeMode = SharedTransitionScope.ResizeMode.scaleToBounds(),
+            resizeMode = NavTextResize,
         )
+    }
+}
+
+/**
+ * The third way a morphing container can treat its contents: crop them.
+ *
+ * The set is [sharedContainer] reflows, [sharedText] scales, and this one does neither - the content
+ * is laid out once at the size it will have when it arrives, and the container is a window over it
+ * that grows. Nothing inside reflows, stretches or moves relative to anything else beside it, which
+ * is what lets a whole card become a whole screen without keying a single thing inside it.
+ *
+ * Reach for this when the two ends are the same *component* at wildly different sizes - a list row
+ * and the header it opens into, a grid tile and the page it becomes. [sharedContainer] is still
+ * right when the two ends genuinely need to re-flow into a different shape at a similar size, and
+ * remains the cheaper option for a small travel.
+ *
+ * **Both ends must be congruent at their top-left.** The two contents are anchored to the same
+ * corner of the growing box and crossfaded, so whatever comes first in each - an icon, an avatar -
+ * has to be in the same place at both ends or it visibly jumps. A centred tile morphing into a
+ * left-aligned header is the case this reads worst on, and no amount of tuning fixes it: pick a
+ * different pairing, or keep a [sharedContent] on the one element that really is the same object.
+ *
+ * [shape] is the crop, and applies at rest as well as in flight - pass the destination's own shape
+ * so the corners match rather than squaring off for the duration.
+ *
+ * Pair with [MorphPage], and mind the same one-key-one-origin rule as [sharedContainer]. No-ops
+ * outside a [MainNavigation], and on a multi-pane layout, so previews and screenshot tests are
+ * unaffected.
+ */
+@OptIn(ExperimentalSharedTransitionApi::class)
+@Composable
+fun Modifier.sharedCrop(key: Any, shape: Shape = RectangleShape): Modifier {
+    // Ahead of the early returns on purpose. Content measured at its arrival size is *larger* than
+    // the box it is travelling in, and clipInOverlayDuringTransition below only covers the frames
+    // where the element has been lifted into the shared-element overlay. At rest, before a match is
+    // found, and whenever one of the three guards has bailed, this is the only thing stopping the
+    // content painting over its neighbours - and the only thing giving `shape` any effect at all.
+    //
+    // Outside sharedBounds rather than inside, because the bounds node reports the *animating* size
+    // upward. A clip chained on by the caller lands inside it and crops to the arrival size, which
+    // is no crop at all.
+    val clipped = clip(shape)
+    if (LocalNavMultiPane.current) return clipped
+    val shared = LocalSharedTransitionScope.current ?: return clipped
+    val animated = LocalEntryAnimatedScope.current ?: return clipped
+    // Remembered, not built inline: these are compared by reference when the modifier node decides
+    // whether it has changed, so a fresh instance per recomposition rebuilds the node every time.
+    val overlayClip = remember(shared, shape) { with(shared) { OverlayClip(shape) } }
+    // Both ends default to the same z, leaving composition order to decide who paints on top. That
+    // is invisible on an 80dp header and very visible on a frame filling the screen, so the arriving
+    // end is put in front explicitly.
+    val arrivingOnTop = if (isNavLeaving()) 0f else 1f
+    return with(shared) {
+        clipped
+            .sharedBounds(
+                rememberSharedContentState(key),
+                animated,
+                enter = fadeIn(NavMorphContentFade),
+                exit = fadeOut(NavMorphContentFade),
+                boundsTransform = NavMorphBoundsTransform,
+                resizeMode = SharedTransitionScope.ResizeMode.RemeasureToBounds,
+                zIndexInOverlay = arrivingOnTop,
+                clipInOverlayDuringTransition = overlayClip,
+            )
+            // Inside the bounds node, so the content is measured at the size it will settle at while
+            // the node itself reports the animating size. This is the whole difference from
+            // [sharedContainer]: the box moves, the contents do not.
+            .skipToLookaheadSize()
     }
 }
 
@@ -625,6 +744,87 @@ fun Modifier.expandFromLine(): Modifier {
                 shrinkTowards = Alignment.CenterVertically,
                 targetHeight = { 0 },
             ) + fadeOut(NavMorphContentFade),
+        )
+    }
+}
+
+/**
+ * True when the screen transition is a plain crossfade, and an element inside it is therefore free
+ * to carry a movement of its own.
+ *
+ * [NavMotion.Detail] slides the screen, [NavMotion.Zoom] and [NavMotion.Fullscreen] scale it, and
+ * predictive back does both - so on those an element exit that also translates or scales stacks two
+ * spatial transforms on the same pixels, which is the conflict [sharedContainer] warns about one
+ * level up. Only [NavMotion.Morph] and [NavMotion.Sibling] leave the spatial channel free.
+ */
+private fun NavMotion.leavesTheScreenStill(): Boolean =
+    this == NavMotion.Morph || this == NavMotion.Sibling
+
+/**
+ * The shared spec for the exit helpers.
+ *
+ * Duration-based for the same reason as [NavMorphBounds]: predictive back seeks the transition by
+ * gesture fraction, and a spring has no notion of being 40% through. Under the finger it would sit
+ * still and then snap on release.
+ */
+private val NavExitScale: FiniteAnimationSpec<Float> = tween(NavMorphMillis, easing = NavMorphEasing)
+
+private val NavExitOffset: FiniteAnimationSpec<IntOffset> =
+    tween(NavMorphMillis, easing = NavMorphEasing)
+
+/**
+ * Leaves by shrinking into its own centre rather than ghosting out at full size in the spot it
+ * occupies.
+ *
+ * For a small thing that owns a fixed place on the screen - a floating action button, a badge. This
+ * is the navigation-time sibling of [com.vayunmathur.library.ui.PopVisibility], which does the same
+ * for a component appearing and disappearing *within* one screen; reach for that when the trigger is
+ * a state change rather than a destination change.
+ *
+ * Size only, no alpha, and no entrance. Every [NavMotion] already ends in a fade, so a helper that
+ * faded too would multiply the two curves and make the element vanish long before it finished
+ * shrinking - and the arrival is already carried by the destination's own fade, which is why there
+ * is nothing here for it.
+ *
+ * Put this on chrome belonging to a screen that gets *pushed away from*. It no-ops unless the
+ * destination on top of the stack is a [MorphPage] or [SiblingPage] - the other three motions move
+ * the whole screen, and a second transform on top of that reads as a glitch - and outside a
+ * [MainNavigation], so previews and screenshot tests are unaffected.
+ */
+@Composable
+fun Modifier.dropsAway(): Modifier {
+    val scope = LocalEntryAnimatedScope.current ?: return this
+    if (!LocalNavMotion.current.leavesTheScreenStill()) return this
+    return with(scope) {
+        this@dropsAway.animateEnterExit(
+            enter = EnterTransition.None,
+            exit = scaleOut(NavExitScale),
+        )
+    }
+}
+
+/**
+ * Leaves by sliding down past the bottom edge, the direction it would go if it were dismissed.
+ *
+ * For chrome docked at the bottom - a tab bar, a docked toolbar - which reads as merely switched off
+ * when it crossfades in place. [com.vayunmathur.library.ui.BannerVisibility] owns the top edge for
+ * the in-screen case; there is deliberately no in-screen bottom equivalent, because bottom chrome
+ * here comes and goes with the destination rather than with state.
+ *
+ * Offset only, no alpha, no entrance, for the same reasons as [dropsAway], and it stands down under
+ * the same two conditions.
+ *
+ * Only correct for something actually against the bottom edge - applied further up, it slides out
+ * over whatever sits below it.
+ */
+@Composable
+fun Modifier.sinksBelow(): Modifier {
+    val scope = LocalEntryAnimatedScope.current ?: return this
+    if (!LocalNavMotion.current.leavesTheScreenStill()) return this
+    return with(scope) {
+        this@sinksBelow.animateEnterExit(
+            enter = EnterTransition.None,
+            exit = slideOutVertically(NavExitOffset) { it },
         )
     }
 }

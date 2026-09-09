@@ -195,6 +195,7 @@ fun PlaylistDetailPage(
                                     ),
                                     onClick = null,
                                     backupOnClick = false,
+                                    titleSharedKey = "youpipe-video-title-${item.videoItem.videoID}",
                                     trailingContent = {
                                         if (!isSelectionMode && localData.size > 1) {
                                             IconButton(

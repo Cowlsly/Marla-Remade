@@ -1,0 +1,118 @@
+# Automated dependency monitoring (SUPPLY_CHAIN_RISKS.md 6.4).
+#
+# Scheduling note: this repo has 100+ Gradle modules and 9 independent Cargo
+# workspace roots. Ungrouped weekly updates would open dozens of PRs a week, so
+# every ecosystem is monthly and every ecosystem collapses its minor/patch bumps
+# into a single grouped PR. Major bumps stay ungrouped (they need individual
+# review) and are capped by open-pull-requests-limit.
+#
+# Dependabot *security* alerts are not affected by this schedule - they are
+# raised as soon as an advisory lands, independently of the interval below.
+
+version: 2
+
+updates:
+  # ---- Gradle / JVM ----------------------------------------------------
+  # Nearly every module resolves its versions through the single version
+  # catalog at gradle/libs.versions.toml, so the root directory covers the
+  # whole app tree. build-logic is a separate included build (it has its own
+  # settings.gradle.kts) and has to be listed explicitly.
+  - package-ecosystem: "gradle"
+    directories:
+      - "/"
+      - "/build-logic"
+    schedule:
+      interval: "monthly"
+      day: "monday"
+      time: "06:00"
+      timezone: "Etc/UTC"
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: "deps"
+    labels:
+      - "dependencies"
+      - "gradle"
+    groups:
+      gradle-minor-patch:
+        patterns:
+          - "*"
+        update-types:
+          - "minor"
+          - "patch"
+
+  # ---- Cargo -----------------------------------------------------------
+  # One entry per committed Cargo.lock, i.e. per independent workspace root.
+  # The repo root workspace covers all the app-level src/main/rust members and
+  # the vendored third_party/betocore crates (path dependencies, which
+  # Dependabot ignores). The rest are detached roots:
+  #   - code/src/main/rust, games/voxels/src/main/rust: separate lockfiles
+  #   - library/tilecodec/src/main/rust: excluded from the root workspace on
+  #     purpose (see the comment in the root Cargo.toml)
+  #   - scripts/maps/*: host-side build tools, not shipped in any APK
+  # third_party/betocore/*/fuzz are vendored fuzz harnesses and are all
+  # deliberately left out: nothing they pull in is linked into a shipped .so,
+  # so a libfuzzer-sys advisory would reach reviewers as product risk when it
+  # is not. Two different situations sit behind that one decision:
+  #   - np_adv/fuzz parses and is a detached workspace root with its own
+  #     115-package lockfile, so it genuinely could be added here. It is
+  #     excluded on the merits above, not because it cannot be.
+  #   - the other four still fail `cargo metadata` at manifest parse: they
+  #     inherit arbitrary / derive_fuzztest / libfuzzer-sys via
+  #     `workspace = true` and none of those three is defined in the root
+  #     [workspace.dependencies]. Their committed Cargo.locks make them look
+  #     addable and they are not - each of the four predates the
+  #     derive_fuzztest dependency and has no entry for it, so a lock would
+  #     not satisfy its own manifest even once that manifest parses.
+  #
+  # Reviewer note: a `jni` 0.22 PR should not be merged as-is. The root
+  # Cargo.toml documents that the 0.21 -> 0.22 API change touches all 31 native
+  # entry points and is deliberately deferred.
+  - package-ecosystem: "cargo"
+    directories:
+      - "/"
+      - "/code/src/main/rust"
+      - "/games/voxels/src/main/rust"
+      - "/library/tilecodec/src/main/rust"
+      - "/scripts/maps/gtfs_ingest"
+      - "/scripts/maps/mamaps_build"
+      - "/scripts/maps/osm_ingest"
+      - "/scripts/maps/tile_build"
+      - "/scripts/maps/wikidesc"
+    schedule:
+      interval: "monthly"
+      day: "monday"
+      time: "06:00"
+      timezone: "Etc/UTC"
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: "deps"
+    labels:
+      - "dependencies"
+      - "rust"
+    groups:
+      cargo-minor-patch:
+        patterns:
+          - "*"
+        update-types:
+          - "minor"
+          - "patch"
+
+  # ---- GitHub Actions --------------------------------------------------
+  # Covers every workflow under .github/workflows.
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "monthly"
+      day: "monday"
+      time: "06:00"
+      timezone: "Etc/UTC"
+    open-pull-requests-limit: 2
+    commit-message:
+      prefix: "deps"
+    labels:
+      - "dependencies"
+      - "github-actions"
+    groups:
+      github-actions-all:
+        patterns:
+          - "*"

@@ -58,8 +58,11 @@ class DirectComposeAnimationDetector : Detector(), SourceCodeScanner {
                     "`$banned` must not be used directly in an app module. Use the motion helpers " +
                         "in `com.vayunmathur.library.ui` (animatedDp / animatedFloat / " +
                         "animatedColor / pressedShape / itemMotion / staggeredEntrance, " +
-                        "FadeVisibility / PopVisibility / ExpandVisibility / SwappedContent) or " +
-                        "`com.vayunmathur.library.util` for navigation and shared-element motion, " +
+                        "FadeVisibility / PopVisibility / ExpandVisibility / BannerVisibility / " +
+                        "SwappedContent / SwappedTopBar) or `com.vayunmathur.library.util` for " +
+                        "navigation, shared-element and exit motion (sharedContainer / " +
+                        "sharedText / sharedCrop / MorphPage / expandFromLine / dropsAway / " +
+                        "sinksBelow), " +
                         "so the timing is named once instead of re-derived per screen. Imperative " +
                         "one-off motion on Animatable is allowed - mark the file with " +
                         "`$EXCEPTION_MARKER <reason>` if that is what this is.",
@@ -149,9 +152,11 @@ class DirectComposeAnimationDetector : Detector(), SourceCodeScanner {
                 themed with. The shared helpers name the interaction instead and hold the timing \
                 in one place: `animatedDp`, `animatedFloat`, `animatedColor`, `pressedShape`, \
                 `itemMotion` and `staggeredEntrance` in com.vayunmathur.library.ui, the \
-                `FadeVisibility` / `PopVisibility` / `ExpandVisibility` / `SwappedContent` \
-                wrappers beside them, and `sharedText` / `sharedContainer` / `MorphPage` in \
-                com.vayunmathur.library.util for navigation and shared-element motion.
+                `FadeVisibility` / `PopVisibility` / `ExpandVisibility` / `BannerVisibility` / \
+                `SwappedContent` / `SwappedTopBar` wrappers beside them, and `sharedText` / \
+                `sharedContainer` / `sharedCrop` / `MorphPage` / `expandFromLine` / \
+                `dropsAway` / `sinksBelow` in com.vayunmathur.library.util for navigation, \
+                shared-element and exit motion.
 
                 Imperative motion on androidx.compose.animation.core.Animatable is NOT flagged. A \
                 game board wave or a camera capture flash is genuinely one-off, and wrapping it \

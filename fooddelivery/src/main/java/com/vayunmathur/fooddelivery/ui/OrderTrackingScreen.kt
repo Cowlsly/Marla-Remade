@@ -51,6 +51,7 @@ import com.vayunmathur.library.ui.MaterialTheme
 import com.vayunmathur.library.ui.OutlinedButton
 import com.vayunmathur.library.ui.Surface
 import com.vayunmathur.library.ui.Text
+import com.vayunmathur.library.util.sharedText
 import android.util.Log
 import com.vayunmathur.fooddelivery.R
 import com.vayunmathur.fooddelivery.api.BitesApi
@@ -100,7 +101,14 @@ fun OrderTrackingScreen(orderId: Int, onBack: () -> Unit) {
     }
 
     AppScaffold(
-        title = order?.merchant?.name ?: stringResource(R.string.tracking),
+        // Title slot rather than the string overload so the merchant name can carry the shared
+        // key it travels in on from the Orders row.
+        title = {
+            Text(
+                order?.merchant?.name ?: stringResource(R.string.tracking),
+                modifier = Modifier.sharedText("food-order-merchant-$orderId"),
+            )
+        },
         onNavigateBack = onBack,
         scrollBehavior = appBarScrollBehavior(),
     ) { padding ->

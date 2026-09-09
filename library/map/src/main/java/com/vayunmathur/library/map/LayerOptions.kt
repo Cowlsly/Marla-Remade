@@ -9,7 +9,7 @@ package com.vayunmathur.library.map
  * because most consumers (findfamily, photos, weather, taxi, fooddelivery) show a map as a
  * backdrop for their own pins, and neither layer helps that: POI icons compete with the pin,
  * and rail lines are noise outside a transit app. `maps` opts into transit, driven by its
- * own layers toggle; `mapcompare` can drive both.
+ * own layers toggle.
  *
  * # What turning one on costs
  *

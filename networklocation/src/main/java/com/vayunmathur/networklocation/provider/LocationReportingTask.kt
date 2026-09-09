@@ -8,10 +8,8 @@ import com.vayunmathur.networklocation.BeaconFix
 import com.vayunmathur.networklocation.BeaconId
 import com.vayunmathur.networklocation.DevicePosition
 import com.vayunmathur.networklocation.NetworkLocationNative
-import com.vayunmathur.networklocation.apple.ApplePositioningService
 import com.vayunmathur.networklocation.cache.BeaconCache
 import com.vayunmathur.networklocation.cell.NearbyCells
-import com.vayunmathur.networklocation.util.Throttle
 import com.vayunmathur.networklocation.wifi.NearbyWifi
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -23,9 +21,13 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
 /**
- * The periodic fix loop: scan nearby radios, resolve them to coordinates (cache
- * first, then Apple's proxy for the misses), and estimate the device position with
- * the native solver. Reconstructs GrapheneOS's LocationReportingTask.
+ * The periodic fix loop: scan nearby radios, resolve them to coordinates against the
+ * cache and the offline WPSDB stores, and estimate the device position with the native
+ * solver. Reconstructs GrapheneOS's LocationReportingTask.
+ *
+ * Resolution is entirely on-device. Beacons absent from both tiers are dropped, so a
+ * fix is produced only from what the downloaded stores know; if they have not been
+ * downloaded yet, no fix is produced at all.
  */
 class LocationReportingTask(
     context: Context,
@@ -36,10 +38,6 @@ class LocationReportingTask(
     private val cells = NearbyCells(appContext)
     private val cache = BeaconCache(appContext)
     private val offlineStore = OfflineBeaconStore(appContext)
-    private val apple = ApplePositioningService()
-    // gs-loc is only consulted for beacons we have never seen; still throttle it so a
-    // burst of new APs (e.g. moving fast) cannot spam Apple.
-    private val networkThrottle = Throttle(minIntervalMillis = 20_000)
 
     private var scope: CoroutineScope? = null
 
@@ -94,11 +92,12 @@ class LocationReportingTask(
         val cached = cache.get(allIds)
         val resolved = ArrayList(cached.values)
 
-        var missingWifi = wifiIds.filter { it !in cached }
-        var missingCell = cellIds.filter { it !in cached }
+        val missingWifi = wifiIds.filter { it !in cached }
+        val missingCell = cellIds.filter { it !in cached }
 
-        // Offline store tier: resolve locally before ever touching the network. Hits are
-        // written back into BeaconCache so the in-memory/Room tier front-runs later scans.
+        // Offline store tier: the only source of new beacon coordinates. Hits are written
+        // back into BeaconCache so the in-memory/Room tier front-runs later scans. Beacons
+        // absent from the stores stay unresolved and are simply left out of the solve.
         if (missingWifi.isNotEmpty() || missingCell.isNotEmpty()) {
             val offline = withContext(Dispatchers.Default) {
                 buildList {
@@ -109,23 +108,6 @@ class LocationReportingTask(
             if (offline.isNotEmpty()) {
                 cache.put(offline)
                 resolved.addAll(offline)
-                val hitIds = offline.mapTo(HashSet()) { it.id }
-                missingWifi = missingWifi.filterNot { it in hitIds }
-                missingCell = missingCell.filterNot { it in hitIds }
-            }
-        }
-
-        // gs-loc fallback: only for beacons still unknown after cache + offline store.
-        if ((missingWifi.isNotEmpty() || missingCell.isNotEmpty()) && networkThrottle.tryAcquire()) {
-            val fresh = withContext(Dispatchers.IO) {
-                buildList {
-                    if (missingWifi.isNotEmpty()) addAll(apple.queryWifi(missingWifi.map { it.bssid }))
-                    if (missingCell.isNotEmpty()) addAll(apple.queryCell(missingCell))
-                }
-            }
-            if (fresh.isNotEmpty()) {
-                cache.put(fresh)
-                resolved.addAll(fresh)
             }
         }
         return resolved

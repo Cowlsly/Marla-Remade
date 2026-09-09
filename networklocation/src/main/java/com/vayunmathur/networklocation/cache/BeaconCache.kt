@@ -48,8 +48,8 @@ abstract class BeaconDatabase : RoomDatabase() {
 /**
  * Two-tier beacon-location cache: an in-memory [TimedLruCache] in front of a Room
  * table. Beacon coordinates are effectively static, so caching them locally is the
- * whole point — it means a given AP/tower is asked of Apple's proxy once, then
- * served offline forever (until the TTL sweep). The cache holds only public beacon
+ * whole point - it means a given AP/tower is looked up in the offline store once,
+ * then served from memory (until the TTL sweep). The cache holds only public beacon
  * coordinates, so it is stored unencrypted.
  */
 class BeaconCache(

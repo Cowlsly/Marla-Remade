@@ -33,9 +33,11 @@
 pub mod abstracts;
 pub mod archive;
 pub mod clean;
+pub mod ids;
 pub mod join;
 
 pub use abstracts::{english_title, Abstract, Abstracts};
 pub use archive::{Archive, Builder};
 pub use clean::clean;
+pub use ids::tagged_id;
 pub use join::{join, Wanted};

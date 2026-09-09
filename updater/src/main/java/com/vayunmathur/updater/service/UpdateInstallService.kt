@@ -1,5 +1,6 @@
 package com.vayunmathur.updater.service
 
+import android.app.PendingIntent
 import android.app.Service
 import android.content.Context
 import android.content.Intent
@@ -10,20 +11,23 @@ import android.os.PowerManager
 import android.util.Log
 import androidx.core.app.ServiceCompat
 import androidx.core.content.getSystemService
+import com.vayunmathur.library.util.DataStoreUtils
 import com.vayunmathur.updater.R
+import com.vayunmathur.updater.domain.OtaDownloadPlan
 import com.vayunmathur.updater.domain.OtaPackageValidation
 import com.vayunmathur.updater.notifications.UpdateNotifications
 import com.vayunmathur.updater.platform.IdleReboot
 import com.vayunmathur.updater.platform.OtaDownloader
 import com.vayunmathur.updater.platform.OtaInstaller
+import com.vayunmathur.updater.platform.RebootReceiver
 import com.vayunmathur.updater.platform.SystemBuild
+import com.vayunmathur.updater.platform.UpdaterPreferences
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.launch
-import java.io.File
 
 private const val TAG = "UpdateInstallService"
 
@@ -125,7 +129,7 @@ class UpdateInstallService : Service() {
 
         UpdateNotifications.updateProgress(this, getString(R.string.notify_downloading), 0)
         val downloaded = OtaDownloader.download(
-            directory = packageDirectory(this),
+            context = this,
             device = device,
             currentBuild = current.build,
             targetBuild = build,
@@ -134,8 +138,8 @@ class UpdateInstallService : Service() {
             UpdateNotifications.updateProgress(this, getString(R.string.notify_downloading), percent)
         }
 
-        val file = when (downloaded) {
-            is OtaDownloader.Result.Downloaded -> downloaded.file
+        val incremental = when (downloaded) {
+            is OtaDownloader.Result.Downloaded -> downloaded.incremental
             OtaDownloader.Result.NotFound -> {
                 fail(getString(R.string.error_no_package))
                 return
@@ -149,7 +153,7 @@ class UpdateInstallService : Service() {
 
         UpdateNotifications.updateProgress(this, getString(R.string.notify_verifying), 0)
         val result = OtaInstaller.install(
-            packageFile = file,
+            packageFile = OtaDownloader.UPDATE_PATH,
             expected = OtaPackageValidation.Expected(
                 buildDateUtcSeconds = buildDate,
                 targetBuild = build,
@@ -169,11 +173,27 @@ class UpdateInstallService : Service() {
             OtaInstaller.Result.Applied -> {
                 // The payload is on the inactive slot; the running system is untouched until
                 // the reboot, which is why waiting for idle costs nothing.
-                file.delete()
-                IdleReboot.arm(this, build)
+                val store = DataStoreUtils.getInstance(this)
+                store.setString(UpdaterPreferences.PENDING_REBOOT_BUILD, build)
+                store.setString(UpdaterPreferences.DOWNLOAD_FILE, "")
+                UpdateNotifications.rebootPending(this, build, restartIntent(this))
+                IdleReboot.schedule(this)
             }
 
-            is OtaInstaller.Result.Failed -> fail(result.reason)
+            is OtaInstaller.Result.Failed -> {
+                // An incremental update_engine cannot initialise from will fail identically
+                // every time. Remember it so the next run goes straight to the full package
+                // instead of looping on a download that can never install.
+                if (incremental && result.initializationFailure) {
+                    val artifacts = OtaDownloadPlan.artifacts(device, current.build, build)
+                    artifacts.incremental?.let {
+                        DataStoreUtils.getInstance(this)
+                            .setString(UpdaterPreferences.FAILED_INCREMENTAL, it)
+                    }
+                }
+                OtaDownloader.discard(this)
+                fail(result.reason)
+            }
         }
     }
 
@@ -227,16 +247,11 @@ class UpdateInstallService : Service() {
             context.startForegroundService(intent)
         }
 
-        /**
-         * Where the package is staged.
-         *
-         * **Verify this on a real device before trusting it.** update_engine opens the file
-         * itself, as its own uid and under its own SELinux domain, so the directory has to be
-         * one it is allowed to read — which app-private internal storage is not. The external
-         * files directory is the best available guess; if `applyPayload` fails with a
-         * permission or open error, this is the line to change.
-         */
-        fun packageDirectory(context: Context): File =
-            File(context.getExternalFilesDir(null) ?: context.filesDir, "ota")
+        private fun restartIntent(context: Context): PendingIntent = PendingIntent.getBroadcast(
+            context,
+            0,
+            Intent(context, RebootReceiver::class.java),
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
+        )
     }
 }

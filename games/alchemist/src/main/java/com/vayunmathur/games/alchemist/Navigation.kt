@@ -25,6 +25,7 @@ import com.vayunmathur.library.ui.GameCenterScreen
 import com.vayunmathur.library.util.AchievementsManager
 import com.vayunmathur.library.util.GameHubComposeHook
 import com.vayunmathur.library.util.MainNavigation
+import com.vayunmathur.library.util.MorphPage
 import com.vayunmathur.library.util.rememberNavBackStack
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
@@ -58,7 +59,7 @@ fun Navigation(viewModel: AlchemistViewModel) {
         MainNavigation(backStack) {
             entry<Route.Home> { HomePage(backStack, viewModel, onOpenCollection = { backStack.add(Route.Collection) }, onOpenGameCenter = { backStack.add(Route.GameCenter) }) }
             entry<Route.Collection> { CollectionPage(backStack, viewModel) }
-            entry<Route.ItemDetails> { ItemDetailsPage(backStack, viewModel, it.item) }
+            entry<Route.ItemDetails>(metadata = MorphPage()) { ItemDetailsPage(backStack, viewModel, it.item) }
             entry<Route.GameCenter> { achievementsManager?.let { GameCenterScreen(backupAgent = AppBackupAgent(), manager = it, onBack = { backStack.pop() }) } }
         }
         newAchievement?.let { ach -> AchievementNotification(ach) { achievementsManager.dismissNotification() } }

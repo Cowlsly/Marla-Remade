@@ -116,9 +116,10 @@ object PoiCategories {
         "animal" -> 36
         "museum" -> 38
         // The one mapping with behaviour attached: a tapped station opens the departure
-        // board. `bus_stop` and `ferry_terminal` are deliberately NOT 50 — the board is
-        // resolved from baked rail stops, and sending a bus stop there would find the wrong
-        // thing or nothing.
+        // board. `bus_stop` and `ferry_terminal` have no number here — this table is
+        // `osm_ingest`'s, and it treats a bus pole or a ferry pier as street furniture
+        // rather than a POI — so they route to the board by kind instead; see
+        // [opensDepartureBoard].
         "station" -> STATION_TYPE
         else -> null
     }
@@ -129,4 +130,20 @@ object PoiCategories {
      * Station POIs carry no stop id of their own; see `TransitStopsViewModel.openNearestStop`.
      */
     const val STATION_TYPE: Int = 50
+
+    /**
+     * Archive `poi` kinds whose taps open a departure board rather than a place sheet.
+     *
+     * Matched on the kind rather than on [typeOfKind]'s number because two of the three have
+     * no number to match: `osm_ingest`'s table predates the archive and treats a bus pole or a
+     * ferry pier as street furniture rather than a POI, so only `station` ever reaches 50.
+     * The archive draws all three, and a tap on any of them is asking the same question.
+     *
+     * `bus_stop` covers tram stops too — the tiler folds `railway=tram_stop` into that kind.
+     *
+     * None of them carry a stop id, so the board is resolved from the nearest stop in the
+     * baked pack; see `TransitStopsViewModel.openNearestStop`.
+     */
+    fun opensDepartureBoard(kind: String): Boolean =
+        kind == "station" || kind == "bus_stop" || kind == "ferry_terminal"
 }

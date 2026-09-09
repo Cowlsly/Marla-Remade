@@ -70,7 +70,7 @@ enum class SearchPhase {
  *
  * These are not implemented by [MapsSearchViewModel]: a query needs the visible bounding
  * box (to bias the Google search toward the map centre) and picking a result touches the
- * nav back stack, so the search page builds the adapter itself.
+ * selection the map screen owns, so the map screen builds the adapter itself.
  */
 interface SearchActions {
     fun setQuery(query: String) {}

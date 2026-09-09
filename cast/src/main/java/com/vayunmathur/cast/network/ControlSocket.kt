@@ -6,8 +6,10 @@ import com.vayunmathur.cast.protocol.ControlFraming
 import com.vayunmathur.cast.protocol.ControlMessage
 import java.io.DataInputStream
 import java.io.DataOutputStream
+import java.io.IOException
 import java.net.InetSocketAddress
 import java.net.Socket
+import java.net.SocketTimeoutException
 
 private const val TAG = "ControlSocket"
 
@@ -89,11 +91,33 @@ class ControlSocket(private val host: String, private val port: Int) {
         return body
     }
 
-    /** The next message, or null when the TV closed or sent something unreadable. */
+    /**
+     * The next message, or null when the TV closed or sent something unreadable.
+     *
+     * Every failure mode still collapses into null, because every one of them ends the session -
+     * but they are logged apart. A starved read and a TV that hung up are indistinguishable to the
+     * caller and were indistinguishable in the log too, which is what made a missing heartbeat look
+     * like the receiver dropping us.
+     */
     fun receive(): Received? {
         val stream = input ?: return null
-        val body = runCatching { ControlFraming.read(stream) }.getOrNull() ?: return null
-        val message = codec.decode(body) ?: return null
+        val body = try {
+            ControlFraming.read(stream)
+        } catch (e: SocketTimeoutException) {
+            Log.w(TAG, "no control frame for ${READ_TIMEOUT_MS}ms; treating the TV as gone", e)
+            return null
+        } catch (e: IOException) {
+            Log.i(TAG, "the TV closed the control channel", e)
+            return null
+        } catch (e: IllegalArgumentException) {
+            // A length prefix outside the bound. The stream cannot be resynchronised after one.
+            Log.w(TAG, "unframeable control traffic", e)
+            return null
+        } ?: return null
+        val message = codec.decode(body) ?: run {
+            Log.w(TAG, "could not decode a ${body.size}-byte control frame")
+            return null
+        }
         return Received(message, body)
     }
 

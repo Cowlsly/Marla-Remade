@@ -26,6 +26,8 @@ import com.vayunmathur.library.image.ImageRequest
 import com.vayunmathur.library.ui.IconAdd
 import com.vayunmathur.library.ui.IconEdit
 import com.vayunmathur.library.util.NavBackStack
+import com.vayunmathur.library.util.sharedContainer
+import com.vayunmathur.library.util.sharedContent
 import com.vayunmathur.youpipe.R
 import com.vayunmathur.youpipe.Route
 import com.vayunmathur.youpipe.util.YouPipeViewModel
@@ -93,16 +95,21 @@ fun SubscriptionsPage(
                 ListItem { Text(stringResource(R.string.label_channels)) }
             }
             items(subscriptions, key = { it.id }) {
-                ListItem(modifier = Modifier.clickable {
-                    backStack.add(Route.ChannelPage(it.channelID))
-                }, overlineContent = {}, supportingContent = {}, leadingContent = {
+                // Only this list is keyed, not the channel rows in the search overlay on the next
+                // tab: one key needs one origin, and the pager composes both mid-swipe.
+                ListItem(modifier = Modifier
+                    .sharedContainer("youpipe-channel-${it.channelID}")
+                    .clickable { backStack.add(Route.ChannelPage(it.channelID)) },
+                    overlineContent = {}, supportingContent = {}, leadingContent = {
                     AsyncImage(
                         model = ImageRequest.Builder(context)
                             .data(it.avatarURL)
                             .memoryCacheKey("sub-avatar-${it.id}")
                             .build(),
                         contentDescription = null,
-                        Modifier.size(24.dp).clip(CircleShape)
+                        Modifier.sharedContent("youpipe-channel-avatar-${it.channelID}")
+                            .size(24.dp)
+                            .clip(CircleShape)
                     )
                 }) {
                     Text(it.name.decodeHtml())

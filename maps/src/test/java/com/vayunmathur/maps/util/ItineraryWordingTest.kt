@@ -1,6 +1,6 @@
 package com.vayunmathur.maps.util
 
-import org.maplibre.spatialk.geojson.Position
+import com.vayunmathur.library.map.GeoPoint
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertNull
@@ -51,7 +51,7 @@ class ItineraryWordingTest {
     private fun walkStep(duration: kotlin.time.Duration) = RouteService.Step(
         distanceMeters = 100.0,
         staticDuration = duration,
-        polyline = listOf(Position(0.0, 0.0)),
+        polyline = listOf(GeoPoint(0.0, 0.0)),
         navInstruction = RouteService.API.NavInstruction(
             RouteService.API.Maneuver.MANEUVER_UNSPECIFIED,
             WALK_LEG_PLACEHOLDER,

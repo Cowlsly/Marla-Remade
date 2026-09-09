@@ -14,12 +14,14 @@ dependencies {
 
 protobuf {
     protoc {
-        artifact = "com.google.protobuf:protoc:${libs.versions.protobufJavalite.get()}"
+        artifact = libs.protobuf.protoc.get().toString()
     }
 
     generateProtoTasks {
         all().forEach { task ->
             task.builtins {
+                // `named`, not `create` as in :appstore: the JVM path already pre-registers the
+                // java builtin, and creating it a second time fails.
                 named("java") {
                     option("lite")
                 }

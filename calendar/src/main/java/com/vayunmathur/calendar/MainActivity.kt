@@ -206,7 +206,15 @@ sealed interface Route: NavKey {
         val location: String? = null,
         val beginTime: Long? = null,
         val endTime: Long? = null,
-        val allDay: Boolean? = null
+        val allDay: Boolean? = null,
+        /**
+         * The instance the user opened, when they arrived here from its detail screen.
+         *
+         * The title morph needs it: a title is keyed per *instance* so that a recurring event
+         * showing several times on the grid still has one origin per key, while everything else
+         * about an edit is keyed per event. Null when the edit was not reached from a detail screen.
+         */
+        val instanceId: Long? = null,
     ): Route {
         @Serializable
         data class DatePickerDialog(val key: String, val initialDate: LocalDate, val minDate: LocalDate? = null): Route

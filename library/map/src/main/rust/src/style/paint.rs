@@ -277,6 +277,9 @@ fn layer(json: &Json) -> Result<Layer, String> {
         "halo_dark",
         "halo_width",
         "minzoom",
+        // The floor that applies while browsing, i.e. with no category chip selected. Optional;
+        // defaults to `minzoom`. See `Layer::browse_min_zoom`.
+        "browse_minzoom",
         "maxzoom",
     ];
     for key in json.as_object().ok_or_else(|| format!("`{id}` is not an object"))?.keys() {
@@ -470,6 +473,8 @@ fn layer(json: &Json) -> Result<Layer, String> {
             .map(|v| v as f32)
             .unwrap_or(1.0),
         min_zoom: zoom("minzoom", 0)?,
+        // Defaults to the data floor, so a layer that does not set it is gated exactly as before.
+        browse_min_zoom: zoom("browse_minzoom", zoom("minzoom", 0)?)?,
         max_zoom: zoom("maxzoom", MAX_ZOOM)?,
         id,
     })

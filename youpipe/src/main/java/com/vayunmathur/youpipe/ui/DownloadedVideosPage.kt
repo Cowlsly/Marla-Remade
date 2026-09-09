@@ -174,7 +174,9 @@ fun DownloadedVideosPage(backStack: NavBackStack<Route>, youPipeViewModel: YouPi
                             }
                         ),
                         onClick = null,
-                        backupOnClick = false
+                        backupOnClick = false,
+                        // `id` is the video id, and is what the tap above navigates with.
+                        titleSharedKey = "youpipe-video-title-${downloadItem.id}",
                     )
                 }
             }

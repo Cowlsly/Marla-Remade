@@ -6,9 +6,26 @@ import kotlin.test.assertEquals
 import kotlin.test.assertTrue
 
 /**
- * [toStyleHex] feeds colours into MapLibre, which parses CSS colour syntax. The trap it
- * exists to close is that `#aarrggbb` — the form Android's own `Color.parseColor` accepts —
- * is not valid CSS, so an alpha colour serialized the obvious way is silently mis-parsed.
+ * [toStyleHex] was written to feed MapLibre, which parses CSS colour syntax, and the trap it
+ * closed was that `#aarrggbb` — the form Android's own `Color.parseColor` accepts — is not
+ * valid CSS, so an alpha colour serialized the obvious way was silently mis-parsed.
+ *
+ * That consumer is gone, and the rationale has inverted. The only live caller is now
+ * `RouteLayer`, which hands the string to `android.graphics.Color.parseColor` — and that
+ * parser accepts `#rrggbb` and `#aarrggbb` but *rejects* `rgba(...)`, which it throws on.
+ * So the alpha branch these tests pin now emits the one form its only consumer cannot read.
+ *
+ * There is no live bug: every route and traffic token is fully opaque (`0xFF…` at
+ * `MapTokens.kt:109-112,132-133,145-148,170-171`), so the `#rrggbb` branch is the only one
+ * reached. The failure mode if that changes is silent rather than loud —
+ * `RouteLayer.kt:66` wraps the parse in `runCatching { … }.getOrDefault(0xFF1710F1)`, so a
+ * translucent token would not crash; every affected segment would just quietly draw opaque
+ * blue, collapsing the jam/slow/free traffic colouring into one wrong colour.
+ *
+ * The assertions below are still correct — they pin what [toStyleHex] actually does — so
+ * they stay. Giving a route or traffic token an alpha is what needs care, and if the rgba
+ * branch ever loses its last justification the function should shed it rather than keep a
+ * form nothing can parse.
  */
 class MapTokensTest {
 
@@ -29,7 +46,7 @@ class MapTokensTest {
         assertTrue(!hex.startsWith("#"), "alpha must not be emitted as hex: $hex")
     }
 
-    /** The admin highlight fill is the real caller of the alpha path. */
+    /** No live caller reaches the alpha path today; this pins the behaviour regardless. */
     @Test
     fun `a low alpha keeps two decimals`() {
         assertEquals("rgba(255,0,0,0.12)", Color(0xFFFF0000).copy(alpha = 0.12f).toStyleHex())
@@ -39,8 +56,8 @@ class MapTokensTest {
     fun `formatting does not depend on the default locale`() {
         val original = java.util.Locale.getDefault()
         try {
-            // A comma-decimal locale would otherwise emit "rgba(255,0,0,0,5)", which MapLibre
-            // parses as a four-argument rgba and rejects.
+            // A comma-decimal locale would otherwise emit "rgba(255,0,0,0,5)" — a
+            // four-argument rgba that no parser accepts.
             java.util.Locale.setDefault(java.util.Locale.GERMANY)
             assertEquals("rgba(255,0,0,0.5)", Color(0xFFFF0000).copy(alpha = 0.5f).toStyleHex())
         } finally {

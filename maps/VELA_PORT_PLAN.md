@@ -154,11 +154,13 @@ Vela paths below are relative to the clone root (removed after research; never c
 **Decisions:** D11 (satellite/transit tile sources & keys); D12 (settings scope for v1).
 
 ### P7 — Google Street View (keyless, reuse photos app renderer)
-**Goal:** add Street View panorama viewing. RENDERER DECISION (user): do NOT port Vela's bespoke GLES 2.0 sphere — instead REUSE the photos app's existing image viewer/renderer to display the equirectangular pano (pan/zoom), which is simpler and consistent with the suite. The P7 agent must locate the photos app's image-viewer component (photos/src/main/java/... the zoom/pan image display used in its editor/gallery) and reuse it for the pano image.
-**Vela refs (data only, NOT the renderer):** `core/.../data/google/StreetViewParser.kt` (keyless pano metadata: panoId, lat/lng, links/neighbors, date, heading), `StreetViewTiles.kt` (equirect tile fetch/stitch by zoom), `GoogleMapsDataSource.streetView`. Skip Vela's `PanoramaView.kt` (GLES sphere) — replaced by the photos renderer.
-**MA — ADD:** `data/google/StreetViewDataSource.kt` (port StreetViewParser + equirect tile fetch/stitch via :library:network — keyless pano metadata + tiles → one equirect bitmap), `ui/streetview/StreetViewScreen.kt` (full-screen viewer using the PHOTOS APP's image renderer/viewer to pan/zoom the equirect bitmap; shared library/ui scaffold; move between adjacent panos via links).
-**MA — CHANGE:** Street View entry points — from the place-details sheet (P4 `PlaceSheet`) when a pano exists, and optionally a long-press-on-map "Street View here"; nearest-pano lookup by lat/lng.
-**Reuse:** the photos app image viewer (renderer), existing Google scrape infra, library/ui, library/image.
+**Goal:** add Street View panorama viewing. RENDERER DECISION (user): REUSE the photos app's panorama renderer rather than porting Vela's.
+
+**CORRECTED (task 6).** The first pass read "the photos app's renderer" as its flat pan/zoom image viewer, but the photos app has two panorama viewers and the correct one is `PanoramaSphereView` — an equirectangular pano is not a flat image and must be projected onto the inside of a sphere. That renderer has now been lifted into `:library:ui` as `PanoramaSphere` (+ `PanoramaCrop`) and BOTH apps call it; photos keeps a thin wrapper that supplies its XMP `GPano` crop and decodes from a content Uri.
+**Vela refs (data only, NOT the renderer):** `core/.../data/google/StreetViewParser.kt` (keyless pano metadata: panoId, lat/lng, links/neighbors, date, heading), `StreetViewTiles.kt` (equirect tile fetch/stitch by zoom), `GoogleMapsDataSource.streetView`. Skip Vela's `PanoramaView.kt` — the photos app's sphere renderer replaces it.
+**MA — ADD:** `data/google/StreetViewDataSource.kt` (port StreetViewParser + equirect tile fetch/stitch via :library:network — keyless pano metadata + tiles → one equirect bitmap), `ui/streetview/StreetViewScreen.kt` (full-screen viewer projecting the equirect bitmap onto `PanoramaSphere`; full-bleed `TopAppBarOverlay`; move between adjacent panos via links).
+**MA — CHANGE (task 6):** Street View is NO LONGER reachable from the place-details sheet. Its one entry point is `ui/streetview/StreetViewPegman.kt` — a Pegman-style chip you drag off the map chrome and drop on a point, projected through the camera and resolved by nearest-pano lookup. It must stay a direct child of the unpadded box `MapSurface` fills or every drop is offset by the chrome inset. No coverage overlay during the drag: `StreetViewDataSource` exposes coverage only as a per-point network lookup, not a tile layer, so a miss is reported on drop instead.
+**Reuse:** the shared `PanoramaSphere` renderer (`:library:ui`), existing Google scrape infra, library/ui.
 - **Defaults applied (no further input needed):** D1 runtime POI-hide (filter in `patchStyleForHybrid`, OTA-swappable); D-arch port as maplibre-compose **declarative** layers; D3/D7 debounced + LRU-cached viewport scrape; D5 pin icons as Compose `SymbolLayer` images/generated bitmaps; D10 road shields derived from road name/ref.
 
 ---
@@ -195,7 +197,7 @@ Vela paths below are relative to the clone root (removed after research; never c
 - **D-arch** Port Vela's imperative MapLibre overlay code as **maplibre-compose declarative** layers (recommended, matches MA) vs reach through to raw `MapLibreMap`.
 
 ## Suggested sequencing
-P1 (map/details Google-only + suppress POIs, keep DB search) → P3 (Google search, then delete DB) → P2 (layout) → P4 (details) → P7 (street view, entry from the place sheet) → P5 (nav UI) → P6 (extras). P1 and P3 are the critical path (they own DB removal); P2/P4/P7/P5/P6 are largely independent afterward.
+P1 (map/details Google-only + suppress POIs, keep DB search) → P3 (Google search, then delete DB) → P2 (layout) → P4 (details) → P7 (street view, entry from the map peg) → P5 (nav UI) → P6 (extras). P1 and P3 are the critical path (they own DB removal); P2/P4/P7/P5/P6 are largely independent afterward.
 
 ---
 

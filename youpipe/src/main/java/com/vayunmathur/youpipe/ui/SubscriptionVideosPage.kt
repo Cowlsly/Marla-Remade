@@ -114,6 +114,7 @@ fun SubscriptionVideosScreen(
                     VideoRow(
                         row = row,
                         modifier = Modifier.invisibleClickable { actions.openVideo(row.videoID) },
+                        titleSharedKey = "youpipe-video-title-${row.videoID}",
                     )
                 }
             }

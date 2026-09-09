@@ -38,6 +38,8 @@ import com.vayunmathur.games.alchemist.platform.AlchemistViewModel
 import com.vayunmathur.games.alchemist.platform.ItemDetailsUiState
 import com.vayunmathur.games.alchemist.ui.components.DynamicAlchemyIcon
 import com.vayunmathur.library.util.NavBackStack
+import com.vayunmathur.library.util.sharedContent
+import com.vayunmathur.library.util.sharedCrop
 
 /** Binds [AlchemistViewModel] to the stateless [ItemDetailsScreen]. */
 @Composable
@@ -80,7 +82,9 @@ fun ItemDetailsScreen(
                     .padding(8.dp)
             ) {
             Card(
-                modifier = Modifier.fillMaxSize(),
+                modifier = Modifier
+                    .fillMaxSize()
+                    .sharedCrop("alchemist-item-${item.id}", RoundedCornerShape(16.dp)),
                 shape = RoundedCornerShape(16.dp),
                 colors = CardDefaults.cardColors(
                     containerColor = MaterialTheme.colorScheme.primaryContainer,
@@ -94,7 +98,9 @@ fun ItemDetailsScreen(
                     horizontalArrangement = Arrangement.spacedBy(16.dp)
                 ) {
                     Box(
-                        modifier = Modifier.size(40.dp),
+                        modifier = Modifier
+                            .size(40.dp)
+                            .sharedContent("alchemist-item-icon-${item.id}"),
                         contentAlignment = Alignment.Center
                     ) {
                         DynamicAlchemyIcon(

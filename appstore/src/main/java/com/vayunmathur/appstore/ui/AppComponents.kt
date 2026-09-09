@@ -44,6 +44,8 @@ import com.vayunmathur.library.ui.IconStar
 import com.vayunmathur.library.ui.LinearProgressIndicator
 import com.vayunmathur.library.ui.MaterialTheme
 import com.vayunmathur.library.ui.Text
+import com.vayunmathur.library.util.sharedContainer
+import com.vayunmathur.library.util.sharedCrop
 import java.util.Locale
 
 /**
@@ -151,11 +153,18 @@ fun AppRow(
     stage: InstallStage? = null,
     installedIcon: Drawable? = null,
     versionLabel: String? = null,
+    /**
+     * Non-null makes this row the origin of the [sharedCrop] container transform into the app's
+     * detail page. Null for a row that is a second copy of an app already shown elsewhere on
+     * screen - the morph cannot choose between two origins for one destination.
+     */
+    sharedKey: Any? = null,
     onClick: () -> Unit = {},
     trailing: @Composable (() -> Unit)? = null,
 ) {
     Column(
         modifier
+            .then(if (sharedKey == null) Modifier else Modifier.sharedCrop(sharedKey))
             .fillMaxWidth()
             .clickable(onClick = onClick)
             .padding(horizontal = 16.dp, vertical = 10.dp),
@@ -225,10 +234,17 @@ fun AppTile(
     isInstalled: Boolean = false,
     stage: InstallStage? = null,
     installedIcon: Drawable? = null,
+    /** As [AppRow]: null for a tile whose app is already an origin elsewhere on screen. */
+    sharedKey: Any? = null,
     onClick: () -> Unit = {},
 ) {
     Column(
         modifier
+            // Deliberately [sharedContainer] where [AppRow] uses [sharedCrop]: a tile centres its
+            // icon in 96dp and the detail header puts it hard left in a full-width row, so the two
+            // ends are not congruent at their top-left and a crop would jump the icon across. A
+            // reflow absorbs that. Do not "tidy" this into matching AppRow.
+            .then(if (sharedKey == null) Modifier else Modifier.sharedContainer(sharedKey))
             .width(96.dp)
             .clip(RoundedCornerShape(12.dp))
             .clickable(onClick = onClick)
@@ -284,6 +300,8 @@ fun AppCarousel(
     onAppClick: (UnifiedApp) -> Unit,
     modifier: Modifier = Modifier,
     stages: Map<String, InstallStage> = emptyMap(),
+    /** Per-app, because only the caller knows which copy of an app owns the morph. */
+    sharedKey: (UnifiedApp) -> Any? = { null },
 ) {
     LazyRow(
         modifier = modifier.fillMaxWidth(),
@@ -297,6 +315,7 @@ fun AppCarousel(
                 stage = stages[app.packageName],
                 installedIcon = installedIcons[app.packageName],
                 onClick = { onAppClick(app) },
+                sharedKey = sharedKey(app),
             )
         }
     }

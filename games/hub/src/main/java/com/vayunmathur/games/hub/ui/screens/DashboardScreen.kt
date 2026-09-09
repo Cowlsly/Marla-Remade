@@ -35,6 +35,7 @@ import com.vayunmathur.library.ui.MaterialTheme
 import com.vayunmathur.library.ui.Text
 import com.vayunmathur.library.ui.TextButton
 import com.vayunmathur.library.ui.appBarScrollBehavior
+import com.vayunmathur.library.util.sharedContainer
 import androidx.compose.ui.res.stringResource
 
 /**
@@ -44,6 +45,9 @@ import androidx.compose.ui.res.stringResource
  * [iconFor] and [topBarActions] are the two things that genuinely need a device: installed
  * app icons, and the backup menu's file pickers (which need an Activity). Both default to
  * nothing so a preview can leave them out.
+ *
+ * [ownsGameMorphKeys] is false while the Games tab is the settled page: the same game appears in
+ * both tabs, so only one of the two may be the origin of the morph into the game's detail page.
  */
 @Composable
 fun DashboardScreen(
@@ -51,6 +55,7 @@ fun DashboardScreen(
     actions: DashboardActions,
     modifier: Modifier = Modifier,
     iconFor: (HubGameEntity) -> Drawable? = { null },
+    ownsGameMorphKeys: Boolean = true,
     topBarActions: @Composable RowScope.() -> Unit = {},
 ) {
     AppScaffold(
@@ -105,7 +110,10 @@ fun DashboardScreen(
                                 iconDrawable = iconFor(game),
                                 onClick = { actions.openGame(game.gameId) },
                                 onPlay = { actions.playGame(game) },
-                                modifier = Modifier.fillParentMaxWidth(0.85f)
+                                modifier = Modifier.fillParentMaxWidth(0.85f).then(
+                                    if (!ownsGameMorphKeys) Modifier
+                                    else Modifier.sharedContainer("hub-game-${game.gameId}")
+                                )
                             )
                         }
                     }

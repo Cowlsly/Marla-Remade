@@ -7,6 +7,7 @@ import android.view.WindowManager
 import androidx.core.content.getSystemService
 import com.vayunmathur.cast.protocol.CodecLimits
 import com.vayunmathur.cast.protocol.CodecSelection
+import com.vayunmathur.cast.protocol.DisplayMode
 import com.vayunmathur.cast.protocol.StreamConstants
 import com.vayunmathur.cast.protocol.VideoCodec
 
@@ -62,6 +63,16 @@ object MirrorGeometry {
     /** What an app gets if it asks for nonsense; 720p is a size every decoder takes. */
     private const val DEFAULT_CONTENT_WIDTH = 1280
     private const val DEFAULT_CONTENT_HEIGHT = 720
+
+    /**
+     * The density a 1080p television is composed at, and the short edge that figure belongs to.
+     *
+     * `DENSITY_TV` (213) is the AOSP constant for the case, and it is what a 1280x720 panel wants.
+     * A 1080p screen is 1.5x that short edge, so the reference is scaled to match rather than
+     * leaving every larger panel rendering at 720p element sizes.
+     */
+    private const val TV_REFERENCE_DENSITY = 320
+    private const val TV_REFERENCE_SHORT_EDGE = 1080
 
     /**
      * The phone's real screen size in pixels.
@@ -143,6 +154,74 @@ object MirrorGeometry {
             densityDpi = DisplayMetrics.DENSITY_DEFAULT,
             bitRate = bitRate,
         )
+    }
+
+    /**
+     * The frame to send for a desktop composed on the television.
+     *
+     * Same clamping as [forDisplay], different starting point and a different reason for it.
+     * Mirroring sends the phone's own shape because the phone is what is being shown, and the TV
+     * pads it. A desktop is not a picture of the phone: the system composes it for whatever size
+     * the display was created at, so creating it at the phone's `1080x2400` portrait geometry
+     * produced a portrait desktop letterboxed into a landscape panel, with the wallpaper and
+     * taskbar laid out for a phone.
+     *
+     * Takes the panel's largest mode, since a desktop wants every pixel the screen has, then fits
+     * it to the decoder exactly as [forDisplay] does - [modes] describes the screen and
+     * `receiverLimits` describes the decoder, and a TV can easily have a 4K decoder behind a 1080p
+     * panel or the reverse.
+     *
+     * Falls back to [forDisplay] when the receiver advertised no modes, which is what a
+     * pre-version-8 television does. That is the old, wrong-but-working behaviour rather than a
+     * failure: a desktop letterboxed into the wrong shape still casts.
+     */
+    fun forDesktop(
+        context: Context,
+        chosen: CodecSelection.Chosen,
+        modes: List<DisplayMode>,
+    ): CaptureGeometry {
+        val largest = modes.maxByOrNull { it.area }
+        if (largest == null) {
+            Log.w(TAG, "the TV advertised no panel modes; composing the desktop for the phone")
+            return forDisplay(context, chosen)
+        }
+
+        val (fittedWidth, fittedHeight) = chosen.receiverLimits.fit(largest.width, largest.height)
+        val frameRate = frameRateFor(chosen.receiverLimits)
+        val (width, height) =
+            EncoderSupport.clampToEncoder(chosen.codec, fittedWidth, fittedHeight, frameRate)
+        val bitRate = bitRateFor(width, height, frameRate, chosen)
+        val density = desktopDensityFor(width, height)
+
+        Log.i(
+            TAG,
+            "desktop: panel is ${largest.width}x${largest.height}, sending ${width}x$height " +
+                "@ ${frameRate}fps at ${bitRate / 1_000_000.0} Mbit/s, ${density}dpi" +
+                chosen.rateReasoning(),
+        )
+        return CaptureGeometry(
+            width = width,
+            height = height,
+            densityDpi = density,
+            bitRate = bitRate,
+        )
+    }
+
+    /**
+     * The density to compose a desktop at.
+     *
+     * Explicitly not the phone's. A phone's ~420dpi describes a screen held at arm's length; used
+     * on a television it renders a desktop whose text and controls are sized for a hand, which on a
+     * 55-inch panel across a room is enormous and fits almost nothing on screen.
+     *
+     * Scaled from the frame's own height against a 1080p reference at [TV_REFERENCE_DENSITY], so a
+     * 4K panel gets proportionally more density rather than four times as many equally-tiny
+     * elements - the same shape of arithmetic AOSP uses for external displays.
+     */
+    private fun desktopDensityFor(width: Int, height: Int): Int {
+        val shortEdge = minOf(width, height).takeIf { it > 0 } ?: return TV_REFERENCE_DENSITY
+        val scaled = TV_REFERENCE_DENSITY * shortEdge / TV_REFERENCE_SHORT_EDGE
+        return scaled.coerceIn(DisplayMetrics.DENSITY_LOW, DisplayMetrics.DENSITY_XXHIGH)
     }
 
     /**

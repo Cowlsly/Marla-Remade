@@ -349,12 +349,14 @@ fun ComposerScreen(
                     modifier = Modifier.fillMaxWidth(),
                 )
             }
-            OutlinedTextField(
-                value = subject, onValueChange = { subject = it },
-                label = { Text(stringResource(R.string.subject_label)) },
-                singleLine = true,
-                textStyle = MaterialTheme.typography.bodyMedium,
+            // The drafts row's subject morphs into this field. Null for a fresh compose, a reply or
+            // a forward, none of which came from a draft.
+            LabeledTextField(
+                value = subject,
+                onValueChange = { subject = it },
+                label = stringResource(R.string.subject_label),
                 modifier = Modifier.fillMaxWidth(),
+                sharedTextKey = draftId?.let { "email-draft-subject-$it" },
             )
 
             com.vayunmathur.email.ui.composer.EmailHtmlEditor(

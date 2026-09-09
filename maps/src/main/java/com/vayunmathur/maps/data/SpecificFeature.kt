@@ -1,5 +1,6 @@
 package com.vayunmathur.maps.data
 
+import com.vayunmathur.library.map.GeoPoint
 import com.vayunmathur.maps.util.PoiIndex
 import com.vayunmathur.maps.util.Wikidata
 import kotlinx.coroutines.Dispatchers
@@ -8,14 +9,11 @@ import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.jsonPrimitive
-import org.maplibre.spatialk.geojson.Feature
-import org.maplibre.spatialk.geojson.Geometry
-import org.maplibre.spatialk.geojson.Position
 
 @Serializable
 sealed interface SpecificFeature {
     interface RoutableFeature : SpecificFeature {
-        val position: Position
+        val position: GeoPoint
         val name: String
     }
 
@@ -25,10 +23,12 @@ sealed interface SpecificFeature {
      * in needs the network. Requiring them meant tapping a country did nothing at all offline.
      */
     @Serializable
-    data class Admin0Label(@SerialName("iso3166_1") val iso: String? = null, val wikipedia: String? = null, val name: String) : SpecificFeature
+    data class Admin0Label(@SerialName("iso3166_1") val iso: String? = null, val wikipedia: String? = null, val name: String,
+                           @Serializable(with = GeoPointAsCoordinates::class) val position: GeoPoint? = null) : SpecificFeature
     /** A state or region. [iso] and [wikipedia] are optional for the same reason as [Admin0Label]. */
     @Serializable
-    data class Admin1Label(@SerialName("iso3166_2") val iso: String? = null, val wikipedia: String? = null, val name: String) : SpecificFeature
+    data class Admin1Label(@SerialName("iso3166_2") val iso: String? = null, val wikipedia: String? = null, val name: String,
+                           @Serializable(with = GeoPointAsCoordinates::class) val position: GeoPoint? = null) : SpecificFeature
     /**
      * A city / town. Unlike the country and region labels there is no ISO code to
      * key on — the baked `admin_city` layer carries only `name` / `name_en` — so
@@ -37,13 +37,14 @@ sealed interface SpecificFeature {
      * [wikipedia] is optional for the same reason as [Admin0Label].
      */
     @Serializable
-    data class Admin2Label(val wikipedia: String? = null, val name: String) : SpecificFeature
+    data class Admin2Label(val wikipedia: String? = null, val name: String,
+                           @Serializable(with = GeoPointAsCoordinates::class) val position: GeoPoint? = null) : SpecificFeature
     @Serializable
     data class Restaurant(override val name: String, val phone: String?, val website: String?, val menu: String?, val openingHours: OpeningHours?,
-                          override val position: Position): RoutableFeature
+                          @Serializable(with = GeoPointAsCoordinates::class) override val position: GeoPoint): RoutableFeature
     @Serializable
     data class GenericPlace(override val name: String, val phone: String?, val website: String?, val openingHours: OpeningHours?,
-                          override val position: Position, val poiType: Int? = null,
+                          @Serializable(with = GeoPointAsCoordinates::class) override val position: GeoPoint, val poiType: Int? = null,
                           /** Street address from the OSM `addr:*` tags, when we have them. */
                           val address: String? = null): RoutableFeature
     @Serializable
@@ -69,7 +70,7 @@ sealed interface SpecificFeature {
  */
 suspend fun osmPlace(
     name: String,
-    position: Position,
+    position: GeoPoint,
     poiType: Int? = null,
 ): SpecificFeature.GenericPlace {
     val attrs = withContext(Dispatchers.IO) {
@@ -115,20 +116,26 @@ suspend fun parse(feature: Feature1): SpecificFeature? {
     val wiki = properties.string("wikidata")?.let { id ->
         try { Wikidata.get(id) } catch (_: Exception) { null }
     }
+    // Where the label sits, which is what the region mask probes with: the archive links a place
+    // to its outline by containment and nothing else, so losing this loses the mask.
+    val at = (feature.geometry as? Point)?.coordinates
     return when (properties.string("kind")) {
         "country" -> SpecificFeature.Admin0Label(
             iso = wiki?.getProperty("P297"),
             wikipedia = wiki?.getWikipedia(),
             name = name,
+            position = at,
         )
         "region" -> SpecificFeature.Admin1Label(
             iso = wiki?.getProperty("P300"),
             wikipedia = wiki?.getWikipedia(),
             name = name,
+            position = at,
         )
         // No ISO lookup: a city has no ISO 3166 code, so the Wikidata round trip is only for the
         // article URL.
-        "locality" -> SpecificFeature.Admin2Label(wikipedia = wiki?.getWikipedia(), name = name)
+        "locality" ->
+            SpecificFeature.Admin2Label(wikipedia = wiki?.getWikipedia(), name = name, position = at)
         else -> null
     }
 }

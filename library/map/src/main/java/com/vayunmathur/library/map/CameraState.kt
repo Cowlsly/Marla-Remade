@@ -18,13 +18,33 @@ import kotlinx.coroutines.flow.first
 import kotlin.math.log2
 
 /**
- * North-up camera position. Bearing/tilt are intentionally unsupported (the
- * three migrated apps only ever used a north-up basemap), so the axis-aligned
- * overlays and image quad stay correct.
+ * Where the camera is, and which way is up.
+ *
+ * [bearing] **defaults to zero**, so every existing call site, the saver, and the whole
+ * Compose path are unchanged: a north-up camera composes the same axis-aligned matrices it
+ * always did, and the overlays and image quad positioned against them stay correct.
+ *
+ * Tilt is still deliberately unsupported. A bearing is a rotation, which composes into the
+ * clip matrices as a 2x2 and leaves the projection orthographic; a tilt would make it
+ * perspective, and every screen-space measurement downstream — label boxes, the image
+ * quad, [Projection] itself — assumes it is not.
  */
 data class CameraPosition(
     val target: GeoPoint = GeoPoint(0.0, 0.0),
     val zoom: Double = 0.0,
+    /**
+     * Which compass direction points **up the screen**, in degrees clockwise from north.
+     *
+     * Zero is north-up and is what every phone screen uses. Android Auto's heading-up
+     * navigation is the one caller that sets it, through [SurfaceMapRenderer.camera].
+     *
+     * **Setting it on a [CameraState] does nothing.** The Compose path forces it to zero
+     * before the frame, because [Projection] is north-up and everything positioned through
+     * it — every `MapMarker`, pin and cluster — would stay put while the basemap turned
+     * underneath. Ignoring it is a visible no-op; honouring it would be a silent wrong
+     * render that nothing reports.
+     */
+    val bearing: Double = 0.0,
 )
 
 /**
@@ -85,6 +105,9 @@ class CameraState(initial: CameraPosition = CameraPosition()) {
     /** Linearly interpolate center + zoom to [target] over [durationMs]. */
     suspend fun animateTo(target: CameraPosition, durationMs: Int = 500) {
         val start = position
+        // The short way round, so a turn from 350 to 10 degrees goes through north rather
+        // than the long way through south. Inert on the phone, where both ends are zero.
+        val turn = ((target.bearing - start.bearing + 540.0) % 360.0) - 180.0
         Animatable(0f).animateTo(1f, tween(durationMs)) {
             val t = value.toDouble()
             position = CameraPosition(
@@ -93,6 +116,7 @@ class CameraState(initial: CameraPosition = CameraPosition()) {
                     lerp(start.target.latitude, target.target.latitude, t),
                 ),
                 zoom = lerp(start.zoom, target.zoom, t),
+                bearing = start.bearing + turn * t,
             )
         }
     }
@@ -175,13 +199,15 @@ class CameraState(initial: CameraPosition = CameraPosition()) {
         if (zoomEnabled && zoomChange != 1f && zoomChange > 0f) {
             val newZoom = (zoom + log2(zoomChange.toDouble())).coerceIn(effectiveMinZoom, maxZoom)
             if (newZoom != zoom) {
-                val zoomed = anchoredZoom(CameraPosition(center, zoom), newZoom, centroidDp, vp)
+                val zoomed = anchoredZoom(position.copy(target = center), newZoom, centroidDp, vp)
                 center = zoomed.target
                 zoom = zoomed.zoom
             }
         }
 
-        position = CameraPosition(center, zoom)
+        // `copy`, not a fresh `CameraPosition`: a gesture pans and zooms, and rebuilding
+        // the position from scratch would silently reset the bearing to north.
+        position = position.copy(target = center, zoom = zoom)
     }
 }
 
@@ -200,7 +226,7 @@ private fun anchoredZoom(
     val cw = Mercator.project(from.target.longitude, from.target.latitude, from.zoom)
     val geo = Mercator.unproject(cw.x + dx, cw.y + dy, from.zoom)
     val gw = Mercator.project(geo.longitude, geo.latitude, newZoom)
-    return CameraPosition(Mercator.unproject(gw.x - dx, gw.y - dy, newZoom), newZoom)
+    return from.copy(target = Mercator.unproject(gw.x - dx, gw.y - dy, newZoom), zoom = newZoom)
 }
 
 private fun lerp(start: Double, end: Double, t: Double): Double = start + (end - start) * t
@@ -208,16 +234,25 @@ private fun lerp(start: Double, end: Double, t: Double): Double = start + (end -
 /**
  * Saves the camera across configuration change and process death.
  *
- * Only `(lon, lat, zoom)`: [CameraState.viewportDp] is re-measured by the next layout pass
- * and [CameraState.labelQueryProvider] is re-registered by the surface, so persisting either
- * would restore a value that is immediately overwritten — and a stale viewport would produce
- * a wrong projection for one frame.
+ * Only `(lon, lat, zoom, bearing)`: [CameraState.viewportDp] is re-measured by the next
+ * layout pass and [CameraState.labelQueryProvider] is re-registered by the surface, so
+ * persisting either would restore a value that is immediately overwritten — and a stale
+ * viewport would produce a wrong projection for one frame.
  */
 private val CameraStateSaver = listSaver<CameraState, Double>(
     save = {
-        listOf(it.position.target.longitude, it.position.target.latitude, it.position.zoom)
+        listOf(
+            it.position.target.longitude,
+            it.position.target.latitude,
+            it.position.zoom,
+            it.position.bearing,
+        )
     },
-    restore = { CameraState(CameraPosition(GeoPoint(it[0], it[1]), it[2])) },
+    // `getOrElse` rather than `it[3]`: a bundle written before the bearing existed is
+    // three long, and a restored camera is not worth an IndexOutOfBounds.
+    restore = {
+        CameraState(CameraPosition(GeoPoint(it[0], it[1]), it[2], it.getOrElse(3) { 0.0 }))
+    },
 )
 
 /**

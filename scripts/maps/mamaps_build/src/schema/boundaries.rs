@@ -36,12 +36,41 @@ pub const FILTERS: &[&str] = &["boundary", "admin_level", "maritime"];
 
 /// Every `kind` this module can emit.
 #[cfg_attr(not(test), allow(dead_code))]
-pub const KINDS: &[&str] = &["country", "region", "county", "locality"];
+pub const KINDS: &[&str] = &["country", "region", "county", "locality", "region_area"];
 
 /// The deepest administrative level worth drawing.
 ///
 /// Below 8 is a ward or a neighbourhood: real data, and a line nobody has ever wanted on a basemap.
 const MAX_LEVEL: u16 = 8;
+
+/// The region's *shape*, for a relation that has one.
+///
+/// Emitted **in addition to** the border line from [`classify`], never instead of it: the line is
+/// what draws the border, and this is only read by the region mask. Both are needed, and they
+/// cannot be the same feature — see the module docs for the tile-edge grid that results from
+/// trying.
+///
+/// `None` for a way, because a single way is one segment of a border and encloses nothing. A
+/// relation whose rings will not close simply yields no area, and the border is unaffected.
+pub fn region_area(tags: &(impl TagSource + ?Sized), is_way: bool) -> Option<Class> {
+    if is_way {
+        return None;
+    }
+    let line = classify(tags)?;
+    Some(Class {
+        layer: LAYER_BOUNDARIES,
+        kind: kind("region_area"),
+        // The same level the border carries, so the mask can tell a country from a city.
+        kind_detail: line.kind_detail,
+        flags: FLAG_DETAIL_NUMERIC,
+        area: true,
+        // One level shallower than the border line. A mask is drawn over a whole region, so it is
+        // wanted at the zoom where the region *fits on screen* — which is about where its label
+        // appears, not where its border becomes legible.
+        min_zoom: line.min_zoom.saturating_sub(1),
+        min_area_px: 0.0,
+    })
+}
 
 pub fn classify(tags: &(impl TagSource + ?Sized)) -> Option<Class> {
     if tags.get("boundary") != Some("administrative") {
@@ -138,6 +167,37 @@ mod tests {
         assert_eq!(name("4"), "region");
         assert_eq!(name("6"), "county");
         assert_eq!(name("8"), "locality");
+    }
+
+    /// A relation yields the border *and* the region's shape, as two features.
+    ///
+    /// They cannot be one. The border must stay a line, because clipping a polygon to a tile adds
+    /// segments along the tile edge and the style's `boundaries` layer strokes polygon outlines —
+    /// which drew a grid across the whole map when this was tried as a single area feature.
+    #[test]
+    fn a_relation_yields_a_border_line_and_a_region_shape() {
+        let tags = [("boundary", "administrative"), ("admin_level", "8")];
+        let line = classify_tags(&tags).expect("the border");
+        assert!(!line.area, "the border is drawn, so it stays a line");
+
+        let shape = super::region_area(&tags[..], false).expect("the region");
+        assert!(shape.area, "the region is a shape, and nothing draws it");
+        assert_eq!(shape.layer, dict::LAYER_BOUNDARIES);
+        assert_eq!(
+            dict::KINDS[shape.kind as usize - 1],
+            "region_area",
+            "a kind the boundaries layer's whitelist excludes, or it would be stroked",
+        );
+        assert_eq!(shape.kind_detail, line.kind_detail, "same level, so the mask can tell a city from a country");
+        assert!(shape.min_zoom < line.min_zoom, "a mask is wanted where the region fits on screen");
+    }
+
+    /// A single way is one segment of a border and encloses nothing.
+    #[test]
+    fn a_way_has_no_region_shape() {
+        let tags = [("boundary", "administrative"), ("admin_level", "2")];
+        assert!(super::region_area(&tags[..], true).is_none());
+        assert!(super::region_area(&tags[..], false).is_some());
     }
 
     /// A border is a line even when it closes. Filling it would paint over every layer inside the

@@ -333,6 +333,19 @@ class FindFamilyViewModel(
     )
     val hasBackground: StateFlow<Boolean> = _hasBackground.asStateFlow()
 
+    private val _hasBluetooth = MutableStateFlow(
+        ContextCompat.checkSelfPermission(
+            ctx,
+            Manifest.permission.BLUETOOTH_SCAN
+        ) == PackageManager.PERMISSION_GRANTED
+    )
+
+    /**
+     * BLUETOOTH_SCAN. Required rather than optional: the finder half of powered-off finding is
+     * always on, and without this the scanner starts and immediately closes with no error.
+     */
+    val hasBluetooth: StateFlow<Boolean> = _hasBluetooth.asStateFlow()
+
     /** Re-read all permission flags from the OS and reconcile the tracking
      * service. Call on resume so returning from Settings (grant, revoke,
      * downgrade to approximate, "Only this time" expiry) takes effect. */
@@ -348,6 +361,10 @@ class FindFamilyViewModel(
         _hasBackground.value = ContextCompat.checkSelfPermission(
             ctx,
             Manifest.permission.ACCESS_BACKGROUND_LOCATION
+        ) == PackageManager.PERMISSION_GRANTED
+        _hasBluetooth.value = ContextCompat.checkSelfPermission(
+            ctx,
+            Manifest.permission.BLUETOOTH_SCAN
         ) == PackageManager.PERMISSION_GRANTED
         syncLocationService()
     }

@@ -1,7 +1,7 @@
 package com.vayunmathur.maps.util
 
 import kotlinx.serialization.Serializable
-import org.maplibre.spatialk.geojson.Position
+import com.vayunmathur.library.map.GeoPoint
 import kotlin.time.Duration
 import kotlin.time.Duration.Companion.seconds
 
@@ -34,12 +34,12 @@ object RouteService {
     data class Route(
         override val duration: Duration,
         override val distanceMeters: Double,
-        val polyline: List<Position>,
+        val polyline: List<GeoPoint>,
         val step: List<Step>,
         val departureTime: String? = null,
         val arrivalTime: String? = null,
     ): RouteType
-    data class Step(val distanceMeters: Double, val staticDuration: Duration, val polyline: List<Position>, val navInstruction: API.NavInstruction, val travelMode: TravelMode, val transitDetails: API.TransitDetails? = null, val speedRatio: Double = 1.0, val lanes: List<API.Lane> = emptyList())
+    data class Step(val distanceMeters: Double, val staticDuration: Duration, val polyline: List<GeoPoint>, val navInstruction: API.NavInstruction, val travelMode: TravelMode, val transitDetails: API.TransitDetails? = null, val speedRatio: Double = 1.0, val lanes: List<API.Lane> = emptyList())
     interface RouteType { val duration: Duration; val distanceMeters: Double }
     class EmptyRoute: RouteType { override val duration: Duration = 0.seconds; override val distanceMeters: Double = 0.0 }
 }

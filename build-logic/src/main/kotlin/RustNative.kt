@@ -62,7 +62,6 @@ fun Project.rustNativeLib(
         maxParallelUsages.set(1)
     }
 
-    val ndkVersionForRust = "29.0.14206865"
     val androidApiLevel = 31
 
     fun resolveSdkDir(): String =
@@ -74,7 +73,7 @@ fun Project.rustNativeLib(
             ?: error("Android SDK not found (set ANDROID_HOME or sdk.dir in local.properties)")
 
     val cargoBin = "${System.getProperty("user.home")}/.cargo/bin"
-    val ndkRoot = "${resolveSdkDir()}/ndk/$ndkVersionForRust"
+    val ndkRoot = "${resolveSdkDir()}/ndk/$NDK_VERSION"
     val hostTag = when {
         OperatingSystem.current().isMacOsX -> "darwin-x86_64"
         OperatingSystem.current().isLinux -> "linux-x86_64"

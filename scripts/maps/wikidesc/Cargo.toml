@@ -7,6 +7,11 @@ edition = "2021"
 # under `scripts/maps`: it is built for the host toolchain, not for Android.
 [workspace]
 
+[dependencies]
+# For the `.pbf` scan only. The library half of this crate — cleaning, the container, the join —
+# deliberately does not touch it, so it stays testable without an OSM extract.
+osm_ingest = { path = "../osm_ingest" }
+
 [lib]
 name = "wikidesc"
 path = "src/lib.rs"

@@ -32,8 +32,6 @@ rustNativeLib("offlinerouter", "maps")
 
 dependencies {
     implementation(project(":library:map"))
-    implementation("org.maplibre.spatialk:geojson-jvm:0.7.0")
-    implementation("org.maplibre.gl:android-sdk:13.0.2")
     implementation(project(":library:image"))
     implementation(project(":library:network"))
 
@@ -41,9 +39,8 @@ dependencies {
 
     // Android Auto (P12): AndroidX Car App Library. `app` provides the
     // CarAppService/Session/Screen/template model; `app-projected` provides the
-    // phone-projected (Android Auto) host connection. Coordinates are declared
-    // inline (rather than via the version catalog) to keep this phase confined
-    // to maps/. Only pulled into the car code path — the phone UI is untouched.
-    implementation("androidx.car.app:app:1.4.0")
-    implementation("androidx.car.app:app-projected:1.4.0")
+    // phone-projected (Android Auto) host connection. Only pulled into the car
+    // code path — the phone UI is untouched.
+    implementation(libs.androidx.car.app)
+    implementation(libs.androidx.car.app.projected)
 }

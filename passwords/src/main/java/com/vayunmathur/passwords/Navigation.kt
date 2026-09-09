@@ -29,10 +29,10 @@ fun Navigation(
         entry<Route.PasswordPage>(metadata = ListDetailPage() + MorphPage()) {
             PasswordPage(backStack, it.id, passwordsViewModel)
         }
-        entry<Route.PasswordEditPage>(metadata = ListDetailPage()) {
+        entry<Route.PasswordEditPage>(metadata = ListDetailPage() + MorphPage()) {
             PasswordEditPage(backStack, it.id, passwordsViewModel)
         }
-        entry<Route.PasskeyPage>(metadata = ListDetailPage()) {
+        entry<Route.PasskeyPage>(metadata = ListDetailPage() + MorphPage()) {
             PasskeyPage(backStack, it.id, passwordsViewModel)
         }
         entry<Route.Settings>(metadata = ListDetailPage()) {

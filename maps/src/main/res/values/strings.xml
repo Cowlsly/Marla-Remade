@@ -57,6 +57,11 @@
     <!-- Place detail: Attribution for scraped POI enrichment. "Google Maps" is a product
          trademark and must not be translated. -->
     <string name="poi_google_attribution" translatable="false">Data from Google Maps</string>
+    <!-- Place detail: Fuel price section header, shown for gas stations only. Noun phrase. -->
+    <string name="poi_fuel_price_header">Fuel price</string>
+    <!-- Place detail: Label of the first tab under the action buttons, holding the
+         description, address and opening hours. Noun, plural. -->
+    <string name="poi_tab_details">Details</string>
     <!-- Place detail: Photos section header. Noun. -->
     <string name="poi_photos_header">Photos</string>
     <!-- Place detail: Reviews section header. Noun. -->
@@ -110,6 +115,9 @@
     <string name="street_view_loading">Loading Street View…</string>
     <!-- Street View viewer: shown when no panorama could be loaded for this place. -->
     <string name="street_view_unavailable">Street View is not available here</string>
+    <!-- MapPage: content description of the peg you drag off the map controls and drop
+         on a point to open Street View there. -->
+    <string name="street_view_peg">Drag onto the map to open Street View</string>
 
     <!-- MapPage: Placeholder for map search bar -->
     <string name="search_placeholder">Search…</string>
@@ -327,8 +335,16 @@
     <string name="transit_now">Now</string>
     <!-- Departure board: minutes until departure. %1$d = whole minutes e.g. "5 min" -->
     <string name="transit_minutes">%1$d min</string>
+    <!-- A departure that has already left, inside the last ten minutes. -->
+    <string name="transit_minutes_ago">%1$d min ago</string>
     <!-- Departure board: realtime delay vs schedule, signed. %1$d = signed minutes e.g. "+3 min" -->
-    <string name="transit_delay_minutes">%1$+d min</string>
+    <!--
+      Delay, in words. "+3 min" and "-4 min" made the reader work out which sign meant trouble;
+      a train is late or early, and the board should just say so. Both take a positive number,
+      so the sign lives in the wording rather than the digits.
+    -->
+    <string name="transit_late_minutes">%1$d min late</string>
+    <string name="transit_early_minutes">%1$d min early</string>
     <!-- Transit directions: the direction a line is heading. %1$s = headsign e.g. "Ocean Beach" -->
     <string name="transit_towards">Towards %1$s</string>
     <!-- Transit directions: how many stops are ridden. %1$d = stop count -->

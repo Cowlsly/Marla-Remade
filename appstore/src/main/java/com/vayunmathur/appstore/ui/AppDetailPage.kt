@@ -63,7 +63,7 @@ import com.vayunmathur.library.ui.R as UiR
 import com.vayunmathur.library.ui.Text
 import com.vayunmathur.library.ui.TextButton
 import com.vayunmathur.library.ui.appBarScrollBehavior
-import com.vayunmathur.library.util.sharedContainer
+import com.vayunmathur.library.util.sharedCrop
 
 /** Binds [AppStoreViewModel] to the stateless [AppDetailScreen]. */
 @Composable
@@ -144,7 +144,7 @@ private fun Header(state: AppDetailUiState) {
     val app = state.app ?: return
     Row(
         Modifier
-            .sharedContainer("appstore-app-${app.packageName}")
+            .sharedCrop("appstore-app-${app.packageName}")
             .fillMaxWidth()
             .padding(start = 16.dp, end = 16.dp, top = 8.dp),
         verticalAlignment = Alignment.CenterVertically,

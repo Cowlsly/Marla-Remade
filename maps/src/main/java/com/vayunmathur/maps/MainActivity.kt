@@ -28,11 +28,9 @@ import com.vayunmathur.maps.data.SpecificFeature
 import com.vayunmathur.maps.data.google.GoogleSearchDataSource
 import com.vayunmathur.maps.ui.MapPage
 import com.vayunmathur.maps.ui.SavedPlacesPage
-import com.vayunmathur.maps.ui.SearchPage
 import com.vayunmathur.maps.ui.settings.MapSettingsPage
 import com.vayunmathur.maps.data.MapPreferences
 import com.vayunmathur.maps.data.ThemeMode
-import com.vayunmathur.maps.util.MapTileCache
 import com.vayunmathur.maps.util.MapsSearchViewModel
 import com.vayunmathur.maps.util.NavigationService
 import com.vayunmathur.maps.util.NavigationSessionManager
@@ -47,8 +45,7 @@ import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.serialization.Serializable
-import org.maplibre.android.log.Logger
-import org.maplibre.spatialk.geojson.Position
+import com.vayunmathur.library.map.GeoPoint
 import java.io.File
 
 class MainActivity : ComponentActivity() {
@@ -65,14 +62,10 @@ class MainActivity : ComponentActivity() {
         // FIRST_PARTY: data.vayunmathur.com tiles + amenities + api.vayunmathur.com -> ISRG+GTS
         NetworkClient.init(this, TrustBundle.FIRST_PARTY)
         enableEdgeToEdge()
-        // Route MapLibre's HTTP (incl. the streamed pmtiles range requests)
-        // through our disk-caching client. Must happen before the map loads.
-        MapTileCache.install(this)
         // Reclaim the ~44 MB bundled basemap copied into filesDir by older
         // builds; the basemap now streams live and is cached on demand.
         File(filesDir, "world_z0-6.pmtiles").delete()
         val ds = DataStoreUtils.getInstance(this)
-        Logger.setVerbosity(Logger.INFO)
 
         // Deep link that launched us cold (geo:/google.navigation:/maps URL).
         handleIntent(intent)
@@ -196,15 +189,15 @@ class MainActivity : ComponentActivity() {
         lifecycleScope.launch {
             val mode = link.mode ?: RouteService.TravelMode.DRIVE
             // Destination position: an explicit coord, else geocode the query.
-            val destPos: Position?
+            val destPos: GeoPoint?
             val destName: String
             if (link.lat != null && link.lng != null) {
-                destPos = Position(link.lng, link.lat)
+                destPos = GeoPoint(link.lng, link.lat)
                 destName = link.query ?: getString(R.string.dropped_pin)
             } else if (!link.query.isNullOrBlank()) {
                 val near = biasPosition()
                 val hit = GoogleSearchDataSource.search(link.query, near.latitude, near.longitude).firstOrNull()
-                destPos = hit?.let { Position(it.lng, it.lat) }
+                destPos = hit?.let { GeoPoint(it.lng, it.lat) }
                 destName = hit?.name ?: link.query
             } else {
                 destPos = null
@@ -255,21 +248,21 @@ class MainActivity : ComponentActivity() {
     }
 
     /** First valid GPS fix within [timeoutMs], or null. (0,0) means "no fix yet". */
-    private suspend fun awaitUserPosition(timeoutMs: Long = 8_000): Position? =
+    private suspend fun awaitUserPosition(timeoutMs: Long = 8_000): GeoPoint? =
         withTimeoutOrNull(timeoutMs) {
             selectedVm.userPosition.first { it.latitude != 0.0 || it.longitude != 0.0 }
         }
 
     /** Search bias: the user's live position when known, else the map's default centre. */
-    private fun biasPosition(): Position {
+    private fun biasPosition(): GeoPoint {
         val p = selectedVm.userPosition.value
-        return if (p.latitude != 0.0 || p.longitude != 0.0) p else Position(-118.243683, 34.052235)
+        return if (p.latitude != 0.0 || p.longitude != 0.0) p else GeoPoint(-118.243683, 34.052235)
     }
 
     private fun genericPlace(name: String, lat: Double, lng: Double) =
         SpecificFeature.GenericPlace(
             name = name, phone = null, website = null, openingHours = null,
-            position = Position(lng, lat),
+            position = GeoPoint(lng, lat),
         )
 
     companion object {
@@ -285,9 +278,6 @@ sealed interface Route: NavKey {
     data object SettingsPage: Route
     @Serializable
     data object SavedPlacesPage: Route
-
-    @Serializable
-    data class SearchPage(val idx: Int?, val east: Double, val west: Double, val north: Double, val south: Double, val query: String? = null): Route
 }
 
 @Composable
@@ -309,9 +299,6 @@ fun Navigation(
         }
         entry<Route.SavedPlacesPage> {
             SavedPlacesPage(backStack, savedPlacesViewModel)
-        }
-        entry<Route.SearchPage> {
-            SearchPage(backStack, viewModel, searchViewModel, savedPlacesViewModel, it.idx, it.east, it.west, it.north, it.south, it.query)
         }
     }
 }

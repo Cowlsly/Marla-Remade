@@ -68,6 +68,7 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.first
@@ -1305,10 +1306,10 @@ object LocationServiceController {
     /**
      * Whether this phone acts as a finder for other people's powered-off devices.
      *
-     * **Opt-in, unlike everything else here**, and it stays that way. Turning it on means the
-     * phone scans for and reports strangers' devices, which is a thing done on someone else's
-     * behalf rather than the user's own, so it cannot be a default and it cannot be enabled
-     * quietly. See `R.string.crowd_finding_explanation` for what the user is told.
+     * MANDATORY. There is no toggle: the finder half is part of what the app is, and the
+     * Bluetooth permission behind it is now requested on the initial permission screen alongside
+     * location. The key is retained only so an existing install's stored value is not orphaned;
+     * nothing reads it any more.
      */
     const val CROWD_FINDING_ENABLED_KEY = "crowd_finding_enabled"
 
@@ -1346,12 +1347,16 @@ object LocationServiceController {
     }
 
     /** Whether the user has agreed to act as a finder. Defaults to **false** — opt-in. */
-    suspend fun isCrowdFindingEnabled(context: Context): Boolean =
-        DataStoreUtils.getInstance(context).getBooleanAwait(CROWD_FINDING_ENABLED_KEY, false)
+    @Suppress("UNUSED_PARAMETER")
+    suspend fun isCrowdFindingEnabled(context: Context): Boolean = true
 
-    /** [isCrowdFindingEnabled] as a stream, so the scanner starts and stops with the switch. */
-    fun crowdFindingEnabledFlow(context: Context): Flow<Boolean> =
-        DataStoreUtils.getInstance(context).booleanFlow(CROWD_FINDING_ENABLED_KEY, false)
+    /**
+     * [isCrowdFindingEnabled] as a stream. Constant now that finding is mandatory - kept as a
+     * Flow so the collector in the service is unchanged, and so a future re-introduction of a
+     * user control does not have to re-plumb the call site.
+     */
+    @Suppress("UNUSED_PARAMETER")
+    fun crowdFindingEnabledFlow(context: Context): Flow<Boolean> = flowOf(true)
 
     suspend fun setCrowdFindingEnabled(context: Context, enabled: Boolean) {
         DataStoreUtils.getInstance(context).setBoolean(CROWD_FINDING_ENABLED_KEY, enabled)

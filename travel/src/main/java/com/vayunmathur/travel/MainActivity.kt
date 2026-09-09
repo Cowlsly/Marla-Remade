@@ -173,7 +173,7 @@ fun MainGraph(viewModel: TravelViewModel) {
             entry<Route.OutboundSelect> { OutboundSelectPage(backStack, viewModel, it) }
             entry<Route.ReturnSelect> { ReturnSelectPage(backStack, viewModel, it) }
             entry<Route.FareSelect> { FareSelectPage(backStack, viewModel, it) }
-            entry<Route.OfferReview> { OfferReviewPage(backStack, viewModel, it) }
+            entry<Route.OfferReview>(metadata = MorphPage()) { OfferReviewPage(backStack, viewModel, it) }
             entry<Route.Ancillaries> { AncillariesPage(backStack, viewModel, it) }
             entry<Route.SeatMap> { SeatMapPage(backStack, viewModel, it) }
             entry<Route.Passengers> { PassengersPage(backStack, viewModel, it) }

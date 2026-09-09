@@ -32,6 +32,7 @@ import com.vayunmathur.library.ui.Tab
 import com.vayunmathur.library.ui.Text
 import com.vayunmathur.library.ui.appBarScrollBehavior
 import com.vayunmathur.library.util.NavBackStack
+import com.vayunmathur.library.util.sharedContainer
 import com.vayunmathur.library.util.sharedText
 import com.vayunmathur.musicbrainz.R
 import com.vayunmathur.musicbrainz.Route
@@ -168,7 +169,12 @@ private fun SearchResults(
                                 .joinToString(" \u00B7 "),
                         )
                     },
-                    leadingContent = { CoverArtImage(group.coverUrl) },
+                    leadingContent = {
+                        CoverArtImage(
+                            group.coverUrl,
+                            modifier = Modifier.sharedContainer("mb-release-group-cover-${group.id}"),
+                        )
+                    },
                 )
             }
             SearchTab.Recordings -> items(state.recordings, key = { it.id }) { recording ->

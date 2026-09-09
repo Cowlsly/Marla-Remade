@@ -9,7 +9,7 @@ import android.location.Location
 import android.location.LocationListener
 import android.location.LocationManager
 import android.os.Bundle
-import org.maplibre.spatialk.geojson.Position
+import com.vayunmathur.library.map.GeoPoint
 
 class FrameworkLocationManager(context: Context) : SensorEventListener {
     private val locationManager = context.getSystemService(Context.LOCATION_SERVICE) as LocationManager
@@ -21,10 +21,10 @@ class FrameworkLocationManager(context: Context) : SensorEventListener {
     private val rotationMatrix = FloatArray(9)
     private val orientationAngles = FloatArray(3)
 
-    // Callback to pass both Position and Heading (Compass). The heading is null until a
+    // Callback to pass both GeoPoint and Heading (Compass). The heading is null until a
     // real one has been seen: "unknown" and "due north" are different things, and the map
     // draws the puck's bearing cone only for the second.
-    private var onUpdate: ((Position, Float?) -> Unit)? = null
+    private var onUpdate: ((GeoPoint, Float?) -> Unit)? = null
     // Callback for magnetometer accuracy so the UI can prompt for calibration.
     private var onAccuracy: ((Int) -> Unit)? = null
     private var lastLocation: Location? = null
@@ -36,7 +36,7 @@ class FrameworkLocationManager(context: Context) : SensorEventListener {
 
     @SuppressLint("MissingPermission")
     fun startUpdates(
-        onUpdateReceived: (Position, Float?) -> Unit,
+        onUpdateReceived: (GeoPoint, Float?) -> Unit,
         onAccuracyReceived: (Int) -> Unit = {},
     ): LocationListener {
         this.onUpdate = onUpdateReceived
@@ -55,7 +55,7 @@ class FrameworkLocationManager(context: Context) : SensorEventListener {
                 lastLocation = location
                 // If location has a GPS bearing, we prioritize it while moving
                 val heading = if (location.hasBearing()) location.bearing else currentHeading
-                onUpdate?.invoke(Position(location.longitude, location.latitude), heading)
+                onUpdate?.invoke(GeoPoint(location.longitude, location.latitude), heading)
             }
             @Deprecated("Overrides deprecated LocationListener.onStatusChanged")
             override fun onStatusChanged(provider: String?, status: Int, extras: Bundle?) {}
@@ -124,7 +124,7 @@ class FrameworkLocationManager(context: Context) : SensorEventListener {
             // Update UI if we have a location but the user is standing still
             lastLocation?.let {
                 if (!it.hasBearing()) {
-                    onUpdate?.invoke(Position(it.longitude, it.latitude), currentHeading)
+                    onUpdate?.invoke(GeoPoint(it.longitude, it.latitude), currentHeading)
                 }
             }
         }

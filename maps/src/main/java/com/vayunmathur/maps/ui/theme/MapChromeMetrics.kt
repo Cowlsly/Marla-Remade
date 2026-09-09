@@ -16,10 +16,14 @@ import androidx.compose.ui.unit.dp
 object MapChromeMetrics {
 
     /**
-     * How much of the bottom sheet shows when it is peeking.
+     * How much of the bottom sheet shows when it is peeking, for a selection with no
+     * measurable header.
      *
-     * Fixed rather than content-driven, which is a known limitation: a sheet whose content is
-     * shorter than this renders padding below it.
+     * Places do not use this: `BottomSheetHeader` gives the scaffold a header slot and the
+     * peek is measured from it, so a place peeks at exactly its title through its action
+     * row. What is left on this number is routes and admin labels, which have no header
+     * split yet — and for those it keeps the known limitation it always had, that content
+     * shorter than 170 dp renders padding below it.
      */
     val sheetPeekHeight: Dp = 170.dp
 

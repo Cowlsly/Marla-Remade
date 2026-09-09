@@ -23,14 +23,12 @@ private const val ENTRY_PAYLOAD_PROPERTIES = "payload_properties.txt"
 private const val ENTRY_CARE_MAP = "care_map.pb"
 
 /**
- * Where update_engine looks for the care map.
+ * Where update_engine looks for the care map, matching the reference implementation.
  *
- * INFERRED, not copied from the reference — see the note on [copyCareMap]. The care map lists
- * the blocks that are actually in use, letting update_engine skip verifying the rest. It is an
- * optimisation: getting the destination wrong costs a slower apply, not a broken one, which is
- * why the copy is best-effort and never fails the install.
+ * The care map lists the blocks that are actually in use, letting update_engine skip verifying
+ * the rest. It is an optimisation, so staging it is best-effort and never fails an install.
  */
-private const val CARE_MAP_DESTINATION = "/data/ota_package/care_map.pb"
+private val CARE_MAP_PATH = File("/data/ota_package/care_map.pb")
 
 /**
  * Turns a downloaded file into a written inactive slot.
@@ -50,7 +48,12 @@ object OtaInstaller {
         /** Written to the inactive slot. A reboot will boot into it. */
         data object Applied : Result
 
-        data class Failed(val reason: String, val retryable: Boolean = false) : Result
+        data class Failed(
+            val reason: String,
+            val retryable: Boolean = false,
+            /** The package cannot apply to this build; see [UpdateEngineOutcome.Outcome.Failed]. */
+            val initializationFailure: Boolean = false,
+        ) : Result
     }
 
     /**
@@ -157,19 +160,23 @@ object OtaInstaller {
      * Best-effort copy of the care map out of the package.
      *
      * Failure is logged and ignored: the care map only tells update_engine which blocks it can
-     * skip verifying, so its absence makes the apply slower rather than wrong. The destination
-     * path is inferred rather than taken from the reference implementation, so this failing on
-     * a real device is a plausible outcome and deliberately not one that stops an update.
+     * skip verifying, so its absence makes the apply slower rather than wrong.
+     *
+     * World-readable afterwards for the same reason the package itself is — update_engine opens
+     * it as its own uid, not ours.
      */
     private fun copyCareMap(packageFile: File) {
         runCatching {
             ZipFile(packageFile).use { zip ->
-                val entry = zip.getEntry(ENTRY_CARE_MAP) ?: return
-                zip.getInputStream(entry).use { input ->
-                    File(CARE_MAP_DESTINATION).outputStream().use { output ->
-                        input.copyTo(output)
-                    }
+                val entry = zip.getEntry(ENTRY_CARE_MAP)
+                if (entry == null) {
+                    Log.i(TAG, "$ENTRY_CARE_MAP missing; continuing without it")
+                    return
                 }
+                zip.getInputStream(entry).use { input ->
+                    CARE_MAP_PATH.outputStream().use { output -> input.copyTo(output) }
+                }
+                CARE_MAP_PATH.setReadable(true, false)
             }
         }.onFailure { Log.i(TAG, "could not stage the care map; continuing without it", it) }
     }
@@ -192,16 +199,35 @@ object OtaInstaller {
         payloadOffset: Long,
         headers: List<String>,
         onProgress: (percent: Int) -> Unit,
-    ): Result = suspendCancellableCoroutine { continuation ->
+    ): Result {
         val engine = try {
             UpdateEngine()
         } catch (e: Exception) {
             // The constructor binds to the update_engine binder and throws when it is
-            // unavailable — which is what a non-privileged build looks like from here.
+            // unavailable - which is what a non-privileged build looks like from here.
             Log.e(TAG, "update_engine is unavailable", e)
-            continuation.resume(Result.Failed("the system update service is unavailable"))
-            return@suspendCancellableCoroutine
+            return Result.Failed("the system update service is unavailable")
         }
+        return try {
+            awaitPayload(engine, packageFile, payloadOffset, headers, onProgress)
+        } finally {
+            // Deliberately here rather than inside the callback. The reference unbinds on the
+            // calling thread after the completion arrives (Service.java:134), not from within
+            // the binder callback, and unbinding from the callback thread risks deadlocking
+            // against the same binder we are being called on. `finally` also covers
+            // cancellation, which would otherwise leave the callback registered against a
+            // service that outlives this object.
+            runCatching { if (!engine.unbind()) Log.w(TAG, "could not unbind update_engine") }
+        }
+    }
+
+    private suspend fun awaitPayload(
+        engine: UpdateEngine,
+        packageFile: File,
+        payloadOffset: Long,
+        headers: List<String>,
+        onProgress: (percent: Int) -> Unit,
+    ): Result = suspendCancellableCoroutine { continuation ->
 
         val callback = object : UpdateEngineCallback() {
             override fun onStatusUpdate(status: Int, percent: Float) {
@@ -212,10 +238,21 @@ object OtaInstaller {
             override fun onPayloadApplicationComplete(errorCode: Int) {
                 continuation.finish(
                     when (val outcome = UpdateEngineOutcome.of(errorCode)) {
-                        UpdateEngineOutcome.Outcome.Applied -> Result.Applied
+                        UpdateEngineOutcome.Outcome.Applied -> {
+                            // Whatever happened, the 1-2 GB staged package has served its
+                            // purpose and must not be left behind or resumed from.
+                            packageFile.delete()
+                            Result.Applied
+                        }
+
                         is UpdateEngineOutcome.Outcome.Failed -> {
                             Log.e(TAG, "apply failed: ${outcome.reason} (${outcome.code})")
-                            Result.Failed(outcome.reason, outcome.retryable)
+                            packageFile.delete()
+                            Result.Failed(
+                                outcome.reason,
+                                outcome.retryable,
+                                outcome.initializationFailure,
+                            )
                         }
                     },
                 )
@@ -229,6 +266,9 @@ object OtaInstaller {
         continuation.invokeOnCancellation { runCatching { engine.cancel() } }
 
         try {
+            // update_engine opens this path as its own uid, not ours, so it has to be readable
+            // by others. Without it applyPayload fails on open.
+            packageFile.setReadable(true, false)
             engine.applyPayload(
                 "file://${packageFile.absolutePath}",
                 payloadOffset,

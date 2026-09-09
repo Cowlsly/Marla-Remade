@@ -31,9 +31,9 @@ import kotlin.math.sqrt
  *  - `photometa/v1` — a pano by id, used to walk to a neighbour (a `)]}'` guard).
  * Tiles come from `streetviewpixels-pa.googleapis.com/v1/tile` (keyless JPEG).
  *
- * RENDERER NOTE: unlike Vela (a GLES sphere) this returns a single stitched
- * *equirectangular* [Bitmap]; the viewer ([ui.streetview.StreetViewScreen]) shows
- * it with the photos-app pan/zoom image renderer.
+ * RENDERER NOTE: this returns a single stitched *equirectangular* [Bitmap]; the
+ * viewer ([ui.streetview.StreetViewScreen]) projects it onto the inside of a GLES
+ * sphere via the shared `PanoramaSphere` renderer.
  *
  * All network runs on [Dispatchers.IO]; every accessor is null-safe so a Google
  * reshape degrades to "no imagery" instead of throwing. Pano metadata is cached in
@@ -77,9 +77,8 @@ object StreetViewDataSource {
     )
 
     // Cap the stitched equirect width so a full-res pyramid (16384×8192 ≈ 400 MB
-    // decoded) can't blow up memory; the pan/zoom viewer only needs a sharp mid
-    // level. Native pano dimensions are kept (no upscaling — the flat viewer
-    // doesn't need a power-of-two texture the way a GL sphere did).
+    // decoded) can't blow up memory. Also keeps the bitmap inside GL_MAX_TEXTURE_SIZE,
+    // which is at least 4096 on every device this app runs on.
     private const val MAX_TILE_WIDTH = 4096
 
     private val json = Json { ignoreUnknownKeys = true; isLenient = true }
@@ -145,7 +144,7 @@ object StreetViewDataSource {
 
     /**
      * Fetch [pano]'s equirectangular tiles at a bounded zoom level and stitch them
-     * into one bitmap for the pan/zoom viewer. Null when no tile could be fetched.
+     * into one bitmap for the sphere viewer. Null when no tile could be fetched.
      *
      * The pyramid shape is taken from the pano's own [StreetViewPano.levelDims]
      * (modern captures are 512·2^z, pre-2016 are 416·2^z) so an old capture's grid

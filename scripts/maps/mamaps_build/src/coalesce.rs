@@ -107,6 +107,16 @@ type Run = Vec<Span>;
 /// Polygon features are left exactly as they were, in place; only the parts table and the arena are
 /// rebuilt around them, which [`crate::rings::normalise`] does immediately afterwards anyway.
 pub fn coalesce_lines(layer: &mut Layer) -> Stats {
+    coalesce_lines_with_ids(layer, None)
+}
+
+/// As [`coalesce_lines`], but also rewrites an id side table so it stays parallel to the features.
+///
+/// The table is indexed by feature position, so merging lines without rewriting it leaves more ids
+/// than features and the encoder rejects the tile. A merged line takes the id of the first feature
+/// of its class, which is arbitrary — that is why only layers whose id-carrying features are *not*
+/// lines populate the table at all (see `extract::tracks_ids`).
+pub fn coalesce_lines_with_ids(layer: &mut Layer, ids: Option<&mut Vec<u64>>) -> Stats {
     let mut stats = Stats {
         features_before: layer.features.len() as u64,
         parts_before: layer.parts.len() as u64,
@@ -146,11 +156,13 @@ pub fn coalesce_lines(layer: &mut Layer) -> Stats {
         groups.iter().map(|parts| chain(parts, &layer.coords)).collect();
 
     let mut features = Vec::with_capacity(layer.features.len() - lines + order.len());
+    // The original position of each surviving feature, for remapping the id table below.
+    let mut kept: Vec<usize> = Vec::with_capacity(features.capacity());
     let mut parts: Vec<Part> = Vec::with_capacity(layer.parts.len());
     let mut coords: Vec<(i16, i16)> = Vec::with_capacity(layer.coords.len());
     let mut emitted: Vec<bool> = vec![false; order.len()];
 
-    for feature in &layer.features {
+    for (index, feature) in layer.features.iter().enumerate() {
         if feature.geom_type != GEOM_LINE {
             // Copied through at its original position, so a mixed layer keeps its feature order.
             let from = feature.parts_offset as usize;
@@ -167,6 +179,7 @@ pub fn coalesce_lines(layer: &mut Layer) -> Stats {
             let mut copy = *feature;
             copy.parts_offset = start;
             features.push(copy);
+            kept.push(index);
             continue;
         }
         let class = class_of(feature);
@@ -198,6 +211,13 @@ pub fn coalesce_lines(layer: &mut Layer) -> Stats {
         merged.parts_offset = start;
         merged.part_count = parts.len() as u32 - start;
         features.push(merged);
+        kept.push(index);
+    }
+
+    if let Some(ids) = ids {
+        if !ids.is_empty() {
+            *ids = kept.iter().map(|&at| ids[at]).collect();
+        }
     }
 
     layer.features = features;

@@ -23,6 +23,7 @@ import com.vayunmathur.library.ui.MaterialTheme
 import com.vayunmathur.library.ui.Text
 import com.vayunmathur.library.ui.appBarScrollBehavior
 import com.vayunmathur.library.util.NavBackStack
+import com.vayunmathur.library.util.sharedContainer
 import com.vayunmathur.library.util.sharedText
 import com.vayunmathur.musicbrainz.R
 import com.vayunmathur.musicbrainz.Route
@@ -95,7 +96,12 @@ fun ArtistScreen(
                             .fillMaxWidth()
                             .clickable { backStack.add(Route.ReleaseGroup(group.id)) },
                         supportingContent = { SecondaryText(group.subtitle) },
-                        leadingContent = { CoverArtImage(group.coverUrl) },
+                        leadingContent = {
+                            CoverArtImage(
+                                group.coverUrl,
+                                modifier = Modifier.sharedContainer("mb-release-group-cover-${group.id}"),
+                            )
+                        },
                     )
                 }
             }

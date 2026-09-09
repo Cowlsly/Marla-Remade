@@ -45,7 +45,7 @@ configure<com.android.build.api.dsl.ApplicationExtension> {
         generateLocaleConfig = true
     }
 
-    ndkVersion = "29.0.14206865"
+    ndkVersion = NDK_VERSION
 
     defaultConfig {
         minSdk = 30

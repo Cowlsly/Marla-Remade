@@ -436,6 +436,7 @@ object ReceiverController {
                     receiverId = deviceId,
                     publicBundle = ProtocolBase64.encode(identity.publicBundle),
                     limits = limits,
+                    displayModes = PanelModes.of(context),
                 ),
             ),
         )

@@ -18,6 +18,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import com.vayunmathur.library.util.NavBackStack
 import com.vayunmathur.library.util.isNavLeaving
+import com.vayunmathur.library.util.sinksBelow
 import com.vayunmathur.music.Route
 import com.vayunmathur.music.platform.MusicViewModel
 import com.vayunmathur.music.platform.SyncWorker
@@ -105,6 +106,9 @@ fun MusicTabsScreen(
                     scope.launch { pagerState.animateScrollToPage(index) }
                 }
             },
+            // The bar belongs to Home, not to the detail pages Home pushes, so it leaves the way it
+            // would be dismissed rather than dissolving where it sits.
+            modifier = Modifier.sinksBelow(),
         )
     }
 }

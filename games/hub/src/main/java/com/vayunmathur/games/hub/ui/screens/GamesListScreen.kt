@@ -37,6 +37,9 @@ enum class GameSort { LAST_PLAYED, MOST_PLAYED, NAME, COMPLETION }
  * The games list, with no dependency on the ViewModel so it can be rendered from a
  * `@Preview`. Search and sort stay here: they are the screen's own state, and filtering the
  * list is pure. [iconFor] is the one thing that needs a device — see [DashboardScreen].
+ *
+ * [ownsGameMorphKeys] is false while the Home tab is the settled page: the same game appears in
+ * both tabs, so only one of the two may be the origin of the morph into the game's detail page.
  */
 @Composable
 fun GamesListScreen(
@@ -44,6 +47,7 @@ fun GamesListScreen(
     actions: GamesListActions,
     modifier: Modifier = Modifier,
     iconFor: (HubGameEntity) -> Drawable? = { null },
+    ownsGameMorphKeys: Boolean = true,
 ) {
     var search by remember { mutableStateOf("") }
     var sort by remember { mutableStateOf(GameSort.LAST_PLAYED) }
@@ -89,7 +93,8 @@ fun GamesListScreen(
             items(filteredSorted, key = { it.gameId }) { game ->
                 GameCard(
                     game = game, isInstalled = game.gameId in state.installedGameIds,
-                    modifier = Modifier.sharedContainer("hub-game-${game.gameId}"),
+                    modifier = if (!ownsGameMorphKeys) Modifier
+                    else Modifier.sharedContainer("hub-game-${game.gameId}"),
                     achievementProgress = state.achievementProgressByGame[game.gameId],
                     dailyStreak = state.dailyStreakByGame[game.gameId],
                     iconDrawable = iconFor(game),

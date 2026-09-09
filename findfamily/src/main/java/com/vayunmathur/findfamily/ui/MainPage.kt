@@ -151,8 +151,17 @@ import kotlin.time.Instant
 // Peek height with the sheet collapsed — sits a bit higher so more of the
 // family list is visible up front while keeping the map usable.
 private val SheetPeekHeight = 200.dp
-// Compact peek used in history mode: just the contact's name.
-private val HistoryPeekHeight = 84.dp
+
+/**
+ * How much taller than the peek the sheet content is forced to be.
+ *
+ * BottomSheetScaffold anchors PartiallyExpanded at (container - peek) and Expanded at
+ * (container - sheetHeight). If the content is no taller than the peek those coincide, Material3
+ * keeps only Expanded, and the state - still targeting PartiallyExpanded - throws
+ * AnchoredDraggableUninitializedException from the measure pass. Any positive margin avoids that;
+ * this one is large enough to survive a rounding difference at an unusual density.
+ */
+private val SheetMinContentMargin = 48.dp
 
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalMaterial3ExpressiveApi::class)
 @Composable
@@ -424,8 +433,20 @@ fun MainPageContent(
     // inspection mode; the page still lays out (peeked sheet + top bar + FAB) statically.
     val inPreview = LocalInspectionMode.current
 
-    // In history mode drop the sheet entirely (peek 0); the name goes in the app bar.
-    val peekHeight = if (state.historyMode) 0.dp else SheetPeekHeight
+    // In history mode the sheet is effectively gone - the name moves to the app bar, the drag
+    // handle is removed and swiping is disabled - but the peek must stay NON-ZERO.
+    //
+    // A peek of 0.dp crashes. `rememberBottomSheetScaffoldState` defaults to
+    // `skipHiddenState = true`, so `Hidden` is not a legal anchor, and Material3 only creates a
+    // `PartiallyExpanded` anchor when the peek height is greater than zero. At 0.dp the sheet
+    // therefore has exactly one anchor, `Expanded`, while the state is still targeting
+    // `PartiallyExpanded` - and the next measure pass throws
+    // `AnchoredDraggableUninitializedException` from `DraggableAnchorsNode.checkOffsetIsValid`.
+    // That is a hard FATAL on the main thread, not a layout glitch.
+    //
+    // 1.dp is below a pixel boundary on every supported density once the sheet is undecorated,
+    // so this keeps the anchor alive without showing anything.
+    val peekHeight = if (state.historyMode) 1.dp else SheetPeekHeight
 
     // The FAB sits on top of the always-light map, so color it from a light dynamic
     // scheme regardless of the app's (possibly dark) theme. Captured OUTSIDE the
@@ -540,7 +561,20 @@ fun MainPageContent(
             )
         },
         sheetContent = {
-            if (state.nothingSelected) {
+            // The sheet's own content MUST be taller than the peek, or Material3 emits a single
+            // anchor and the scaffold crashes.
+            //
+            // BottomSheetScaffold places PartiallyExpanded at (container - peek) and Expanded at
+            // (container - sheetHeight). When the content is no taller than the peek those two
+            // coincide, Material3 keeps only Expanded, and the state - which still targets
+            // PartiallyExpanded - throws AnchoredDraggableUninitializedException out of the
+            // measure pass. That is a hard FATAL, and it is reached by an ordinary route: a fresh
+            // install has no family members, so FamilyListSheet is close to empty.
+            //
+            // Enforced here, around every branch, rather than inside each one: the history-mode
+            // branch below is deliberately empty, and a future branch would inherit the same trap.
+            Box(Modifier.heightIn(min = SheetPeekHeight + SheetMinContentMargin)) {
+                if (state.nothingSelected) {
                 FamilyListSheet(state.familyList, familyActions)
             } else if (state.historyMode) {
                 // History mode has no sheet; the name is shown in the app bar.
@@ -572,6 +606,7 @@ fun MainPageContent(
                         } else null
                     )
                 }
+            }
             }
         }
     ) { _ ->
@@ -787,52 +822,9 @@ fun PersonDetailSheet(state: PersonUiState, actions: PersonActions) {
         ) {
             Text(stringResource(R.string.change_connected_contact))
         }
-        // Only offered on your own entry: both are properties of this phone, not of a relationship
-        // with a particular person. They are the two halves of powered-off finding and sit
-        // together on purpose — "keep mine findable" next to "help find theirs" is what makes the
-        // bargain legible. Showing either alone invites the fair objection that you are taking
-        // from the network without giving back, or giving without getting.
-        if (user.id == Networking.userid) {
-            Spacer(Modifier.height(4.dp))
-            PoweredOffFindingSetting(state.connectedUsers.filter { it.id != user.id })
-            Spacer(Modifier.height(8.dp))
-            CrowdFindingRow(state.crowdFindingEnabled) { actions.setCrowdFinding(it) }
-        }
     }
 }
 
-/**
- * Opt-in for acting as a finder. Deliberately a switch with the explanation always visible rather
- * than a one-time dialog: the user is agreeing to have their phone do work on strangers' behalf,
- * so what it actually does should stay readable, not be buried in a consent they clicked once.
- */
-@Composable
-private fun CrowdFindingRow(enabled: Boolean, onChange: (Boolean) -> Unit) {
-    val context = LocalContext.current
-    val messenger = rememberMessenger()
-    // BLUETOOTH_SCAN is a runtime permission, and without it the scanner silently starts and
-    // immediately closes. Ask at the moment the user opts in, so a denial can be explained here
-    // rather than leaving a switch that is on but doing nothing.
-    val requestScan = rememberPermissionRequest(Manifest.permission.BLUETOOTH_SCAN) { granted ->
-        if (granted) onChange(true)
-        else messenger.show(context.getString(R.string.crowd_finding_needs_bluetooth))
-    }
-    Column(Modifier.fillMaxWidth().padding(horizontal = 4.dp)) {
-        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-            Text(
-                stringResource(R.string.crowd_finding_title),
-                Modifier.weight(1f),
-                style = MaterialTheme.typography.bodyMedium
-            )
-            Switch(enabled, { on -> if (on) requestScan() else onChange(false) })
-        }
-        Text(
-            stringResource(R.string.crowd_finding_explanation),
-            style = MaterialTheme.typography.bodySmall,
-            color = MaterialTheme.colorScheme.onSurfaceVariant
-        )
-    }
-}
 
 @OptIn(ExperimentalMaterial3ExpressiveApi::class)
 @Composable

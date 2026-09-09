@@ -18,7 +18,8 @@ import com.vayunmathur.games.hub.viewmodel.GameHubViewModel
 fun GamesListPage(
     viewModel: GameHubViewModel,
     onGameClick: (String) -> Unit,
-    modifier: Modifier = Modifier
+    modifier: Modifier = Modifier,
+    ownsGameMorphKeys: Boolean = true
 ) {
     val games by viewModel.gamesFlow.collectAsStateWithLifecycle()
     val allAchievements by viewModel.allAchievementsFlow.collectAsStateWithLifecycle()
@@ -49,6 +50,7 @@ fun GamesListPage(
             override fun playGame(game: HubGameEntity) = launchGame(context, game)
         },
         iconFor = { game -> iconCache.getOrPut(game.packageName) { GameIconResolver.resolveAppIcon(context, game.packageName) } },
+        ownsGameMorphKeys = ownsGameMorphKeys,
         modifier = modifier,
     )
 }

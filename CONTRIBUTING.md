@@ -321,7 +321,9 @@ app is themed with. Reach for the helper that names the interaction:
 | `Modifier.animateItem(...)` | `itemMotion()` | `library.ui` |
 | a press-shape `animateIntAsState` | `pressedShape(pressed)` | `library.ui` |
 | a hand-rolled entrance | `Modifier.staggeredEntrance(index, arriving)` | `library.ui` |
-| a shared element across a nav change | `sharedText` / `sharedContainer` / `SharedEditableText` / `MorphPage()` | `library.util` |
+| a shared element across a nav change | `sharedText` / `sharedContainer` / `sharedCrop` / `SharedEditableText` / `MorphPage()` | `library.util` |
+| a card that becomes a much bigger thing | `sharedCrop` — crops its contents instead of reflowing (`sharedContainer`) or scaling (`sharedText`) them | `library.util` |
+| a hand-rolled exit for chrome the user navigates away from | `Modifier.dropsAway()` / `Modifier.sinksBelow()` / `Modifier.expandFromLine()` | `library.util` |
 
 Imperative one-off motion on `androidx.compose.animation.core.Animatable` is **not** flagged — a
 game board wave or a camera capture flash is genuinely bespoke, and wrapping it would be a

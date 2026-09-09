@@ -39,6 +39,7 @@ import com.vayunmathur.library.ui.AchievementNotification
 import com.vayunmathur.library.util.DialogPage
 import com.vayunmathur.library.util.FullscreenPage
 import com.vayunmathur.library.util.MainNavigation
+import com.vayunmathur.library.util.MorphPage
 import com.vayunmathur.library.util.NavKey
 import com.vayunmathur.library.util.rememberNavBackStack
 import kotlinx.coroutines.Dispatchers
@@ -122,9 +123,11 @@ fun MainGraph(viewModel: EducationViewModel) {
     Box(Modifier.fillMaxSize()) {
         MainNavigation(backStack) {
             entry<Route.Home> { HomePage(backStack, viewModel) }
-            entry<Route.Course> { CoursePage(backStack, viewModel, it.courseId) }
-            entry<Route.UnitScreen> { UnitPage(backStack, viewModel, it.unitId) }
-            entry<Route.LessonScreen> { LessonPage(backStack, viewModel, it.lessonId) }
+            // Morph on the three levels of the title chain: a course card's title carries into the
+            // course bar, a unit card's into the unit bar, a lesson card's into the lesson bar.
+            entry<Route.Course>(metadata = MorphPage()) { CoursePage(backStack, viewModel, it.courseId) }
+            entry<Route.UnitScreen>(metadata = MorphPage()) { UnitPage(backStack, viewModel, it.unitId) }
+            entry<Route.LessonScreen>(metadata = MorphPage()) { LessonPage(backStack, viewModel, it.lessonId) }
             entry<Route.Quiz> { QuizPage(backStack, viewModel, it.exerciseId) }
             entry<Route.VideoPlayer>(metadata = FullscreenPage()) { VideoPlayerPage(backStack, it.youtubeId, it.title) }
             entry<Route.K2Lesson> { K2LessonPage(backStack, viewModel, it.lessonId) }

@@ -262,7 +262,9 @@ fun Navigation(initialBackStack: List<Route>, ypvm: YouPipeViewModel) {
         entry<Route.VideoPage>(metadata = MorphPage()) {
             VideoPage(backStack, ypvm, it.videoID)
         }
-        entry<Route.ChannelPage> {
+        // Morph: a subscription row carries its avatar and name up into the header here. The other
+        // ways in - a search result, a video's author line - are unkeyed and simply crossfade.
+        entry<Route.ChannelPage>(metadata = MorphPage()) {
             ChannelPage(backStack, ypvm, it.channelID)
         }
         entry<Route.SubscriptionVideosPage> {

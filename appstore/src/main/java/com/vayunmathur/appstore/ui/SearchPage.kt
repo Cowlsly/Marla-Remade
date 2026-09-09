@@ -133,6 +133,9 @@ fun SearchScreen(
                             stage = state.stages[app.packageName],
                             installedIcon = state.installedIcons[app.packageName],
                             onClick = { onAppClick(app) },
+                            // Unambiguous despite the source in the item key: results are
+                            // deduplicated by package before they get here.
+                            sharedKey = "appstore-app-${app.packageName}",
                         )
                     }
                 }

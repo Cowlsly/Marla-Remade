@@ -32,6 +32,7 @@ import com.vayunmathur.library.image.MemoryCache
 import com.vayunmathur.library.image.ImageRequest
 import com.vayunmathur.library.ui.IconCheck
 import com.vayunmathur.library.ui.invisibleClickable
+import com.vayunmathur.library.util.sharedContainer
 import com.vayunmathur.photos.data.Photo
 import com.vayunmathur.photos.R
 
@@ -142,6 +143,12 @@ object ImageLoader {
          * previews substitute a placeholder here.
          */
         thumbnail: @Composable (Photo, Modifier) -> Unit = { p, m -> PhotoItem(p, m) },
+        /**
+         * Non-null makes this tile the origin of the container transform into the full-screen
+         * viewer. Null for a tile that is a second copy of a photo already shown elsewhere on
+         * screen - the morph cannot choose between two origins for one destination.
+         */
+        sharedKey: Any? = null,
     ) {
         Box(
             modifier = Modifier
@@ -150,6 +157,10 @@ object ImageLoader {
                 .combinedClickable(
                     onClick = onClick,
                     onLongClick = onToggleSelection
+                )
+                .then(
+                    if (sharedKey == null) Modifier
+                    else Modifier.sharedContainer("photo-image-$sharedKey")
                 )
         ) {
             thumbnail(photo, Modifier.fillMaxSize())

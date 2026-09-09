@@ -22,7 +22,10 @@ data class GooglePoiInfo(
     val category: String? = null,
     val editorialSummary: String? = null,
     val featuredReview: String? = null,
-    val hours: List<String> = emptyList(),      // 7 day strings, "Monday: 9 AM–5 PM"
+    val fuelPrice: FuelPrice? = null,   // gas stations only
+    // Only ever today, e.g. ["Tuesday: 6 AM–10 PM"] — the search response carries no
+    // weekly schedule (calibrated 2026-09; see readHours in GooglePoiDataSource).
+    val hours: List<String> = emptyList(),
     val photoUrls: List<String> = emptyList(),  // FIFE image URLs, resized for thumbnails
     val reviews: List<GoogleReview> = emptyList(),
     val popularTimes: PoiPopularTimes? = null,
@@ -32,8 +35,19 @@ data class GooglePoiInfo(
     val isEmpty: Boolean
         get() = rating == null && reviewCount == null && priceText == null && website == null &&
             phone == null && statusText == null && editorialSummary == null && featuredReview == null &&
+            fuelPrice == null &&
             hours.isEmpty() && photoUrls.isEmpty() && reviews.isEmpty() && popularTimes == null
 }
+
+/**
+ * A fuel pump price, e.g. [price] "$6.20", [grade] "Regular".
+ *
+ * Google sends one grade per station and formats it itself, so [price] keeps the
+ * currency symbol as given rather than being reduced to a number — the scrape has
+ * no locale to re-format it with. Across a 20-station US sample the grade was
+ * always "Regular"; it is kept as a string because nothing guarantees that.
+ */
+data class FuelPrice(val price: String, val grade: String)
 
 /** A single user review. [rating] is 1..5; [text] is null for rating-only reviews. */
 data class GoogleReview(
@@ -53,3 +67,14 @@ data class PoiDayBusyness(val dayOfWeek: Int, val hours: List<PoiHourBusyness>)
 
 /** [hour] is 0..23; [occupancy] is the typical busyness 0..100. */
 data class PoiHourBusyness(val hour: Int, val occupancy: Int)
+
+/**
+ * One tab's worth of the enrichment. The place sheet shows exactly one of these at a
+ * time, so what used to be three stacked sections is now three destinations.
+ *
+ * Here rather than beside the composable that renders it because the selected section
+ * outlives that composable: it is held on `SelectedFeatureViewModel` so the tab row (in
+ * the sheet's measured header) and the panel it switches (below the fold) can agree, and
+ * a view model naming a type from the `ui` package would invert the module's layering.
+ */
+enum class PoiSection { DETAILS, PHOTOS, REVIEWS }

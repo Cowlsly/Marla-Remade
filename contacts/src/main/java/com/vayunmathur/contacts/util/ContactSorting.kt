@@ -28,9 +28,6 @@ object ContactSorting {
         decomposition = Collator.CANONICAL_DECOMPOSITION
     }
 
-    /** Compare two display names using locale rules. */
-    fun compareNames(a: String, b: String): Int = collator().compare(a, b)
-
     private val DIACRITICS_REGEX = Regex("\\p{InCombiningDiacriticalMarks}+")
 
     /**
@@ -47,15 +44,6 @@ object ContactSorting {
         val upper = base.uppercaseChar()
         return if (upper.isLetter()) upper else '#'
     }
-
-    /** Comparator for contacts by display name, locale-aware. */
-    val contactComparator: Comparator<Contact>
-        get() = Comparator { a, b ->
-            // Use a fresh collator per comparison chain to avoid threading issues;
-            // Collator itself is not thread-safe, but compare within same chain reuses one.
-            // For simplicity and small list sizes, create once per sort call via sortedWith.
-            compareNames(a.name.value, b.name.value)
-        }
 
     /** Sort a list of contacts locale-aware. */
     fun List<Contact>.sortedLocale(): List<Contact> {

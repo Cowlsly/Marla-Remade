@@ -24,6 +24,47 @@ sealed interface MirrorSource {
     }
 
     /**
+     * A SYSTEM-OWNED display, created by this app and handed to the framework.
+     *
+     * The desktop-mode path, and the difference from [Screen] is not cosmetic. [Screen] takes a
+     * `MediaProjection` and mirrors the phone: same content, same layout, one screen shown twice,
+     * and a consent dialog every session. This creates a *separate* display that the window
+     * manager can place activities on, so the TV can be a second desktop rather than a copy of
+     * the phone - and whether it mirrors or extends is the system's choice, exposed by Settings'
+     * own switch, because the display carries `ALLOWS_CONTENT_MODE_SWITCH`.
+     *
+     * There is no consent Activity because there is no screen capture: nothing here reads the
+     * phone's screen. It needs `ADD_TRUSTED_DISPLAY` instead, which cast holds through the
+     * SYSTEM_AUTOMOTIVE_PROJECTION role pinned in `MaosFrameworkResRRO`.
+     *
+     * [displayId] is published back to the route via `RemoteDisplay.setPresentationDisplayId`
+     * once the display exists; `MediaRouterService` only ever reads that id, it never creates a
+     * display itself.
+     */
+    class SystemDisplay : MirrorSource {
+        override val appLabel: String get() = ""
+
+        /** Framework display id, or -1 before [MirrorEngine.start] has created it. */
+        var displayId: Int = -1
+            internal set
+
+        /**
+         * The TV's `receiverId`, which the display's stable unique id is built from.
+         *
+         * Stable across sessions on purpose: the framework keys every persisted display
+         * preference - resolution, rotation, and the mirror-or-desktop connection choice - on the
+         * unique id, and gates the lot behind `DisplayDevice.hasStableUniqueId()`. Building it
+         * from anything per-session would give the same television a new identity on every
+         * connect, so nothing the user chose would ever be remembered.
+         *
+         * Null before the handshake names the receiver, in which case no unique id is set and the
+         * framework falls back to its own per-session one.
+         */
+        var receiverId: String? = null
+            internal set
+    }
+
+    /**
      * Another app's content: it is handed the encoder's input surface and draws into it itself, and
      * writes PCM into a pipe if [wantAudio].
      *

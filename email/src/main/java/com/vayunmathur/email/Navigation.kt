@@ -195,7 +195,10 @@ fun Navigation(viewModel: EmailViewModel) {
                     onCompose = { to, sub -> backStack.add(Route.Composer(to = to, subject = sub)) }
                 )
             }
-            entry<Route.Composer>(metadata = ListDetailPage()) { route ->
+            // Morph: a draft's subject line travels out of the drafts list into the subject field.
+            // The other five ways in carry no draft id, so their subject key is null and the screen
+            // simply crossfades.
+            entry<Route.Composer>(metadata = ListDetailPage() + MorphPage()) { route ->
                 ComposerScreen(viewModel = viewModel, initialTo = route.to, initialSubject = route.subject, initialBody = route.body, inReplyTo = route.inReplyTo, references = route.references, draftId = route.draftId, onBack = { backStack.pop() })
             }
             entry<Route.Outbox>(metadata = ListDetailPage()) { OutboxScreen(viewModel = viewModel, onBack = { backStack.pop() }) }

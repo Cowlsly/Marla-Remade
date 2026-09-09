@@ -12,6 +12,7 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.vayunmathur.email.R
 import com.vayunmathur.email.platform.EmailViewModel
 import com.vayunmathur.library.ui.*
+import com.vayunmathur.library.util.sharedText
 
 @Composable
 fun DraftsScreen(
@@ -34,7 +35,12 @@ fun DraftsScreen(
             LazyColumn(modifier = Modifier.fillMaxSize().padding(padding)) {
                 items(drafts, key = { it.id }) { d ->
                     ListItem(
-                        content = { Text(d.subject.ifBlank { stringResource(R.string.no_subject) }) },
+                        content = {
+                            Text(
+                                d.subject.ifBlank { stringResource(R.string.no_subject) },
+                                modifier = Modifier.sharedText("email-draft-subject-${d.id}"),
+                            )
+                        },
                         supportingContent = {
                             val prefix = if (d.to.isNotBlank()) "To: ${d.to}  " else ""
                             Text(prefix + d.body.replace("\n", " ").take(80), maxLines = 2)

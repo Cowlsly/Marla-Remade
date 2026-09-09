@@ -35,6 +35,7 @@ import com.vayunmathur.library.ui.IconEmojiEvents
 import com.vayunmathur.library.ui.IconSettings
 import com.vayunmathur.library.ui.appBarScrollBehavior
 import com.vayunmathur.library.util.NavBackStack
+import com.vayunmathur.library.util.sharedText
 import androidx.compose.ui.res.stringResource
 
 /** Binds [EducationViewModel] and the back stack to the stateless [ScholarHomeScreen]. */
@@ -159,7 +160,11 @@ fun ScholarHomeScreen(state: HomeUiState, actions: HomeActions) {
                         verticalAlignment = Alignment.CenterVertically,
                     ) {
                         Column(Modifier.weight(1f)) {
-                            Text(course.title, style = MaterialTheme.typography.titleMedium)
+                            Text(
+                                course.title,
+                                style = MaterialTheme.typography.titleMedium,
+                                modifier = Modifier.sharedText("education-course-title-${course.id}"),
+                            )
                             Text(
                                 pluralStringResource(R.plurals.units, course.unitCount, course.unitCount),
                                 style = MaterialTheme.typography.bodySmall,

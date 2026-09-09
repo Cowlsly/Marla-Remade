@@ -42,6 +42,8 @@ import com.vayunmathur.library.ui.IconStar
 import com.vayunmathur.library.ui.MaterialTheme
 import com.vayunmathur.library.ui.Scaffold
 import com.vayunmathur.library.ui.Text
+import com.vayunmathur.library.util.sharedContainer
+import com.vayunmathur.library.util.sharedText
 import com.vayunmathur.fooddelivery.api.BitesApi
 import com.vayunmathur.fooddelivery.data.AddressStore
 import com.vayunmathur.fooddelivery.data.Merchant
@@ -146,7 +148,16 @@ private fun MerchantCard(merchant: Merchant, onClick: () -> Unit) {
                     model = merchant.displayImage,
                     contentDescription = merchant.name,
                     contentScale = ContentScale.Crop,
-                    modifier = Modifier.fillMaxWidth().aspectRatio(16f / 9f)
+                    // Keyed on imageUrl, not displayImage: the restaurant header draws that same
+                    // server field and draws nothing when it is empty, so the brand fallback shown
+                    // here in that case has no counterpart to travel to.
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .aspectRatio(16f / 9f)
+                        .then(
+                            if (merchant.imageUrl.isEmpty()) Modifier
+                            else Modifier.sharedContainer("food-merchant-${merchant.id}")
+                        )
                 )
             }
             Column(Modifier.padding(12.dp)) {
@@ -166,12 +177,14 @@ private fun MerchantCard(merchant: Merchant, onClick: () -> Unit) {
                         }
                         Column {
                             Text(merchant.name, fontWeight = FontWeight.Bold,
-                                style = MaterialTheme.typography.titleSmall)
+                                style = MaterialTheme.typography.titleSmall,
+                                modifier = Modifier.sharedText("food-merchant-name-${merchant.id}"))
                             if (merchant.merchantTags.isNotEmpty()) {
                                 Text(
                                     merchant.merchantTags.joinToString(" · "),
                                     style = MaterialTheme.typography.bodySmall,
-                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    modifier = Modifier.sharedText("food-merchant-tags-${merchant.id}")
                                 )
                             }
                         }

@@ -49,6 +49,7 @@ import com.vayunmathur.library.ui.Scaffold
 import com.vayunmathur.library.ui.Surface
 import com.vayunmathur.library.ui.Text
 import com.vayunmathur.library.ui.TextButton
+import com.vayunmathur.library.util.sharedText
 import com.vayunmathur.fooddelivery.api.BitesApi
 import com.vayunmathur.fooddelivery.data.FeedbackRequest
 import com.vayunmathur.fooddelivery.data.Order
@@ -224,7 +225,8 @@ private fun OrderCard(
                     }
                     Column {
                         Text(merchantName, fontWeight = FontWeight.Bold,
-                            style = MaterialTheme.typography.titleSmall)
+                            style = MaterialTheme.typography.titleSmall,
+                            modifier = Modifier.sharedText("food-order-merchant-${order.id}"))
                         Text(formatDate(order.createdAt, is24), style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant)
                     }

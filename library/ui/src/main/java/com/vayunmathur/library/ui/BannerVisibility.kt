@@ -19,6 +19,8 @@ import androidx.compose.ui.unit.IntOffset
  *
  * Only correct for something anchored at the top and drawn *over* the layout. A banner that belongs
  * in a column wants [ExpandVisibility], and a control that owns a fixed spot wants [PopVisibility].
+ * The bottom edge has no in-screen equivalent; bottom chrome leaving with its destination wants
+ * [com.vayunmathur.library.util.sinksBelow].
  */
 @Composable
 fun BannerVisibility(

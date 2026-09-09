@@ -23,6 +23,16 @@ object UpdateEngineOutcome {
 
     private const val SUCCESS = 0
 
+    /**
+     * update_engine could not initialise the download state from this payload.
+     *
+     * Not in `ErrorCodeConstants` — the reference implementation declares it locally too. On an
+     * incremental it means the payload cannot be applied to this device's current slot contents
+     * at all, so the same incremental will fail identically forever and the caller must stop
+     * offering it.
+     */
+    private const val DOWNLOAD_STATE_INITIALIZATION_ERROR = 20
+
     private const val DOWNLOAD_TRANSFER_ERROR = 9
     private const val PAYLOAD_HASH_MISMATCH_ERROR = 10
     private const val PAYLOAD_SIZE_MISMATCH_ERROR = 11
@@ -42,8 +52,17 @@ object UpdateEngineOutcome {
          * [retryable] separates "the network dropped" from "this package will never apply on
          * this device". Retrying a permanent failure just burns another gigabyte of the user's
          * data to arrive at the same answer.
+         *
+         * [initializationFailure] is narrower and only matters for an incremental: it means
+         * this specific patch cannot be applied here, so the caller should remember it and go
+         * straight to the full package next time rather than looping on it.
          */
-        data class Failed(val code: Int, val reason: String, val retryable: Boolean) : Outcome
+        data class Failed(
+            val code: Int,
+            val reason: String,
+            val retryable: Boolean,
+            val initializationFailure: Boolean,
+        ) : Outcome
     }
 
     fun of(errorCode: Int): Outcome {
@@ -52,6 +71,7 @@ object UpdateEngineOutcome {
             code = errorCode,
             reason = reasonFor(errorCode),
             retryable = errorCode in RETRYABLE,
+            initializationFailure = errorCode == DOWNLOAD_STATE_INITIALIZATION_ERROR,
         )
     }
 
@@ -67,6 +87,7 @@ object UpdateEngineOutcome {
     private val RETRYABLE = setOf(DOWNLOAD_TRANSFER_ERROR, NOT_ENOUGH_SPACE)
 
     private fun reasonFor(code: Int): String = when (code) {
+        DOWNLOAD_STATE_INITIALIZATION_ERROR -> "the update could not be applied to this build"
         DOWNLOAD_TRANSFER_ERROR -> "the payload transfer failed"
         PAYLOAD_HASH_MISMATCH_ERROR -> "the payload hash did not match"
         PAYLOAD_SIZE_MISMATCH_ERROR -> "the payload size did not match"

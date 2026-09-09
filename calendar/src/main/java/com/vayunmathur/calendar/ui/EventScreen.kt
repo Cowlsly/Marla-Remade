@@ -72,7 +72,7 @@ fun EventScreen(viewModel: CalendarViewModel, instance: Instance, backStack: Nav
             }
 
             override fun editEvent(eventId: Long) {
-                backStack.add(Route.EditEvent(eventId))
+                backStack.add(Route.EditEvent(eventId, instanceId = instance.id))
             }
         },
     )

@@ -574,6 +574,7 @@
       "authored": "boundaries_country",
       "source": "boundaries",
       "type": "line",
+      "kinds": ["country", "region", "county", "locality"],
       "light": "#a8a296",
       "dark": "#4a4f57",
       "width": 0.7,
@@ -652,6 +653,7 @@
     },
     {
       "id": "poi-shop",
+      "browse_minzoom": 14,
       "authored": "pois",
       "source": "poi",
       "type": "symbol",
@@ -680,6 +682,7 @@
     },
     {
       "id": "poi-food",
+      "browse_minzoom": 14,
       "authored": "pois",
       "source": "poi",
       "type": "symbol",

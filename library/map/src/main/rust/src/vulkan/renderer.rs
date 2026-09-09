@@ -1,6 +1,7 @@
 //! The frame: tile residency, and one render pass per frame.
 
 use crate::camera::Camera;
+use crate::overlay::{RouteMesh, RoutePlacement};
 use crate::style::paint::Stroke;
 use crate::style::{Anchor, Layer, LayerKind, Palette};
 use crate::tile::geometry::{self, TileMesh};
@@ -12,8 +13,10 @@ use crate::vulkan::pipeline::{Pipelines, Push};
 use crate::vulkan::swapchain::Swapchain;
 use ash::vk;
 use std::cell::Cell;
+use std::cmp::Reverse;
 use std::collections::HashMap;
 use std::collections::HashSet;
+use std::ops::RangeInclusive;
 
 /// How many frames may be in flight. Two is enough to keep the GPU fed behind vsync
 /// without adding latency the user can feel when panning.
@@ -36,6 +39,9 @@ struct LayerBuffers {
 /// One tile's geometry, resident on the GPU.
 struct ResidentTile {
     layers: Vec<LayerBuffers>,
+    /// The region shapes in this tile, for the selection mask. Uploaded with the rest of the
+    /// tile so selecting a region costs no tessellation and no allocation.
+    regions: Vec<RegionBuffers>,
     /// Shaped symbol candidates (CPU-side): the renderer emits quads per frame
     /// at the frame's text size. Shaped once on the worker thread.
     labels: Vec<geometry::ShapedLabel>,
@@ -45,6 +51,22 @@ struct ResidentTile {
     /// The toggle generation this was tessellated at — see
     /// [`crate::style::SharedToggles`].
     generation: u32,
+}
+
+/// One region's tessellated shape within one tile, on the GPU.
+struct RegionBuffers {
+    /// The OSM relation this piece came from, matched against the selected region.
+    id: u64,
+    vertices: Buffer,
+    indices: Buffer,
+    index_count: u32,
+    /// Exterior rings in tile-local 0..1, kept on the CPU for [`Renderer::region_at`].
+    rings: Vec<Vec<(f32, f32)>>,
+    /// Total absolute ring area, for preferring the smallest region containing a point.
+    area: f32,
+    /// The region's OSM `admin_level`, so a lookup can ask for a state rather than whatever
+    /// happens to be smallest at that point.
+    level: u16,
 }
 
 /// A transient per-frame buffer pair (one symbol draw's vertices + indices),
@@ -85,11 +107,70 @@ pub struct UserPuck {
 /// Something drawn on top of every tile, from the same camera value as the tiles.
 ///
 /// One variant today. It is an enum rather than an `Option<UserPuck>` field because the
-/// route line and the pins are the next things to move in here, and the pass below is
-/// written as "draw the overlays this frame has" so they can arrive one at a time.
+/// pins are the next thing to move in here, and the pass below is written as "draw the
+/// overlays this frame has" so they can arrive one at a time.
+///
+/// The route line is deliberately *not* one of these: every variant here draws from the
+/// shared unit quad and is pure `Copy` state, while a route owns vertex and index buffers
+/// with a retirement rule. It lives in [`Renderer::route`] beside
+/// [`Renderer::selected_region`] for the same reason that one does.
 enum Overlay {
     Puck(UserPuck),
 }
+
+/// The navigation route, resident on the GPU.
+///
+/// Uploaded once by [`Renderer::set_route`] and never touched again until the route
+/// changes: the mesh is zoom-independent by construction (see [`crate::overlay`]), so a
+/// frame does nothing but build one matrix and push two colour/width pairs. That is the
+/// difference between a route that costs nothing in a two-hour drive and one that
+/// re-tessellates on every zoom step.
+struct RouteBuffers {
+    placement: RoutePlacement,
+    vertices: Buffer,
+    indices: Buffer,
+    index_count: u32,
+}
+
+/// Where `lon`/`lat` falls inside tile `z/x/y`, in tile-local 0..1, or `None` if it is outside.
+///
+/// Web Mercator, matching the projection the tiler cut the archive with.
+fn tile_local(lon: f64, lat: f64, z: u8, x: u32, y: u32) -> Option<(f32, f32)> {
+    let n = f64::from(1u32 << z);
+    let sin = lat.to_radians().sin().clamp(-0.9999, 0.9999);
+    let world_x = (lon + 180.0) / 360.0 * n;
+    let world_y = (0.5 - ((1.0 + sin) / (1.0 - sin)).ln() / (4.0 * std::f64::consts::PI)) * n;
+    let u = world_x - f64::from(x);
+    let v = world_y - f64::from(y);
+    (0.0..=1.0).contains(&u).then_some(())?;
+    (0.0..=1.0).contains(&v).then_some(())?;
+    Some((u as f32, v as f32))
+}
+
+/// Even-odd point-in-polygon over a closed ring.
+fn contains(ring: &[(f32, f32)], u: f32, v: f32) -> bool {
+    let mut inside = false;
+    for window in ring.windows(2) {
+        let (x0, y0) = window[0];
+        let (x1, y1) = window[1];
+        if (y0 > v) != (y1 > v) && u < (x1 - x0) * (v - y0) / (y1 - y0) + x0 {
+            inside = !inside;
+        }
+    }
+    inside
+}
+
+/// How dark the world outside the selected region goes. Alpha, not a colour swap, so the map
+/// stays legible underneath — the point is to say "this is the boundary", not to hide the rest.
+const SCRIM_COLOR: u32 = 0x8C00_0000;
+
+/// Column-major identity, for an overlay whose vertices are already in clip space.
+const IDENTITY: [f32; 16] = [
+    1.0, 0.0, 0.0, 0.0, //
+    0.0, 1.0, 0.0, 0.0, //
+    0.0, 0.0, 1.0, 0.0, //
+    0.0, 0.0, 0.0, 1.0,
+];
 
 /// The unit quad every screen-anchored overlay draws with: four vertices in −1..1 and the
 /// two triangles over them.
@@ -170,6 +251,13 @@ pub struct Renderer {
     overlays: Vec<Overlay>,
     /// The geometry every overlay shares, uploaded once.
     quad: Quad,
+    /// The OSM relation whose shape is punched out of the mask scrim, if any.
+    ///
+    /// Not an [`Overlay`]: an overlay draws itself over the tiles, while this one is a property
+    /// of how every tile is drawn — two pipelines and a stencil rather than one quad.
+    selected_region: Option<u64>,
+    /// The navigation route line, or `None` when no route is set.
+    route: Option<RouteBuffers>,
 }
 
 /// One placed label as the pick path sees it: everything `pickLabels` needs
@@ -341,6 +429,8 @@ impl Renderer {
             placed: std::cell::RefCell::new(Vec::new()),
             overlays: Vec::new(),
             quad,
+            selected_region: None,
+            route: None,
         })
     }
 
@@ -354,6 +444,126 @@ impl Renderer {
         if let Some(puck) = puck {
             self.overlays.push(Overlay::Puck(puck));
         }
+    }
+
+    /// Draw `mesh` as the navigation route, or take the route away with `None`.
+    ///
+    /// Pure state like [`set_user_puck`](Self::set_user_puck), and for a stronger reason:
+    /// a route arrives once when the driver starts navigating and then does not change
+    /// for the rest of the trip, so it has no business being an argument on
+    /// [`render`](Self::render).
+    ///
+    /// The old buffers go through the same frames-in-flight grace queue the transient
+    /// symbol buffers use — a command buffer submitted last frame may still be reading
+    /// them, and freeing a live vertex buffer is the classic Vulkan use-after-free.
+    ///
+    /// On upload failure the route is left cleared rather than half-set, so a device that
+    /// cannot allocate draws no route instead of a route with no indices.
+    pub fn set_route(&mut self, mesh: Option<&RouteMesh>) -> Result<(), String> {
+        if let Some(previous) = self.route.take() {
+            self.transients.push(TransientBuffers {
+                vbuf: previous.vertices,
+                ibuf: previous.indices,
+                frames: FRAMES_IN_FLIGHT,
+            });
+        }
+        let Some(mesh) = mesh else { return Ok(()) };
+        if mesh.indices.is_empty() {
+            return Ok(());
+        }
+        unsafe {
+            let vertices = Buffer::upload(
+                &self.context.instance,
+                self.context.physical_device,
+                &self.context.device,
+                vk::BufferUsageFlags::VERTEX_BUFFER,
+                &mesh.vertices,
+            )?;
+            let indices = match Buffer::upload(
+                &self.context.instance,
+                self.context.physical_device,
+                &self.context.device,
+                vk::BufferUsageFlags::INDEX_BUFFER,
+                &mesh.indices,
+            ) {
+                Ok(buffer) => buffer,
+                Err(e) => {
+                    vertices.destroy(&self.context.device);
+                    return Err(e);
+                }
+            };
+            self.route = Some(RouteBuffers {
+                placement: mesh.placement,
+                vertices,
+                indices,
+                index_count: mesh.indices.len() as u32,
+            });
+        }
+        Ok(())
+    }
+
+    /// Dim everything outside one region, or take the mask away with `None`.
+    ///
+    /// Takes the region's OSM relation id, not a point: a region reaches the archive as one
+    /// clipped polygon per tile, and the id is what says those pieces are the same region. Pure
+    /// state for the same reason as [`set_user_puck`](Self::set_user_puck) — a selection arrives
+    /// from a tap, not from the frame loop.
+    pub fn set_region_mask(&mut self, region: Option<u64>) {
+        self.selected_region = region;
+    }
+
+    /// The region whose shape covers this point at the requested administrative level.
+    ///
+    /// The caller has a place — a tapped city label or a search result — and needs the relation
+    /// id of the region it names, which the `places` feature does not carry. Containment is the
+    /// link: a city label sits inside its own boundary.
+    ///
+    /// # Why the level is not optional
+    ///
+    /// Containment alone answers the wrong question. Every label sits inside a whole stack of
+    /// regions — a city inside a county inside a state inside a country — so a point lookup has
+    /// to be told which rung of that stack the caller means. Preferring the smallest was the
+    /// first attempt and it picks the deepest rung every time: tapping a state's label selects
+    /// whichever county the label's anchor happens to land in.
+    ///
+    /// `levels` is the inclusive band the selection maps to (see `kind_for` in the tiler's
+    /// boundary schema, which is what put these numbers in the archive). Within the band the
+    /// smallest containing shape still wins, so a city inside a larger city resolves inward.
+    ///
+    /// Ties are broken by the deeper level and then by the lower id, never by iteration order.
+    /// A city and the county it is coterminous with have near-identical areas, and leaving that
+    /// to a hash map's ordering makes the same tap pick differently from one frame to the next.
+    ///
+    /// Falls back to any level when the band matches nothing, because "no mask at all" reads as
+    /// the feature being broken. A city mapped at a level this vocabulary calls a county is
+    /// still better answered with its own shape than with nothing.
+    ///
+    /// `None` when no resident tile covers the point, which is the honest answer — the mask would
+    /// otherwise punch out whichever larger region happened to be loaded.
+    pub fn region_at(&self, lon: f64, lat: f64, levels: RangeInclusive<u16>) -> Option<u64> {
+        self.smallest_containing(lon, lat, &levels).or_else(|| self.smallest_containing(lon, lat, &(0..=u16::MAX)))
+    }
+
+    fn smallest_containing(&self, lon: f64, lat: f64, levels: &RangeInclusive<u16>) -> Option<u64> {
+        let mut best: Option<(f32, u16, u64)> = None;
+        for tile in self.tiles.values() {
+            let Some((u, v)) = tile_local(lon, lat, tile.z, tile.x, tile.y) else { continue };
+            for region in &tile.regions {
+                if !levels.contains(&region.level) {
+                    continue;
+                }
+                if !region.rings.iter().any(|ring| contains(ring, u, v)) {
+                    continue;
+                }
+                let candidate = (region.area, region.level, region.id);
+                if best.is_none_or(|(area, level, id)| {
+                    (candidate.0, Reverse(candidate.1), candidate.2) < (area, Reverse(level), id)
+                }) {
+                    best = Some(candidate);
+                }
+            }
+        }
+        best.map(|(_, _, id)| id)
     }
 
     pub fn resize(&mut self, width: u32, height: u32) {
@@ -440,8 +650,37 @@ impl Renderer {
                 });
             }
         }
+        let mut regions = Vec::with_capacity(mesh.regions.len());
+        for region in &mesh.regions {
+            unsafe {
+                let vertices = Buffer::upload(
+                    &self.context.instance,
+                    self.context.physical_device,
+                    &self.context.device,
+                    vk::BufferUsageFlags::VERTEX_BUFFER,
+                    &region.vertices,
+                )?;
+                let indices = Buffer::upload(
+                    &self.context.instance,
+                    self.context.physical_device,
+                    &self.context.device,
+                    vk::BufferUsageFlags::INDEX_BUFFER,
+                    &region.indices,
+                )?;
+                regions.push(RegionBuffers {
+                    id: region.id,
+                    vertices,
+                    indices,
+                    index_count: region.indices.len() as u32,
+                    rings: region.rings.clone(),
+                    area: region.area,
+                    level: region.level,
+                });
+            }
+        }
         let tile = ResidentTile {
             layers,
+            regions,
             labels: mesh.labels.clone(),
             z: mesh.z,
             x: mesh.x,
@@ -525,6 +764,10 @@ impl Renderer {
                     layer.vertices.destroy(device);
                     layer.indices.destroy(device);
                 }
+                for region in &tile.regions {
+                    region.vertices.destroy(device);
+                    region.indices.destroy(device);
+                }
             }
             false
         });
@@ -547,12 +790,18 @@ impl Renderer {
     ///
     /// Returns `Ok(false)` when the frame was skipped because the swapchain needs
     /// rebuilding, which the caller answers by calling again.
+    /// Draw one frame.
+    ///
+    /// `filter` is the active category filter. It reaches the gate as well as tessellation,
+    /// because a chip both narrows which POIs are drawn and pulls its own kinds in earlier than
+    /// the ambient map shows them — see [`Layer::draws_at_focused`].
     pub fn render(
         &mut self,
         camera: &Camera,
         layers: &[Layer],
         palette: Palette,
         clear: u32,
+        filter: &crate::style::KindFilter,
     ) -> Result<bool, String> {
         if self.width == 0 || self.height == 0 {
             return Ok(true);
@@ -609,7 +858,7 @@ impl Renderer {
             device
                 .reset_fences(std::slice::from_ref(&in_flight))
                 .map_err(|e| format!("reset_fences {e:?}"))?;
-            self.record(command_buffer, image_index as usize, camera, layers, palette, clear)?;
+            self.record(command_buffer, image_index as usize, camera, layers, palette, clear, filter)?;
 
             let wait_stages = [vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT];
             let submit = vk::SubmitInfo::default()
@@ -660,6 +909,7 @@ impl Renderer {
         layers: &[Layer],
         palette: Palette,
         clear: u32,
+        filter: &crate::style::KindFilter,
     ) -> Result<(), String> {
         // `record_symbol` takes `&mut self` (transient uploads), so `record`
         // issues all fill/line draws through small helpers that re-borrow per
@@ -670,7 +920,7 @@ impl Renderer {
         let framebuffer = self.swapchain.framebuffers[image_index];
         let extent = self.swapchain.extent;
         unsafe {
-            self.record_inner(command_buffer, render_pass, framebuffer, extent, camera, layers, palette, clear)
+            self.record_inner(command_buffer, render_pass, framebuffer, extent, camera, layers, palette, clear, filter)
         }
     }
 
@@ -688,6 +938,7 @@ impl Renderer {
         layers: &[Layer],
         palette: Palette,
         clear: u32,
+        filter: &crate::style::KindFilter,
     ) -> Result<(), String> {
         let device = self.context.device.clone();
         device
@@ -699,14 +950,23 @@ impl Renderer {
             .begin_command_buffer(command_buffer, &begin)
             .map_err(|e| format!("begin_command_buffer {e:?}"))?;
 
-        let clear_value = vk::ClearValue {
-            color: vk::ClearColorValue { float32: argb_to_rgba(clear) },
-        };
+        // One per attachment, in render-pass order, and the layout differs: multisampled is
+        // [colour, resolve, stencil] while single-sampled is [colour, stencil]. The stencil is
+        // therefore at index 2 or index 1 depending on the device, so both carry the stencil
+        // clear — the resolve target is `DONT_CARE` and ignores its entry, and a trailing extra
+        // entry is allowed. Clearing to zero is what the scrim reads as "outside the region".
+        let stencil_clear =
+            vk::ClearValue { depth_stencil: vk::ClearDepthStencilValue { depth: 1.0, stencil: 0 } };
+        let clear_values = [
+            vk::ClearValue { color: vk::ClearColorValue { float32: argb_to_rgba(clear) } },
+            stencil_clear,
+            stencil_clear,
+        ];
         let pass = vk::RenderPassBeginInfo::default()
             .render_pass(render_pass)
             .framebuffer(framebuffer)
             .render_area(vk::Rect2D { offset: vk::Offset2D { x: 0, y: 0 }, extent })
-            .clear_values(std::slice::from_ref(&clear_value));
+            .clear_values(&clear_values);
         device.cmd_begin_render_pass(command_buffer, &pass, vk::SubpassContents::INLINE);
 
         let viewport = vk::Viewport::default()
@@ -752,7 +1012,7 @@ impl Renderer {
         // label with its screen box at this frame's text size, run the greedy
         // rank-ordered placer once, and hand the accept-set to `record_symbol`.
         // Without this every shaped label draws and z10 is an unreadable pile.
-        let accepted = self.place_symbols(camera, layers, &ordered, extent);
+        let accepted = self.place_symbols(camera, layers, &ordered, extent, filter);
         // Task-17 pick snapshot: the accepted labels with their screen boxes,
         // names, kinds and anchor geo — refreshed every frame so pickLabels
         // answers the frame the user sees, not a stale one.
@@ -761,7 +1021,7 @@ impl Renderer {
         for (index, layer) in layers.iter().enumerate() {
             // `min_zoom`/`max_zoom` are a data-and-cost gate, not paint: they say which zooms
             // the archive is worth asking for this layer at. Paint is the ramp below.
-            if !layer.draws_at(camera.zoom.floor().clamp(0.0, 22.0) as u8) {
+            if !layer.draws_at_focused(camera.zoom.floor().clamp(0.0, 22.0) as u8, layer.focused_by(filter)) {
                 continue;
             }
             // Width and opacity come from the flat style, evaluated against the *camera's*
@@ -918,11 +1178,172 @@ impl Renderer {
         // presented in the same frame and from the same camera value as the basemap under
         // them. Binding the overlay pipeline invalidates `bound`, which is why this comes
         // after the layer loop rather than anywhere inside it.
+        //
+        // The order between the three is the reading order the driver needs. The region
+        // scrim is a property of the basemap, so it goes first and the route is *not*
+        // dimmed by it — a route you are following must not fade because a details sheet
+        // is open. The route then goes under the puck, because the puck is where you are
+        // and it has to stay visible where it sits on top of the line it is following.
+        self.record_region_mask(command_buffer, camera, &mut submitted);
+        self.record_route(command_buffer, camera, &mut submitted);
         self.record_overlays(command_buffer, camera, &mut submitted);
 
         self.submitted_draws.set(submitted);
         device.cmd_end_render_pass(command_buffer);
         device.end_command_buffer(command_buffer).map_err(|e| format!("end_command_buffer {e:?}"))
+    }
+
+    /// Rasterise the selected region into the stencil, then dim everything it did not cover.
+    ///
+    /// Two passes over one attachment rather than any geometric cut: the region arrives as one
+    /// clipped polygon per tile, and rasterising every piece with `REPLACE` unions them in the
+    /// stencil for free. Overlapping pieces and the self-touching rings the tile clipper produces
+    /// are both harmless to a rasteriser, which is exactly what defeated the two attempts to do
+    /// this with a polygon boolean.
+    unsafe fn record_region_mask(
+        &self,
+        command_buffer: vk::CommandBuffer,
+        camera: &Camera,
+        submitted: &mut usize,
+    ) {
+        let Some(selected) = self.selected_region else { return };
+        let device = &self.context.device;
+
+        let mut any = false;
+        for tile in self.tiles.values() {
+            for region in tile.regions.iter().filter(|r| r.id == selected) {
+                if !any {
+                    device.cmd_bind_pipeline(
+                        command_buffer,
+                        vk::PipelineBindPoint::GRAPHICS,
+                        self.pipelines.mask,
+                    );
+                    any = true;
+                }
+                let push = Push {
+                    tile_to_clip: camera.tile_to_clip(tile.z, tile.x, tile.y),
+                    color: [0.0; 4],
+                    line: [0.0; 4],
+                    misc: [0.0; 4],
+                };
+                device.cmd_push_constants(
+                    command_buffer,
+                    self.pipelines.layout,
+                    vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT,
+                    0,
+                    push.as_bytes(),
+                );
+                device.cmd_bind_vertex_buffers(
+                    command_buffer,
+                    0,
+                    &[region.vertices.buffer],
+                    &[0],
+                );
+                device.cmd_bind_index_buffer(
+                    command_buffer,
+                    region.indices.buffer,
+                    0,
+                    vk::IndexType::UINT32,
+                );
+                device.cmd_draw_indexed(command_buffer, region.index_count, 1, 0, 0, 0);
+                *submitted += 1;
+            }
+        }
+        // No piece of the region is resident - the map has been panned away from it, or its
+        // tiles have not landed yet. Dimming the whole screen would be worse than dimming none
+        // of it, so the scrim is skipped rather than drawn over everything.
+        if !any {
+            return;
+        }
+
+        let push = Push {
+            // The quad is already in clip space, so the vertex shader must not move it.
+            tile_to_clip: IDENTITY,
+            color: argb_to_rgba(SCRIM_COLOR),
+            line: [0.0; 4],
+            misc: [0.0; 4],
+        };
+        device.cmd_bind_pipeline(
+            command_buffer,
+            vk::PipelineBindPoint::GRAPHICS,
+            self.pipelines.scrim,
+        );
+        device.cmd_push_constants(
+            command_buffer,
+            self.pipelines.layout,
+            vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT,
+            0,
+            push.as_bytes(),
+        );
+        device.cmd_bind_vertex_buffers(command_buffer, 0, &[self.quad.vertices.buffer], &[0]);
+        device.cmd_bind_index_buffer(
+            command_buffer,
+            self.quad.indices.buffer,
+            0,
+            vk::IndexType::UINT32,
+        );
+        device.cmd_draw_indexed(command_buffer, QUAD_INDICES.len() as u32, 1, 0, 0, 0);
+        *submitted += 1;
+    }
+
+    /// Draw the navigation route, above the basemap and below the puck.
+    ///
+    /// Two draws over one buffer: the casing at the wider half-width, then the route on
+    /// top of it. `stroke` bakes no width into a vertex, so the same geometry drawn wider
+    /// underneath *is* the outline — no second mesh and no `gapped` band.
+    ///
+    /// Allocation-free, like every other per-frame path here: the buffers were uploaded
+    /// when the route was set, and everything that varies per frame is a matrix and two
+    /// push blocks built on the stack. The matrix is the overlay sibling of
+    /// `tile_to_clip`, so the route picks up the camera's bearing exactly as the tiles
+    /// under it do.
+    unsafe fn record_route(
+        &self,
+        command_buffer: vk::CommandBuffer,
+        camera: &Camera,
+        submitted: &mut usize,
+    ) {
+        let Some(route) = &self.route else { return };
+        let device = &self.context.device;
+        let (origin, span) = route.placement.at_zoom(camera.zoom);
+        let matrix = camera.world_quad_to_clip(origin, span);
+        // What `line.vert` divides a pixel offset by to reach local units. The route's
+        // square stands in for a tile here, which is the whole reason the two share a
+        // vertex format.
+        let span_px = (span * camera.density as f64) as f32;
+        let edge_aa = f32::from(self.swapchain.samples == vk::SampleCountFlags::TYPE_1);
+
+        device.cmd_bind_pipeline(
+            command_buffer,
+            vk::PipelineBindPoint::GRAPHICS,
+            self.pipelines.line,
+        );
+        device.cmd_bind_vertex_buffers(command_buffer, 0, &[route.vertices.buffer], &[0]);
+        device.cmd_bind_index_buffer(
+            command_buffer,
+            route.indices.buffer,
+            0,
+            vk::IndexType::UINT32,
+        );
+        for (color, half_width_px) in route.placement.passes(camera.density) {
+            let push = Push {
+                tile_to_clip: matrix,
+                color: argb_to_rgba(color),
+                // No gap and no dash: a route is one solid band, and `line.frag`
+                // short-circuits a non-positive dash gap before it reaches the modulo.
+                line: [half_width_px, 0.0, 0.0, 0.0],
+                misc: [span_px, edge_aa, 0.0, 0.0],
+            };
+            device.cmd_push_constants(
+                command_buffer,
+                self.pipelines.layout,
+                vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT,
+                0,
+                push.as_bytes(),
+            );
+            device.cmd_draw_indexed(command_buffer, route.index_count, 1, 0, 0, 0);
+            *submitted += 1;
+        }
     }
 
     /// Draw this frame's overlays on top of every tile.
@@ -1040,6 +1461,12 @@ impl Renderer {
         let tile_clip = camera.tile_to_clip(tile.z, tile.x, tile.y);
         let tile_labels = tile.labels.clone();
         let (primary, alternate) = anchors_for(layer);
+        // Labels counter-rotate about their anchor so they stay upright under a
+        // heading-up camera, which is what a driver needs and what keeps the placer's
+        // axis-aligned collision boxes describing the box the label actually occupies.
+        // `(1, 0)` north-up, where `upright` is a no-op.
+        let (cos, sin) = camera.rotation();
+        let rotation = (cos as f32, sin as f32);
         // Batched by resolved size, not one batch per tile-layer. A label's size now
         // depends on its population rank, so one draw can hold two of them — and
         // `Push::line.x` carries the text size the fragment shader turns a halo width in
@@ -1073,6 +1500,7 @@ impl Renderer {
                     palette.variant == crate::style::Variant::Dark,
                     camera.density,
                     tile_span_px,
+                    rotation,
                     &mut icon_vertices,
                     &mut icon_indices,
                 );
@@ -1090,6 +1518,7 @@ impl Renderer {
                 layer.text_offset,
                 text_px,
                 tile_span_px,
+                rotation,
                 &mut batch.1,
                 &mut batch.2,
             );
@@ -1226,6 +1655,7 @@ impl Renderer {
         layers: &[Layer],
         ordered: &[u64],
         extent: vk::Extent2D,
+        filter: &crate::style::KindFilter,
     ) -> HashMap<u64, (bool, u32)> {
         use crate::tile::placement;
         let mut candidates = Vec::new();
@@ -1233,7 +1663,7 @@ impl Renderer {
             if layer.kind != LayerKind::Symbol {
                 continue;
             }
-            if !layer.draws_at(camera.zoom.floor().clamp(0.0, 22.0) as u8) {
+            if !layer.draws_at_focused(camera.zoom.floor().clamp(0.0, 22.0) as u8, layer.focused_by(filter)) {
                 continue;
             }
             // Device px, matching `record_symbol`: `extent` below is device px, so a
@@ -1498,6 +1928,10 @@ impl Drop for Renderer {
                     layer.vertices.destroy(&self.context.device);
                     layer.indices.destroy(&self.context.device);
                 }
+                for region in &tile.regions {
+                    region.vertices.destroy(&self.context.device);
+                    region.indices.destroy(&self.context.device);
+                }
             }
             self.tiles.clear();
             for (_, tile) in &self.retiring {
@@ -1505,8 +1939,21 @@ impl Drop for Renderer {
                     layer.vertices.destroy(&self.context.device);
                     layer.indices.destroy(&self.context.device);
                 }
+                for region in &tile.regions {
+                    region.vertices.destroy(&self.context.device);
+                    region.indices.destroy(&self.context.device);
+                }
             }
             self.retiring.clear();
+            if let Some(route) = &self.route {
+                route.vertices.destroy(&self.context.device);
+                route.indices.destroy(&self.context.device);
+            }
+            for transient in &self.transients {
+                transient.vbuf.destroy(&self.context.device);
+                transient.ibuf.destroy(&self.context.device);
+            }
+            self.transients.clear();
             for frame in &self.frames {
                 self.context.device.destroy_fence(frame.in_flight, None);
                 self.context.device.destroy_semaphore(frame.image_available, None);

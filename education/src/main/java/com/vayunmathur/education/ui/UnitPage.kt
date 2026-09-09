@@ -31,6 +31,7 @@ import com.vayunmathur.education.util.EducationViewModel
 import com.vayunmathur.library.ui.IconNavigation
 import com.vayunmathur.library.ui.appBarScrollBehavior
 import com.vayunmathur.library.util.NavBackStack
+import com.vayunmathur.library.util.sharedText
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.res.pluralStringResource
 
@@ -42,8 +43,15 @@ fun UnitPage(backStack: NavBackStack<Route>, viewModel: EducationViewModel, unit
     val unit = content.unit(unitId)
 
     AppScaffold(
-        title = unit?.title ?: stringResource(R.string.unit),
-        backStack = backStack,
+        title = {
+            Text(
+                unit?.title ?: stringResource(R.string.unit),
+                modifier = unit
+                    ?.let { Modifier.sharedText("education-unit-title-${it.id}") }
+                    ?: Modifier,
+            )
+        },
+        onNavigateBack = { backStack.pop() },
         scrollBehavior = appBarScrollBehavior(),
     ) { padding ->
         if (unit == null) {
@@ -80,7 +88,11 @@ fun UnitPage(backStack: NavBackStack<Route>, viewModel: EducationViewModel, unit
                         horizontalArrangement = Arrangement.SpaceBetween,
                     ) {
                         Column(Modifier.weight(1f)) {
-                            Text(lesson.title, style = MaterialTheme.typography.titleMedium)
+                            Text(
+                                lesson.title,
+                                style = MaterialTheme.typography.titleMedium,
+                                modifier = Modifier.sharedText("education-lesson-title-${lesson.id}"),
+                            )
                             val videoText = pluralStringResource(R.plurals.video_count, lesson.videos.size, lesson.videos.size)
                             val exerciseSuffix = if (lesson.exercise != null) stringResource(R.string.exercise) else ""
                             Text(

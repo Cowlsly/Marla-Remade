@@ -54,6 +54,20 @@ pub struct Swapchain {
     pub samples: vk::SampleCountFlags,
     /// The multisampled colour target, absent when `samples` is 1.
     msaa: Option<MsaaTarget>,
+    /// The stencil the region mask is rasterised into, and the attachment index it sits at.
+    stencil: StencilTarget,
+}
+
+/// The stencil buffer, for punching the selected region out of the mask scrim.
+///
+/// Transient and lazily allocated for the same reason as [`MsaaTarget`]: it is written and read
+/// within a single subpass and never afterwards, so on a tile-based GPU it lives in tile memory
+/// and needs no backing store. That is what keeps the "# No depth buffer" bandwidth argument above
+/// true even though there is now an attachment here.
+struct StencilTarget {
+    image: vk::Image,
+    memory: vk::DeviceMemory,
+    view: vk::ImageView,
 }
 
 struct MsaaTarget {
@@ -189,8 +203,23 @@ impl Swapchain {
             .stencil_store_op(vk::AttachmentStoreOp::DONT_CARE)
             .initial_layout(vk::ImageLayout::UNDEFINED)
             .final_layout(vk::ImageLayout::PRESENT_SRC_KHR);
+        // Chosen before the render pass because the attachment has to name the format, and
+        // `S8_UINT` is optional in Vulkan while a combined depth-stencil is universally
+        // available. The depth half goes unused when the fallback is taken.
+        let stencil_format = stencil_format(context)?;
+        let stencil = vk::AttachmentDescription::default()
+            .format(stencil_format)
+            .samples(samples)
+            // Cleared to zero every frame: zero means "outside the selected region", which is
+            // what the scrim tests for, and is also the right answer when nothing is selected.
+            .load_op(vk::AttachmentLoadOp::DONT_CARE)
+            .store_op(vk::AttachmentStoreOp::DONT_CARE)
+            .stencil_load_op(vk::AttachmentLoadOp::CLEAR)
+            .stencil_store_op(vk::AttachmentStoreOp::DONT_CARE)
+            .initial_layout(vk::ImageLayout::UNDEFINED)
+            .final_layout(vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL);
         let attachments: Vec<vk::AttachmentDescription> =
-            if multisampled { vec![color, resolve] } else { vec![color] };
+            if multisampled { vec![color, resolve, stencil] } else { vec![color, stencil] };
 
         let color_ref = vk::AttachmentReference::default()
             .attachment(0)
@@ -198,9 +227,13 @@ impl Swapchain {
         let resolve_ref = vk::AttachmentReference::default()
             .attachment(1)
             .layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL);
+        let stencil_ref = vk::AttachmentReference::default()
+            .attachment(if multisampled { 2 } else { 1 })
+            .layout(vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL);
         let mut subpass = vk::SubpassDescription::default()
             .pipeline_bind_point(vk::PipelineBindPoint::GRAPHICS)
-            .color_attachments(std::slice::from_ref(&color_ref));
+            .color_attachments(std::slice::from_ref(&color_ref))
+            .depth_stencil_attachment(&stencil_ref);
         if multisampled {
             subpass = subpass.resolve_attachments(std::slice::from_ref(&resolve_ref));
         }
@@ -225,6 +258,8 @@ impl Swapchain {
             None
         };
 
+        let stencil_target = StencilTarget::new(context, stencil_format, extent, samples)?;
+
         let mut views = Vec::with_capacity(images.len());
         let mut framebuffers = Vec::with_capacity(images.len());
         for &image in &images {
@@ -245,10 +280,10 @@ impl Swapchain {
                 .map_err(|e| format!("create_image_view {e:?}"))?;
             views.push(view);
 
-            // Attachment order matches the render pass: colour first, resolve second.
+            // Attachment order matches the render pass: colour, resolve, then stencil.
             let attached: Vec<vk::ImageView> = match &msaa {
-                Some(target) => vec![target.view, view],
-                None => vec![view],
+                Some(target) => vec![target.view, view, stencil_target.view],
+                None => vec![view, stencil_target.view],
             };
             let framebuffer_info = vk::FramebufferCreateInfo::default()
                 .render_pass(render_pass)
@@ -275,6 +310,7 @@ impl Swapchain {
             extent,
             samples,
             msaa,
+            stencil: stencil_target,
         })
     }
 
@@ -291,6 +327,9 @@ impl Swapchain {
             device.destroy_image(target.image, None);
             device.free_memory(target.memory, None);
         }
+        device.destroy_image_view(self.stencil.view, None);
+        device.destroy_image(self.stencil.image, None);
+        device.free_memory(self.stencil.memory, None);
         device.destroy_render_pass(self.render_pass, None);
         for &view in &self.views {
             device.destroy_image_view(view, None);
@@ -298,6 +337,30 @@ impl Swapchain {
         self.views.clear();
         self.loader.destroy_swapchain(self.swapchain, None);
     }
+}
+
+/// A stencil-capable attachment format the device supports, cheapest first.
+///
+/// `S8_UINT` is what this actually wants — eight bits, no depth — but it is optional in Vulkan
+/// and plenty of drivers omit it, so the combined formats are the fallback. Every Vulkan
+/// implementation must support at least one of `D24_UNORM_S8_UINT` or `D32_SFLOAT_S8_UINT`.
+unsafe fn stencil_format(context: &Context) -> Result<vk::Format, String> {
+    for candidate in [
+        vk::Format::S8_UINT,
+        vk::Format::D24_UNORM_S8_UINT,
+        vk::Format::D32_SFLOAT_S8_UINT,
+    ] {
+        let properties = context
+            .instance
+            .get_physical_device_format_properties(context.physical_device, candidate);
+        if properties
+            .optimal_tiling_features
+            .contains(vk::FormatFeatureFlags::DEPTH_STENCIL_ATTACHMENT)
+        {
+            return Ok(candidate);
+        }
+    }
+    Err("no stencil-capable attachment format".into())
 }
 
 impl MsaaTarget {
@@ -383,5 +446,93 @@ impl MsaaTarget {
             }
         };
         Ok(MsaaTarget { image, memory, view })
+    }
+}
+
+impl StencilTarget {
+    /// Allocate the stencil attachment, transient and lazily allocated like [`MsaaTarget::new`].
+    unsafe fn new(
+        context: &Context,
+        format: vk::Format,
+        extent: vk::Extent2D,
+        samples: vk::SampleCountFlags,
+    ) -> Result<StencilTarget, String> {
+        let image_info = vk::ImageCreateInfo::default()
+            .image_type(vk::ImageType::TYPE_2D)
+            .format(format)
+            .extent(vk::Extent3D { width: extent.width, height: extent.height, depth: 1 })
+            .mip_levels(1)
+            .array_layers(1)
+            .samples(samples)
+            .tiling(vk::ImageTiling::OPTIMAL)
+            .usage(
+                vk::ImageUsageFlags::DEPTH_STENCIL_ATTACHMENT
+                    | vk::ImageUsageFlags::TRANSIENT_ATTACHMENT,
+            )
+            .sharing_mode(vk::SharingMode::EXCLUSIVE)
+            .initial_layout(vk::ImageLayout::UNDEFINED);
+        let image = context
+            .device
+            .create_image(&image_info, None)
+            .map_err(|e| format!("create stencil image {e:?}"))?;
+
+        let requirements = context.device.get_image_memory_requirements(image);
+        let properties =
+            context.instance.get_physical_device_memory_properties(context.physical_device);
+        let find = |flags: vk::MemoryPropertyFlags| -> Option<u32> {
+            (0..properties.memory_type_count).find(|&i| {
+                requirements.memory_type_bits & (1 << i) != 0
+                    && properties.memory_types[i as usize].property_flags.contains(flags)
+            })
+        };
+        let type_index = find(
+            vk::MemoryPropertyFlags::DEVICE_LOCAL | vk::MemoryPropertyFlags::LAZILY_ALLOCATED,
+        )
+        .or_else(|| find(vk::MemoryPropertyFlags::DEVICE_LOCAL))
+        .ok_or("no device-local memory type for the stencil target")?;
+
+        let allocate = vk::MemoryAllocateInfo::default()
+            .allocation_size(requirements.size)
+            .memory_type_index(type_index);
+        let memory = match context.device.allocate_memory(&allocate, None) {
+            Ok(memory) => memory,
+            Err(e) => {
+                context.device.destroy_image(image, None);
+                return Err(format!("allocate stencil memory {e:?}"));
+            }
+        };
+        if let Err(e) = context.device.bind_image_memory(image, memory, 0) {
+            context.device.destroy_image(image, None);
+            context.device.free_memory(memory, None);
+            return Err(format!("bind stencil memory {e:?}"));
+        }
+
+        // The view names only the stencil aspect even when the format carries depth too, which
+        // is what a depth-stencil attachment view must do when only one aspect is used.
+        let aspect = if format == vk::Format::S8_UINT {
+            vk::ImageAspectFlags::STENCIL
+        } else {
+            vk::ImageAspectFlags::DEPTH | vk::ImageAspectFlags::STENCIL
+        };
+        let view_info = vk::ImageViewCreateInfo::default()
+            .image(image)
+            .view_type(vk::ImageViewType::TYPE_2D)
+            .format(format)
+            .subresource_range(vk::ImageSubresourceRange {
+                aspect_mask: aspect,
+                base_mip_level: 0,
+                level_count: 1,
+                base_array_layer: 0,
+                layer_count: 1,
+            });
+        let view = match context.device.create_image_view(&view_info, None) {
+            Ok(view) => view,
+            Err(e) => {
+                context.device.destroy_image(image, None);
+                context.device.free_memory(memory, None);
+                return Err(format!("create stencil image view {e:?}"));
+            }
+        };
+        Ok(StencilTarget { image, memory, view })
     }
 }

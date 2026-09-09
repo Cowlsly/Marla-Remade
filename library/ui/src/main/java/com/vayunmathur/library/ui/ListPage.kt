@@ -30,6 +30,7 @@ import androidx.compose.ui.unit.dp
 import com.vayunmathur.library.util.NavBackStack
 import com.vayunmathur.library.util.NavKey
 import com.vayunmathur.library.util.DatabaseItem
+import com.vayunmathur.library.util.dropsAway
 import kotlinx.coroutines.launch
 
 /**
@@ -179,7 +180,10 @@ internal fun <T : DatabaseItem, Route : NavKey> ListPageContent(
             Column {
                 fab?.invoke()
                 if (editPage != null && !isEditPage(backStack.backStack.lastOrNull())) {
-                    FloatingActionButton(onClick = { backStack.add(editPage()) }) {
+                    FloatingActionButton(
+                        onClick = { backStack.add(editPage()) },
+                        modifier = Modifier.dropsAway(),
+                    ) {
                         IconAdd()
                     }
                 }

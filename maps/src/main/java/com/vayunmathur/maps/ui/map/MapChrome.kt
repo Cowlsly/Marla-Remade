@@ -1,7 +1,9 @@
 package com.vayunmathur.maps.ui.map
 
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -27,15 +29,18 @@ import com.vayunmathur.maps.ui.theme.MapChromeMetrics
 import com.vayunmathur.maps.R as MapsR
 
 /**
- * The search field in the top app bar.
+ * The map's search entry point: a pill resting at the bottom of the screen.
  *
- * Not editable: tapping it opens the search page, which owns the real field. It shows the
- * selected place's name when there is one, so the bar doubles as the "where you are looking"
- * label — which is why it is a read-only surface rather than a text field.
+ * Not editable, and not the real field: tapping it raises the search sheet, which owns the
+ * editable one. This is the collapsed half of that pair, so it carries the two shortcuts that
+ * make sense before you have typed anything — a contact's address, and voice — and nothing else.
+ *
+ * It is drawn only while browsing. A selected place or a running trip hands the bottom of the
+ * screen to its own sheet, and a second pill floating over that sheet would be two search boxes
+ * arguing about which one you meant.
  */
 @Composable
 fun MapSearchBar(
-    label: String,
     onOpenSearch: (query: String?) -> Unit,
     onContactAddress: (String) -> Unit,
     modifier: Modifier = Modifier,
@@ -47,7 +52,7 @@ fun MapSearchBar(
         ) {
             IconSearch(Modifier.size(20.dp))
             Text(
-                label,
+                stringResource(MapsR.string.search_placeholder),
                 modifier = Modifier.weight(1f).padding(horizontal = Spacing.sm),
                 maxLines = 1,
             )
@@ -55,7 +60,7 @@ fun MapSearchBar(
             // and open the resolved place directly — never through the search box, so no
             // query prefill and no results list.
             ContactAddressButton(onAddress = onContactAddress)
-            // Voice search (P8): a transcript opens the search page pre-filled.
+            // Voice search (P8): a transcript opens the search sheet pre-filled.
             VoiceSearchButton(onResult = { onOpenSearch(it) })
         }
     }
@@ -74,22 +79,20 @@ fun MapBrowseHeader(
     headingAccuracy: Int,
     modifier: Modifier = Modifier,
 ) {
-    Column(modifier.padding(MapChromeMetrics.chromeMargin).fillMaxWidth()) {
+    Column(modifier.padding(vertical = MapChromeMetrics.chromeMargin).fillMaxWidth()) {
         CategoryChips(
             onCategory = onCategory,
             selected = selectedCategory,
             modifier = Modifier.fillMaxWidth(),
+            contentPadding = PaddingValues(horizontal = MapChromeMetrics.chromeMargin),
         )
         Spacer(Modifier.height(Spacing.sm))
         // Only nag when the heading is genuinely unreliable; MEDIUM is good enough to draw a
         // puck with, and a banner that is always up is a banner nobody reads.
         if (headingAccuracy <= android.hardware.SensorManager.SENSOR_STATUS_ACCURACY_LOW) {
-            CompassCalibrationBanner(headingAccuracy)
+            Box(Modifier.padding(horizontal = MapChromeMetrics.chromeMargin)) {
+                CompassCalibrationBanner(headingAccuracy)
+            }
         }
     }
 }
-
-/** The label the search bar shows: the selected place's name, else the placeholder. */
-@Composable
-fun mapSearchLabel(selectedName: String?): String =
-    selectedName ?: stringResource(MapsR.string.search_placeholder)

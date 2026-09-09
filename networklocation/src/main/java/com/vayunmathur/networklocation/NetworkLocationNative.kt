@@ -2,8 +2,8 @@ package com.vayunmathur.networklocation
 
 /**
  * JNI bridge to the native `networklocation` Rust library: device-position
- * estimation from the beacon fixes (cell towers + WiFi APs) returned by the
- * Apple `gs-loc` proxy and cached locally.
+ * estimation from the beacon fixes (cell towers + WiFi APs) resolved against the
+ * offline WPSDB stores and cached locally.
  *
  * The fully-qualified name of this object MUST stay
  * `com.vayunmathur.networklocation.NetworkLocationNative` so the JNI symbol

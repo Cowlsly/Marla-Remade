@@ -70,6 +70,23 @@ class UpdateEngineOutcomeTest {
     }
 
     @Test
+    fun `an initialization error is flagged so a bad incremental is not retried forever`() {
+        // Code 20. An incremental that cannot initialise against this slot will fail the same
+        // way every time; without the flag the next run re-downloads it and never reaches the
+        // full package.
+        val outcome = assertIs<UpdateEngineOutcome.Outcome.Failed>(UpdateEngineOutcome.of(20))
+        assertTrue(outcome.initializationFailure)
+    }
+
+    @Test
+    fun `other failures are not initialization failures`() {
+        for (code in listOf(1, 9, 10, 51, 52, 60, 61)) {
+            val outcome = assertIs<UpdateEngineOutcome.Outcome.Failed>(UpdateEngineOutcome.of(code))
+            assertFalse(outcome.initializationFailure, "code $code")
+        }
+    }
+
+    @Test
     fun `every failure carries the code it was given`() {
         for (code in listOf(1, 9, 10, 11, 12, 51, 52, 60, 61)) {
             val outcome = assertIs<UpdateEngineOutcome.Outcome.Failed>(UpdateEngineOutcome.of(code))

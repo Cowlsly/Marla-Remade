@@ -56,6 +56,8 @@ import com.vayunmathur.library.ui.RadioButton
 import com.vayunmathur.library.ui.Scaffold
 import com.vayunmathur.library.ui.Text
 import com.vayunmathur.library.ui.TextButton
+import com.vayunmathur.library.util.sharedContainer
+import com.vayunmathur.library.util.sharedText
 import com.vayunmathur.fooddelivery.api.BitesApi
 import com.vayunmathur.fooddelivery.data.CartItem
 import com.vayunmathur.fooddelivery.data.MerchantDetail
@@ -196,7 +198,10 @@ fun RestaurantContent(
                                 model = m.imageUrl,
                                 contentDescription = m.name,
                                 contentScale = ContentScale.Crop,
-                                modifier = Modifier.fillMaxWidth().aspectRatio(16f / 9f)
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .aspectRatio(16f / 9f)
+                                    .sharedContainer("food-merchant-${m.id}")
                             )
                             IconButton(onClick = onBack,
                                 modifier = Modifier.padding(4.dp)) {
@@ -215,12 +220,14 @@ fun RestaurantContent(
                 item {
                     Column(Modifier.padding(16.dp)) {
                         Text(m.name, style = MaterialTheme.typography.headlineSmall,
-                            fontWeight = FontWeight.Bold)
+                            fontWeight = FontWeight.Bold,
+                            modifier = Modifier.sharedText("food-merchant-name-${m.id}"))
                         if (m.merchantTags.isNotEmpty()) {
                             Spacer(Modifier.height(4.dp))
                             Text(m.merchantTags.joinToString(" · "),
                                 style = MaterialTheme.typography.bodyMedium,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                modifier = Modifier.sharedText("food-merchant-tags-${m.id}"))
                         }
                         Spacer(Modifier.height(8.dp))
                         Row(horizontalArrangement = Arrangement.spacedBy(16.dp)) {

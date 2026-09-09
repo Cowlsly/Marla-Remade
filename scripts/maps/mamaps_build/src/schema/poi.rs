@@ -129,14 +129,22 @@ fn poi_kind(tags: &(impl TagSource + ?Sized)) -> Option<(&'static str, u8)> {
         return Some(("station", 11));
     }
     if tags.get("highway") == Some("bus_stop") {
-        return Some(("bus_stop", 14));
+        return Some(("bus_stop", 13));
+    }
+    // A street tram stop. `railway=tram_stop` is the usual tagging and was missing entirely, so
+    // tram stops existed only where a mapper had also tagged `station=tram` on a concourse — which
+    // is the exception. `public_transport=platform` is deliberately not used as a fallback: it is
+    // on bus shelters, rail platforms and ferry piers alike, and would multiply every stop by the
+    // number of platforms it has.
+    if matches!(tags.get("railway"), Some("tram_stop" | "halt_tram")) {
+        return Some(("bus_stop", 13));
     }
     if tags.get("amenity") == Some("ferry_terminal") {
         return Some(("ferry_terminal", 11));
     }
     // Fuel is a driver's landmark, so it appears with the shops rather than the street furniture.
     if tags.get("amenity") == Some("fuel") {
-        return Some(("fuel", 14));
+        return Some(("fuel", 12));
     }
     // Nature and outdoors.
     match tags.get("natural") {
@@ -164,7 +172,7 @@ fn poi_kind(tags: &(impl TagSource + ?Sized)) -> Option<(&'static str, u8)> {
     // Lodging. `guest_house` is included because OSM uses it for the small end of the same thing;
     // the app's Hotels chip means "somewhere to sleep", not "a building tagged tourism=hotel".
     if matches!(tags.get("tourism"), Some("hotel" | "motel" | "hostel" | "guest_house")) {
-        return Some(("hotel", 14));
+        return Some(("hotel", 12));
     }
     if tags.get("tourism") == Some("artwork") {
         return Some(("artwork", 14));
@@ -180,56 +188,67 @@ fn poi_kind(tags: &(impl TagSource + ?Sized)) -> Option<(&'static str, u8)> {
         return Some(("university", 13));
     }
     if matches!(tags.get("amenity"), Some("school" | "kindergarten")) {
-        return Some(("school", 14));
+        return Some(("school", 13));
     }
     if tags.get("amenity") == Some("library") {
-        return Some(("library", 14));
+        return Some(("library", 13));
     }
     if matches!(tags.get("amenity"), Some("townhall" | "courthouse" | "embassy")) {
-        return Some(("townhall", 14));
+        return Some(("townhall", 13));
     }
     if tags.get("amenity") == Some("post_office") {
-        return Some(("post_office", 14));
+        return Some(("post_office", 13));
     }
-    // Food and shops.
+    // Food and shops. The kinds a category chip selects are carried from **12**, two levels
+    // shallower than they are ever drawn while browsing. That gap is the point: the style gives
+    // `poi-food` and `poi-shop` a `browse_minzoom` of 14, so the ambient map is unchanged, and
+    // `Layer::draws_at_focused` drops to this floor for whichever kinds the active chip names.
+    // Tapping "Restaurants" therefore reaches four times the area rather than showing the same
+    // screenful with everything else removed.
+    //
+    // It costs archive size — these are the numerous kinds, and each extra level is another copy
+    // of every one of them — which is why it stops at the chip kinds and at 12.
     if tags.get("amenity") == Some("restaurant") {
-        return Some(("restaurant", 15));
+        return Some(("restaurant", 12));
     }
     if tags.get("amenity") == Some("fast_food") {
-        return Some(("fast_food", 15));
+        return Some(("fast_food", 12));
     }
     if matches!(tags.get("amenity"), Some("cafe" | "ice_cream")) {
-        return Some(("cafe", 15));
+        return Some(("cafe", 12));
     }
     if matches!(tags.get("amenity"), Some("bar" | "pub" | "biergarten" | "nightclub")) {
-        return Some(("bar", 15));
+        return Some(("bar", 13));
     }
     if tags.get("shop") == Some("supermarket") {
-        return Some(("supermarket", 14));
+        return Some(("supermarket", 12));
     }
     if matches!(tags.get("shop"), Some("convenience" | "kiosk")) {
-        return Some(("convenience", 15));
+        return Some(("convenience", 12));
     }
     if tags.get("shop") == Some("books") {
-        return Some(("books", 15));
+        return Some(("books", 14));
     }
     if matches!(tags.get("shop"), Some("beauty" | "hairdresser" | "cosmetics")) {
-        return Some(("beauty", 15));
+        return Some(("beauty", 14));
     }
     if matches!(tags.get("shop"), Some("electronics" | "computer" | "mobile_phone")) {
-        return Some(("electronics", 15));
+        return Some(("electronics", 14));
     }
     if matches!(tags.get("shop"), Some("clothes" | "shoes" | "fashion")) {
-        return Some(("clothes", 15));
+        return Some(("clothes", 14));
     }
     // Money. `bank` is separate from `atm` and drawn earlier because a branch is a landmark and a
     // machine is not — but the app's ATM chip selects both, since most branches have a machine and
     // OSM frequently tags only the branch.
     if tags.get("amenity") == Some("bank") {
-        return Some(("bank", 15));
+        return Some(("bank", 12));
     }
+    // Not 12 like the rest of the ATM chip: there are a great many cash machines and most sit
+    // inside a bank that is already carried. The chip selects `bank` as well, so it still finds
+    // something two levels out.
     if tags.get("amenity") == Some("atm") {
-        return Some(("atm", 16));
+        return Some(("atm", 14));
     }
     // Street furniture and the small stuff, last.
     if matches!(tags.get("amenity"), Some("bench" | "shelter")) {
@@ -267,6 +286,77 @@ mod tests {
     fn kind_of(pairs: &[(&str, &str)]) -> String {
         let class = classify_tags(pairs).expect("a poi");
         dict::KINDS[class.kind as usize - 1].to_string()
+    }
+
+    fn zoom_of(pairs: &[(&str, &str)]) -> u8 {
+        classify_tags(pairs).expect("a poi").min_zoom
+    }
+
+    /// A street tram stop is `railway=tram_stop`. It was matched by nothing, so trams only had a
+    /// stop where a mapper had *also* tagged a `station=tram` concourse — the exception, not the
+    /// rule, and the reason tram stops appeared to be missing from the map entirely.
+    #[test]
+    fn a_street_tram_stop_is_a_stop() {
+        assert_eq!(kind_of(&[("railway", "tram_stop")]), "bus_stop");
+        assert_eq!(zoom_of(&[("railway", "tram_stop")]), 13);
+        // The concourse form still works, and still reads as a station.
+        assert_eq!(kind_of(&[("station", "tram")]), "station");
+    }
+
+    /// A category chip is useless if its results only exist at the very deepest zoom. Everything a
+    /// person would search for is carried from 13.
+    #[test]
+    fn anything_worth_searching_for_is_carried_from_zoom_13() {
+        for tags in [
+            vec![("amenity", "restaurant")],
+            vec![("amenity", "fast_food")],
+            vec![("amenity", "cafe")],
+            vec![("amenity", "bar")],
+            vec![("amenity", "fuel")],
+            vec![("shop", "supermarket")],
+            vec![("tourism", "hotel")],
+            vec![("highway", "bus_stop")],
+            vec![("railway", "tram_stop")],
+        ] {
+            assert!(
+                zoom_of(&tags) <= 13,
+                "{tags:?} should be carried by z13, is {}",
+                zoom_of(&tags),
+            );
+        }
+    }
+
+    /// The kinds a category chip selects are carried two levels shallower than they are drawn
+    /// while browsing, so tapping a chip reaches further out rather than just removing everything
+    /// else from the same screenful. The style holds the browsing floor (`browse_minzoom`); this
+    /// holds the data floor.
+    #[test]
+    fn a_chip_kind_is_carried_two_levels_before_it_is_drawn() {
+        for tags in [
+            vec![("amenity", "restaurant")],
+            vec![("amenity", "fast_food")],
+            vec![("amenity", "cafe")],
+            vec![("amenity", "fuel")],
+            vec![("shop", "supermarket")],
+            vec![("shop", "convenience")],
+            vec![("tourism", "hotel")],
+            vec![("amenity", "bank")],
+        ] {
+            assert_eq!(zoom_of(&tags), 12, "{tags:?} is a chip kind and should be carried at z12");
+        }
+    }
+
+    /// And the limit: street furniture stays at the deepest level. A bench two zooms out is noise,
+    /// and there are a great many of them.
+    #[test]
+    fn street_furniture_stays_at_the_deepest_level() {
+        for tags in [
+            vec![("amenity", "bench")],
+            vec![("amenity", "toilets")],
+            vec![("amenity", "atm")],
+        ] {
+            assert_eq!(zoom_of(&tags), 14, "{tags:?} should stay at z14");
+        }
     }
 
     #[test]

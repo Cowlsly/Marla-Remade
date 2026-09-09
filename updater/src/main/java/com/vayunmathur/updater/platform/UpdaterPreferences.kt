@@ -23,15 +23,25 @@ internal object UpdaterPreferences {
      * none.
      *
      * Persisted because the applied slot outlives this process by hours: the payload is written,
-     * everything gets killed, and something has to know on the next poll that a reboot is owed.
+     * everything gets killed, and something has to know that a reboot is owed.
      */
     const val PENDING_REBOOT_BUILD = "updater_pending_reboot_build"
 
     /**
-     * Last time the device was observed interactive, epoch millis.
+     * Which artifact the bytes currently at `update.zip` came from.
      *
-     * See `IdleRebootPolicy`. Persisted for the same reason: the idle wait is measured in
-     * tens of minutes and the process will not survive it.
+     * The package always lands at one fixed path, so the path alone cannot say whether a partial
+     * file is a prefix of the artifact we are about to request. Resuming a full package onto an
+     * incremental's bytes would produce a corrupt zip that only `verifyPackage` would catch,
+     * after another gigabyte had been transferred.
      */
-    const val LAST_INTERACTIVE = "updater_last_interactive"
+    const val DOWNLOAD_FILE = "updater_download_file"
+
+    /**
+     * An incremental that update_engine refused to initialise from.
+     *
+     * Without this the next run downloads the same incremental, fails the same way, and never
+     * reaches the full package — an update that can never install and never stops trying.
+     */
+    const val FAILED_INCREMENTAL = "updater_failed_incremental"
 }

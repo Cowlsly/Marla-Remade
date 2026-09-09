@@ -20,7 +20,6 @@ import com.vayunmathur.maps.data.SpecificFeature
 import com.vayunmathur.maps.data.string
 import kotlinx.serialization.json.doubleOrNull
 import kotlinx.serialization.json.jsonPrimitive
-import org.maplibre.spatialk.geojson.Position
 
 /** Pin id — hit-tested in MapSurface.onMapClick (before the ambient POI
  *  layer) so a tapped search pin re-selects that place. */
@@ -75,5 +74,5 @@ fun Feature1.toSelectedSearchResult(): SpecificFeature? {
     val name = props.string("name")?.ifBlank { null } ?: return null
     val lat = props["lat"]?.jsonPrimitive?.doubleOrNull ?: return null
     val lng = props["lng"]?.jsonPrimitive?.doubleOrNull ?: return null
-    return SpecificFeature.GenericPlace(name, null, null, null, Position(lng, lat))
+    return SpecificFeature.GenericPlace(name, null, null, null, GeoPoint(lng, lat))
 }

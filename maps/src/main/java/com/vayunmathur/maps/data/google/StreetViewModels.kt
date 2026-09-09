@@ -12,16 +12,16 @@ package com.vayunmathur.maps.data.google
  * NOT fixed (pre-2016 captures are `416·2^z`), so [levelDims] carries the pano's
  * own per-level dimensions and the tile loader sizes its grid from THOSE.
  *
- * Ported from Vela's `StreetViewPano` (model only; the renderer is the photos-app
- * pan/zoom viewer, not Vela's GLES sphere).
+ * Ported from Vela's `StreetViewPano` (model only; the renderer is the shared
+ * `PanoramaSphere` from `:library:ui`).
  */
 data class StreetViewPano(
     val panoId: String,
     val lat: Double,
     val lng: Double,
     // Capture heading (degrees, true north): the compass direction at the image
-    // centre. Kept for attribution/orientation; the flat pan/zoom viewer doesn't
-    // reproject by it.
+    // centre. Kept for attribution/orientation; the sphere viewer opens facing the
+    // image centre and does not reproject by it.
     val headingDeg: Double = 0.0,
     val tileSize: Int = 512,
     // Number of pyramid levels; a full-res equirect is ~400 MB decoded, so the

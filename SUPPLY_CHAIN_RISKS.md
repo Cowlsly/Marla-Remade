@@ -1,201 +1,945 @@
 # Supply Chain Risks
 
-This document enumerates critical external dependencies for the Modern-Apps monorepo (27 apps + `library/`, `sdk/`, `third_party/`). It covers runtime server dependencies and build-time library dependencies that could break apps if abandoned, shut down, or changed.
+This document records the current state of everything external that this repository depends on:
+the code and artifacts that enter its builds and shipped APKs, and the network services its apps
+contact at run time. Each entry states what the dependency is, the risk as it stands, and what
+would mitigate it.
 
-## Assumptions
+## Scope and limits
 
-- **Self-hosted infrastructure is assumed indefinite**: `api.vayunmathur.com`, `data.vayunmathur.com`, `findfamily.cc` and any subdomains are excluded from the risk list. These services host self-owned data (e.g. the `openassistant`/`photos` ML models permanently hosted at `data.vayunmathur.com/models`, map pmtiles/zone downloads on `data.vayunmathur.com`, E2EE relays) and proxy a few third-party secrets (Duffel, Google Places/Ratings) to keep F-Droid builds reproducible. Only the *transitive third-party* upstreams (Duffel, Google Maps Platform) are listed — the proxy/DB itself is not a supply-chain risk.
-- Offline apps require only Maven Central / Google Maven at build time.
+Covered:
 
----
+- **The build and artifact supply chain** — dependency declaration and resolution, artifact
+  integrity, the CI and release pipeline, scripts that fetch or compile remote code, vendored
+  third-party source, and model-weight provenance.
+- **The servers the apps talk to** — both the runtime hosts contacted from user devices (§11) and
+  the build-time and data-prep hosts contacted from a developer machine or CI runner (§12). Several
+  hosts appear in both roles; the two are kept separate throughout because the trust model and the
+  blast radius differ.
 
-## Server Dependencies
+Not covered: application logic, permissions posture, and data handling beyond where it bears
+directly on a third-party dependency.
 
-### A. Purpose-Aligned Dependencies (server IS the feature)
+### Verification status
 
-These services are the raison d'être of the feature. If the service itself ceases to exist, the feature's purpose also ceases. The risk is existential to the product category, not an avoidable implementation choice. Most are also reverse-engineered/unofficial, so breakage from API changes is expected.
+**Nothing in this document has been validated by a build.** No Gradle task ran, and no shell script
+was syntax-checked. `cargo metadata --offline --no-deps` was run against the vendored fuzz manifests
+(§4.1) and is the only build-tool invocation behind any claim here; there was no full `cargo build`.
+Everything else is a static read of the tree.
 
-| App | External Service | Endpoints / Evidence | Why Inherent | Impact if Gone | Source Files |
-|---|---|---|---|---|---|
-| `youpipe`, `education` | **YouTube** | `https://www.youtube.com/watch?v=`, `*.googlevideo.com`, SABR streaming, `sabr_po_token.js` | Product is a YouTube client; YouTube is the content source | No playback. Breaks on anti-bot changes (common, requires extractor updates) | `youpipe/src/main/java/com/vayunmathur/youpipe/util/Extractor.kt`, `MyDownloader.kt`, `youpipe/extractor/src/main/java/org/schabi/newpipe/extractor/` (vendored NewPipe Extractor) |
-| `messages` (gmessages) | **Google Messages for Web** | `https://messages.google.com/web/authentication`, `https://instantmessaging-pa.googleapis.com`, `https://instantmessaging-pa.clients6.google.com`, API key `AIzaSyCA...`, UA `Chrome/146.0.0.0` | Purpose is aggregating user's Google Messages account | QR pairing / long-poll fails; requires UA / PbLite RPC bump | `messages/src/main/java/com/vayunmathur/messages/gmessages/Constants.kt`, `RpcClient.kt`, `PairFlow.kt` |
-| `messages` (gvoice) | **Google Voice (unofficial web API)** | `clients6.google.com/voice/v1/...`, `signaler-pa.clients6.google.com`, `waa-pa.clients6.google.com`, Origin `https://voice.google.com` | Purpose is aggregating Google Voice | SMS/calls/history stops on Voice web change | `messages/src/main/java/com/vayunmathur/messages/gvoice/Constants.kt`, `GVoiceRpcClient.kt` |
-| `messages` (whatsapp) | **WhatsApp Web + media CDN** | `wss://web.whatsapp.com/ws/chat`, `s.whatsapp.net`, `*.whatsapp.net`, `mmg.whatsapp.net` | Purpose is aggregating WhatsApp | Noise `XX_25519_AESGCM_SHA256` handshake breaks, media upload fails | `messages/src/main/java/com/vayunmathur/messages/whatsapp/WhatsAppProtocol.kt`, `WhatsAppWebSocket.kt` |
-| `messages` (signal) | **Signal** | `wss://chat.signal.org/v1/websocket/`, `chat.signal.org/v1/devices/capabilities`, Signal CDN attachments, `signal-root.crt.der` | Purpose is aggregating Signal | Sealed sender / ratchet / attachment upload breaks | `messages/src/main/java/com/vayunmathur/messages/signal/SignalClient.kt` |
-| `messages` (meta) | **Messenger / Instagram (Lightspeed/MQTT)** | Facebook MQTT, `www.messenger.com`, Mercury upload, `LS_RESP`, `ORCA_TYPING` | Purpose is aggregating Messenger/IG | MQTT `versionId` mismatch rejected, login token expiry | `messages/src/main/java/com/vayunmathur/messages/meta/MetaClient.kt`, `MetaMqttClient.kt`, `MetaBootstrap.kt` |
-| `messages` (telegram) | **Telegram MTProto DCs** | Telegram data centers, MTProto | Purpose is aggregating Telegram | DC migration / flood wait / auth key invalidation | `messages/src/main/java/com/vayunmathur/messages/telegram/TelegramClient.kt`, `mtproto/` |
-| `email` | **Per-provider IMAP/SMTP + OAuth** | Gmail `imap.gmail.com:993` / `smtp.gmail.com:465`, Outlook `outlook.office365.com:993` / `smtp-mail.outlook.com:587` + `https://login.microsoftonline.com/common/oauth2/v2.0/authorize`, Yahoo, iCloud `imap.mail.me.com`, Fastmail, generic custom | Purpose is connecting to user's own email provider; provider IS the mailbox | That provider's account stops syncing. Microsoft identity outage blocks Outlook token refresh | `email/src/main/java/com/vayunmathur/email/data/ProviderPresets.kt`, `OutlookOAuth.kt` |
-| `everysync` | **Google Contacts/Calendar, Google Health, iCloud CalDAV/CardDAV, Generic DAV** | `https://accounts.google.com/o/oauth2/v2/auth`, `oauth2.googleapis.com/token`, `www.googleapis.com/carddav/v1`, `apidata.googleusercontent.com/caldav/v2`, `health.googleapis.com/v4/.../dataPoints`, `caldav.icloud.com`, `contacts.icloud.com`, generic `/.well-known/caldav` discovery via `DavClient.kt` PROPFIND/REPORT | Purpose is syncing user's external calendars/contacts/health from those providers. Generic DAV servers are user-provided (not third-party) | Google/iCloud sync stops; Health backfill (steps, HR, sleep etc) halts | `everysync/src/main/java/com/vayunmathur/everysync/auth/OAuthConfig.kt`, `provider/impl/GoogleProvider.kt`, `remote/GoogleHealthClient.kt`, `provider/impl/DavProviders.kt`, `remote/DavClient.kt` |
-| `travel` | **Duffel (Flights + Stays) via self-hosted proxy** | `https://api.vayunmathur.com/api/travel/*` proxying Duffel token server-side: `/places`, `/flights`, `/flights-async`, `/offers`, `/airlines`, `/aircraft`, `/orders`, `/orders/{id}/pay`, etc. Stays: `https://api.vayunmathur.com/api/stays/*` `/search`, `/rates`, `/quote`, `/bookings` | Purpose is flight + hotel search/booking; Duffel is the inventory aggregator. Proxy itself is assumed indefinite, but upstream Duffel is third-party | Flight/hotel search, pricing, seat maps, booking, trips hub fails. Reference data (airlines/cities) cached partially | `travel/src/main/java/com/vayunmathur/travel/network/TravelApi.kt`, `StaysApi.kt` |
-| `musicbrainz` | **MusicBrainz WS/2** | `https://musicbrainz.org/ws/2/{artist,release-group,release,recording}`, 1 req/sec limit, identifying User-Agent required | Product is a MusicBrainz browser; MusicBrainz is the catalogue | No search or browsing at all. The app has no other catalogue source | `musicbrainz/src/main/java/com/vayunmathur/musicbrainz/api/MusicBrainzApi.kt` |
-| `musicbrainz` | **YouTube** | `*.googlevideo.com` progressive audio, resolved through the vendored NewPipe fork in `:youpipe:extractor` | MusicBrainz catalogues music but hosts none; YouTube is the audio source | Downloads fail; browsing and the on-device library scan still work. Breaks on anti-bot changes, same as `youpipe` | `musicbrainz/src/main/java/com/vayunmathur/musicbrainz/download/AudioResolver.kt`, `MbDownloader.kt` |
+Two specifics worth knowing before relying on a "clean" signal:
 
-Mitigation for purpose-aligned: pin UA versions (`Chrome/146`, Sec-CH-UA), isolate per-bridge circuit breaker, implement extractor/protocol version checks in CI, surface degraded state per account.
+- Shell scripts cannot be checked in this environment. `bash -n` is unavailable, shellcheck is not
+  installed, and no diagnostics provider is registered for `.sh` — so an empty diagnostics result on
+  a shell file means *nothing was checked*, not *nothing is wrong*.
+- Nothing JVM-side can be compiled locally. CI can compile it (§6.6), but no change described here
+  has been through that path yet.
 
-### B. Replaceable / Infrastructure Dependencies (implementation choice, could be self-hosted or swapped)
+This matters most for the recently changed build inputs. The following are correct by inspection
+and unverified by execution:
 
-These servers provide data/functionality that is NOT intrinsically tied to a single vendor. We currently depend on a community/FOSS provider or CDN, but could mirror, self-host, or swap with modest engineering.
+- Kotlin Gradle Plugin at 2.4.0, and the single `protobufVersion` key at 4.35.0 now backing
+  `protobuf-java`, `protobuf-javalite` and `protoc`.
+- The version-catalog accessors added for the Android Auto and `androidx.test` coordinates that are
+  now declared through `libs.versions.toml`.
+- The NDK version refactor onto `build-logic/src/main/kotlin/NdkVersion.kt`.
+- Every shell script referenced below, including the pinning and checksum logic in
+  `scripts/maps/extract_pmtiles.sh` and `scripts/download-ca-bundle.sh`.
 
-| App | External Service | Endpoints / Evidence | Why Replaceable | Impact if Gone | Alternative |
-|---|---|---|---|---|---|
-| `weather` | **Open-Meteo Stack (FOSS, keyless)** | `https://api.open-meteo.com/v1/forecast`, `geocoding-api.open-meteo.com/v1/search`, `air-quality-api.open-meteo.com/v1/air-quality`, `map-tiles.open-meteo.com/data_spatial/<model>/latest.json` + `.om` tiles `.../YYYY/MM/DD/HHMMZ/...om` decoded by `libweather_om.so` (vendored C/Rust in `third_party/om-file-format-sys`) | Weather data is commodity; Open-Meteo is one FOSS provider among many. API is keyless and opensource, self-hostable | Forecast, city search, air-quality, weather map shading fails. `WeatherCacheStore` mitigates partially | Self-host Open-Meteo `om-file-format` + DWD ICON model, or swap to PirateWeather, OpenWeather, NOAA GFS direct |
-| `maps` ratings + live traffic | **Google Places + traffic via self-hosted proxy (transitive)** | `https://api.vayunmathur.com/maps/traffic` (live traffic tiles, `OfflineRouter.kt`), `place_match`, `place_rating` wrapping Google Places (`Reviews.kt`) | Ratings/traffic proxy holds secret; Google is upstream. **Routing is fully offline** via `offlinerouter.so` (C++ `maps/src/main/cpp/`, `OfflineRouter.findRouteNative`) + self-hosted `v4.pmtiles` + the routing packs fetched on first launch + `admin0.fgb/admin1.fgb` + GTFS — no online routing endpoint is called | Place ratings + live-traffic overlay fail; turn-by-turn routing continues fully offline | Ratings could be OSM/Wikidata; self-host a traffic source. (Online routing already removed in favor of the offline router) |
-| `maps` basemap (vector) | **Protomaps v4 + basemaps-assets now self-hosted ✅** | `https://data.vayunmathur.com/v4.pmtiles` (137 GB, was `https://demo-bucket.protomaps.com/v4.pmtiles`), styling sprites `https://data.vayunmathur.com/basemaps-assets/sprites/v4/light` + fonts `fonts/{fontstack}/{range}.pbf` (`style.json:3541-3542`, 1044 objects), plus a one-time fetch of nine routing/POI packs (`metadata.bin`, `road_names.bin`, `nodes.bin`, `edges.bin`, `lanes.bin`, `intermediate.bin`, `poi_index.bin`, `poi_names.bin`, `world.transit`) via `InitialDownloadChecker` (`maps/src/main/java/com/vayunmathur/maps/MainActivity.kt:85-97`) | Self-hosted on R2 bucket `maps` custom domain `data.vayunmathur.com` (Cloudflare, direct Range, free egress, `immutable` cache). PMTiles streams via HTTP Range by MapLibre; disk cache `MapTileCache.kt:36-39` SHA-256(URL+Range) 24h refresh + offline stale-serve with `.origin` migration marker. Attribution `Protomaps © OSM` preserved (`style.json` attribution, ODbL/BSD allowed) | If R2 down: previously-cached tilecache still serves; the nine routing packs are already on disk so navigation continues | Already vendored at `data.vayunmathur.com` — zero external vector dependency. APK only hits own domain for vector tiles |
-| `findfamily` / `photos` / `weather` / `taxi` / `fooddelivery` | **CARTO raster basemap CDN (third-party)** | `https://basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}@2x.png` and `light_all/...` (`library/map/src/main/java/com/vayunmathur/library/map/TileSource.kt:26,32`), consumed through `RasterMap.kt` | Raster XYZ tiles are a commodity; any OSM raster source has the same URL shape. Attribution is `© OpenStreetMap © CARTO` | These five apps' map views show blank tiles. `maps` itself is unaffected — it uses the self-hosted vector basemap | Point `TileSource` at self-hosted raster tiles rendered from the existing `v4.pmtiles`, or reuse the vector basemap via MapLibre |
-| `youpipe` extras | **SponsorBlock / DeArrow (community)** — data APIs now self-hosted | Segment + branding data served from `https://api.vayunmathur.com/api/skipSegments` and `/api/branding` (a local mirror of the SponsorBlock DB, no runtime call to ajay.app). DeArrow now self-hosted renderer `GET /api/dearrow/thumbnail?videoID=&time=` (`handlers/dearrow.rs`, own yt-dlp + ffmpeg impl inspired by `ajayyy/DeArrowThumbnailCache`) | Crowdsourced, best-effort extras, not core YouTube | Sponsor skips + DeArrow titles/branding + thumbnail frames now continue from local even if ajay.app is down | ✅ **Fully self-hosted** — SponsorBlock DB mirrored into `sponsorblock.db` (`sb_build.sh` rsyncs public dumps; served by `handlers/sponsorblock.rs`). DeArrow thumbnail proxy + render at `/api/dearrow/thumbnail` (`dearrow.rs`), clients rewired in `Extractor.kt:167` `DEARROW_THUMB_MIRROR` and `Wikidata.kt:10` `BASE_URL`. Wikidata proxy `GET /api/wikidata/items/:id` (`wikidata.rs`) — 73 server tests green |
-| `maps` / `travel` / `photos` / `weather` | **MapLibre rendering + Wikidata enrichment** | `org.maplibre.compose:maplibre-compose:0.13.0` → `libmaplibre.so`, self-hosted Wikidata `https://api.vayunmathur.com/api/wikidata/items/{id}` (`Wikidata.kt:10`) | Map renderer is FOSS community project (vs Mapbox), Wikidata is enrichment only (now also proxied/self-cached at `wikidata_cache/`) | Map rendering would need fork/mirror if MapLibre artifacts gone; Wikidata fail is graceful null | Vendor MapLibre AAR, or switch to OpenGL self-render; Wikidata proxy keeps attribution |
-| `musicbrainz` extras | **Cover Art Archive / LRCLIB (community)** | `https://coverartarchive.org/release/{id}/front-500` and `/release-group/...` (redirects to `ia*.us.archive.org`, hence `TrustBundle.STANDARD`), `https://lrclib.net/api/get` | Artwork and lyrics are decoration on the download, not the feature. Both are optional and switchable off in settings | Downloads still succeed, just without embedded cover art or lyrics. Browsing shows placeholder tiles | Mirror covers on `data.vayunmathur.com`, or fall back to the artwork embedded in the source stream |
+Treat "the build tolerates this" anywhere in this document as an inference, not an observation.
 
-`health` **no longer requests `android.permission.INTERNET` at all** — it is the first app here with no network access whatsoever. Its nutrition database ships inside the APK as a brotli-compressed columnar asset (`scripts/generate_food_db.py` → `health/src/main/assets/food.bin.br`, 10.9 MB for 465,000 products), which `FoodDatabase.kt` turns into a SQLite/FTS5 database on first launch. Upstream is the **Open Food Facts** daily CSV export (ODbL v1.0, attributed in-app) — a build-host dependency, not a runtime one: if it vanished the shipped database keeps working and only stops being refreshable. The older `/api/food/search` and `/api/food/data/:id` endpoints remain up for previously-shipped builds.
+### Limits of the audit
 
-`speech` **no longer downloads anything**:
+These bound what the rest of the document can claim.
 
-- **Speech-to-text** is `whisper-base` in `speech/src/main/assets/whisper-base/whisper_base.maml` (70.6 MiB int8), run on **`:library:ml`** by `WhisperEngine.kt`. It replaced two int8 ONNX exports totalling 76.9 MB on `onnxruntime-android`, which had replaced a 117 MB runtime download of the ncnn conversion from `data.vayunmathur.com/models/whisper-tiny/`. It was `whisper-tiny` until the swap to `base`, which roughly halves word error. Upstream is now the **fp32 checkpoint**, `openai/whisper-base` (Apache-2.0) pinned to revision `e37978b9`, a **build-host** dependency only, pinned by SHA-256 and rebuilt byte-for-byte by `scripts/ml/fetch_whisper.py`. Reading the checkpoint rather than the ONNX export is what lets `maml_convert.quantise_per_channel` quantise **per output channel** where onnxruntime quantised per tensor: measured over the encoder output, mean absolute error against fp32 is 0.029 against the export's 0.110, four times closer. The log-mel front end stays in Kotlin (`WhisperFeatures.kt`, pinned against HuggingFace by `WhisperFeaturesTest`); the KV-cached decode loop moved out of Kotlin into tested Rust (`post::whisper`).
-- **Text-to-speech** is **Supertonic 3** bundled in `speech/src/main/assets/supertonic/`, run on `:library:ml` - our own Vulkan compute runtime - by `SupertonicTtsService.kt`. It replaced Piper (VITS), whose voices were a **1,834 MB** runtime download across 42 SHA-256-pinned archives from `data.vayunmathur.com/models/piper/`, each needing a per-language espeak-ng dictionary generated on the build machine. One bundle of four networks now covers 31 languages and 10 voices; the `:library:downloadservice` and DataStore dependencies went with it, along with `scripts/speech/fetch_piper_model.sh`, `generate_piper_dict.py` and `generate_wordlist.py`. Reads stream out of the APK through a file descriptor, which is why `noCompress += "maml"` is load-bearing rather than an optimisation.
+- The Gradle dependency graph was not resolved. Everything here reflects *declared* coordinates.
+  Transitive dependencies are not inventoried — notably, `io.grpc:grpc-okhttp` pulls okhttp and okio
+  into `:appstore` transitively, and those versions are not established here.
+- No vulnerability or advisory scanning result is reported here. Nothing below asserts that a
+  dependency is or is not affected by a known CVE. `cargo-deny` runs in CI (§6.4) for the Rust side;
+  there is no equivalent for the JVM side.
+- Maintainer counts, release cadence, and abandonment status were not verified upstream. Where a
+  library is described, the description is limited to what is observable in the tree.
+- The `personal/*` modules are gitignored and absent from this checkout, so their dependencies and
+  hosts are outside this inventory.
+- The host inventory has its own, sharper limits — see §11.5.
 
-  Two things about this one are unlike every other model here. **Its licence is use-restricted**: Supertonic 3 is **OpenRAIL**, the first such licence in this tree - everything else is Apache-2.0, MIT, ODbL or InsightFace's non-commercial research terms. And because it is bundled rather than downloaded, the restriction ships in the APK rather than being fetched by a user who went looking for it. It is a **build-host** dependency and no runtime dependency at all: upstream is **`Supertone/supertonic-3`** on HuggingFace, pinned to revision `3cadd1ee` with all four ONNX SHA-256s in `scripts/ml/fetch_supertonic.py`, which fetches it and drives both converters. The ONNX is not vendored - it is 398 MB against the 189 MiB of fp16 `.maml` it becomes, and nothing reads it at run time. The `.maml` are not committed either, for the reason `/.gitignore` gives, so `fetch_supertonic.py` is the only record of where the weights came from and the only way to rebuild them.
+## Summary
 
-  Two independent checks guard a bad rebuild, and they fail for different reasons: the pinned file SHA-256s catch a re-export or a truncated download, and each converter's layer-table digest in `maml_convert.EXPECTED_DIGEST` catches an export whose *structure* moved - which is what would make the hardcoded Rust forward passes read the right shapes holding the wrong numbers. Neither checks the numbers; `scripts/ml/onnx_parity.py` does, and its correlations against onnxruntime are recorded in the README beside the assets.
+The build side is in reasonable shape and the runtime side is not.
 
-  The bundle is **107 MiB**, not the 198 MB the fp32 export folds to at fp16: every ungrouped `1 x 1` convolution in the sampler, the vocoder and the duration predictor is stored as int8 with one fp16 scale per output channel. That is 92% of the sampler's parameters and 87% of the vocoder's. The text encoder stays fp16 - quantising it cost more correlation than the other three combined and saved 6.6 MB of 198, so it was measured and reverted. With whisper-base's 71.6 MiB, `:speech` ships 179.2 MiB of assets and links no third-party inference runtime at all.
+The Rust/Cargo half of the build is well controlled: committed lockfiles with per-package checksums,
+no git dependencies, no source replacement, locked builds, and `cargo-deny` on a schedule. The model
+pipeline is comparably controlled — every weight pins an upstream revision and verifies a SHA-256.
+CI pins every third-party action to a commit SHA, scopes signing secrets to the one step that needs
+them, and gets the keystore off disk before any third-party code runs.
 
-  The language coverage is a deliberate regression as well as a gain: 42 languages became 31. TTS was **lost** for Chinese, Hebrew, Thai, Bengali, Telugu, Malayalam, Marathi, Urdu, Serbian, Norwegian, Catalan, Georgian, Kurdish, Luxembourgish, Nepali and Swahili, and **gained** for Estonian, Croatian, Lithuanian, Latvian and Slovenian. The dropped languages are absent from the engine's advertised voice list, so a user is never offered one that would be silent.
+One build-integrity gap dominates: Gradle resolves every dependency with no artifact verification
+whatsoever (§1.1).
 
-So a clean install both transcribes and speaks with no network at all.
-
-**There is no third-party inference runtime left in the tree.** `com.microsoft.onnxruntime:onnxruntime-android` and its reduced rebuild `io.github.vayun-mathur:onnxruntime-reduced-android` are gone from `libs.versions.toml`, and with them the last of the `.so`-shaped AI dependencies that ncnn started. Both `:speech` and `:photos` were on the **reduced** build, so what actually left each APK is 10,466,856 bytes of arm64 native code - about 3.6 MiB deflated - against the 797 KB `libmodelrunner.so` that was already in both. Every model in every app now runs on `:library:ml` reading `.maml` weights.
-
-Measured release APKs, before and after: `:photos` 59.0 MiB to **53.8 MiB**, `:speech` 188.1 MiB to **181.8 MiB**. The weights dominate both numbers and barely moved - TinyCLIP's 24,281,512-byte ONNX became a 23,734,912-byte `.maml`, whisper's two graphs' 76,894,612 bytes became 74,058,272 - so the saving is the runtime, as expected. Neither APK contains an `onnxruntime` entry or a `.onnx` asset.
-
-The reduced build is worth remembering as a shape of dependency to avoid rather than merely as bytes saved. It was **our own rebuild** of upstream with `--include_ops_by_config` against an operator list generated from the very models it ran — so re-exporting a model meant regenerating the AAR by hand, and a model with an operator outside the configured set failed at *session creation* rather than at inference. Nothing in `.maml` has that coupling: the container carries ordered tensors and the forward pass is Rust in `nets/`.
-
-It also came out **more accurate**, not less, because reading each model's fp32 source and quantising per output channel beats onnxruntime's per-tensor dynamic quantisation. Measured against fp32: whisper-base's encoder output is 0.029 mean absolute error against the export's 0.110, and TinyCLIP's text embedding is 0.9994 cosine against 0.9829.
-
-`photos` **semantic search no longer needs a second app**.
-
-`photos` **semantic search no longer needs a second app**. It previously delegated image/text embedding to the OpenAssistant app over IPC, so search only worked if OpenAssistant was installed, recent enough, and had finished a ~452 MB SigLIP2 download. It now runs **TinyCLIP-ViT-8M/16 Text-3M** in-process from `photos/src/main/assets/clip/tinyclip.maml` (22.6 MiB int8) on **`:library:ml`**, with the CLIP BPE table in `clip/bpe_simple_vocab_16e6.txt`. Upstream is **`onnx-community/TinyCLIP-ViT-8M-16-Text-3M-YFCC15M-ONNX`** (MIT, an ONNX export of `wkcn/TinyCLIP-ViT-8M-16-Text-3M-YFCC15M`) pinned to revision `9463a9c5` - a **build-host** dependency only, pinned by SHA-256 and rebuilt byte-for-byte by `scripts/ml/fetch_tinyclip.py`, with provenance in `photos/src/main/assets/clip/README.md`. Until that script existed this was the only bundled model in the tree with no pinned upstream digest and no fetch recipe. The `.maml` is converted from the repo's **fp32** `onnx/model.onnx` rather than the int8 export the app used to run: that export quantised the 49,408-row token table per *tensor* with a uint8 zero point of 226, which `conv_int8.comp` cannot represent and requantising cannot recover. Cosine against fp32 is now 0.9999 for an image and 0.9994 for a query, against the int8 export's 0.9985 and 0.9829. The trade-off accepted here is accuracy in absolute terms: TinyCLIP-8M scores 41.1% zero-shot ImageNet-1k against SigLIP2-base's high-70s, so single-concept queries are noticeably weaker than the IPC path it replaced.
-
-`camera` and `photos` **no longer bundle two unattributable models**. Both `erdnet.{param,bin}` (portrait segmentation) and `u2netp.ncnn.{param,bin}` (subject segmentation) were added in a single commit (`72dde80df`, "make apps smaller") with no upstream URL, no license and no conversion recipe, and neither was ever listed here. They are replaced by fp16 `.maml` weights converted from **Apache-2.0** ONNX exports, run on `:library:ml` — our own Vulkan compute runtime — rather than on ncnn:
-
-- `camera/src/main/assets/selfie_segmentation.maml` (211 KB, was 1.63 MB) from **`onnx-community/mediapipe_selfie_segmentation`**. A deliberate model *change*, not a port: erdnet was Caffe-derived from nihui's ncnn demo family and had no obtainable ONNX, so it could not be attributed or rebuilt at all. Bokeh masks therefore differ from before.
-- `photos/src/main/assets/u2netp.maml` (2.15 MB, was 2.26 MB) from **`BritishWerewolf/U-2-Netp`**. The same network re-sourced — the ncnn model's op inventory (Convolution 119, Pooling 33, Interp 38) matches the ONNX exactly.
-
-Both are **build-host** dependencies only, pinned by upstream revision *and* file SHA-256 in `scripts/ml/fetch_and_convert.sh`, with provenance in a `README.md` beside each asset and the source ONNX SHA-256 baked into each `.maml` header. If either vanished, shipped builds keep working. The ONNX itself is not vendored: it is twice the size and nothing reads it at run time.
-
-The trade-off accepted is **GPU-only**: `:library:ml` needs Vulkan 1.1 plus `VK_KHR_shader_float16_int8`, which was promoted to core only in Vulkan 1.2 and so is optional at the 1.1 floor minSdk 31 guarantees. On a device without it, portrait bokeh, auto-select-subject, OCR, speech synthesis, translation and the chess AI turn off rather than falling back to CPU.
-
-**ncnn is gone from the tree.** `:translate` was its last consumer, and SMaLL-100 now runs on `:library:ml` too, so `libncnn_android.so` is in no APK here and the self-built `com.github.vayun-mathur:ncnn-android` AAR — a JitPack fork of a third-party runtime, built from a local checkout and resolved through `mavenLocal()` — has left the supply chain entirely. `mavenLocal()` went with it: it existed only so a freshly built ncnn resolved ahead of a rate-limited JitPack, and a local repository ahead of the remotes means any coordinate in `~/.m2` silently outranks the pinned one. The JitPack declaration stays, scoped to `com.github.*`, for `com.github.luben:zstd-jni`.
-
-**Stockfish is gone too, and with it the last personal JitPack fork.** `games/chess` played against `com.github.vayun-mathur:Stockfish-Library` — a prebuilt AAR from a personal GitHub repo, driven over raw UCI text, with an 86 MB NNUE bundled as an APK asset. It now plays against **Maia3-5M** on `:library:ml`: an encoder-only transformer that predicts *human* moves at a requested rating, one forward pass per move and no search. Upstream is **`UofTCSSLab/Maia3-5M`**, a **build-host** dependency pinned by HF revision and checkpoint SHA-256 in `scripts/ml/fetch_maia.py`.
-
-Three things improve at once. The remaining JitPack coordinate is a third-party library (`zstd-jni`) rather than a personal fork, so no build here depends on a repo one person can delete. The APK loses **~79 MB**: the 86 MB NNUE is replaced by a 6.8 MiB int8 `.maml`. And the AI plays better chess in the sense that matters for a casual app — Stockfish at `Skill Level 0` blundered in ways no beginner does, where Maia at 1100 blunders the way an 1100 does.
-
-The int8 was chosen on measured **move agreement** rather than on the per-tensor cosine gate, because a cosine says nothing about whether a chess model still picks the same move: `scripts/ml/maia_quant_eval.py` puts int8 at 99.0–99.5% agreement with fp32 across the four difficulties with no disagreement wider than fp16 rounding, and rejects int4 at 87–91% with 14–29 genuine changes of mind at any group size.
-
-The port also removed the only two tagged-memory faults this tree has seen, both inside `libncnn_android.so`, and cut the translation model's download from **1.14 GB across seven files to 320 MB across two** — ncnn could not quantise the 131M-parameter embedding, so the shipped model was fp16 and carried it twice; the `.maml` is int8 per output channel and carries it once, because it is tied. Upstream is **`alirezamsh/small100`** (MIT), a **build-host** dependency pinned by revision and file SHA-256 in `scripts/ml/fetch_small100.py`. Nothing about the model is built locally any more.
-
-Notably **offline after first launch**: `astronomy`, `calendar`, `clock`, `contacts` (only `libphonenumber` locally), `files`, `notes` (Room + Ink), `things`, `camera` (on-device MediaPipe Selfie Segmentation on `:library:ml`), `pdf` (Rust `libpdf_render.so`), `music` (Media3 ExoPlayer + local scan), `games/*`, `passwords` (biometric + KeePass), `library/*`, `health` (including food search, which ships its database in the APK).
+The runtime picture is worse than the build picture. One app transports credentials over a socket
+with no TLS, another accepts any certificate presented by an arbitrary mail server, live payment and
+OAuth credentials are compiled into shipped APKs, and one developer-run generator downloads and
+executes JavaScript from a mutable upstream branch. These are set out in full below.
 
 ---
 
-## Library / Build Dependencies
+## Highest-severity findings
 
-### Build Infrastructure
+The four items in this section outrank everything else in this document. Three are runtime; one is
+in a build script.
 
-- **Maven repositories**: `google()` (filtered), `mavenCentral()`, `gradlePluginPortal()` in `build-logic/settings`, plus **`https://jitpack.io`** in root `settings.gradle.kts`, scoped to `com.github.*`. JitPack now serves **no personal forks at all**, only `com.github.luben:zstd-jni`: `ncnn-android` is gone with ncnn itself (✅ above), `Stockfish-Library` is gone with Stockfish (✅ above), and `mavenLocal()` — which existed only to resolve the former — is gone with it. `nanojson` was vendored to `:third_party:nanojson` (✅ mitigation #2). JitPack is still a reproducible-build SPOF, but now only for a third-party library rather than for a repo one person can delete.
-- **Launch icon generator**: `build-logic/src/main/kotlin/LauncherIconGen.kt` downloads `https://raw.githubusercontent.com/google/material-design-icons/819d786.../symbols/android/{icon}/...24px.xml` at build time, cached under `~/.gradle/material-symbols-cache`. Build needs GitHub availability on first (uncached) build. ⚠️ Not yet mitigated.
-- **Alpha toolchain**: `agp = 9.4.0-alpha04`, `composeBom = 2026.06.01` (future-dated), `navigation3 = 1.2.0-alpha05`, `material3 = 1.5.0-alpha23`, `biometric = 1.4.0-alpha07`, `camerax = 1.7.0-alpha02`, `datastore = 1.3.0-alpha09`. ⚠️ Stable release branch should pin stable versions (not yet done).
-- **Version drift**: `okhttp 4.12.0` (2y old, 5.x exists) ⚠️ still pinned. `ktor` fully removed (`:messages` migrated to `:library:network` ✅) and `mediapipe tasks-vision` unified at `0.10.35` (camera inline `0.10.14` removed ✅).
-- **Vendored third_party**: `third_party/nanojson/` (vendored `TeamNewPipe/nanojson`, was JitPack — ✅ mitigation #2), `third_party/om-file-format-sys/` (C + Rust bindings for `open-meteo/om-file-format` GPL-2.0-only) patched for reproducible `readdir` sort, `maps/src/main/cpp/sqlite3.c` amalgamation (SQLite NDK workaround), `youpipe/extractor/` full NewPipe Extractor GPLv3. The two unattributable `RapidAI/RapidOCR` ncnn conversions that were in `library/ocr/src/main/assets/` are **gone**: PP-OCRv5 detection and recognition are now `.maml`, converted from PaddlePaddle's own Apache-2.0 ONNX exports and each SHA-256-pinned in `scripts/ml/fetch_and_convert.sh`.
+**WhatsApp traffic runs over a plain TCP socket.** `WhatsAppSocket.kt` opens a bare
+`java.net.Socket` to `g.whatsapp.net:443` and runs Noise_XX over it, with no TLS wrapper. Noise does
+supply confidentiality for the payload, but the transport carries no system trust, no hostname
+verification, and no certificate chain validation — server authentication rests entirely on the
+custom verification inside the handshake. This is the sole transport for the primary WhatsApp
+client, so there is no fallback path with better properties. The file's own header records that
+whether the mobile edge expects raw Noise-over-TCP or a TLS wrap is an unresolved live-validation
+question.
 
-All versions in `gradle/libs.versions.toml`. Rust versions unified in root `/Cargo.toml` (workspace resolver 2, mirrors Gradle catalog) – see `/scripts/rust-deps-count.sh`.
+**The email client accepts any server certificate.**
+`email/src/main/java/com/vayunmathur/email/network/imap/TrustAll.kt:25` implements
+`checkServerTrusted` as an empty body, so every certificate validates. The user's IMAP/SMTP password
+is sent immediately after the connection is established. Separately, `ImapClient.kt` swallows a
+STARTTLS failure and continues to log in over the plaintext socket. Two of the six bundled provider
+presets (`smtp-mail.outlook.com:587`, `smtp.mail.me.com:587`) start plaintext by design, so the
+downgrade path is reachable with stock configuration.
 
-## Rust Dependencies – Post-Slimming Audit (armv8-only)
+**Live third-party credentials are compiled into shipped APKs.** A Stripe publishable *live* key is
+a string literal at `fooddelivery/src/main/java/com/vayunmathur/fooddelivery/MainActivity.kt:82`. A
+Lyft OAuth client secret is a string literal at
+`taxi/src/main/java/com/vayunmathur/taxi/network/lyft/LyftAuth.kt:55`, and `:taxi` has
+`BOOKING_LIVE = true`, so real charges are possible. A Tidal `client_id;client_secret` pair sits
+base64-encoded at `musicbrainz/.../tidal/TidalAuth.kt:67-68`. Alongside these are a WhatsApp
+`CLIENT_TOKEN` plus registration salt and public key, Google BotGuard api-key and request-key
+constants in `:youpipe`, and two public OAuth client ids. A secret in an APK is a published secret:
+these must be treated as disclosed and rotated, and the flows that need a confidential client moved
+behind a service that can hold one.
 
-Counting model matters: `Cargo.lock` includes cfg(windows)/cfg(wasm)/cfg(wasi) crates even if they never compile for `aarch64-linux-android`. Use `cargo tree --target aarch64-linux-android --edges normal` to measure what actually goes into the shipped `.so`.
-
-**Workspace lock**: 318 → **239 total, unique 217** packages (down 79 total).
-**Filtered compile graph**: `cargo tree --workspace --target aarch64-linux-android --edges normal` = **429 lines, unique 188** crates.
-Per-crate normal filtered lines:
-- `astronomy_engine` 38, `photos_fx` 38, `office_engine` 45, `weather_om` 79, `camera_stitch` 75, `passwords_kdbx` 141, `e2ee_pqc` 71, `pdf_render` 242
-Summed old per-crate locks (before workspace) = 712 total (641 excluding voxels) → 239 root now (single source).
-
-**Banned crates check (normal armv8 edges)**: `windows-sys`, `walkdir`, `same-file`, `winapi-util`, `bindgen`, `clang-sys`, `prettyplease`, `regex` = **0 in normal graph** (verified by `scripts/rust-deps-count.sh`). Remaining 6 `windows-*` in unfiltered lock (`windows-core/link/result/strings/implement/interface`) are only cfg(windows) feature flags via `jana-time-zone-haiku`/`chrono` `windows-link` feature – not compiled code, but Cargo.lock still lists them because `Cargo.lock` includes all cfg. `cargo tree --edges normal --target` shows 0.
-
-**Cuts implemented (no feature loss, no cross-app merging, stdlib preferred per user request):**
-- `third_party/om-file-format-sys`: Removed build-dep `bindgen 0.72` (was pulling clang-sys, cexpr, libloading, aho-corasick, regex, prettyplease, bitflags, itertools, cfg-if, etc ~20 crates). Pre-generated bindings to `src/bindings_android.rs` (NDK 29 aarch64-linux-android) + `src/bindings_host.rs` (aarch64-apple-darwin host for `cargo test`), selected via `#[cfg(target_os=\"android\")]`. `build.rs` only uses `cc` now.
-- `jni`: **was** a local fork at `third_party/jni-android` (0.21.1 with `combine`, `walkdir` and `windows-sys` stripped). Removed in favour of upstream `jni 0.21.1` from crates.io — the fork was ~20 hand-maintained files pinned three years behind upstream with no route to security fixes, which is the larger liability. Cost of un-forking: 16 lock entries, 10 of them `windows-*` crates behind `cfg(windows)` that never compile for Android. Upstream 0.22 would drop those again (it uses `windows-link`) but is a breaking API change across all 31 native entry points; see the note in the root `Cargo.toml`.
-- `pdf/rust-toolchain.toml`: Dropped `x86_64-linux-android` target – now armv8-only `aarch64-linux-android` (matches RustNative.kt `rustAbis = listOf(\"arm64-v8a\" -> \"aarch64-linux-android\")` already was armv8-only).
-- `weather`: Dropped `ureq 2.12` – it pulled `base64`, `flate2`, `log`, `once_cell`, `rustls 0.23.42 -> ring 0.17.14 -> untrusted 0.9 + windows-sys 0.52, rustls-pki-types/zeroize, rustls-webpki 0.103 -> webpki-roots 0.26->1.0, url 2.5 -> form_urlencoded, idna 1.1 -> idna_adapter, icu_* collections/locale/normalizer/properties/provider, litemap, smallvec, utf8_iter, etc = ~90 crates). Rewrote `weather/src/main/rust/src/lib.rs` from `HttpRangeBackend` doing `ureq` Range GET + OnceLock Agent LRU 12 to `SliceBackend(&[u8])` reading from passed slice (via `omfiles` `InMemoryBackend` trait `count/get_bytes/prefetch_data`). Added `OmTilesNative.decodeRegionBytes(ByteArray, ...)` in `/weather/src/main/java/com/vayunmathur/weather/map/OmTilesNative.kt` and refactored `WeatherMapPage.kt` to fetch `.om` via `NetworkClient.performRequestBytes` (HttpURLConnection stdlib, armv8-only) with 64KB block caching now in Kotlin OkHttp layer.
-- `camera`: Dropped `image 0.25 jpeg` – it pulled `bytemuck 1.25, byteorder-lite 0.2, bitflags 2.x, zune-core 0.5 + zune-jpeg 0.5 (plus moxcms 0.7 + pxfm 0.1 behind default features vs jpeg only it still pulled zune deps). Single usage was `Rgba::from_jpeg` via `image::load_from_memory.to_rgba8()`. Now uses `jpeg-decoder 0.3.2` (already in pdf, minimal pure Rust) directly in `imgbuf.rs::from_jpeg`, with L8/RGB24/CMYK32 handling matching pdf's `decode_jpeg_rgba`. Encode uses `jpeg-encoder 0.6.1` (no transitive) via `Camera::encode_jpeg` using `jpeg_encoder::Encoder` with quality param.
-- `photos_fx`: Dropped `rayon 1.12` – was pulling `rayon-core 1.13 + crossbeam-deque 0.8 + crossbeam-epoch 0.9 + crossbeam-utils 0.8 + either 1.13` (6 crates) just for `par_chunks_mut(w)` in `blur.rs` gaussian 2-pass, motion, radial, mask. Rewrote with plain loops + stdlib (prefer standard library). Parallelism preserved via naive std `thread::scope` split if wanted, but now sequential exact (keeps feature), could add `std::thread::scope` later if Perf needed without extra crates.
-- `camera` still uses `rayon` for stitch feature pyramid? Candidate for `std::thread::scope` rewrite if requested – keeping for now because bundle adjustment uses DMatrix math and perf matters, but not feature-reducing.
-- `passwords_kdbx`: uses `serde_json` for `Vec<BTreeMap<String,String>>` – candidate for manual JSON encoder std-only (single function). Preserved for now because `serde` is also used elsewhere heavily (CRDT signed exact JSON field order `id,parent,left,kind,payload,deleted,lamport,dev,name,attrLamport,attrDev` with skip_serializing_if exact match to Kotlin kotlinx `encodeDefaults false`). Passwords JSON leniency allows std rewrite without risk; could be done as manual encoder to drop zmij, serde_json, serde_derive chain. Kept for now to avoid risk but counted as candidate.
-- `games/voxels`: has its own workspace lock (outside the root workspace); it takes `jni` from crates.io like everything else.
-
-**Remaining heavy justified libraries (per no-feature-loss):**
-- `nalgebra 0.33.3` – DMatrix zeros 2n×9, Matrix3::new, Vector3, SVD try_inverse lu solve, rodrigues_to_mat for panorama bundle adjustment – cannot be replaced with glam.
-- `openjp2 0.6.1` – JPEG2000 decoding in PDF (complex C-ffi + ops).
-- `lopdf 0.36` – safe PDF parsing, no feature removal.
-- `fips203 0.4.3, fips204 0.4.6` – ML-KEM-768/ML-DSA-65 PQC (FIPS 203/204).
-- `keepass 0.13` – KDBX4 save, well-audited.
-
-**Remaining duplicate versions (attack surface but unavoidable unless upstream updates):**
-- `getrandom` 0.2.17 vs 0.3.4 vs 0.4.3 – due to `keepass 0.13 -> uuid 1.24 -> getrandom 0.4.3 (js/wasm backend with cfg(wasm32-unknown-unknown) js-sys/wasm-bindgen/wit-bindgen/r-efi/wasip2 correctly excluded from normal android graph but present in lock)`, `rand_core 0.6 -> getrandom 0.2 + 0.3`, `paste 0.1`, `unicode-properties -> getrandom 0.4.3`. Normal android graph only `getrandom` compiles the `android` backend, but lock still lists wasm/js deps. We unified to `getrandom 0.2.15` single version in workspace dependencies attempt, but transitive keeps 0.3/0.4 via direct deps – could be unified via `[patch.crates-io]` `getrandom = "0.2.15"` but would break keepass which needs 0.4 API? Kept as-is with note, normal graph excludes js.
-- `syn` 2.0.119 vs 3.0.3 – from main Rust crates vs transitive (serde_derive 2.x vs jiff serde proc macro maybe).
-- `thiserror` 1.0.69 vs 2.0.19 – jni fork uses 1.0.69 (upstream not yet bumped), keepass uses 2.0.19. Unified attempt but keepass must stay 2.x. Could patch jni to 2.0.19 but it still uses 1.x API.
-
-**Audit scripts:**
-- `scripts/rust-deps-count.sh` – groups counts: root total vs unique, filtered normal graph vs all, per-crate normal, banned platform check, heavy justification.
-
-### High-Risk External Libraries (single maintainer, abandoned, or proprietary CDN)
-
-| Library | Version | Used By | Why High Risk | File |
-|---|---|---|---|---|
-| `com.github.luben:zstd-jni` via JitPack | — | see `libs.versions.toml` | The only remaining JitPack coordinate. Third-party rather than a personal fork, so lower risk than `Stockfish-Library` was | `settings.gradle.kts` |
-| `jitpack.io` itself | — | above | Supply chain SPOF | `settings.gradle.kts` |
-| `io.github.dokar3:quickjs-kt` | `1.0.5` | `youpipe` | Single maintainer (dokar3), JS eval for YouTube signature decipher — critical path | `youpipe/build.gradle.kts`, `libs.versions.toml:8` |
-| `org.linguafranca.pwdb:KeePassJava2-dom` | `2.2.4` | `passwords` | Single maintainer, last release 2021, security-sensitive KDBX parsing | `passwords/build.gradle.kts`, `libs.versions.toml:82` |
-| `org.wololo:flatgeobuf` | `3.29.0` | `maps` | Niche geo format, single maintainer | `maps/build.gradle.kts`, `libs.versions.toml:13` |
-| `com.google.code.findbugs:jsr305` + `javax.annotation-api:1.3.2` | `3.0.2` / `1.3.2` | `extractor` | Deprecated 7+ years, replaced by JetBrains annotations | `libs.versions.toml:5,114` |
-| `org.mozilla:rhino` + `rhino-engine` | `1.8.1` pinned | `extractor` | Pinned old because `1.9.0` requires minSdk 26 comment in `libs.versions.toml:2`; Mozilla but old | `libs.versions.toml:3,107` |
-
-### Medium-Risk (small org / community, but active)
-
-| Library | Version | Used By | Notes | File |
-|---|---|---|---|---|
-| `org.brotli:dec` | `0.1.2` | `extractor` | Google JVM port, low activity | `libs.versions.toml:9` |
-| `org.maplibre.compose:maplibre-compose` | `0.13.0` → `libmaplibre.so` native | `maps`, `weather`, `findfamily`, `photos` | Community-maintained FOSS renderer, better than Mapbox but smaller than Google Maps | `libs.versions.toml:78` |
-| `com.google.mediapipe:tasks-vision` | `0.10.35` (unified) | `camera` (face), vision segmentation | Native lib size; inline `0.10.14` drift resolved | `camera/build.gradle.kts:124`, `libs.versions.toml` |
-| `net.zetetic:sqlcipher-android` | `4.18.0` | `library:room` → `passwords`, `notes` | Small company, adds ~2MB `.so`, encrypted DB. `4.18.0` is the first release with `SQLCipherDriver` (an `androidx.sqlite.SQLiteDriver`), which is what lets encrypted databases work on Room 3 at all: Room 3 removed `openHelperFactory(...)` | `library/room/build.gradle.kts`, `libs.versions.toml:117` |
-| `io.coil-kt:coil-compose` + `coil-svg` + `coil-video` | `2.7.0` | `photos`, `maps`, `email`, `travel`, `education`, `pdf` | <3 maintainers, but widely adopted image loader | `libs.versions.toml:50` |
-| `com.google.zxing:core` | `3.5.4` | `messages` (QR), `library:ocr`, `pdf` | Old, community fork `zxing-cpp` preferred | `libs.versions.toml:83` |
-| `com.google.ai.edge.litertlm:litertlm-android` | `0.14.0` experimental | `openassistant` | Google AI Edge experimental, GPU backend `libLiteRtTopKOpenClSampler.so`, requires `kotlinx-coroutines 1.11.0` conflict win | `openassistant/build.gradle.kts`, `libs.versions.toml:30` |
-
-### Vendored Assets (compiled in, no runtime fetch)
-
-| Asset | Source | Licence | Notes | File |
-|---|---|---|---|---|
-| POI sprite sheet, entries 1-53 | `protomaps/basemaps-assets` `sprites/v4/light@2x` | BSD-3-Clause | Vendored unchanged from upstream; also mirrored at `data.vayunmathur.com/basemaps-assets/`. Compiled into `libmap_renderer.so`, never fetched at runtime | `library/map/src/main/rust/assets/sprites/sprites@2x.{png,json}` |
-| POI sprite sheet, entries 54-57 (`fuel`, `hotel`, `bank`, `atm`) | `mapbox/maki` glyphs on a badge lifted from the Protomaps sheet | **CC0 1.0** (public domain, no attribution required) | Protomaps' style draws none of these four kinds, so no upstream sheet has ever carried an icon for them — but the `maps` app has offered Gas, Hotels and ATM chips all along. Regenerate with `analysis/spritepack/pack.py` | same as above |
-
-### Low Risk / Platform (Google/JetBrains) — Not Critical
-
-Well-maintained: `androidx.*` (`core-ktx 1.19.0`, `lifecycle 2.11.0`, `room3 3.0.2`, `sqlite 2.7.0`, `work 2.11.2`, `datastore`, `camera`, `webkit`, `browser 1.9.0`, `biometric`, `glance`, `exifinterface`, `credentials`, `autofill`), `composeBom 2026.06.01`, `material3 1.5.0-alpha23`, `material 1.14.0`, `foundation 1.12.0-beta02`, `ink 1.1.0-alpha04`, `navigation3`, `media3-exoplayer 1.11.0-beta01`, `okhttp 4.12.0` + `okio 3.17.0`, `kotlin 2.4.0` + `coroutines 1.11.0` + `serialization-json 1.11.0` + `datetime 0.8.0`, `ksp 2.3.10`, `protobuf 4.36.0-RC1` / `protobuf-javalite 4.35.0`, `libphonenumber 9.0.34`, `fhir-model 1.0.0-beta02`, `health/connect-client 1.2.0-alpha04`, etc.
+**`generate_shields_lists.py` executes unpinned remote code.** `scripts/generate_shields_lists.py`
+downloads uBlock Origin scriptlet sources from
+`raw.githubusercontent.com/gorhill/uBlock/master/src` — a mutable branch, no commit pin, no digest —
+writes them into a temporary directory alongside a generated `dump.mjs`, and runs
+`node dump.mjs` over them with `check=True` (`:222-228`). Anything landing on uBO's `master`
+executes on the developer machine on the next run of the generator. That machine is also where
+release signing happens.
 
 ---
 
-## Transitive Dependencies Behind Self-Hosted Proxy (for awareness)
+## 1. Build integrity (Gradle)
 
-Even assuming `api.vayunmathur.com` stays up, its upstreams are third-party:
+### 1.1 No artifact verification — High
 
-- **Duffel API** (flights + stays) — proxied token held server-side, no secret in APK. See `travel/network/TravelApi.kt`, `StaysApi.kt`.
-- **Google Maps Platform** (Place Details/Ratings only) — proxied via `place_match`, `place_rating`. See `Reviews.kt`. Live traffic tiles come via `api.vayunmathur.com/maps/traffic` (`OfflineRouter.kt`). **Routing is no longer proxied** — it runs entirely on-device via `offlinerouter.so` (`OfflineRouter.findRouteNative`), so there is no Google Routes dependency.
+There is no `gradle/verification-metadata.xml`, no dependency lockfiles, and no `dependencyLocking`
+or `dependencyVerification` configuration anywhere in the build. The Gradle wrapper's
+`distributionSha256Sum` is the only artifact integrity check in the entire build.
 
-If those upstreams shut, our proxy returns errors — same UX as purpose-aligned but fixable by swapping provider behind same proxy endpoint.
+This is specifically *not* a version-drift risk. Every coordinate in the build is exactly pinned:
+there are no dynamic versions, no version ranges, and no `-SNAPSHOT` dependencies. Pinning fixes
+which artifact is requested; it does not constrain what bytes arrive. An artifact that is
+substituted or republished at an already-pinned coordinate is consumed without complaint.
+
+The exposure is not confined to library bytes sitting on a compile classpath. The build resolves
+four *executables* from Maven and runs them during the build (§7.3), so the same missing check
+applies to code the build actually executes.
+
+Mitigation: generate `gradle/verification-metadata.xml` with checksum (ideally signature)
+verification enabled. This is the single highest-value change available on the JVM side.
+
+Generating it is not a mechanical step and should not be treated as one.
+`--write-verification-metadata` records whatever is already in the local Gradle cache, so running it
+on a warm cache pins the current bytes without ever establishing that those bytes are the right
+ones. Doing this properly means resolving into a clean cache and reconciling the resulting digests
+against upstream before committing them.
+
+### 1.2 Wrapper distribution is verified — control in place
+
+`gradle/wrapper/gradle-wrapper.properties` pins Gradle 9.6.1 from `services.gradle.org` with
+`distributionSha256Sum` set and `validateDistributionUrl=true`.
+
+The residual gap is narrow but worth stating precisely: `gradle-wrapper.jar` is committed to the
+repository and is the one committed binary in the tree. The pinned checksum covers the distribution
+zip that the jar downloads, not the jar itself.
+
+Mitigation: keep the checksum pinned on every wrapper upgrade. Validate the committed jar against
+the upstream release when it changes.
 
 ---
 
-## Offline-First Guarantee
+## 2. Repositories
 
-After initial model download (openassistant), the one-time routing/POI pack fetch (maps) and one TTS voice download (speech), these apps work airplane-mode: `astronomy`, `calendar`, `clock`, `contacts`, `files`, `notes`, `things`, `camera`, `pdf`, `music`, `games`, `passwords`, `health` core (Health Connect), `speech` (STT bundled; TTS after one voice download), `photos` (semantic search bundled), `library` modules (`ocr` det/rec, `ink`, `biometric`, `room`).
+`dependencyResolutionManagement` in `settings.gradle.kts` sets
+`repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)`, so no module can introduce its own
+repository — all resolution goes through the repositories declared centrally. `mavenLocal()` is not
+present anywhere, so no artifact in a developer's local cache can outrank a declared remote.
+
+Beyond the standard Google and Maven Central set, one custom repository is declared:
+`https://build-artifacts.signal.org/libraries/maven/`, content-filtered to `includeGroup("org.signal")`.
+
+### 2.1 Signal artifacts come from a vendor-run repository — Medium
+
+`libsignal-android` 0.101.0 and `ringrtc-android` 2.71.0 are consumed by `:communicate` from
+`build-artifacts.signal.org`. There is no Central mirror, so availability and integrity both rest
+on a single vendor-operated host — and with no artifact verification configured (§1.1), nothing
+validates what that host returns.
+
+`libsignal` is deliberately held at 0.101.0 for MRENCLAVE reasons, so it cannot be upgraded freely
+in response to an upstream advisory. That constraint is a property of the protocol, not an
+oversight, but it does mean the usual "upgrade to fix" response is unavailable here.
+
+Mitigation: cover these coordinates in verification metadata as part of §1.1. Mirror the artifacts
+if build availability matters.
+
+---
+
+## 3. JVM / Android dependency surface
+
+Dependencies are centralised in `gradle/libs.versions.toml`: 60 versions, 105 libraries, 7 plugins,
+all exactly pinned. Every dependency coordinate in the tree takes its group, name and version from
+the catalog. Two are still finished off as strings in module build files because they append a
+classifier the catalog cannot express: the OS-classified `protoc` executable in `:communicate` and
+`protoc-gen-grpc-kotlin`'s `:jdk8@jar` in `:appstore`.
+
+### 3.1 Prerelease toolchain and libraries — Medium
+
+Eighteen catalog version entries resolve to alpha or beta releases, among them the Android Gradle
+Plugin at `9.4.0-alpha04` (with `lint` tracking it at `32.4.0-alpha04`), `material3`
+`1.5.0-alpha27`, `camerax` `1.7.0-alpha02`, `credentials` `1.7.0-alpha02`, `biometric`
+`1.4.0-alpha07`, `webkit` `1.17.0-alpha03`, and `media3` `1.11.0-beta01`. Prerelease artifacts can be
+withdrawn or republished, receive no stability guarantee, and are generally not covered by upstream
+security backports.
+
+AGP is the one that matters most, because it is the build tool rather than a library: an alpha AGP
+is the component with the widest reach over what gets produced.
+
+Mitigation: move the toolchain, and AGP in particular, to stable releases before any release branch
+is cut.
+
+### 3.2 Deprecated annotation libraries — Low
+
+`com.google.code.findbugs:jsr305` 3.0.2 is consumed by `:youpipe:extractor`, and
+`javax.annotation:javax.annotation-api` 1.3.2 by `:appstore` as `compileOnly`. Both are long
+deprecated. Both supply compile-time annotations only, so the practical exposure is small.
+
+Neither can be removed independently. `javax.annotation-api` exists because grpc-java generated
+stubs reference `@javax.annotation.Generated`. `jsr305` is required by the vendored NewPipe
+Extractor source, so dropping it means editing vendored third-party code (§9).
+
+Mitigation: revisit `jsr305` if and when the vendored extractor is refreshed.
+
+### 3.3 Third-party libraries on sensitive paths — Medium
+
+These are called out for where they sit rather than for any known defect. Descriptions are limited
+to what is observable in the tree; publisher activity and maintenance status were not verified.
+
+| Library | Version | Consumers | Why it is called out |
+|---|---|---|---|
+| `io.github.dokar3:quickjs-kt` | 1.0.5 | `:youpipe` | Published under a personal `io.github.dokar3` namespace, and evaluates JavaScript on the YouTube extraction path — a code-execution dependency from a single-account publisher. |
+| `net.zetetic:sqlcipher-android` | 4.18.0 | `:library:room` → `:passwords`, `:notes` | Provides encrypted-database support. Declared `api(...)` at `library/room/build.gradle.kts:14`, so it propagates onto dependents' compile classpaths rather than staying an implementation detail. |
+| `com.auroraoss:gplayapi` | 3.6.4 | `:appstore` | Small community organisation on the Play install path. Its host surface is in §11.1. |
+| `org.brotli:dec` | 0.1.2 | 5 modules incl. `:library:network`, `:youpipe:extractor` | Decompression of network-sourced input, pinned at a 0.1.x version. |
+
+Mitigation: cover all of these under artifact verification (§1.1).
+
+On narrowing sqlcipher from `api` to `implementation`: the reason recorded next to the declaration
+— that the inline `buildDatabase` body exposes a `net.zetetic` type — does not hold. `buildDatabase`
+delegates to a non-inline overload and names no SQLCipher type; `SQLCipherDriver` appears only in
+the private `openRoomDatabase` (`SqlCipher.kt:138`), and no public signature exposes a `net.zetetic`
+type.
+
+The actual blocker is one consumer. `health/src/main/java/com/vayunmathur/health/util/FoodDatabase.kt:19`
+imports `net.zetetic.database.sqlcipher.SQLiteDatabase` while `health/build.gradle.kts` declares no
+sqlcipher dependency of its own — it rides the `api` leak. The other 21 `:library:room` consumers do
+not. So the narrowing is a two-line change: add `implementation(libs.sqlcipher.android)` to `:health`
+and drop `api` to `implementation` in `:library:room`. It needs a build to confirm, and none can be
+run locally (see Verification status).
+
+---
+
+## 4. Native code (Rust / Cargo)
+
+This is the strongest-controlled area of the build.
+
+- The root `Cargo.lock` is committed and covers 440 packages. All 398 external packages carry a
+  registry source and a SHA-256 checksum.
+- There are no git dependencies and no `[patch]` or `[replace]` sections, so no crate is resolved
+  from an arbitrary remote or silently swapped.
+- There is no `.cargo/config.toml`, so no registry redirection is configured.
+- `rust-toolchain.toml` pins the toolchain to 1.97.0, and CI reads its channel from that file.
+- Builds run with `--locked`, so a build fails rather than silently updating the lockfile.
+- Nine independent workspace roots each have a committed lockfile, including
+  `third_party/betocore/np_adv/fuzz`, whose manifest spells out the `[workspace.dependencies]` keys
+  that upstream's unvendored `nearby/Cargo.toml` would otherwise supply.
+
+### 4.1 Four vendored fuzz harnesses do not parse — Low
+
+`third_party/betocore/*/fuzz`, other than `np_adv/fuzz`, still inherit `arbitrary`,
+`derive_fuzztest` and `libfuzzer-sys` via `workspace = true` against a root
+`[workspace.dependencies]` that does not define them, so `cargo metadata` fails on each. Their
+committed lockfiles predate the `derive_fuzztest` dependency and have no entry for it. They are
+fuzzing harnesses, ship in no APK, and are excluded from both Dependabot and `cargo-deny` for that
+reason.
+
+Mitigation: repair the manifests the way `np_adv/fuzz` was, or delete the harnesses if they are not
+run.
+
+---
+
+## 5. NDK and cross-compilation
+
+The build does not use `cargo-ndk`. `build-logic/src/main/kotlin/RustNative.kt` implements Android
+cross-compilation directly. The NDK version is single-sourced as `NDK_VERSION` in
+`build-logic/src/main/kotlin/NdkVersion.kt` and consumed by AGP's `ndkVersion` in the app and wear
+convention plugins and by the Rust toolchain paths, so the version string exists in one place.
+
+The residual risk is that the constant names an NDK that must actually be installed on the build
+host; a mismatch surfaces as a link failure rather than a version error. This is unverified by any
+build (see Verification status).
+
+---
+
+## 6. CI and release pipeline
+
+Four workflows: `android.yml` (release), `pr-compile-check.yml`, `cargo-deny.yml`, and
+`issue_labeler.yml`.
+
+### 6.1 Third-party action pinning — control in place
+
+Every third-party action across all four workflows is pinned to a full commit SHA with the tag in a
+trailing comment: `actions/checkout`, `actions/setup-java`, `actions/github-script`,
+`softprops/action-gh-release`, and `taiki-e/install-action`. A repointed upstream tag therefore
+cannot change what runs.
+
+Mitigation: keep the SHA form on every bump. The `github-actions` Dependabot ecosystem (§6.4)
+proposes them.
+
+### 6.2 Signing key handling — control in place
+
+In `android.yml`, workflow-level `env:` holds only the non-secret keystore filename. `KS_STORE_PASS`,
+`KS_ALIAS` and `KS_ALIAS_PASS` are step-level `env:` on the single "Build and Sign APKs" step, so
+they are not in the environment of any other step. That step deletes the decoded keystore
+immediately after collecting the APKs — before `softprops/action-gh-release` runs — and an
+`if: always()` cleanup step is a backstop for a build that fails earlier.
+
+The release commit stages explicit paths (`settings.gradle.kts`, `build.gradle.kts`, and each
+detected module's `build.gradle.kts` and generated listing directory) rather than `git add .`, so
+the decoded keystore cannot be captured into a commit that the pushed tag is reachable from.
+
+The job holds `contents: write`. `pr-compile-check.yml` and `cargo-deny.yml` are `contents: read`;
+`issue_labeler.yml` is `issues: write`.
+
+### 6.3 Rust version check — control in place
+
+The "Install Rust Toolchain" step greps the repository-root `rust-toolchain.toml` for its channel
+and exits non-zero if the value is empty, so CI tracks the real pin instead of falling back to a
+hardcoded version.
+
+### 6.4 Dependency monitoring — control in place, JVM half missing
+
+`.github/dependabot.yml` covers three ecosystems: `gradle` (root plus the `build-logic` included
+build), `cargo` (nine workspace roots), and `github-actions`. All are monthly with minor/patch bumps
+grouped into one PR per ecosystem and major bumps left ungrouped. Dependabot security alerts are
+independent of that schedule.
+
+`.github/workflows/cargo-deny.yml` runs `cargo deny check advisories bans sources` and
+`check licenses` against `deny.toml`, per workspace root in a matrix, on pull request, on push to
+`main`, on a Monday cron, and on dispatch. The cron matters: an advisory can land against an
+unchanged lockfile, which no `pull_request` run would ever see.
+
+The gap is that this is Rust-only. Nothing scans the JVM dependency surface for advisories —
+Dependabot proposes JVM upgrades but no equivalent of `cargo-deny` reports on what is committed
+today.
+
+Mitigation: add a JVM advisory scan (OWASP dependency-check or equivalent) to CI.
+
+### 6.5 Release APK upload uses a shell script with an ambient token — Low
+
+`release.sh:165-168` uploads every built APK and a generated `index.json` with
+`gh release create ... --draft`, using whatever credential the local `gh` CLI holds. This is the
+manual counterpart to the `android.yml` release job and runs on a developer machine with a personal
+token rather than a scoped `GITHUB_TOKEN`.
+
+Mitigation: prefer the workflow path for real releases; keep `release.sh` for dry runs.
+
+### 6.6 The PR check does not exercise the release toolchain — Medium
+
+`pr-compile-check.yml` is the only workflow that compiles application code on a pull request, and it
+diverges from the release job in two ways that matter.
+
+**It runs a different JDK.** `pr-compile-check.yml:20-24` sets up JDK 17; `android.yml:26-30` sets up
+JDK 21. For routine code changes the gap is harmless. For a toolchain change — an AGP major, a
+Kotlin realignment — the JDK is precisely the variable that bites, because toolchain resolution and
+Kotlin `jvmTarget` behaviour differ across the two. A green PR check on that class of diff does not
+establish that the release job still builds.
+
+**It compiles and nothing else.** The PR check runs `./gradlew :compileDevKotlin` only, and the
+release job runs `assembleRelease` with `-x lint -x test`. So neither workflow ever runs `lint` or
+the test suite: the repo's own lint rules (including the build-failing ones) and every unit test are
+verified only by whoever remembers to run them locally.
+
+This bounds what CI can be relied on to catch, including for the unverified changes listed under
+Verification status.
+
+Mitigation: align the PR check's JDK with the release job's, and run `lint` and `test` somewhere in
+CI rather than excluding them from the one job that could.
+
+---
+
+## 7. Build-time and script downloads
+
+The hosts these scripts contact are inventoried in §12.
+
+### 7.1 `go-pmtiles` — control in place, with a stated caveat
+
+`scripts/maps/extract_pmtiles.sh` pins `go-pmtiles` to v1.31.2, installs it project-local under the
+gitignored `tmp/tools` (no `sudo`, no write to a system path), and verifies a per-platform SHA-256
+before extracting.
+
+The script is explicit that the digests are weaker than they look, and that statement should be
+preserved rather than rounded up: upstream publishes no `checksums.txt` for v1.31.2, so the four
+digests were computed from downloaded artifacts. They establish **immutability** (a later silent
+re-upload or a MITM is caught) and not **authenticity** (if an artifact was already bad when
+measured, the bad one is now pinned).
+
+Two residual gaps: an OS/arch pair not in the `case` list falls through to an empty
+`PMTILES_SHA256` and installs with only a printed warning, and the macOS path extracts with
+`unzip -o` without a traversal guard.
+
+Mitigation: fail rather than warn when no digest is available for the host platform, and re-derive
+the digests from an upstream-published manifest if protomaps ever ships one.
+
+### 7.2 TLS trust anchors are pin-gated — control in place, with residual gaps
+
+`scripts/download-ca-bundle.sh` produces the 20 DER trust anchors under
+`library/network/src/main/assets/ca/`, which are what the apps pin against at run time (§11.4). It
+fetches the Mozilla bundle from `curl.se/ca/cacert.pem`, falls back to direct vendor URLs
+(`letsencrypt.org`, `pki.goog`, `cacerts.digicert.com`, `www.amazontrust.com`) for roots the bundle
+drops, converts everything inside a temporary directory, and moves a `.der` into the asset directory
+**only** when its SHA-256 matches a `PINS` entry. An unpinned label is never written. `--clean`
+pruning is skipped entirely if the run had any failure or rejection, and the script exits non-zero
+if either counter is non-zero — so a partial run cannot silently ship a short trust set.
+
+Three residual gaps:
+
+- The pins are digests of the `.der` files **as committed**. They prove the shipped anchor set
+  cannot change without a reviewable edit to both the asset and its pin in the same diff; they do
+  not independently establish that a given anchor is the authentic upstream root. The
+  authenticity question is answered by review of that diff, not by the script.
+- `godaddy-root-g2.der` is committed PEM-encoded despite its extension, so a freshly converted DER
+  can never match its pin and that anchor will always be rejected until the asset is re-encoded.
+- The fallback URLs are fetched over TLS validated by the *host* trust store, which is the ordinary
+  bootstrap circularity for this kind of script rather than a defect in it.
+
+Mitigation: re-encode `godaddy-root-g2.der`. Continue reviewing any change to a `.der` or its pin as
+a security-relevant diff.
+
+### 7.3 Four build-time executables resolved from Maven and run unverified — High
+
+The build downloads four executable artifacts from Maven and runs them during compilation:
+
+| Artifact | Version | Resolved by |
+|---|---|---|
+| `com.google.protobuf:protoc` (OS-classified `@exe`) | 4.35.0 | `:communicate`, via a custom `protocBinary` configuration |
+| `com.google.protobuf:protoc` | 4.35.0 | `:appstore`, `:youpipe:extractor` |
+| `io.grpc:protoc-gen-grpc-java` | 1.69.0 | `:appstore` |
+| `io.grpc:protoc-gen-grpc-kotlin` (`:jdk8@jar`) | 1.4.1 | `:appstore` |
+
+The `:communicate` case additionally marks the download executable with `setExecutable(true)` before
+invoking it. All four resolve from Maven Central, all are exactly pinned, and — because there is no
+verification metadata and no lockfile (§1.1) — nothing checks their bytes before they execute.
+
+This is rated above the other consequences of §1.1 because a substituted library must still be
+called by application code to matter, whereas a substituted compiler plugin runs on the build
+machine by construction, with that machine's credentials.
+
+Mitigation: prioritise these four coordinates when adding verification metadata under §1.1.
+
+### 7.4 Remote source compiled from commit-pinned revisions — control in place
+
+`scripts/geocoder_gen.sh` compiles simdjson and zstd from single-header sources fetched from
+`raw.githubusercontent.com`, pinned to commit SHAs (`SIMDJSON_REV` b4242d3b / v3.11.0, `ZSTD_REV`
+63779c79 / v1.5.5). The header records how to bump them, including that `git ls-remote ... '^{}'` is
+required to peel zstd's annotated tags to a commit — a bare tag ref returns the tag object, which is
+not a content ref.
+
+A `raw.githubusercontent.com` URL carrying a commit SHA is content-addressed, so no separate digest
+is needed. The residual trust is in GitHub serving the correct object for that SHA, plus TLS.
+
+### 7.5 Launcher icon fetch — Low integrity risk, Medium availability risk
+
+`LauncherIconGen.kt` fetches Material Symbols sources from `raw.githubusercontent.com`, pinned to
+the full commit SHA `819d78680a849ceef4c78f863d8753e3160b7c89`, which is also the SHA used by the
+second, separate fetch of the same upstream in `android.yml:174` for Play/F-Droid listing icons.
+Results are cached under `$GRADLE_USER_HOME/material-symbols-cache/<ref>/`, and a cache hit skips
+the download.
+
+On integrity the pin is doing real work: a full commit SHA makes the request content-addressed, so
+the risk is low. The response carries no digest of its own, leaving trust resting on the commit SHA
+plus TLS.
+
+Availability is the sharper edge. The fetch is reached from 72 `launcherIcon` blocks across the app
+modules, and a failure throws `GradleException` — so on a cold cache without GitHub reachability the
+build fails outright rather than degrading. The `android.yml` copy is softer: it warns and continues
+without an icon.
+
+Mitigation: vendor the icon sources to remove the build-time network dependency entirely, or record
+a digest per fetched file and pre-seed the cache in CI.
+
+---
+
+## 8. Model weights
+
+Eleven model weights are fetched by the scripts under `scripts/ml/`, and **all eleven pin an
+upstream revision and verify a SHA-256**. This is the strongest provenance control in the
+repository.
+
+Six are fetched directly by `fetch_and_convert.sh`, each from a `huggingface.co/.../resolve/<commit>/`
+URL with a pinned file digest, then converted to `.maml`:
+
+| Asset | Model |
+|---|---|
+| `camera/src/main/assets/selfie_segmentation.maml` | MediaPipe Selfie Segmentation |
+| `photos/src/main/assets/u2netp.maml` | U²-Net portable (saliency) |
+| `photos/src/main/assets/scrfd_500m.maml` | SCRFD 500M (face detection) |
+| `photos/src/main/assets/w600k_mbf.maml` | MobileFaceNet (face embedding) |
+| `library/ocr/src/main/assets/ppocr_det.maml` | PP-OCRv5 mobile (text detection) |
+| `library/ocr/src/main/assets/ppocr_rec.maml` | PP-OCRv5 mobile latin (text recognition) |
+
+Five more come through `huggingface_hub.snapshot_download`, each with an explicit `revision=` and a
+per-file digest table: `fetch_maia.py` (`:games:chess`), `fetch_nllb600.py` (`:translate`),
+`fetch_supertonic.py` and `fetch_whisper.py` (`:speech`), and `fetch_tinyclip.py` (`:photos`).
+
+`fetch_and_convert.sh` downloads into a `mktemp -d` scratch directory that is removed on exit, and
+on a digest mismatch it reports and skips the model without invoking the converter — so a failed
+verification cannot overwrite a committed asset.
+
+Beyond the digests, `maml_convert.py` pins a digest over the whole ordered layer table, so an
+upstream re-export that reorders or re-pads a layer fails at conversion rather than shipping a net
+that infers nonsense. That digest covers *structure*, not weight values; `scripts/ml/onnx_parity.py`
+is the numeric check.
+
+### 8.1 Two model provenance gaps — Medium
+
+- The SMaLL-100 provenance scripts are deleted but still referenced.
+- `music_detector.sound_model` has its provenance recorded nowhere — no fetch script, no upstream
+  revision, no digest.
+
+Mitigation: record provenance for `music_detector.sound_model` in the form the other eleven use, and
+either restore or remove the SMaLL-100 references.
+
+### 8.2 `HF_TOKEN` is sent implicitly — Low
+
+`huggingface_hub` attaches `HF_TOKEN` from the environment when it is set, so the five
+`snapshot_download` scripts authenticate to `huggingface.co` whenever a developer happens to have a
+token exported, whether or not the repository requires one.
+
+Mitigation: pass `token=False` where anonymous access suffices.
+
+---
+
+## 9. Vendored third-party source
+
+| Vendored source | Upstream revision recorded |
+|---|---|
+| `third_party/betocore` | Yes — upstream commit recorded |
+| `youpipe/extractor` (NewPipe Extractor) | No |
+| `third_party/om-file-format-sys` | No |
+
+### 9.1 Two vendored trees have no recorded upstream revision — Medium
+
+Without a recorded upstream commit there is no way to diff the vendored copy against upstream, apply
+an upstream security fix with confidence, or establish what local modifications exist. This matters
+most for `youpipe/extractor`, which parses untrusted remote input from YouTube (§11.1) and is also
+what forces `jsr305` to stay in the catalog (§3.2).
+
+Mitigation: record the upstream commit for both, in the form `third_party/betocore` already uses.
+
+---
+
+## 10. Release signing key
+
+### 10.1 `release_keystore.jks` is committed to the repository — High, pending confirmation
+
+A 2500-byte `release_keystore.jks` is tracked in git at the repository root, under the exact
+filename the release workflow signs with. It is the only keystore in the tree.
+
+CI overwrites this file from a secret before signing, which strongly suggests the committed file is
+a development key rather than the production one. That has not been confirmed, and the distinction
+is the entire risk: if the committed key is the production signing key, it is disclosed to everyone
+with repository access and every APK signed with it is compromised.
+
+Mitigation: confirm what the committed keystore actually is. If it is not a throwaway development
+key, treat it as disclosed — rotate it and follow key-compromise procedure. Either way, remove it
+from version control and have CI supply the keystore entirely from secrets, so no file at that path
+is ever tracked.
+
+---
+
+## 11. Runtime servers the apps depend on
+
+Hosts contacted from a user's device. Build-time hosts are in §12; several organisations appear in
+both, and the two roles are not interchangeable.
+
+First-party infrastructure (`vayunmathur.com`, `findfamily.cc`) is out of scope for this inventory
+and is omitted throughout.
+
+`UNCERTAIN` markings below are load-bearing. They mean the host was inferred from a string, a
+comment, or a single capture rather than confirmed from a request site, and they should not be
+promoted to fact without re-checking.
+
+### 11.1 Hosts by app
+
+**`:appstore`**
+
+| Host | Purpose | Notes |
+|---|---|---|
+| `f-droid.org/repo` | Signed index, APKs, icons | HTTPS; fails closed on signature failure; cache survives; toggleable; cert pinned |
+| `verification.f-droid.org/verified.json` | Reproducible-build badge | Best-effort, cosmetic |
+| `apps.grapheneos.org` | Sandboxed Play index + APKs | signify ed25519 pin. **No mirror, not toggleable** |
+| `repo.accrescent.app` | Signed allowlist / trust anchor | Pinned key. **No fallback, fails closed** |
+| `appstore-api.accrescent.app:443` (gRPC) | Listings, download URLs | TLS **deliberately unpinned**; browse soft-fails; sends device attributes |
+| Accrescent split CDN | APK bytes | Host supplied by the server — **not statically known** |
+| `auroraoss.com/api/auth` | Anonymous Play accounts | **Sends a full device fingerprint and receives a Google authToken**; spoofs the Aurora UA to evade Cloudflare. `FALLBACK_DISPENSERS` has exactly one entry — the same URL — so it is a **SPOF** |
+| Play API hosts (`android.clients.google.com` and siblings) | Play protocol via the `gplayapi` AAR | authToken + `X-DFE-*`. **UNCERTAIN** — read from strings inside the AAR |
+| Play APK CDN | APK bytes | **Does not use the pinned SSL factory** that its sibling downloaders use. Range-resume |
+| `play-lh.googleusercontent.com` | Listing imagery | **UNCERTAIN / dynamic** |
+
+`play.google.com` and `f-droid.org` also appear as inbound deep links in the manifest, and
+`github.com/vayun-mathur/Modern-Apps` as a dead cache key and displayed link. Neither is a
+dependency.
+
+**`:maps`**
+
+| Host | Purpose | Notes |
+|---|---|---|
+| `api.transitous.org/api/v1/stoptimes` | Transit departures | **Volunteer-run.** Good fallback behaviour, but the UA `Modern-Apps-Maps/1.0` is not contactable, and `OfflineRouter.kt:562-569` fires one call per journey stop, concurrently |
+| `www.google.com/search?tbm=map` | POI discovery and search | Keyless, ToS-hostile scrape. A spoofed Chrome UA, Referer and warmed cookies **are** the credential. 15 category terms per viewport; search is online-only |
+| `www.google.com/maps/vt/pb=` | Traffic tiles | **UNCERTAIN** — the file states it is a no-op on phone |
+| `maps.googleapis.com/.../SingleImageSearch` | Street View lookup | Fired on **every** place selection |
+| `www.google.com/maps/photometa/v1`, `streetviewpixels-pa.googleapis.com/v1/tile` | Street View metadata and tiles | Full tile grid fetched concurrently |
+| `www.google.com/maps?cid=` | Reviews | Hidden WebView DOM scrape, 10–45 s per place |
+| `*.googleusercontent.com` | Photos and avatars | |
+| `http://localhost:<ephemeral>/traffic/{z}/{x}/{y}` | Local traffic tile server | **PLAINTEXT**, unauthenticated, `Access-Control-Allow-Origin: *`. Loopback-bound, which is itself a deliberate narrowing of an earlier bind |
+
+`openstreetmap.org` and `github.com/protomaps/basemaps` are attribution only. `maps.app.goo.gl` /
+`goo.gl` are deep links, and are a real dependency only if the app resolves shorteners itself —
+**UNCERTAIN**. The manifest accepts `scheme="http"`.
+
+**`:musicbrainz`**
+
+| Host | Purpose | Notes |
+|---|---|---|
+| `musicbrainz.org/ws/2` | Metadata | Non-profit. Correctly rate-gated at 1100 ms with an identifying UA. Hard-fails the screen |
+| `coverartarchive.org` | Cover art | Non-profit. **Not rate-gated and no identifying UA** |
+| `archive.org`, `ia*.us.archive.org` | Cover art redirect targets | |
+| `api.tidal.com/v1` | Catalogue and playback | Bearer OAuth |
+| `auth.tidal.com/v1/oauth2` | Tidal auth | **Hardcoded shared `client_id;client_secret`**, base64-encoded at `TidalAuth.kt:67-68` |
+| `sp-*-{cf,fa}.audio.tidal.com` | Audio CDN | The reason `TrustBundle.MUSICBRAINZ` exists |
+| `lrclib.net` | Lyrics | **Volunteer-run**, ungated, two calls per track |
+
+**`:youpipe`**
+
+| Host | Purpose | Notes |
+|---|---|---|
+| `www.youtube.com/youtubei/v1/*` | InnerTube API | No fallback host |
+| `www.youtube.com/sw.js`, `/results` | Client version discovery | Real three-tier fallback |
+| `youtubei.googleapis.com` | InnerTube alternate | **UNCERTAIN** |
+| `music.youtube.com` | Music surface | |
+| `suggestqueries.google.com` | Search suggestions | **Partial query sent to Google per keystroke** |
+| `api.pipepipe.dev/decoder/*` | Stream-URL deobfuscation | **Third-party community service that sees every stream URL the user plays**, and so learns what each user watches. The local fallback is null by default. The highest-risk runtime third party in the tree |
+| `jnn-pa.googleapis.com` | BotGuard / PoToken | **Hardcoded api-key and request-key** at `LocalDomPoTokenGenerator.kt:287-288` |
+| BotGuard interpreter URL | Attestation | **Host chosen by YouTube**, and the JS is eval'd in a WebView |
+| `*.googlevideo.com` | Media | Dynamic |
+| `/feeds/videos.xml` | Channel feeds | **UNCERTAIN** |
+
+The 30-host Invidious/Piped list is string-only recognition and is never contacted.
+`dearrow-thumb.ajay.app` appears in a comment only.
+
+**`:communicate`** — the largest runtime surface.
+
+*Signal.* `wss://chat.signal.org:443/v1/websocket/` (two sockets) is a **SPOF**. `/v2/directory/auth`
+resolves to `cdsi.signal.org`, whose host lives inside libsignal (**UNCERTAIN**).
+`/v4/attachments/form/upload` returns a **server-supplied CDN3 URL that is used without scheme or
+host validation** (`SignalAttachmentUpload.kt:104`). `/v2/calling/relays` returns
+**server-supplied `turn:`/`stun:` hosts, including bare IPs**. The bundled Signal roots are a
+**union with the system CAs — additive, not pinning**.
+
+*WhatsApp.* `g.whatsapp.net:443` over a raw socket with no TLS — see Highest-severity findings; sole
+transport and a **SPOF**. `v.whatsapp.net/v2/*` carries the OTP, 2FA PIN, key bundle and device
+fingerprint, impersonates the official client, and uses a **hardcoded salt and public key**
+(`WhatsAppRegistrationConstants.kt:26-27,54-55`). `graph.whatsapp.com/graphql` uses a **hardcoded
+`CLIENT_TOKEN`**. The media host is **server-supplied** via `media_conn`, and its **scheme is
+unverified** (§11.5).
+
+*Google Voice.* `clients6.google.com/voice/v1/voiceclient/` uses **no OAuth — it replays the browser
+cookie jar plus a SAPISIDHASH**, is a **SPOF**, and **logs every response body, including the SIP
+password**. `voice.google.com` is loaded in a WebView that monkey-patches `fetch`/`XHR`, uses
+`addJavascriptInterface`, and has an unscoped fallback injection.
+`wss://web.voice.telephony.goog/websocket` uses RFC 2069 MD5 digest auth and logs frames.
+`web.c.pbx.voice.sip.google.com` is derived from a **single HAR capture**.
+`stun:stun.l.google.com:19302` is **plaintext UDP and the only ICE server — no TURN**.
+
+*MMS.* The download URL is taken **unvalidated from an inbound WAP-push PDU**
+(`MmsDeliverReceiver.kt:63`), and real MMSCs are usually `http://`.
+
+Verified absent from `:communicate`: RCS, all push (60 s Google Voice polling instead), any bridge,
+any community endpoint.
+
+**`:email`**
+
+Six provider preset pairs, two of which start plaintext (`smtp-mail.outlook.com:587`,
+`smtp.mail.me.com:587`). `login.microsoftonline.com/.../{authorize,token}` uses a hardcoded PKCE
+`client_id`, **hard-fails — a SPOF for every Outlook account** — and **logs access and refresh
+tokens**. The arbitrary user-supplied IMAP/SMTP host is reached through the empty
+`checkServerTrusted` described in Highest-severity findings. There is **no autoconfig or ISPDB
+lookup at all**; the in-app help links are display-only.
+
+**`:everysync`**
+
+`accounts.google.com/o/oauth2/v2/auth` (hardcoded `client_id`), `oauth2.googleapis.com/token`
+(**SPOF**), `www.googleapis.com/oauth2/v3/userinfo`, Google CardDAV/CalDAV
+(`apidata.googleusercontent.com/caldav/v2/...`), `health.googleapis.com/v4/...`, and
+`caldav.icloud.com` + `contacts.icloud.com` over Basic auth, plus `.well-known/{caldav,carddav}`
+discovery. `DavLoginScreen.kt:61-66` performs **no scheme validation**, so an `http://` server URL
+sends the password in the clear. A stale comment references a Withings/Samsung proxy that does not
+exist.
+
+**`:euicc`**
+
+A user-supplied SM-DP+ host and `/gsma/rsp2/es9plus/*`. `es9p.rs:154` **accepts `http://` verbatim
+from a scanned QR code or a typed activation code**. There is **no SM-DS discovery**.
+`rsp.truphone.com` is a test fixture, not a dependency.
+
+**`:weather`**
+
+`api.open-meteo.com/v1/forecast`, `geocoding-api.open-meteo.com/v1/search`,
+`air-quality-api.open-meteo.com/v1/air-quality`, and `map-tiles.open-meteo.com` (both `latest.json`
+and 64 KB HTTP Range reads of `*.om` from Rust). All keyless HTTPS. **Open-Meteo is free and
+donation-funded, and is a single organisational SPOF for the entire app.** `api.weather.gov` is
+verified absent.
+
+**`:networklocation`**
+
+**No third-party positioning host.** Beacon resolution is fully on-device: the `BeaconCache`
+(in-memory + Room) first, then the offline WPSDB stores, and nothing beyond that. Beacons
+absent from both are dropped from the solve. MLS, beacondb, OpenCelliD, WiGLE, Apple `gs-loc`
+and Google geolocation are all absent from the tree.
+
+The app still holds `INTERNET`, used solely by `:library:downloadservice` to fetch the offline
+databases. `wifi.wpsdb`, `cells.wpsdb` and `geocoder.geodb` are **downloaded on demand, not
+bundled** (they are far too large to ship in the APK). Until they arrive every lookup misses,
+and with no online fallback the provider now reports **no position at all** rather than
+degrading to a remote service — a deliberate trade of availability for not talking to anyone.
+The stores are built by an out-of-repo `wtfps-experiment/store.py`, so their **provenance is
+unresolved — UNCERTAIN**, and that is now the app's only meaningful supply-chain exposure.
+
+**`:passwords`**
+
+`wss://cable.ua5v.com/...` is the **Google-operated** FIDO caBLE tunnel. It sees ciphertext only,
+which is the point of the design, but `DEFAULT_ID = 0` is hardcoded, making it a **hard-fail SPOF
+for cross-device passkeys** with Apple's `cable.auth.com` sitting unused one array index away. The
+`cable.<base32>.*` entries are self-declared **UNVERIFIED** and dormant. Disproven: no HIBP, no
+favicon fetch, no remote KDBX sync (the vault is a local SAF URI).
+
+**`:taxi`**
+
+`api.lyft.com` with **`BOOKING_LIVE = true`, so real charges are possible**, a **hardcoded OAuth
+client id and secret**, a pinned app-version string that is a time bomb, and **SPOF** status.
+`api.stripe.com` needs an explicit system-CA factory. `payments.braintree-api.com/graphql` is
+reached at a **URL read out of the Lyft-supplied client token**. `cn-geo1.uber.com` is
+non-functional by the authors' own admission. `m.uber.com` runs through a JS bridge and **logs
+GraphQL variables and 4000 characters of each response to logcat**; Uber quotes are unimplemented
+and the store listing overstates what works.
+
+**`:fooddelivery`**
+
+`api.deliverycollective.com` (~50 endpoints) is a real third-party aggregator and a **SPOF for the
+whole app**. `api.stripe.com` is reached with the **hardcoded `pk_live_` key** described in
+Highest-severity findings.
+
+**`:education`**
+
+`www.youtube.com/watch?v=` via the vendored NewPipe extractor, plus `*.googlevideo.com`. A
+chronic-breakage SPOF with graceful fallback. **ExoPlayer fetches media outside `NetworkClient`, so
+it bypasses the pinned trust bundle.** The curriculum is bundled JSON; there is no content API.
+
+**`:backup`**
+
+An **unvalidated `http://` WebDAV URL** (`BackendFactory.kt:16-20`) sends **HTTP Basic credentials
+in the clear**, and the password is also **stored unencrypted** (`BackupConfig.kt:66`). A local SAF
+folder is an equally supported alternative.
+
+**`:web`**
+
+Seven user-selectable search engines (DuckDuckGo default), Safe Browsing opted in (host
+**UNCERTAIN**), `<origin>/favicon.ico` as a PWA fallback, and `market://`. Global
+`cleartextTrafficPermitted="true"` plus user CAs is defensible for a browser and is **well mitigated
+in-app**: `ShieldsRequestFilter.kt:54-62` and `LanPolicy.kt:48-63` fail **closed** on DNS failure and
+require *all* resolved addresses to be private (a DNS-rebinding defence), and HTTPS upgrade is
+applied. Verified absent: DoH, a suggestions endpoint, a runtime filter updater, any third-party
+favicon service, and hardcoded DNS IPs.
+
+**`:vpn`**
+
+**Zero hardcoded hosts, zero DNS IPs, zero default endpoints.** Everything comes from a
+user-imported `.conf`. Network security config cleartext is false. The only literals are RFC1918
+fallbacks, MTU 1280, and port 51820.
+
+### 11.2 Apps with no third-party runtime host
+
+- `:updater` — HTTPS *enforced* by a hard `HttpsURLConnection` cast and no redirects.
+- `:translate` — first-run 617 MB NLLB download, SHA-256 pinned, no Hugging Face fallback.
+- `:openassistant` — on-device, 24 local IPC tools.
+- `:calculator` — a currency tab is the sole reason it holds `INTERNET`.
+- `:travel` — one proxy fronting Duffel; every call currently throws, which makes it a **SPOF for a
+  money-handling app**.
+- `:office`, `:games:voxels` — one E2EE relay each, no STUN/TURN.
+- `:cast` / `:cast:tv` — LAN only, ephemeral TLS pinned by fingerprint, no STUN/TURN. The "100%
+  offline" claim is accurate.
+- `:share` — LAN TCP plus mDNS/BLE.
+- `:photos` — holds `INTERNET` but has no host of its own; models ship in the APK.
+- `:music` — **no `INTERNET` permission**; no radio, lyrics or artwork APIs.
+- `:nowplaying` — `SongMatcher` is a stub; no AcoustID, no Shazam.
+- `:speech` — models bundled.
+- Fully offline: astronomy, clock, code, contacts, calendar, health, keyboard, launcher, logviewer,
+  measure, things, tuner, setupwizard, camera (which *removes* `INTERNET`), and every game except
+  voxels.
+
+### 11.3 Cross-cutting patterns
+
+**Plaintext or unauthenticated transport**, worst first: the WhatsApp raw socket; the empty
+`checkServerTrusted` and STARTTLS downgrade in `:email`; `stun.l.google.com` over plaintext UDP; the
+unvalidated `http://` WebDAV URL in `:backup`; the unvalidated DAV URL in `:everysync`; the
+`http://` activation code accepted by `:euicc`; the MMS content-location taken from an inbound PDU;
+the loopback traffic tile server in `:maps`; and `:web`'s global cleartext allowance, which is
+deliberate and mitigated.
+
+**Volunteer or community-run services carrying production traffic**: `api.transitous.org` (hit at
+both runtime *and* as a 10 GB build-time mirror, §12), `api.pipepipe.dev`, `lrclib.net`,
+`coverartarchive.org`, Open-Meteo, and — build-side — gorhill/uBlock and the Brave filter lists.
+None of these has a commercial support relationship, and several are hit without rate-gating or a
+contactable UA.
+
+**Single points of failure**: `chat.signal.org`, `g.whatsapp.net`, `v.whatsapp.net`,
+`clients6.google.com`, `stun.l.google.com`, `api.pipepipe.dev`, Open-Meteo, `api.lyft.com`,
+`api.deliverycollective.com`, `cable.ua5v.com`, `auroraoss.com`,
+`login.microsoftonline.com`, `oauth2.googleapis.com`, `apps.grapheneos.org`, `repo.accrescent.app`.
+
+**Hardcoded credentials shipped in APKs**: Lyft client id and secret; a Stripe `pk_live_` key; a
+Tidal `client_id;client_secret`; a WhatsApp client token plus registration salt and public key;
+Google BotGuard api-key and request-key; and two public OAuth client ids. See Highest-severity
+findings.
+
+### 11.4 Shared network-library controls
+
+- `:library:network`'s manifest sets `cleartextTrafficPermitted="false"` for **every consumer**.
+  Only `:web` and `:email` override it (`:vpn`'s override is a no-op).
+- There is **no `<pin-set>` anywhere**. Pinning is code-side, via `TrustBundle` over the 20 DER roots
+  under `library/network/src/main/assets/ca/`, which are pin-gated at generation time (§7.2).
+- **Manifest-merge `INTERNET` leak**: `:notes`, `:flashcards`, `:files`, `:pdf` and `:translate`
+  ship with `INTERNET` without declaring it, which makes several `metadata_data/*.md` claims wrong.
+- `InitialDownloader.kt:323` uses a raw `HttpURLConnection`, **bypassing the CA bundle**.
+- Six modules consume `:library:map`: maps, findfamily, weather, photos, taxi, fooddelivery.
+  `:library:image` has no fixed host.
+- CARTO is confirmed removed — `library/map/build.gradle.kts` drops `:library:image` because there
+  is no raster path, and the "bundled CARTO map" is a `screenshotTest` PNG.
+
+### 11.5 Limits of the host inventory
+
+These bound §11 and §12 specifically, on top of the audit limits in the Scope section.
+
+1. **The WhatsApp media scheme is unverified.** `WhatsAppClient.kt:1100-3639` was not read, so
+   whether the `media_conn`-supplied media host is contacted over TLS is not established.
+2. **The `NetworkClient.init(` consumer table is incomplete.** Only `:findfamily` and `:passwords`
+   are verified; the rest is comment-sourced. Two traps: `:library` is a dependency of every app,
+   and `initWithFactory` (`NetworkClient.kt:163`) is a second entry point that a search for `init(`
+   misses.
+3. **The inventory is closed over *hardcoded* hosts only.** Hosts that are real but not statically
+   enumerable are named by role, not by name: `:library:image` targets, the Play and Accrescent
+   CDNs, `*.googlevideo.com`, WhatsApp media, Signal CDN3 and TURN, Duffel logos, the Hugging Face
+   LFS CDN, and the two unbounded build-time registry host sets (§12).
+4. **Not read line by line**: roughly 12 `:vpn` packet and UI files, the `scripts/maps` crate `.rs`
+   bodies, `library/ui/odf/`, and the `library/ml` examples.
+5. The inventory was built by directory-walking and targeted reads across roughly 15 parallel
+   searches, without a grep tool. Coverage is high but is not a mechanical sweep.
+
+---
+
+## 12. Build-time and data-prep hosts
+
+Contacted from a developer machine or a CI runner, never from a user device. Where a risk is written
+up above, this section only names the host.
+
+**Toolchain and dependency resolution.** `services.gradle.org` (SHA-256 verified, §1.2);
+`dl.google.com`, `repo.maven.apache.org` and `plugins.gradle.org` (no verification metadata, §1.1);
+`build-artifacts.signal.org` (§2.1); `crates.io` (`--locked`, §4); `static.rust-lang.org`;
+`proxy.golang.org`, `sum.golang.org` and `github.com` for the unblockjam Go tools (hash-pinned);
+`cdn.azul.com` for the JDK; Ubuntu apt mirrors; `github.com` for Actions; and `api.github.com`,
+including the `gh release create` upload in `release.sh` (§6.5).
+
+**`raw.githubusercontent.com` — five consumers.**
+
+| Consumer | Pinning |
+|---|---|
+| Material Symbols (`LauncherIconGen.kt`, plus the second site at `android.yml:174`) | Full commit SHA (§7.5) |
+| simdjson and zstd (`scripts/geocoder_gen.sh`) | Full commit SHAs (§7.4) |
+| brave/adblock-resources | **`master` — mutable, unpinned** |
+| gorhill/uBlock | **`master` — mutable, unpinned, and executed** (Highest-severity findings) |
+| unicode-org/cldr | **`main` — mutable, unpinned** |
+
+**TLS trust anchors.** `curl.se/ca/cacert.pem`, with `letsencrypt.org`, `pki.goog`,
+`cacerts.digicert.com` and `www.amazontrust.com` as per-root fallbacks. Pin-gated (§7.2).
+
+**Model weights.** `huggingface.co` — six direct fetches plus five `snapshot_download` repos, all
+revision-pinned and digest-verified (§8). The LFS CDN behind it is dynamic.
+
+**Map and geospatial data.**
+
+- `download.geofabrik.de` — OSM extracts.
+- `demo-bucket.protomaps.com` — the original upstream basemap; a size mismatch is a warning only,
+  and upstream is reported dead.
+- `github.com` and `api.github.com` — go-pmtiles, pinned and checksummed (§7.1).
+- `naciscdn.org` — **the only source for two shipped layers**, extracted with `unzip -o` and no
+  traversal guard. A **SPOF** for those layers.
+- `api.transitous.org/gtfs/` — roughly 2250 zip files, about 10 GB, soft-fail, **zero checksums**.
+  Same volunteer-run organisation the runtime hits (§11.1).
+- `codeload.github.com` at `refs/heads/main` — mutable.
+- **An unbounded set of GTFS agency hosts.** Third-party API keys transit these, and an `http://`
+  entry in the agency list would be fetched in plaintext.
+- Cloudflare R2 upload, using `R2_*` / `AWS_*` credentials from a sourced `.env`.
+
+**Other data prep.**
+
+- `static.openfoodfacts.org` — roughly 1.2 GB into a `:health` asset, **no checksum**, redirecting
+  to an unnamed S3 bucket.
+- `unicode.org` — emoji data.
+- The Brave filter-list catalog — **a second unbounded host set**, since the list of lists is read
+  from upstream rather than hardcoded.
+- `calendar.google.com` — `tools/holidaygen/HolidayGen.kt` issues roughly **13,700 sequential,
+  unthrottled GETs** with a spoofed `Mozilla/5.0 (holidaygen)` UA. The build file's "Thunderbird"
+  comment describes a different source and is wrong.
+
+**Cleared.** `wikidesc` reads a local dump and deliberately avoids the API.
+`scripts/networklocation` is an OSM geocoder, not a Wi-Fi harvester. Also clear: the other three
+maps crates, the chess/voxels/pipes/wordmaker generators, the install scripts, both `third_party`
+`build.rs` files, and the remaining build-logic. The only plaintext URL anywhere in build scope is
+`http://tdc-www.harvard.edu/...` in an inert docstring.
+
+---
+
+## 13. Absent risks worth recording
+
+These were checked and are not present, or are present by decision. They are listed so future audits
+need not re-derive them.
+
+- No git hooks.
+- No git submodules.
+- No Gradle init scripts.
+- No `curl | sh` style pipe-to-shell installers anywhere in the tree.
+- No dynamic, range, or `-SNAPSHOT` dependency versions.
+- No `mavenLocal()`, and no per-module repositories (`FAIL_ON_PROJECT_REPOS`).
+- One committed binary only: `gradle/wrapper/gradle-wrapper.jar`.
+- CI installs build prerequisites with `apt-get` and no version constraints. This is deliberate:
+  pinning apt versions breaks the build on every GitHub runner-image roll, which costs more than the
+  reproducibility it buys.

@@ -132,6 +132,10 @@ private fun HubTabs(
 ) {
     val pagerState = rememberPagerState(pageCount = { 4 })
     val scope = rememberCoroutineScope()
+    // Home and Games are adjacent pages showing the same games (recentlyPlayed is a subset of the
+    // full list), and the pager composes both while a swipe is in flight - so "hub-game-<id>" would
+    // have two live origins. settledPage rather than currentPage: currentPage flips at the halfway
+    // point of a scroll, which would leave both pages claiming the key mid-swipe.
     val tabs = listOf(
         PagerTab("Home", { IconDashboard() }) {
             DashboardPage(
@@ -140,6 +144,7 @@ private fun HubTabs(
                 onProfileClick = { scope.launch { pagerState.animateScrollToPage(3) } },
                 onActivityClick = { backStack.add(MainRoute.Activity) },
                 onGamesClick = { scope.launch { pagerState.animateScrollToPage(1) } },
+                ownsGameMorphKeys = pagerState.settledPage == 0,
                 dbConfigs = dbConfigs,
                 datastoreNames = listOf("datastore_default")
             )
@@ -147,7 +152,8 @@ private fun HubTabs(
         PagerTab("Games", { IconSportsEsports() }) {
             GamesListPage(
                 viewModel = viewModel,
-                onGameClick = { gameId -> backStack.add(MainRoute.GameDetail(gameId)) }
+                onGameClick = { gameId -> backStack.add(MainRoute.GameDetail(gameId)) },
+                ownsGameMorphKeys = pagerState.settledPage == 1
             )
         },
         PagerTab("Achievements", { IconEmojiEvents() }) {

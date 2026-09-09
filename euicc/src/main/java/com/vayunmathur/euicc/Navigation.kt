@@ -10,6 +10,7 @@ import com.vayunmathur.euicc.ui.EuiccHomeScreen
 import com.vayunmathur.euicc.ui.ProfileDetailScreen
 import com.vayunmathur.euicc.ui.QrScannerScreen
 import com.vayunmathur.library.util.MainNavigation
+import com.vayunmathur.library.util.MorphPage
 import com.vayunmathur.library.util.rememberNavBackStack
 
 @Composable
@@ -35,7 +36,8 @@ fun Navigation(viewModel: EuiccViewModel) {
                 onAddSim = { backStack.add(Route.AddSim) },
             )
         }
-        entry<Route.ProfileDetail> { route ->
+        // Morph: the tapped row's profile name travels up into the app bar here.
+        entry<Route.ProfileDetail>(metadata = MorphPage()) { route ->
             ProfileDetailScreen(
                 iccid = route.iccid,
                 state = viewModel.state,

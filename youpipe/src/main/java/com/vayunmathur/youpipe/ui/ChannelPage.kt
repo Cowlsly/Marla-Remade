@@ -43,6 +43,8 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
 import com.vayunmathur.library.util.NavBackStack
+import com.vayunmathur.library.util.sharedContainer
+import com.vayunmathur.library.util.sharedContent
 import com.vayunmathur.library.util.sharedText
 import com.vayunmathur.library.image.compose.AsyncImage
 import com.vayunmathur.library.image.ImageRequest
@@ -167,6 +169,8 @@ fun VideoItem(
     trailingContent: @Composable (() -> Unit)? = null,
     reason: String? = null,
     overflowActions: List<Pair<String, () -> Unit>> = emptyList(),
+    /** Forwarded to [VideoRow]; see the parameter there for why it is per call site. */
+    titleSharedKey: Any? = null,
 ) {
     val context = LocalContext.current
     val historyFlow = remember(videoInfo.videoID) { youPipeViewModel.historyById(videoInfo.videoID) }
@@ -201,6 +205,7 @@ fun VideoItem(
         modifier = itemModifier,
         trailingContent = trailingContent,
         overflowActions = overflowActions,
+        titleSharedKey = titleSharedKey,
     )
 }
 
@@ -222,7 +227,7 @@ fun VideoRow(
      * than derived from [row] here, because a row is drawn by eight of them: the home feed and the
      * search overlay are on screen together, and the tab pager has two feeds composed mid-swipe, so
      * keying every row would put the same video under one key twice with no single origin to travel
-     * from. Null everywhere but the one list a morph starts at.
+     * from. Null on any list that shares a composition with another keyed one.
      */
     titleSharedKey: Any? = null,
 ) {
@@ -312,10 +317,17 @@ private fun VideoOverflowMenu(actions: List<Pair<String, () -> Unit>>) {
     }
 }
 
+/**
+ * The channel's identity block, and the far end of the morph that starts at a subscription row.
+ *
+ * Keyed on the container rather than on the avatar alone: an avatar gliding out of a row while the
+ * name beside it cuts reads worse than no morph at all. The avatar is nested inside so its pixels
+ * keep their identity across the size change - 24dp in the row, 52dp here.
+ */
 @Composable
 fun ChannelHeader(channelInfo: ChannelInfo) {
     val context = LocalContext.current
-    ListItem(modifier = Modifier, overlineContent = {
+    ListItem(modifier = Modifier.sharedContainer("youpipe-channel-${channelInfo.channelID}"), overlineContent = {
 
     }, supportingContent = {
         Text(stringResource(R.string.channel_info, countString(context, channelInfo.subscribers)))
@@ -326,7 +338,9 @@ fun ChannelHeader(channelInfo: ChannelInfo) {
                 .memoryCacheKey("channel-avatar-${channelInfo.channelID}")
                 .build(),
             contentDescription = null,
-            Modifier.size(52.dp).clip(CircleShape)
+            Modifier.sharedContent("youpipe-channel-avatar-${channelInfo.channelID}")
+                .size(52.dp)
+                .clip(CircleShape)
         )
     }) {
         Text(channelInfo.name.decodeHtml(), style = MaterialTheme.typography.titleLarge)

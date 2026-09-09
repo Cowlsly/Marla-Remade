@@ -4,7 +4,6 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import com.vayunmathur.library.map.CameraState
 import com.vayunmathur.maps.util.NavigationProgress
-import com.vayunmathur.maps.util.toGeoPoint
 import kotlin.time.Duration.Companion.milliseconds
 
 /** How long the follow animation takes. Matched to the ~1s GPS cadence so it never catches up
@@ -45,7 +44,7 @@ fun NavigationCameraFollow(
         chrome.lastProgrammaticMoveMs = System.currentTimeMillis()
         camera.animateTo(
             camera.position.copy(
-                target = progress.snappedPosition.toGeoPoint(),
+                target = progress.snappedPosition,
                 zoom = FOLLOW_ZOOM,
             ),
             FOLLOW_ANIMATION_MS,

@@ -86,6 +86,16 @@ pub struct Pipelines {
     /// Built here rather than bolted onto the renderer so it survives `Renderer::rebuild`,
     /// which destroys and remakes every `Pipelines` on each resize and rotation.
     pub puck: vk::Pipeline,
+    /// The region mask: draws the selected region's tessellated shape into the stencil and no
+    /// colour at all, so [`scrim`](Self::scrim) can skip those pixels.
+    ///
+    /// A stencil rather than a clipped polygon because a region arrives as one clipped piece per
+    /// tile: rasterising them all into the same stencil unions them for free, whereas cutting the
+    /// region out of a viewport quad geometrically needs a polygon boolean, which is what two
+    /// earlier attempts at exactly this foundered on.
+    pub mask: vk::Pipeline,
+    /// The dimming scrim, drawn over the whole viewport wherever the stencil is still zero.
+    pub scrim: vk::Pipeline,
 }
 
 impl Pipelines {
@@ -171,6 +181,7 @@ impl Pipelines {
             fill_frag,
             (fill::FLOATS_PER_VERTEX * 4) as u32,
             &fill_attributes,
+            Stencil::Ignore,
         );
         let line = build(
             device,
@@ -181,6 +192,7 @@ impl Pipelines {
             line_frag,
             (stroke::FLOATS_PER_VERTEX * 4) as u32,
             &line_attributes,
+            Stencil::Ignore,
         );
 
         // The symbol pipeline needs the atlas descriptor set, so it gets its own
@@ -218,6 +230,7 @@ impl Pipelines {
             symbol_frag,
             (symbol::FLOATS_PER_VERTEX * 4) as u32,
             &symbol_attributes,
+            Stencil::Ignore,
         );
         let sprite = build(
             device,
@@ -228,6 +241,7 @@ impl Pipelines {
             sprite_frag,
             (symbol::FLOATS_PER_VERTEX * 4) as u32,
             &symbol_attributes,
+            Stencil::Ignore,
         );
 
         // The overlay quad is position-only in -1..1, so it shares the fill vertex
@@ -241,6 +255,33 @@ impl Pipelines {
             puck_frag,
             (fill::FLOATS_PER_VERTEX * 4) as u32,
             &fill_attributes,
+            Stencil::Ignore,
+        );
+
+        // The region mask and its scrim. Both are position-only quads/triangles in the same
+        // vertex format as `fill`: the mask draws the region's tessellated shape, the scrim a
+        // full-viewport quad that the stencil keeps off the region itself.
+        let mask = build(
+            device,
+            layout,
+            render_pass,
+            samples,
+            fill_vert,
+            fill_frag,
+            (fill::FLOATS_PER_VERTEX * 4) as u32,
+            &fill_attributes,
+            Stencil::Write,
+        );
+        let scrim = build(
+            device,
+            layout,
+            render_pass,
+            samples,
+            fill_vert,
+            fill_frag,
+            (fill::FLOATS_PER_VERTEX * 4) as u32,
+            &fill_attributes,
+            Stencil::TestOutside,
         );
 
         // The modules are only needed while the pipelines are being created.
@@ -254,12 +295,24 @@ impl Pipelines {
         device.destroy_shader_module(puck_vert, None);
         device.destroy_shader_module(puck_frag, None);
 
-        match (fill, line, symbol, sprite, puck) {
-            (Ok(fill), Ok(line), Ok(symbol), Ok(sprite), Ok(puck)) => {
-                Ok(Pipelines { layout, symbol_layout, fill, line, symbol, sprite, puck })
-            }
-            (fill, line, symbol, sprite, puck) => {
-                for created in [fill, line, symbol, sprite, puck].into_iter().flatten() {
+        match (fill, line, symbol, sprite, puck, mask, scrim) {
+            (Ok(fill), Ok(line), Ok(symbol), Ok(sprite), Ok(puck), Ok(mask), Ok(scrim)) => Ok(
+                Pipelines {
+                    layout,
+                    symbol_layout,
+                    fill,
+                    line,
+                    symbol,
+                    sprite,
+                    puck,
+                    mask,
+                    scrim,
+                },
+            ),
+            (fill, line, symbol, sprite, puck, mask, scrim) => {
+                for created in
+                    [fill, line, symbol, sprite, puck, mask, scrim].into_iter().flatten()
+                {
                     device.destroy_pipeline(created, None);
                 }
                 device.destroy_pipeline_layout(symbol_layout, None);
@@ -278,9 +331,22 @@ impl Pipelines {
         device.destroy_pipeline(self.symbol, None);
         device.destroy_pipeline(self.sprite, None);
         device.destroy_pipeline(self.puck, None);
+        device.destroy_pipeline(self.mask, None);
+        device.destroy_pipeline(self.scrim, None);
         device.destroy_pipeline_layout(self.symbol_layout, None);
         device.destroy_pipeline_layout(self.layout, None);
     }
+}
+
+/// How a pipeline uses the stencil attachment.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum Stencil {
+    /// Neither tests nor writes: every pipeline that draws the map itself.
+    Ignore,
+    /// Writes 1 wherever it draws, and writes no colour. The region mask.
+    Write,
+    /// Draws only where the stencil is still 0 — outside the region. The scrim.
+    TestOutside,
 }
 
 unsafe fn build(
@@ -292,6 +358,7 @@ unsafe fn build(
     fragment: vk::ShaderModule,
     stride: u32,
     attributes: &[vk::VertexInputAttributeDescription],
+    stencil: Stencil,
 ) -> Result<vk::Pipeline, String> {
     let entry = c"main";
     let stages = [
@@ -343,9 +410,45 @@ unsafe fn build(
         .src_alpha_blend_factor(vk::BlendFactor::ONE)
         .dst_alpha_blend_factor(vk::BlendFactor::ONE_MINUS_SRC_ALPHA)
         .alpha_blend_op(vk::BlendOp::ADD)
-        .color_write_mask(vk::ColorComponentFlags::RGBA);
+        // The mask writes stencil only. Letting it write colour would paint the region's
+        // triangles over the map in whatever the fill shader produced.
+        .color_write_mask(if stencil == Stencil::Write {
+            vk::ColorComponentFlags::empty()
+        } else {
+            vk::ColorComponentFlags::RGBA
+        });
     let blend = vk::PipelineColorBlendStateCreateInfo::default()
         .attachments(std::slice::from_ref(&blend_attachment));
+
+    // A subpass with a depth-stencil attachment requires this state on every pipeline, even the
+    // ones that ignore it. Depth is off throughout — see `swapchain`'s "# No depth buffer".
+    let stencil_op = match stencil {
+        Stencil::Ignore => vk::StencilOpState::default(),
+        // `REPLACE` with reference 1 rather than increment: the region's tile pieces overlap at
+        // shared edges, and any counting op would disagree with itself there.
+        Stencil::Write => vk::StencilOpState::default()
+            .compare_op(vk::CompareOp::ALWAYS)
+            .pass_op(vk::StencilOp::REPLACE)
+            .fail_op(vk::StencilOp::REPLACE)
+            .depth_fail_op(vk::StencilOp::REPLACE)
+            .compare_mask(0xff)
+            .write_mask(0xff)
+            .reference(1),
+        Stencil::TestOutside => vk::StencilOpState::default()
+            .compare_op(vk::CompareOp::NOT_EQUAL)
+            .pass_op(vk::StencilOp::KEEP)
+            .fail_op(vk::StencilOp::KEEP)
+            .depth_fail_op(vk::StencilOp::KEEP)
+            .compare_mask(0xff)
+            .write_mask(0)
+            .reference(1),
+    };
+    let depth_stencil = vk::PipelineDepthStencilStateCreateInfo::default()
+        .depth_test_enable(false)
+        .depth_write_enable(false)
+        .stencil_test_enable(stencil != Stencil::Ignore)
+        .front(stencil_op)
+        .back(stencil_op);
 
     let info = vk::GraphicsPipelineCreateInfo::default()
         .stages(&stages)
@@ -354,6 +457,7 @@ unsafe fn build(
         .viewport_state(&viewport_state)
         .rasterization_state(&rasterization)
         .multisample_state(&multisample)
+        .depth_stencil_state(&depth_stencil)
         .color_blend_state(&blend)
         .dynamic_state(&dynamic)
         .layout(layout)

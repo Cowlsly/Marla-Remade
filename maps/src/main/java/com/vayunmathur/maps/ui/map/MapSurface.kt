@@ -9,8 +9,11 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.DpRect
 import androidx.compose.ui.unit.DpSize
 import com.vayunmathur.library.map.CameraState
+import com.vayunmathur.library.map.GeoPoint
 import com.vayunmathur.library.map.LayerOptions
 import com.vayunmathur.library.map.MapOptions
+import com.vayunmathur.library.map.RegionLevel
+import com.vayunmathur.library.map.RegionMask
 import com.vayunmathur.library.map.UserPuck
 import com.vayunmathur.library.map.VectorMap
 import com.vayunmathur.library.ui.FreeHeightSheetState
@@ -34,10 +37,7 @@ import com.vayunmathur.maps.util.RouteService
 import com.vayunmathur.maps.util.SearchResult
 import com.vayunmathur.maps.util.SelectedFeatureViewModel
 import com.vayunmathur.maps.util.TransitStopsViewModel
-import com.vayunmathur.maps.util.toGeoPoint
-import com.vayunmathur.maps.util.toPosition
 import kotlinx.coroutines.launch
-import org.maplibre.spatialk.geojson.Position
 
 /**
  * The map surface: the renderer, its overlay layers, and what a tap on it means.
@@ -62,7 +62,7 @@ fun MapSurface(
     sheetState: FreeHeightSheetState,
     selectedFeature: SpecificFeature?,
     route: RouteService.RouteType?,
-    userPosition: Position,
+    userPosition: GeoPoint,
     userBearing: Float?,
     navProgress: NavigationProgress?,
     searchResults: List<SearchResult>,
@@ -99,13 +99,13 @@ fun MapSurface(
     }
 
     // The library takes a nullable GeoPoint, so :maps' two sentinels are converted here
-    // and go no further: Position(0, 0) is this app's "no fix" and means null, and a null
+    // and go no further: GeoPoint(0, 0) is this app's "no fix" and means null, and a null
     // bearing means no heading yet rather than due north.
     val userPuck = remember(userPosition, userBearing) {
         if (userPosition.latitude == 0.0 && userPosition.longitude == 0.0) {
             null
         } else {
-            UserPuck(userPosition.toGeoPoint(), userBearing)
+            UserPuck(userPosition, userBearing)
         }
     }
 
@@ -116,6 +116,19 @@ fun MapSurface(
         archivePath = archivePath,
         options = mapOptions,
         userPuck = userPuck,
+        // The selected city/region's outline, dimmed outside. Derived from the sheet's own
+        // selection rather than the tap, so a region picked from search masks too — and the
+        // label's own kind supplies the admin level, because the point alone is inside every
+        // region above it and would otherwise resolve to the smallest, not the one named.
+        regionMask = when (selectedFeature) {
+            is SpecificFeature.Admin0Label ->
+                selectedFeature.position?.let { RegionMask(it, RegionLevel.COUNTRY) }
+            is SpecificFeature.Admin1Label ->
+                selectedFeature.position?.let { RegionMask(it, RegionLevel.REGION) }
+            is SpecificFeature.Admin2Label ->
+                selectedFeature.position?.let { RegionMask(it, RegionLevel.LOCALITY) }
+            else -> null
+        },
         // GAP (deferred, renderer has no raster-layer API): the Google traffic tiles
         // have nothing to mount on. [trafficEnabled] is kept so the toggle plumbing
         // survives; see also the no-op branch in [MapLayers].
@@ -150,6 +163,9 @@ fun MapSurface(
                         return@launch
                     }
                     is MapHit.Stop -> {
+                        // Whatever place sheet was up is replaced, not stacked under: one tap
+                        // should take one back to undo, and a board over a stale sheet takes two.
+                        viewModel.set(null)
                         transitViewModel.openStop(hit.stop)
                         return@launch
                     }
@@ -158,6 +174,7 @@ fun MapSurface(
                         // baked stop and open its board instead of selecting the POI.
                         val station = hit.feature as? SpecificFeature.GenericPlace
                         if (station?.poiType == STATION_POI_TYPE) {
+                            viewModel.set(null)
                             transitViewModel.openNearestStop(
                                 station.position.latitude,
                                 station.position.longitude,
@@ -179,12 +196,16 @@ fun MapSurface(
                 val poi = click.poi
                 if (poi != null) {
                     val type = PoiCategories.typeOfKind(poi.kind)
-                    // A station carries no stop id, so its tap opens the nearest baked
+                    // A transit stop carries no stop id, so its tap opens the nearest baked
                     // stop's departure board rather than a place sheet.
-                    if (type == PoiCategories.STATION_TYPE) {
+                    if (PoiCategories.opensDepartureBoard(poi.kind)) {
+                        viewModel.set(null)
                         transitViewModel.openNearestStop(
                             poi.position.latitude,
                             poi.position.longitude,
+                            // The pack names a stop by its MOTIS id, which is a machine string.
+                            // The tapped POI already has the name a person would recognise.
+                            name = poi.name.ifBlank { null },
                         )
                         return@launch
                     }
@@ -192,7 +213,7 @@ fun MapSurface(
                     // phone, website, hours and address are still joined from the offline
                     // index on IO inside `osmPlace`.
                     viewModel.stashRouteSelection()
-                    viewModel.set(osmPlace(poi.name, poi.position.toPosition(), poiType = type))
+                    viewModel.set(osmPlace(poi.name, poi.position, poiType = type))
                     sheetState.partialExpand()
                     return@launch
                 }

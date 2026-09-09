@@ -1,11 +1,11 @@
 package com.vayunmathur.maps.data
 
+import com.vayunmathur.library.map.GeoPoint
 import com.vayunmathur.library.util.DataStoreUtils
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.map
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
-import org.maplibre.spatialk.geojson.Position
 
 /**
  * A remembered parking spot (P9, Vela's `ParkingStore`): where the user left
@@ -27,7 +27,7 @@ data class ParkingSpot(
             phone = null,
             website = null,
             openingHours = null,
-            position = Position(lon, lat),
+            position = GeoPoint(lon, lat),
         )
 }
 

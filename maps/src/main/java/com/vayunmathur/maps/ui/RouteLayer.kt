@@ -15,15 +15,13 @@ import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.unit.dp
 import com.vayunmathur.library.map.CameraState
 import com.vayunmathur.maps.data.Feature1
+import com.vayunmathur.maps.data.LineString
 import com.vayunmathur.maps.ui.theme.MapTokens
 import com.vayunmathur.maps.ui.theme.toStyleHex
 import com.vayunmathur.maps.util.NavigationProgress
 import com.vayunmathur.maps.util.RouteService
-import com.vayunmathur.maps.util.toGeoPoint
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
-import org.maplibre.spatialk.geojson.LineString
-import org.maplibre.spatialk.geojson.Position
 
 /**
  * The route polyline, drawn as plain Compose over VectorMap.
@@ -59,7 +57,7 @@ fun RouteLayer(
                 ?: continue
             val path = Path()
             line.coordinates.forEachIndexed { i, pos ->
-                val o = projection.screenLocationFromPosition(pos.toGeoPoint())
+                val o = projection.screenLocationFromPosition(pos)
                 val px = with(density) { Offset(o.x.toPx(), o.y.toPx()) }
                 if (i == 0) path.moveTo(px.x, px.y) else path.lineTo(px.x, px.y)
             }

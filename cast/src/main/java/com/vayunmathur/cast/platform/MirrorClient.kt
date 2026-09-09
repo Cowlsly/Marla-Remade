@@ -10,6 +10,7 @@ import com.vayunmathur.cast.protocol.ContentEnded
 import com.vayunmathur.cast.protocol.ContentReady
 import com.vayunmathur.cast.protocol.ContentSession
 import com.vayunmathur.cast.protocol.DecoderLimits
+import com.vayunmathur.cast.protocol.DisplayMode
 import com.vayunmathur.cast.protocol.Hello
 import com.vayunmathur.cast.protocol.Negotiation
 import com.vayunmathur.cast.protocol.NowPlaying
@@ -121,6 +122,15 @@ class MirrorClient(
         private set
 
     /**
+     * The TV panel's own modes, which a desktop is composed for.
+     *
+     * Empty from a receiver that enumerated none, in which case the sender keeps using the phone's
+     * geometry - see [com.vayunmathur.cast.platform.mirror.MirrorGeometry.forDesktop].
+     */
+    var displayModes: List<DisplayMode> = emptyList()
+        private set
+
+    /**
      * `HELLO` → `TV_IDENTITY` → `SEALED_SECRET` → `PAIR_REQUIRED`, then the device proof if we hold a
      * key the TV accepts.
      *
@@ -149,6 +159,16 @@ class MirrorClient(
         receiverName = identity.receiverName
         receiverId = identity.receiverId
         limits = identity.limits
+        displayModes = identity.displayModes
+        if (identity.displayModes.isEmpty()) {
+            Log.w(TAG, "'${identity.receiverName}' reported no panel modes; a desktop will use phone geometry")
+        } else {
+            Log.i(
+                TAG,
+                "'${identity.receiverName}' panel offers " +
+                    identity.displayModes.joinToString { "${it.width}x${it.height}" },
+            )
+        }
         if (identity.limits.videoCodecs.isEmpty()) {
             // Not a failure here - CastController names the codecs it checked - but the log is where
             // it would be diagnosed, and "the TV advertised nothing" is invisible otherwise.

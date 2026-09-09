@@ -161,6 +161,10 @@ fun UpdatesScreen(
                                     Text(stringResource(R.string.action_update))
                                 }
                             },
+                            // Library keys the same app with the same key, but the tabs are a
+                            // pager that only composes the settled page, so the two are never
+                            // origins at the same time.
+                            sharedKey = "appstore-app-${app.packageName}",
                         )
                     }
                 }

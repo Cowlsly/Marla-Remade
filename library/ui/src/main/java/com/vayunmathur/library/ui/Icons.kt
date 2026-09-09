@@ -24,6 +24,7 @@ import androidx.compose.material.icons.filled.Dehaze
 import androidx.compose.material.icons.filled.ForkLeft
 import androidx.compose.material.icons.filled.ForkRight
 import androidx.compose.material.icons.filled.Lightbulb
+import androidx.compose.material.icons.filled.LocalGasStation
 import androidx.compose.material.icons.filled.Merge
 import androidx.compose.material.icons.filled.NightsStay
 import androidx.compose.material.icons.filled.NoPhotography
@@ -752,6 +753,10 @@ fun IconDirectionsWalk(modifier: Modifier = Modifier, tint: Color = LocalContent
 @Composable
 fun IconMenuBook(modifier: Modifier = Modifier, tint: Color = LocalContentColor.current) =
     AppIcon(Icons.AutoMirrored.Filled.MenuBook, "Menu", modifier, tint)
+
+@Composable
+fun IconFuelPrice(modifier: Modifier = Modifier, tint: Color = LocalContentColor.current) =
+    AppIcon(Icons.Filled.LocalGasStation, "Fuel price", modifier, tint)
 
 @Composable
 fun IconShuffle(modifier: Modifier = Modifier, tint: Color = LocalContentColor.current) =

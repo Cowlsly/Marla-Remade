@@ -22,15 +22,39 @@
          Cast page is simply empty. Signature|privileged, so it needs the priv-app allowlist entry
          in vendor/modern-apps/privapp-permissions-modern-apps.xml. -->
     <uses-permission android:name="android.permission.REMOTE_DISPLAY_PROVIDER" />
-    <!-- Selecting a route in Settings has to end at MirrorConsentActivity, because screen-capture
-         consent needs an Activity and is single-use. By then Settings is in front and this app is a
-         bound service in the background, so without this the launch is silently dropped and the
-         route sits at CONNECTING for ever. protectionLevel is
-         signature|privileged|vendorPrivileged|oem|verifier|role, so the priv-app allowlist entry is
-         what grants it - this app is presigned with its own key, not the platform key.
-         CAPTURE_VIDEO_OUTPUT, which would let a VirtualDisplay mirror with no consent Activity at
-         all, is signature-only and therefore unreachable for a presigned app. -->
+    <!-- Desktop-mode audio. That path holds no MediaProjection - which is what lets it run with
+         no consent dialog - so AudioPlaybackCapture is unavailable and audio comes from
+         MediaRecorder.AudioSource.REMOTE_SUBMIX instead, the platform's own remote-display audio
+         source. REMOTE_SUBMIX is gated on this permission. Signature|privileged, so it needs the
+         priv-app allowlist entry in vendor/modern-apps/privapp-permissions-modern-apps.xml.
+         Screen mirroring does NOT use this: it keeps the projection-scoped capture, which is
+         narrower and honours each app's own allowCapture policy. -->
+    <uses-permission android:name="android.permission.CAPTURE_AUDIO_OUTPUT" />
+    <!-- Selecting a route in Settings has to end at CastPairActivity, which takes six digits off
+         the TV. By then Settings is in front and this app is a bound service in the background, so
+         without this the launch is silently dropped and the route sits at CONNECTING for ever.
+         protectionLevel is signature|privileged|vendorPrivileged|oem|verifier|role, so the priv-app
+         allowlist entry is what grants it. -->
     <uses-permission android:name="android.permission.START_ACTIVITIES_FROM_BACKGROUND" />
+    <!-- Lets MaRemoteDisplayProvider create the cast display with VIRTUAL_DISPLAY_FLAG_TRUSTED.
+         MediaRouterService never creates a display for a remote display route - it only reads back
+         the id the provider publishes via RemoteDisplay.setPresentationDisplayId - so the display
+         is ours to make. TRUSTED is what lets the system extend onto it and is required by
+         VIRTUAL_DISPLAY_FLAG_ALLOWS_CONTENT_MODE_SWITCH, which is what hands the mirror-vs-extend
+         choice to Settings instead of building one here.
+
+         protectionLevel is signature|role. It is NOT signature|privileged, so it does not belong in
+         privapp-permissions-modern-apps.xml - an entry there is boot-fatal. Nor is it granted by
+         platform signing: ModernAppsCast in vendor/modern-apps/Android.bp is presigned, not
+         certificate: "platform". It is carried by the SYSTEM_AUTOMOTIVE_PROJECTION role, pinned to
+         this package by config_systemAutomotiveProjection in MaosFrameworkResRRO, which is why
+         dumpsys reports it as GRANTED_BY_ROLE. Note the role auto-grants its whole permission
+         list, RECORD_AUDIO among them.
+
+         Deliberately not CAPTURE_VIDEO_OUTPUT: that gate only guards
+         VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR, and ALLOWS_CONTENT_MODE_SWITCH suppresses AUTO_MIRROR
+         being added to a PUBLIC display, so the check is never reached. -->
+    <uses-permission android:name="android.permission.ADD_TRUSTED_DISPLAY" />
 
     <uses-feature android:name="android.hardware.wifi" android:required="false" />
 
@@ -76,6 +100,19 @@
             android:exported="false"
             android:launchMode="singleTop"
             android:theme="@android:style/Theme.Translucent.NoTitleBar" />
+        <!-- The pair prompt for a route selected in Settings. Launched by
+             MaRemoteDisplayProvider over whatever is in front, on the same
+             START_ACTIVITIES_FROM_BACKGROUND grant MirrorConsentActivity needs. Not exported: the
+             only caller is this app's own provider, and the SDK path pairs inside
+             CastPickerActivity instead. configChanges so a rotation does not throw away digits the
+             user has already typed. -->
+        <activity
+            android:name=".platform.CastPairActivity"
+            android:configChanges="mcc|mnc|colorMode|density|fontScale|fontWeightAdjustment|keyboard|keyboardHidden|layoutDirection|navigation|orientation|screenLayout|screenSize|smallestScreenSize|touchscreen|uiMode"
+            android:excludeFromRecents="true"
+            android:exported="false"
+            android:launchMode="singleTop"
+            android:theme="@style/Theme.CastPair" />
 
         <activity
             android:name=".platform.CastPickerActivity"

@@ -243,7 +243,7 @@ pub fn extract(
                             return Ok(());
                         }
                         if let Some(class) = schema::classify(&relation.tags, false, layers) {
-                            let members = relation
+                            let members: Vec<_> = relation
                                 .members
                                 .iter()
                                 .filter(|m| m.kind == MEMBER_WAY)
@@ -255,6 +255,24 @@ pub fn extract(
                             // distinction `Class::area` exists to make.
                             let area = class.area;
                             let name = schema::display_name(&relation.tags, class.layer);
+                            // An administrative relation yields *two* features: the border, which
+                            // is a line and is what the basemap draws, and the region's shape,
+                            // which nothing draws and the region mask reads. They cannot be one
+                            // feature — a clipped polygon grows tile-edge segments and the border
+                            // layer strokes them into a grid. See `schema::boundaries`.
+                            if layers.boundaries {
+                                if let Some(shape) =
+                                    schema::boundaries::region_area(&relation.tags, false)
+                                {
+                                    state.1.push(Relation {
+                                        class: shape,
+                                        members: members.clone(),
+                                        area: true,
+                                        name: name.clone(),
+                                        id: relation.id,
+                                    });
+                                }
+                            }
                             state.1.push(Relation { class, members, area, name, id: relation.id });
                         }
                     }
@@ -572,7 +590,13 @@ pub fn extract(
             stats.geometry_failed += 1;
             continue;
         }
-        sink.push(&relation.class, &Geometry::Polygons(polygons))?;
+        // The id is what lets the mask gather a region's tile-clipped pieces back together.
+        let id = if tracks_ids(&relation.class) {
+            tagged_id(relation.id, ELEMENT_RELATION)
+        } else {
+            tilecodec::mamaps::body::ID_NONE
+        };
+        sink.push_named(&relation.class, &Geometry::Polygons(polygons), None, id)?;
         stats.features += 1;
     }
     bar.finish("relation(s)");
@@ -790,6 +814,32 @@ fn locate(table: &NodeLocations, id: i64) -> Option<(f64, f64)> {
 pub(crate) fn is_label(layer: u8) -> bool {
     use tilecodec::mamaps::dict::{LAYER_PLACES, LAYER_POI};
     layer == LAYER_PLACES || layer == LAYER_POI
+}
+
+/// Does this layer have an id side table at all?
+///
+/// Layer-level, and separate from [`tracks_ids`], because the table is indexed by feature
+/// position: every feature in such a layer needs an entry, `ID_NONE` included, or the table stops
+/// lining up with the features it describes.
+pub(crate) fn layer_tracks_ids(layer: u8) -> bool {
+    is_label(layer) || layer == tilecodec::mamaps::dict::LAYER_BOUNDARIES
+}
+
+/// May this feature carry a non-zero id?
+///
+/// Wider than [`is_label`], and deliberately a separate predicate: `is_label` also means
+/// "centroid this to a point", which a region's shape must not be. `boundaries` needs ids for
+/// a different reason — a region is stored as one clipped polygon per tile, so without an id
+/// there is nothing to say which pieces are the same region, and the mask can only punch out
+/// the piece under the finger.
+///
+/// Keyed on the whole class rather than the layer because `boundaries` holds both kinds of
+/// geometry: the region's shape, which is an area and keeps its id, and the border, which is a
+/// line and must not. `coalesce` merges adjacent border lines, and the survivor's id would be
+/// whichever member happened to come first.
+pub(crate) fn tracks_ids(class: &crate::schema::Class) -> bool {
+    use tilecodec::mamaps::dict::LAYER_BOUNDARIES;
+    is_label(class.layer) || (class.layer == LAYER_BOUNDARIES && class.area)
 }
 
 /// The centroid of a coordinate list: the arithmetic mean, or `None` when there is nothing.

@@ -18,7 +18,8 @@ import androidx.compose.ui.Modifier
  * does not: a fade keeps the full-size shape occupying its space for the whole animation.
  *
  * Wrong for a block inside a list or a column, which needs the space it leaves to close up behind it:
- * use [ExpandVisibility] there.
+ * use [ExpandVisibility] there. When the thing that comes and goes is a whole destination rather
+ * than a state change, [com.vayunmathur.library.util.dropsAway] is the navigation-time equivalent.
  */
 @Composable
 fun PopVisibility(

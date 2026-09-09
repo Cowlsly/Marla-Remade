@@ -22,7 +22,6 @@ import com.vayunmathur.maps.data.string
 import com.vayunmathur.maps.ipc.FamilyMember
 import kotlinx.serialization.json.doubleOrNull
 import kotlinx.serialization.json.jsonPrimitive
-import org.maplibre.spatialk.geojson.Position
 
 /** Circle (dot) layer id — the reliable large tap target hit-tested in
  *  MapSurface.onMapClick so a tapped family pin selects that person. */
@@ -88,5 +87,5 @@ fun Feature1.toSelectedFamilyMember(): SpecificFeature? {
     val name = props.string("name")?.ifBlank { null } ?: return null
     val lat = props["lat"]?.jsonPrimitive?.doubleOrNull ?: return null
     val lng = props["lng"]?.jsonPrimitive?.doubleOrNull ?: return null
-    return SpecificFeature.GenericPlace(name, null, null, null, Position(lng, lat))
+    return SpecificFeature.GenericPlace(name, null, null, null, GeoPoint(lng, lat))
 }

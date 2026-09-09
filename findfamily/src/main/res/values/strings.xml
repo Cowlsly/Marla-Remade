@@ -309,28 +309,10 @@
     <!-- UserPage: Note under the disabled sharing switch when the Quick Settings sharing tile is off. Sentence -->
     <string name="sharing_paused_note">Sharing is paused for everyone from the Quick Settings tile</string>
 
-    <!-- PersonDetailSheet: label for the opt-in switch that makes this phone a finder. Short noun phrase -->
-    <string name="crowd_finding_title">Help find lost devices</string>
-    <!-- PersonDetailSheet: explanation shown under the finder opt-in switch. Must stay plain about what the phone does on other people's behalf. Paragraph -->
-    <string name="crowd_finding_explanation">Your phone will quietly watch for switched-off devices nearby and send their owner an encrypted note saying where you were when you passed one. You never learn whose device it was or where it is, and the note can only be read by its owner. It uses almost no battery, and other people\'s phones can do the same for yours.</string>
-    <!-- PersonDetailSheet: shown when the user turns the finder switch on but denies the Bluetooth permission. Sentence -->
-    <string name="crowd_finding_needs_bluetooth">Finding nearby devices needs permission to scan for Bluetooth devices</string>
     <!-- UserCard: status line for a position that came from another phone spotting this device's beacon rather than from the device itself. Deliberately vaguer than the live wording. Two lines -->
     <string name="user_card_network_sighting">Seen by a passing phone <xliff:g id="last_seen" example="2 hours ago">%1$s</xliff:g>\nSomewhere near <xliff:g id="location_name" example="Home">%2$s</xliff:g> — approximate</string>
-    <!-- PersonDetailSheet, own entry: label for the opt-in switch that makes THIS phone findable after it is switched off. Short noun phrase -->
-    <string name="poweroff_finding_title">Findable when switched off</string>
-    <!-- PersonDetailSheet, own entry: explanation under the powered-off finding switch. Must stay honest that the Bluetooth chip keeps advertising after the phone appears to be off. Paragraph -->
-    <string name="poweroff_finding_explanation">When you switch this phone off, its Bluetooth chip keeps sending out a short anonymous signal so a family member who walks past can tell you where it is. The signal changes every 17 minutes and only your family can recognise it. Nobody, including us, can read where it was seen except you and anyone you choose below.</string>
     <!-- PersonDetailSheet, own entry: the limit, shown under the explanation whether the switch is on or off. Must not be hidden behind the switch. Two sentences -->
     <string name="poweroff_finding_limit">This lasts about 3 days after you switch the phone off, then it stops. It is a limit of the Bluetooth chip, not a setting.</string>
-    <!-- PersonDetailSheet, own entry: shown when the switch is on, confirming the user can undo it. Sentence -->
-    <string name="poweroff_finding_off_hint">Turn this off and the phone sends nothing at all once it is switched off.</string>
-    <!-- PersonDetailSheet, own entry: shown instead of the switch when the phone's Bluetooth chip cannot do this. Sentence -->
-    <string name="poweroff_finding_unsupported">This phone\'s Bluetooth chip cannot stay findable while switched off.</string>
-    <!-- PersonDetailSheet, own entry: heading for the per-person list choosing who may locate this phone while it is switched off. Short noun phrase -->
-    <string name="poweroff_grant_title">Who can find this phone when it\'s off</string>
-    <!-- PersonDetailSheet, own entry: explanation under the grant list. Must make clear the list starts empty and why anyone is needed at all. Paragraph -->
-    <string name="poweroff_grant_explanation">Nobody, until you choose someone here. A switched-off phone cannot show you its own location, so somebody else\'s phone has to be able to read where yours was seen — otherwise the notes pile up and no one can open them.</string>
     <!-- PersonDetailSheet, own entry: the capability the user cannot be shielded from. Must not be softened or hidden behind a tap: choosing someone also lets that person track the phone. Paragraph -->
     <string name="poweroff_grant_tracking_warning">Anyone you choose can also go looking for this phone themselves, whenever they like, for as long as they stay on this list. Reading where it was seen and looking for it use the same key, so there is no way to give one without the other. Only choose people you would be happy to have find this phone.</string>
     <!-- PersonDetailSheet, own entry: what removing someone does and does not do. Must state plainly that revocation is forward-only. Paragraph -->
@@ -338,4 +320,10 @@
     <!-- PersonDetailSheet, own entry: shown in place of the list when the user has no connected family members to choose from. Sentence -->
     <string name="poweroff_grant_no_peers">Once you are connected to someone, you can choose them here.</string>
 
+    <!-- Initial permission screen, step 3: button label before BLUETOOTH_SCAN is granted -->
+    <string name="permission_grant_bluetooth">Allow Bluetooth</string>
+    <!-- Initial permission screen, step 3: button label once BLUETOOTH_SCAN is granted -->
+    <string name="permission_bluetooth_granted">Bluetooth allowed</string>
+    <!-- Initial permission screen, step 3: why Bluetooth is needed. Kept to one sentence -->
+    <string name="permission_bluetooth_explanation">Needed to find devices that are nearby.</string>
 </resources>

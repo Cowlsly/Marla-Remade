@@ -28,7 +28,7 @@ import kotlinx.coroutines.CompletableDeferred
  * Forked from `data/googlevoice/call/WebRtcAudioSession`. Carries one Opus audio m-line over a
  * single [PeerConnection]; SDP is exchanged (via the [WhatsAppCallSignaling] `<webrtc>` extension)
  * with ICE gathered once so the SDP is self-contained for the `<call>` stanza. Exposes mute +
- * speaker routing. Uses the maintained `io.getstream:stream-webrtc-android` prebuilt (`org.webrtc.*`).
+ * speaker routing.
  *
  * The 32-byte WhatsApp call key ([WhatsAppCallCrypto]) is exchanged/verified over signaling; the
  * actual client-to-client media confidentiality here is WebRTC's own DTLS-SRTP (WhatsApp's native

@@ -1,0 +1,140 @@
+# cargo-deny configuration - automated dependency monitoring (SUPPLY_CHAIN_RISKS.md 6.6).
+#
+# Run locally with:
+#     cargo deny --config deny.toml check advisories bans licenses sources
+#
+# This file is the single config for every Cargo workspace root in the tree
+# (repo root, code/src/main/rust, games/voxels/src/main/rust,
+# library/tilecodec/src/main/rust and the scripts/maps/* host tools), which is
+# why CI passes it explicitly with --config rather than relying on a deny.toml
+# sitting next to each manifest. See .github/workflows/cargo-deny.yml.
+
+[graph]
+# Everything shipped in an APK is built for aarch64-linux-android; the
+# scripts/maps/* tools are host-side. Left unrestricted on purpose so an
+# advisory in a host-only or Windows-only dependency is still reported.
+all-features = false
+
+[output]
+feature-depth = 1
+
+# ---------------------------------------------------------------------------
+# Advisories
+# ---------------------------------------------------------------------------
+# No advisories are pre-ignored. If a finding turns out to be a false positive
+# or genuinely unreachable, add the real RUSTSEC id here with a one-line reason
+# and a link to the task - do not add speculative entries.
+[advisories]
+version = 2
+db-urls = ["https://github.com/rustsec/advisory-db"]
+ignore = []
+# A yanked crate is worth knowing about but is not itself a vulnerability, and
+# upstream yanks land without warning, so this must not break an unrelated PR.
+yanked = "warn"
+
+# ---------------------------------------------------------------------------
+# Licenses
+# ---------------------------------------------------------------------------
+# This is the minimal list that satisfies every third-party crate in the
+# committed lockfiles - nothing here is speculative and nothing is unused.
+#
+# Derived by resolving `cargo metadata --offline` for all nine workspace roots
+# (516 third-party package instances, 29 distinct SPDX expressions, zero crates
+# without a license field) and reducing to the smallest set that satisfies
+# every expression. `cargo metadata` reports the whole lockfile across all
+# target platforms, so this is not host-specific.
+#
+# Most entries are carried by an OR expression and need no comment. These are
+# the ones that are actually load-bearing, i.e. the only crate(s) forcing them:
+#   IJG          jpeg-encoder            "(MIT OR Apache-2.0) AND IJG"
+#   Unicode-3.0  the 18 icu_*/zerovec crates, plus unicode-ident via AND
+#   BSD-3-Clause curve25519-dalek, ed25519-dalek, x25519-dalek, subtle,
+#                alloc-no-stdlib, alloc-stdlib; also encoding_rs and brotli
+#                via AND
+#   BSD-2-Clause arrayref, openjp2
+#   ISC          libloading
+#   Zlib         foldhash
+#   MPL-2.0      adblock (the Brave Shields engine, see root Cargo.toml)
+#
+# MPL-2.0 is the only copyleft entry and is file-level, which is fine for an
+# unmodified dependency. If adblock is ever vendored and patched, that needs
+# re-reviewing rather than silently staying on this list.
+#
+# Adding a crate that needs a new license will fail CI. That is intended: the
+# fix is to review the license and add it here deliberately.
+[licenses]
+version = 2
+confidence-threshold = 0.8
+allow = [
+  "Apache-2.0",
+  "BSD-2-Clause",
+  "BSD-3-Clause",
+  "IJG",
+  "ISC",
+  "MIT",
+  "MPL-2.0",
+  "Unicode-3.0",
+  "Zlib",
+]
+# The workspace's own crates (including the vendored third_party/betocore
+# ones) are `publish = false`, and their licensing is a repo decision rather
+# than a third-party one.
+private = { ignore = true }
+exceptions = []
+
+# ---------------------------------------------------------------------------
+# Bans
+# ---------------------------------------------------------------------------
+[bans]
+# Duplicate versions are unavoidable across a 400-crate graph and are a
+# code-size concern, not a security one - report, don't fail.
+multiple-versions = "warn"
+# Deliberately "warn", not "deny". An earlier revision of this file set "deny"
+# on the strength of a grep for a literal `"*"` in the manifests, which found
+# nothing. That grep was the wrong instrument: a path dependency written
+# without a version, e.g. `jni_http = { path = "..." }`, carries an implicit
+# `*` requirement that never appears as a literal in the file. Measured
+# properly via `cargo metadata`, the tree has 77 wildcard requirements (72 in
+# the root workspace, 3 in mamaps_build, 1 each in tile_build and wikidesc),
+# so "deny" would have failed CI on the first run.
+#
+# What the measurement does show, and what makes "warn" adequate for now: all
+# 77 are path dependencies. Zero crates.io dependencies use a wildcard, which
+# is the case actually worth denying, since there the lockfile would be the
+# only thing pinning the version.
+#
+# To make this "deny": cargo-deny's `allow-wildcard-paths = true` exempts path
+# dependencies, but only for crates that are private (`publish = false`).
+# Seven packages here are not - weather_om, camera_stitch, euicc, measure_vio,
+# youpipe_extractor, share_nearby and wikidesc do not inherit the root
+# `[workspace.package] publish = false`. Give those seven `publish.workspace =
+# true` (or an explicit `publish = false`), then flip this to "deny" with
+# `allow-wildcard-paths = true` and confirm with a real run.
+wildcards = "warn"
+allow = []
+skip = []
+skip-tree = []
+
+[[bans.deny]]
+# The root Cargo.toml states the invariant: Rust reaches the network through
+# library/jni-http over the JNI bridge, so no shipped .so links its own TLS.
+# Verified absent from every committed Cargo.lock; this keeps it that way.
+name = "openssl"
+
+[[bans.deny]]
+name = "openssl-sys"
+
+[[bans.deny]]
+name = "native-tls"
+
+# ---------------------------------------------------------------------------
+# Sources
+# ---------------------------------------------------------------------------
+# Verified: every `source` entry in every committed Cargo.lock is crates.io -
+# there are no git dependencies. Third-party code that is not from crates.io
+# is vendored under third_party/ and reviewed as part of the repo.
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+allow-git = []

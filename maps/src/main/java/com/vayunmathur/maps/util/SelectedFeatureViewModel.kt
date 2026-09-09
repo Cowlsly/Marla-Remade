@@ -9,11 +9,12 @@ import com.vayunmathur.maps.data.google.GooglePoiDataSource
 import com.vayunmathur.maps.data.google.GooglePoiInfo
 import com.vayunmathur.maps.data.google.WebReviewsFetcher
 import com.vayunmathur.maps.data.parse
+import com.vayunmathur.maps.data.google.PoiSection
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.flow.*
 import kotlinx.coroutines.withContext
-import org.maplibre.spatialk.geojson.Position
+import com.vayunmathur.library.map.GeoPoint
 
 class SelectedFeatureViewModel(application: Application): AndroidViewModel(application) {
     private val _selectedFeature = MutableStateFlow<SpecificFeature?>(null)
@@ -22,16 +23,33 @@ class SelectedFeatureViewModel(application: Application): AndroidViewModel(appli
     private val _inactiveNavigation = MutableStateFlow<SpecificFeature.Route?>(null)
     val inactiveNavigation = _inactiveNavigation.asStateFlow()
 
+    /**
+     * Which of the place sheet's Details / Photos / Reviews tabs is showing.
+     *
+     * On the ViewModel rather than remembered in the sheet because the tab row and the panel it
+     * switches are no longer the same composable: the row is part of the sheet's measured header,
+     * so that it is visible at the peek and the other tabs are discoverable without expanding,
+     * and the panel is below the fold. Two sibling slots cannot share a `remember`, and this is
+     * selection-scoped state that already has a home — which also means the reset lives with the
+     * selection it belongs to instead of a `remember(key)` in the UI.
+     */
+    private val _poiSection = MutableStateFlow(PoiSection.DETAILS)
+    val poiSection = _poiSection.asStateFlow()
+
+    fun setPoiSection(section: PoiSection) {
+        _poiSection.value = section
+    }
+
     /** A pending request for the map to fly to [position] (at [zoom] when set) and
      *  show the place bottom PANE (peek), the Vela-style place card. Backed by a
      *  StateFlow so a request made before MapPage is composed (a cold-start deep
      *  link) survives until the map consumes it via [consumeFocus]. */
-    data class PlaceFocus(val position: Position, val zoom: Double? = null)
+    data class PlaceFocus(val position: GeoPoint, val zoom: Double? = null)
 
     private val _pendingFocus = MutableStateFlow<PlaceFocus?>(null)
     val pendingFocus = _pendingFocus.asStateFlow()
 
-    private val _userPosition = MutableStateFlow(Position(0.0, 0.0))
+    private val _userPosition = MutableStateFlow(GeoPoint(0.0, 0.0))
     val userPosition = _userPosition.asStateFlow()
 
     private val _userBearing = MutableStateFlow<Float?>(null)
@@ -68,6 +86,7 @@ class SelectedFeatureViewModel(application: Application): AndroidViewModel(appli
 
     fun set(feature: SpecificFeature?) {
         _selectedFeature.value = feature
+        _poiSection.value = PoiSection.DETAILS
     }
 
     /**
@@ -79,6 +98,7 @@ class SelectedFeatureViewModel(application: Application): AndroidViewModel(appli
      */
     fun selectAndFocus(feature: SpecificFeature, zoom: Double? = null) {
         _selectedFeature.value = feature
+        _poiSection.value = PoiSection.DETAILS
         val pos = (feature as? SpecificFeature.RoutableFeature)?.position
         _pendingFocus.value = pos?.let { PlaceFocus(it, zoom) }
     }

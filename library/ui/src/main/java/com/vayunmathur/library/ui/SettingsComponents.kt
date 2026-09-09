@@ -18,6 +18,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.unit.dp
+import com.vayunmathur.library.util.sharedText
 
 /**
  * The rows every settings screen is built from.
@@ -74,13 +75,24 @@ fun SettingsRow(
     onClick: (() -> Unit)? = null,
     leadingContent: @Composable (() -> Unit)? = null,
     trailingContent: @Composable (() -> Unit)? = null,
+    /**
+     * Morphs this row's title into the same key on the screen it opens. Null on a row that is not
+     * the origin of one - which is nearly all of them.
+     */
+    titleSharedKey: Any? = null,
 ) {
     val contentColor =
         if (enabled) MaterialTheme.colorScheme.onSurface
         else MaterialTheme.colorScheme.onSurface.copy(alpha = 0.38f)
 
     ListItem(
-        headlineContent = { Text(title, color = contentColor) },
+        headlineContent = {
+            Text(
+                title,
+                color = contentColor,
+                modifier = if (titleSharedKey == null) Modifier else Modifier.sharedText(titleSharedKey),
+            )
+        },
         supportingContent = supportingText?.let {
             {
                 Text(

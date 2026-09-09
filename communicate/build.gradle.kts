@@ -78,7 +78,7 @@ val protocConfig: Configuration = configurations.create("protocBinary") {
 }
 
 dependencies {
-    "protocBinary"("com.google.protobuf:protoc:${libs.versions.protoc.get()}:$osClassifier@exe")
+    "protocBinary"("${libs.protobuf.protoc.get()}:$osClassifier@exe")
 }
 
 val protoSrcDir = layout.projectDirectory.dir("src/main/proto")
@@ -174,8 +174,10 @@ dependencies {
     implementRoom(libs)
     implementation(project(":library:room"))
 
-    // Protobuf runtime — full Java variant. The lite runtime drops the
-    // reflection API which we need for the PB-Lite encoder.
+    // Protobuf runtime — full Java variant. This module only touches ByteString and
+    // InvalidProtocolBufferException, both of which javalite also has, so the switch to lite
+    // is feasible; it is deferred because it regenerates all 11 Signal/WhatsApp protos and
+    // changes toString() and unknown-field semantics on live messaging paths.
     implementation(libs.protobuf.java)
 
     // ZXing core — QR code encoding only (no scanner UI). Retained for parity with the

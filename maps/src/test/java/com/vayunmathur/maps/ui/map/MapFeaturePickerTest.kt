@@ -16,8 +16,7 @@ import com.vayunmathur.library.map.GeoPoint
 import com.vayunmathur.library.map.PlacedLabel
 import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.coroutines.runBlocking
-import org.maplibre.spatialk.geojson.Point
-import org.maplibre.spatialk.geojson.Position
+import com.vayunmathur.maps.data.Point
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertNull
@@ -50,7 +49,7 @@ class MapFeaturePickerTest {
     }
 
     /** A geometry-only feature: present on the layer, but with no properties to resolve from. */
-    private fun bareFeature() = Feature1(Point(Position(0.0, 0.0)), null)
+    private fun bareFeature() = Feature1(Point(GeoPoint(0.0, 0.0)), null)
 
     private val tap = DpOffset(100.dp, 200.dp)
 

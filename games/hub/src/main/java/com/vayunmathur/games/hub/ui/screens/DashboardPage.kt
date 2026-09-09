@@ -24,7 +24,8 @@ fun DashboardPage(
     onGamesClick: () -> Unit,
     dbConfigs: List<Pair<String, String>>,
     datastoreNames: List<String>,
-    modifier: Modifier = Modifier
+    modifier: Modifier = Modifier,
+    ownsGameMorphKeys: Boolean = true
 ) {
     val games by viewModel.gamesFlow.collectAsStateWithLifecycle()
     val crossStats by viewModel.statsFlow.collectAsStateWithLifecycle()
@@ -80,6 +81,7 @@ fun DashboardPage(
         },
         iconFor = { game -> iconCache.getOrPut(game.packageName) { GameIconResolver.resolveAppIcon(context, game.packageName) } },
         topBarActions = { BackupButtons(dbConfigs = dbConfigs, datastoreNames = datastoreNames) },
+        ownsGameMorphKeys = ownsGameMorphKeys,
         modifier = modifier,
     )
 }

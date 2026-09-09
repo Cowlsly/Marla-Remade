@@ -80,6 +80,11 @@ data class CourseUiState(
     val available: Boolean = true,
     val units: List<CourseUnitRow> = emptyList(),
     val challenge: Exercise? = null,
+    /**
+     * Morphs the title out of the course card that opened this screen. Null in a preview and
+     * whenever the course id no longer resolves, which has no card to have come from.
+     */
+    val titleSharedKey: Any? = null,
 )
 
 /** Course callbacks. Same no-op-default arrangement as [HomeActions]. */

@@ -1,28 +1,20 @@
 package com.vayunmathur.maps.ui
 
 import androidx.compose.foundation.background
-import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
-import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
-import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.foundation.verticalScroll
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.remember
-import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -33,10 +25,9 @@ import androidx.compose.ui.text.font.FontStyle
 import androidx.compose.ui.unit.dp
 import com.vayunmathur.library.image.compose.AsyncImage
 import com.vayunmathur.library.ui.Card
+import com.vayunmathur.library.ui.IconFuelPrice
 import com.vayunmathur.library.ui.IconInfo
-import com.vayunmathur.library.ui.IconPhotoLibrary
 import com.vayunmathur.library.ui.IconSchedule
-import com.vayunmathur.library.ui.IconStar
 import com.vayunmathur.library.ui.ListItem
 import com.vayunmathur.library.ui.ListItemDefaults
 import com.vayunmathur.library.ui.MaterialTheme
@@ -46,115 +37,31 @@ import com.vayunmathur.maps.R
 import com.vayunmathur.maps.data.google.GooglePoiInfo
 import com.vayunmathur.maps.data.google.GoogleReview
 import com.vayunmathur.maps.data.google.PoiPopularTimes
+import com.vayunmathur.maps.data.google.PoiSection
 import kotlinx.datetime.TimeZone
 import kotlinx.datetime.isoDayNumber
 import kotlinx.datetime.toLocalDateTime
 import kotlin.time.Clock
 
 /**
- * Renders the keyless Google Maps POI enrichment under a place's OSM details.
+ * Renders one [PoiSection] of the keyless Google Maps POI enrichment.
  *
- * Every section is conditional on its data being present — a keyless response is
+ * Every part is conditional on its data being present — a keyless response is
  * bot-degraded (popular times and the full photo gallery are usually stripped)
  * and the scrape is fragile (a Google reshape nulls individual fields), so this
  * shows whatever came back and silently omits the rest. Nothing here can throw.
  *
- * Performance: photos are a horizontally-lazy [LazyRow] of async-loaded images;
- * reviews live in a height-bounded, independently-scrollable [Column] (see the
- * reviews section) so the full set is reachable without stretching the sheet.
+ * The caller owns scrolling and the height bound: each section lays itself out at
+ * its natural height inside the sheet's bounded, scrollable tab panel.
  */
 @Composable
-fun GooglePoiEnrichment(info: GooglePoiInfo, showHours: Boolean, showSubtitle: Boolean = true) {
+fun GooglePoiEnrichment(info: GooglePoiInfo, section: PoiSection, showHours: Boolean = true) {
     if (info.isEmpty) return
     Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-        // Price · category subtitle (rating itself is shown by the caller's header).
-        // The reworked place sheet renders these in its own header, so it opts out.
-        if (showSubtitle) {
-            val subtitle = listOfNotNull(info.priceText?.ifBlank { null }, info.category?.ifBlank { null })
-                .joinToString(" \u00B7 ")
-            if (subtitle.isNotBlank()) {
-                Text(subtitle, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
-            }
-        }
-
-        info.editorialSummary?.let {
-            Text(it, style = MaterialTheme.typography.bodyMedium, fontStyle = FontStyle.Italic, maxLines = 3)
-        }
-
-        // Google's weekly hours, which win when it has them (the OSM block is
-        // suppressed by the caller in that case). Collapsed to TODAY's line by
-        // default (tap to expand all 7 days) so the sheet stays short.
-        if (showHours && info.hours.isNotEmpty()) {
-            var showAllHours by remember { mutableStateOf(false) }
-            val todayName = Clock.System.now()
-                .toLocalDateTime(TimeZone.currentSystemDefault())
-                .date.dayOfWeek.name.lowercase().firstLetterUppercase()
-            val todayLine = info.hours.firstOrNull {
-                it.substringBefore(':', "").trim().equals(todayName, ignoreCase = true)
-            } ?: info.hours.first()
-            val shownHours = if (showAllHours) info.hours else listOf(todayLine)
-            SectionHeader(stringResource(R.string.poi_hours_header)) { IconSchedule() }
-            Card(modifier = Modifier.clickable { showAllHours = !showAllHours }) {
-                Column {
-                    shownHours.forEach { line ->
-                        val day = line.substringBefore(':', "").trim()
-                        val hours = line.substringAfter(':', line).trim()
-                        ListItem(
-                            { Text(day.firstLetterUppercase()) },
-                            leadingContent = {},
-                            trailingContent = { Text(hours) },
-                            colors = ListItemDefaults.colors(Color.Transparent),
-                        )
-                    }
-                }
-            }
-        }
-
-        if (info.photoUrls.isNotEmpty()) {
-            SectionHeader(stringResource(R.string.poi_photos_header)) { IconPhotoLibrary() }
-            LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                items(info.photoUrls) { url ->
-                    AsyncImage(
-                        model = url,
-                        contentDescription = stringResource(R.string.poi_photo_description),
-                        modifier = Modifier
-                            .size(width = 160.dp, height = 120.dp)
-                            .clip(RoundedCornerShape(12.dp)),
-                        contentScale = ContentScale.Crop,
-                    )
-                }
-            }
-        }
-
-        info.popularTimes?.let { PopularTimesSection(it) }
-
-        if (info.reviews.isNotEmpty()) {
-            SectionHeader(stringResource(R.string.poi_reviews_header)) { IconStar() }
-            // All reviews, in a height-bounded independently-scrollable region so
-            // the sheet doesn't grow without bound. A `verticalScroll` column (not
-            // a LazyColumn, which can't take infinite height inside the scrolling
-            // sheet) participates in nested scrolling: it scrolls the reviews, and
-            // hands off to the draggable sheet once it hits its top/bottom edge.
-            Column(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .heightIn(max = 360.dp)
-                    .verticalScroll(rememberScrollState()),
-                verticalArrangement = Arrangement.spacedBy(8.dp),
-            ) {
-                info.reviews.forEach { ReviewCard(it) }
-            }
-        } else info.featuredReview?.let {
-            SectionHeader(stringResource(R.string.poi_reviews_header)) { IconStar() }
-            Card {
-                Text(
-                    "\u201C$it\u201D",
-                    Modifier.padding(12.dp),
-                    style = MaterialTheme.typography.bodyMedium,
-                    fontStyle = FontStyle.Italic,
-                    maxLines = 4,
-                )
-            }
+        when (section) {
+            PoiSection.DETAILS -> DetailsSection(info, showHours)
+            PoiSection.PHOTOS -> PhotosSection(info.photoUrls)
+            PoiSection.REVIEWS -> ReviewsSection(info)
         }
 
         // Trademark attribution ("Google Maps" is non-translatable, see strings.xml).
@@ -163,6 +70,97 @@ fun GooglePoiEnrichment(info: GooglePoiInfo, showHours: Boolean, showSubtitle: B
             style = MaterialTheme.typography.labelSmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
+    }
+}
+
+@Composable
+private fun DetailsSection(info: GooglePoiInfo, showHours: Boolean) {
+    // Gas stations only, and always exactly one grade — the response carries no
+    // multi-grade table. `price` is Google's own formatting, currency symbol
+    // included, and there is no currency code to re-format it against.
+    info.fuelPrice?.let { fuel ->
+        SectionHeader(stringResource(R.string.poi_fuel_price_header)) { IconFuelPrice() }
+        Card {
+            ListItem(
+                { Text(fuel.price) },
+                leadingContent = {},
+                trailingContent = { Text(fuel.grade) },
+                colors = ListItemDefaults.colors(Color.Transparent),
+            )
+        }
+    }
+
+    info.editorialSummary?.let {
+        Text(it, style = MaterialTheme.typography.bodyMedium, fontStyle = FontStyle.Italic, maxLines = 3)
+    }
+
+    // Google's hours, which win when it has them (the OSM block is suppressed by
+    // the caller in that case). This is today's line only — the search response
+    // carries no weekly schedule — so it renders as however many lines came back
+    // rather than collapsing to today behind a tap it no longer needs.
+    if (showHours && info.hours.isNotEmpty()) {
+        SectionHeader(stringResource(R.string.poi_hours_header)) { IconSchedule() }
+        Card {
+            Column {
+                info.hours.forEach { line ->
+                    val day = line.substringBefore(':', "").trim()
+                    val hours = line.substringAfter(':', line).trim()
+                    ListItem(
+                        { Text(day.firstLetterUppercase()) },
+                        leadingContent = {},
+                        trailingContent = { Text(hours) },
+                        colors = ListItemDefaults.colors(Color.Transparent),
+                    )
+                }
+            }
+        }
+    }
+
+    info.popularTimes?.let { PopularTimesSection(it) }
+}
+
+/**
+ * The photo gallery, two to a row.
+ *
+ * A grid rather than the single [LazyRow] this replaces: on its own tab there is
+ * width to spend and no competing section, and a row of one visible thumbnail was
+ * most of what made the photos feel hidden.
+ */
+@Composable
+private fun PhotosSection(photoUrls: List<String>) {
+    photoUrls.chunked(2).forEach { pair ->
+        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            pair.forEach { url ->
+                AsyncImage(
+                    model = url,
+                    contentDescription = stringResource(R.string.poi_photo_description),
+                    modifier = Modifier
+                        .weight(1f)
+                        .height(120.dp)
+                        .clip(RoundedCornerShape(12.dp)),
+                    contentScale = ContentScale.Crop,
+                )
+            }
+            // Keeps a trailing odd photo half-width instead of stretching it across.
+            if (pair.size == 1) Spacer(Modifier.weight(1f))
+        }
+    }
+}
+
+@Composable
+private fun ReviewsSection(info: GooglePoiInfo) {
+    if (info.reviews.isNotEmpty()) {
+        info.reviews.forEach { ReviewCard(it) }
+    } else info.featuredReview?.let {
+        Card {
+            Text(
+                "\u201C$it\u201D",
+                Modifier.padding(12.dp),
+                style = MaterialTheme.typography.bodyMedium,
+                fontStyle = FontStyle.Italic,
+                maxLines = 4,
+            )
+        }
     }
 }
 

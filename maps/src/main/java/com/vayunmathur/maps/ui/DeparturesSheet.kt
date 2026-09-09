@@ -4,17 +4,21 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.lazy.items
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.ReadOnlyComposable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.ui.draw.alpha
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -32,7 +36,9 @@ import com.vayunmathur.library.ui.IconButton
 import com.vayunmathur.library.ui.IconRefresh
 import com.vayunmathur.library.ui.MaterialTheme
 import com.vayunmathur.library.ui.ModalBottomSheet
+import com.vayunmathur.library.ui.SheetValue
 import com.vayunmathur.library.ui.Text
+import com.vayunmathur.library.ui.rememberBottomSheetState
 import com.vayunmathur.maps.R
 import com.vayunmathur.maps.data.transit.Departure
 import com.vayunmathur.maps.data.transit.TransitStop
@@ -67,7 +73,19 @@ fun DeparturesSheet(
     var now by remember { mutableLongStateOf(System.currentTimeMillis()) }
     LaunchedEffectTicker { now = it }
 
-    ModalBottomSheet(onDismissRequest = onDismiss) {
+    // PartiallyExpanded is deliberately not an enabled value. Material3's sheet back handler
+    // collapses an Expanded sheet to PartiallyExpanded instead of dismissing whenever that anchor
+    // exists, and since Material3 1.5 the anchor is created at every sheet height - for a board
+    // shorter than half the screen it sits exactly on top of Expanded, so that back press moves
+    // nothing and reads as "back did not work". Refresh is what promotes the sheet to Expanded:
+    // the full-height loading state re-anchors the sheet, and growing back out of a collapsed
+    // (Expanded == PartiallyExpanded) anchor pair is what Material3 treats as a promotion.
+    val sheetState = rememberBottomSheetState(
+        initialValue = SheetValue.Hidden,
+        enabledValues = setOf(SheetValue.Hidden, SheetValue.Expanded),
+    )
+
+    ModalBottomSheet(onDismissRequest = onDismiss, sheetState = sheetState) {
         Column(Modifier.fillMaxWidth().padding(start = 16.dp, end = 16.dp, bottom = 24.dp)) {
             Row(
                 Modifier.fillMaxWidth(),
@@ -116,27 +134,48 @@ fun DeparturesSheet(
     }
 }
 
-/** Group departures by line (ordered by the soonest departure in each group)
- *  and render each as a coloured line badge + its upcoming trips. */
+/**
+ * Every train through this stop, in the order they leave.
+ *
+ * # Why one chronological list rather than groups per line
+ *
+ * The board used to group by line, which answers "when is the next Caltrain" but not "what is the
+ * next train", and on a platform the second is the question. Grouping also makes opening on the
+ * next departure impossible: there is no single next row to scroll to when the list is a set of
+ * per-line runs. The line is still on every row, as a badge, so nothing is lost.
+ *
+ * # The window
+ *
+ * A day either side of now. Departures already gone are kept — deliberately — because "did I just
+ * miss it" is a real question on a platform, and a board that erases the train you were running
+ * for cannot answer it. Anything further out is next week's timetable.
+ */
 @Composable
 private fun DepartureList(departures: List<Departure>, now: Long, modifier: Modifier = Modifier) {
-    val groups = remember(departures) {
+    // Keyed on the departures rather than on `now`: `now` ticks every 15 s and re-sorting the
+    // board on every tick would be wasted work and would fight the scroll position.
+    val shown = remember(departures) {
         departures
+            .filter { DepartureTime.withinWindow(it.realtimeMillis, now) }
             .sortedBy { it.realtimeMillis }
-            .groupBy { it.line }
-            .entries
-            .sortedBy { entry -> entry.value.minOfOrNull { it.realtimeMillis } ?: Long.MAX_VALUE }
+    }
+    val listState = rememberLazyListState()
+
+    // Open on the next train that has not gone, so the board lands where it is useful rather than
+    // at whatever left a day ago. Only on open, and only once: re-running this as `now` ticks
+    // would drag the list back under the user's finger every fifteen seconds.
+    LaunchedEffect(shown) {
+        if (shown.isNotEmpty()) {
+            listState.scrollToItem(
+                DepartureTime.firstUpcoming(shown.map { it.realtimeMillis }, now)
+                    .coerceAtMost(shown.lastIndex)
+            )
+        }
     }
 
-    LazyColumn(modifier.fillMaxWidth().heightIn(max = 420.dp)) {
-        items(groups, key = { it.key }) { (line, trips) ->
-            Column(Modifier.fillMaxWidth().padding(vertical = 6.dp)) {
-                LineBadge(line, trips.first().routeColor)
-                Spacer(Modifier.height(4.dp))
-                trips.forEach { dep ->
-                    DepartureRow(dep, now)
-                }
-            }
+    LazyColumn(modifier.fillMaxWidth().heightIn(max = 420.dp), state = listState) {
+        items(shown, key = { "${it.line}|${it.headsign}|${it.scheduledMillis}" }) { dep ->
+            DepartureRow(dep, now)
             HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
         }
     }
@@ -145,10 +184,14 @@ private fun DepartureList(departures: List<Departure>, now: Long, modifier: Modi
 @Composable
 private fun DepartureRow(dep: Departure, now: Long, modifier: Modifier = Modifier) {
     Row(
-        modifier.fillMaxWidth().padding(vertical = 4.dp),
+        modifier.fillMaxWidth().padding(vertical = 6.dp).alpha(departedAlpha(dep.realtimeMillis, now)),
         horizontalArrangement = Arrangement.SpaceBetween,
         verticalAlignment = Alignment.CenterVertically,
     ) {
+        // The badge moved onto the row when the board stopped grouping by line: without it a
+        // chronological list gives no way to tell which service a train belongs to.
+        LineBadge(dep.line, dep.routeColor)
+        Spacer(Modifier.width(8.dp))
         Column(Modifier.weight(1f)) {
             Text(
                 dep.headsign.ifBlank { "—" },
@@ -184,7 +227,11 @@ private fun DepartureRow(dep: Departure, now: Long, modifier: Modifier = Modifie
                 )
                 if (dep.realTime && dep.delayMinutes != 0) {
                     Text(
-                        stringResource(R.string.transit_delay_minutes, dep.delayMinutes),
+                        if (dep.delayMinutes > 0) {
+                            stringResource(R.string.transit_late_minutes, dep.delayMinutes)
+                        } else {
+                            stringResource(R.string.transit_early_minutes, -dep.delayMinutes)
+                        },
                         style = MaterialTheme.typography.bodySmall,
                         color = delayColor(dep.delayMinutes),
                     )
@@ -194,13 +241,28 @@ private fun DepartureRow(dep: Departure, now: Long, modifier: Modifier = Modifie
     }
 }
 
-/** Minutes until [target] as display text; "Now" once it's due/passed. */
+/**
+ * How a departure reads: a countdown when it is close, a clock time when it is not.
+ *
+ * See [DepartureTime] for the rule and its tests. A train that has already gone is shown as
+ * "5 min ago" rather than hidden, because "did I just miss it" is a question the board should
+ * answer.
+ */
 @Composable
-private fun countdownText(target: Long, now: Long): String {
-    val minutes = Math.ceil((target - now) / 60_000.0).toInt()
-    return if (minutes <= 0) stringResource(R.string.transit_now)
-    else stringResource(R.string.transit_minutes, minutes)
-}
+private fun countdownText(target: Long, now: Long): String =
+    when (val label = DepartureTime.label(target, now)) {
+        DepartureTime.Label.Now -> stringResource(R.string.transit_now)
+        is DepartureTime.Label.InMinutes ->
+            stringResource(R.string.transit_minutes, label.minutes.toInt())
+        is DepartureTime.Label.MinutesAgo ->
+            stringResource(R.string.transit_minutes_ago, label.minutes.toInt())
+        is DepartureTime.Label.Clock -> label.text
+    }
+
+/** A departure already gone is dimmed, so the eye lands on the next one to catch. */
+@Composable
+@ReadOnlyComposable
+private fun departedAlpha(target: Long, now: Long): Float = if (target < now) 0.5f else 1f
 
 /**
  * On-time/early → muted, 1–4 min late → tertiary, ≥5 late → error.

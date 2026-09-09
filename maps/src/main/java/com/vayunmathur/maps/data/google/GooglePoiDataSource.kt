@@ -61,6 +61,9 @@ object GooglePoiDataSource {
      *  treated as the same place, else the enrichment is discarded (wrong match). */
     private const val MATCH_RADIUS_M = 250.0
 
+    /** [Paths.SUMMARY_KIND] value that makes [Paths.SUMMARY_TEXT] a pump price. */
+    private const val GAS_STATION_KIND = "SearchResult.TYPE_GAS_STATION"
+
     @Volatile private var sessionWarmed = false
 
     // Bounded LRU cache (access-ordered). Stores the resolved info OR null (a
@@ -205,6 +208,7 @@ object GooglePoiDataSource {
             category = entry.at(*Paths.CATEGORY).str(),
             editorialSummary = entry.at(*Paths.EDITORIAL).str()?.trim()?.ifBlank { null },
             featuredReview = entry.at(*Paths.FEATURED_REVIEW).str()?.trim()?.trim('"', '\u201C', '\u201D')?.ifBlank { null },
+            fuelPrice = parseFuelPrice(entry),
             hours = parseHours(entry, prefer118 = rich == null && s118 != null),
             photoUrls = parsePhotos(entry),
             popularTimes = parsePopularTimes(entry),
@@ -212,6 +216,28 @@ object GooglePoiDataSource {
         )
         // Ignore an entry that carried nothing but a name (no signal to show).
         return if (info.isEmpty) null else info
+    }
+
+    /**
+     * Pump price for a fuel station, e.g. `"$6.20/Regular"` → `FuelPrice("$6.20", "Regular")`.
+     *
+     * [Paths.SUMMARY_TEXT] is a *shared* slot, not a price field: on a restaurant it
+     * holds the editorial tagline ("Classic bistro with a Mediterranean menu"). So the
+     * sibling type tag at [Paths.SUMMARY_KIND] decides what the text means, and anything
+     * other than a gas station is ignored — reading the slot unconditionally would put a
+     * restaurant's tagline in the fuel row, which no null-check would catch.
+     *
+     * Google pre-formats the string and sends a single grade, so this splits rather than
+     * reducing to a number: no currency or locale information is available here.
+     */
+    private fun parseFuelPrice(entry: JsonElement): FuelPrice? {
+        if (entry.at(*Paths.SUMMARY_KIND).str() != GAS_STATION_KIND) return null
+        val (price, grade) = entry.at(*Paths.SUMMARY_TEXT).str()
+            ?.split('/', limit = 2)
+            ?.takeIf { it.size == 2 }
+            ?: return null
+        if (price.isBlank() || grade.isBlank()) return null
+        return FuelPrice(price.trim(), grade.trim())
     }
 
     /** Weekly hours — main-entity schedule ([Paths.HOURS_203]) first, falling
@@ -224,6 +250,11 @@ object GooglePoiDataSource {
         return if (prefer118) h118().ifEmpty(h203) else h203().ifEmpty(h118)
     }
 
+    /** Days of the schedule Google actually sends. Despite the field's shape this is
+     *  only ever *today*: the search response carries no weekly schedule at all (checked
+     *  2026-09 against captured gas-station and restaurant responses — the only weekday
+     *  tokens present are today's and forward-looking status text like "Opens 8 AM Wed").
+     *  Showing a full week needs a different request, not a different path here. */
     private fun readHours(days: JsonElement?): List<String> {
         val arr = days.arr() ?: return emptyList()
         return arr.mapNotNull { day ->
@@ -366,5 +397,11 @@ object GooglePoiDataSource {
         val HOURS_203 = intArrayOf(1, 203, 0)
         val HOURS_118 = intArrayOf(1, 118, 0, 3, 0)
         val POPULAR_TIMES = intArrayOf(1, 84)
+
+        // [1][88] is a shared "summary" block: [0] is a display string whose meaning is
+        // set by the type tag at [1] — "$6.20/Regular" for a gas station, an editorial
+        // tagline for a restaurant. Always check SUMMARY_KIND before reading SUMMARY_TEXT.
+        val SUMMARY_TEXT = intArrayOf(1, 88, 0)
+        val SUMMARY_KIND = intArrayOf(1, 88, 1)
     }
 }

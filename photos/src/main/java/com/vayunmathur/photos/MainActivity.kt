@@ -58,8 +58,8 @@ import com.vayunmathur.library.ui.DynamicTheme
 import com.vayunmathur.library.util.OfflineAware
 import com.vayunmathur.library.ui.PermissionsChecker
 import com.vayunmathur.library.util.DataStoreUtils
-import com.vayunmathur.library.util.FullscreenPage
 import com.vayunmathur.library.util.MainNavigation
+import com.vayunmathur.library.util.MorphPage
 import com.vayunmathur.library.util.SiblingPage
 import com.vayunmathur.library.util.BottomNavBar
 import com.vayunmathur.library.util.BottomNavBarItem
@@ -304,7 +304,7 @@ fun Navigation(
             PeoplePage(backStack, galleryViewModel)
         }
 
-        entry<Route.PhotoPage>(metadata = FullscreenPage()) {
+        entry<Route.PhotoPage>(metadata = MorphPage()) {
             PhotoPage(galleryViewModel, photoMapViewModel, it.id, it.overridePhotosList, it.pendingUri, backStack)
         }
 

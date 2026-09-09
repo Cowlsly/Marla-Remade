@@ -93,6 +93,7 @@ class MainActivity : ComponentActivity() {
                 val hasForeground by ffViewModel.hasForeground.collectAsState()
                 val hasCoarse by ffViewModel.hasCoarse.collectAsState()
                 val hasBackground by ffViewModel.hasBackground.collectAsState()
+                val hasBluetooth by ffViewModel.hasBluetooth.collectAsState()
 
                 // Automatically re-check when returning from System Settings
                 val lifecycleOwner = LocalLifecycleOwner.current
@@ -106,11 +107,12 @@ class MainActivity : ComponentActivity() {
                     onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
                 }
 
-                if (!hasForeground || !hasBackground) {
+                if (!hasForeground || !hasBackground || !hasBluetooth) {
                     NoPermissionsScreen(
                         hasFine = hasForeground,
                         hasCoarse = hasCoarse,
                         hasBackground = hasBackground,
+                        hasBluetooth = hasBluetooth,
                         onPermissionsChanged = { ffViewModel.refreshPermissions() }
                     )
                 } else {
@@ -165,6 +167,7 @@ fun NoPermissionsScreen(
     hasFine: Boolean,
     hasCoarse: Boolean,
     hasBackground: Boolean,
+    hasBluetooth: Boolean,
     onPermissionsChanged: () -> Unit
 ) {
     // The user granted location but only at an approximate (coarse) level.
@@ -187,6 +190,10 @@ fun NoPermissionsScreen(
     // Background location: the shared helper opens app settings on permanent denial.
     val requestBackground = rememberPermissionRequest(
         Manifest.permission.ACCESS_BACKGROUND_LOCATION
+    ) { onPermissionsChanged() }
+    // Bluetooth scanning, for the always-on finder half of powered-off finding.
+    val requestBluetooth = rememberPermissionRequest(
+        Manifest.permission.BLUETOOTH_SCAN
     ) { onPermissionsChanged() }
 
     // Auto-surface the upgrade prompt when we first detect approximate-only.
@@ -238,6 +245,33 @@ fun NoPermissionsScreen(
             if (hasFine && !hasBackground) {
                 Text(
                     text = stringResource(R.string.permission_background_explanation),
+                    textAlign = TextAlign.Center,
+                    style = MaterialTheme.typography.bodySmall,
+                    modifier = Modifier.padding(horizontal = 32.dp, vertical = 8.dp)
+                )
+            }
+            Spacer(Modifier.height(16.dp))
+            // STEP 3: Bluetooth scanning.
+            //
+            // Required, not optional. The finder half of powered-off finding is always on, so the
+            // scanner needs BLUETOOTH_SCAN from the start; without it it starts and immediately
+            // closes, silently. Asked here with the other two rather than at a toggle, because
+            // there is no longer a toggle to ask at.
+            Button(
+                onClick = { requestBluetooth() },
+                enabled = !hasBluetooth
+            ) {
+                Text(
+                    if (hasBluetooth) {
+                        stringResource(R.string.permission_bluetooth_granted)
+                    } else {
+                        stringResource(R.string.permission_grant_bluetooth)
+                    }
+                )
+            }
+            if (!hasBluetooth) {
+                Text(
+                    text = stringResource(R.string.permission_bluetooth_explanation),
                     textAlign = TextAlign.Center,
                     style = MaterialTheme.typography.bodySmall,
                     modifier = Modifier.padding(horizontal = 32.dp, vertical = 8.dp)

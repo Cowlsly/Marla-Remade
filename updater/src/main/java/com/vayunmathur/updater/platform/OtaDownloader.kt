@@ -1,6 +1,10 @@
 package com.vayunmathur.updater.platform
 
+import android.content.Context
+import android.os.storage.StorageManager
 import android.util.Log
+import androidx.core.content.getSystemService
+import com.vayunmathur.library.util.DataStoreUtils
 import com.vayunmathur.updater.domain.OtaDownloadPlan
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
@@ -8,7 +12,6 @@ import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.withContext
 import java.io.File
 import java.io.FileOutputStream
-import java.io.IOException
 import java.net.HttpURLConnection
 import java.net.URL
 import javax.net.ssl.HttpsURLConnection
@@ -27,167 +30,166 @@ private const val PROGRESS_INTERVAL_MS = 500L
 private const val HTTP_RANGE_NOT_SATISFIABLE = 416
 
 /**
- * Fetches an OTA package to local storage.
+ * Fetches an OTA package to `/data/ota_package/update.zip`.
  *
- * The download is resumable, which is not a nicety at this size: a full package is one to two
- * gigabytes and a transfer that long will be interrupted — the screen locks, the network
- * changes, the process is killed. Bytes land in `<name>.part` and the next attempt continues
- * with a `Range` request, so an interrupted download costs the remainder rather than the whole
- * thing. The Range/206/200 handling here is the same shape as
- * `library/downloadservice`'s `streamToPart`, including treating a 200 in response to a Range
- * request as the server refusing to resume and restarting from zero.
+ * **That path is not a choice.** update_engine opens the file itself, as its own uid and under
+ * its own SELinux domain, so it has to live somewhere update_engine is allowed to read.
+ * `/data/ota_package` is the directory AOSP labels for exactly this, and the app's
+ * `ACCESS_CACHE_FILESYSTEM` permission is what grants write access to it — that permission is in
+ * the manifest for this one reason. App-private storage would not work.
  *
- * Nothing here inspects what it downloaded. The file is untrusted until
+ * One fixed filename means the artifact's own name has to be remembered separately, in
+ * [UpdaterPreferences.DOWNLOAD_FILE]: a partial file is only resumable if it is a prefix of the
+ * artifact we are about to request.
+ *
+ * The download is resumable, which at this size is not a nicety — a one to two gigabyte transfer
+ * will be interrupted. Nothing here inspects what it downloaded; the file is untrusted until
  * [OtaInstaller] has run `RecoverySystem.verifyPackage` over it.
  */
 object OtaDownloader {
 
-    sealed interface Result {
-        data class Downloaded(val file: File, val incremental: Boolean) : Result
+    /** Where update_engine can reach it. See the class doc. */
+    val UPDATE_PATH = File("/data/ota_package/update.zip")
 
-        /**
-         * The server has no such artifact.
-         *
-         * Ordinary, not an error: an incremental exists only for one exact source build, so a
-         * device that skipped a release will always miss on the first candidate.
-         */
+    sealed interface Result {
+        data class Downloaded(val incremental: Boolean) : Result
+
+        /** Neither artifact is published for this build. Ordinary, not an error. */
         data object NotFound : Result
 
         data class Failed(val reason: String) : Result
     }
 
     /**
-     * Try each candidate for [targetBuild] in order and return the first that downloads.
+     * Download the best available artifact for [targetBuild].
      *
-     * Only a [Result.NotFound] moves to the next candidate. A real failure stops: an incremental
-     * that died on a TLS error or a full disk is not a reason to immediately attempt the 1-2 GB
-     * package, which will hit the same wall having spent much more of the user's data getting
-     * there. The next scheduled run resumes the incremental from its `.part` instead.
+     * Tries the incremental, falling back to the full package on a 404 — the normal outcome
+     * after skipping a release. An incremental update_engine has already refused to initialise
+     * from is skipped outright; see [UpdaterPreferences.FAILED_INCREMENTAL].
      */
     suspend fun download(
-        directory: File,
+        context: Context,
         device: String,
         currentBuild: String,
         targetBuild: String,
         onProgress: (bytes: Long, total: Long) -> Unit,
-    ): Result {
-        val candidates = OtaDownloadPlan.candidates(device, currentBuild, targetBuild)
-        discardStalePackages(directory, candidates)
-        for (candidate in candidates) {
-            when (val result = fetch(directory, candidate, onProgress)) {
-                is Result.Downloaded -> return result
-                is Result.Failed -> return result
-                Result.NotFound -> Log.i(TAG, "${candidate.fileName} is not published; trying next")
-            }
-        }
-        return Result.NotFound
-    }
-
-    /**
-     * Delete anything in the staging directory that is not one of [candidates].
-     *
-     * A full package is one to two gigabytes, so a superseded download or the `.part` of an
-     * abandoned one is not clutter — it is a meaningful chunk of the user's storage, kept for a
-     * build nothing will ever ask for again. Only whole packages are dropped; the `.part` of a
-     * *current* candidate is what makes the download resumable and must survive.
-     */
-    private fun discardStalePackages(directory: File, candidates: List<OtaDownloadPlan.Candidate>) {
-        val keep = candidates.flatMap { listOf(it.fileName, "${it.fileName}.part") }.toSet()
-        directory.listFiles()?.forEach { file ->
-            if (file.isFile && file.name !in keep) {
-                Log.i(TAG, "discarding stale package ${file.name}")
-                file.delete()
-            }
-        }
-    }
-
-    private suspend fun fetch(
-        directory: File,
-        candidate: OtaDownloadPlan.Candidate,
-        onProgress: (bytes: Long, total: Long) -> Unit,
     ): Result = withContext(Dispatchers.IO) {
-        val url = "${SystemBuild.otaServer()}/${candidate.fileName}"
-        val target = File(directory, candidate.fileName)
-        val part = File(directory, "${candidate.fileName}.part")
+        val store = DataStoreUtils.getInstance(context)
+        val artifacts = OtaDownloadPlan.artifacts(device, currentBuild, targetBuild)
+        val failedIncremental = store.getStringAwait(UpdaterPreferences.FAILED_INCREMENTAL)
+        val incremental = artifacts.incremental.takeIf { it != null && it != failedIncremental }
+
         try {
-            directory.mkdirs()
-            // A previous run may already have finished this one and been killed before it could
-            // apply it. The file is still unverified either way, so this saves the transfer and
-            // nothing else.
-            if (target.exists() && target.length() > 0L) {
-                return@withContext Result.Downloaded(target, candidate.incremental)
+            UPDATE_PATH.parentFile?.mkdirs()
+            val remembered = store.getStringAwait(UpdaterPreferences.DOWNLOAD_FILE)
+            // Only a partial file whose artifact we can still name is worth resuming.
+            val resumable = remembered != null &&
+                (remembered == incremental || remembered == artifacts.full)
+            var wanted = if (resumable) remembered!! else incremental ?: artifacts.full
+            var offset = if (resumable) UPDATE_PATH.length() else 0L
+            if (!resumable) UPDATE_PATH.delete()
+
+            var connection = open(wanted, offset)
+            var code = connection.responseCode
+
+            // A resumed request the server says is already complete. verifyPackage is next and
+            // will catch the file if it is not in fact whole, so trusting this costs nothing.
+            if (code == HTTP_RANGE_NOT_SATISFIABLE) {
+                connection.disconnect()
+                Log.i(TAG, "$wanted was already downloaded")
+                return@withContext Result.Downloaded(wanted == artifacts.incremental)
             }
-            when (val status = stream(url, part, onProgress)) {
-                Stream.Ok -> Unit
-                Stream.NotFound -> return@withContext Result.NotFound
-                is Stream.Error -> return@withContext Result.Failed(status.reason)
+
+            // No incremental for this exact source build — the usual case after skipping a
+            // release. Start the full package from scratch; the bytes we have are not a prefix
+            // of it.
+            if (code == HttpURLConnection.HTTP_NOT_FOUND && wanted != artifacts.full) {
+                connection.errorStream?.close()
+                connection.disconnect()
+                Log.i(TAG, "$wanted is not published; falling back to ${artifacts.full}")
+                wanted = artifacts.full
+                offset = 0L
+                UPDATE_PATH.delete()
+                connection = open(wanted, offset)
+                code = connection.responseCode
             }
-            if (!promote(part, target)) {
-                return@withContext Result.Failed("could not finalise the downloaded package")
+
+            if (code == HttpURLConnection.HTTP_NOT_FOUND) {
+                connection.errorStream?.close()
+                connection.disconnect()
+                return@withContext Result.NotFound
             }
-            Result.Downloaded(target, candidate.incremental)
+
+            when (val outcome = stream(context, store, connection, code, wanted, offset, onProgress)) {
+                is Stream.Error -> Result.Failed(outcome.reason)
+                Stream.Ok -> Result.Downloaded(wanted == artifacts.incremental)
+            }
         } catch (e: CancellationException) {
-            // The `.part` stays on disk so the next run resumes rather than restarting.
+            // The partial file and the remembered name both stay, so the next run resumes.
             throw e
         } catch (e: Exception) {
-            Log.w(TAG, "download of ${candidate.fileName} failed", e)
-            Result.Failed("could not download ${candidate.fileName}")
+            Log.w(TAG, "download failed", e)
+            Result.Failed("the update could not be downloaded")
         }
     }
 
-    private sealed interface Stream {
-        data object Ok : Stream
-        data object NotFound : Stream
-        data class Error(val reason: String) : Stream
+    /** Forget the staged package entirely, so the next run starts clean rather than resuming. */
+    suspend fun discard(context: Context) {
+        UPDATE_PATH.delete()
+        DataStoreUtils.getInstance(context).setString(UpdaterPreferences.DOWNLOAD_FILE, "")
     }
 
-    private suspend fun stream(
-        url: String,
-        part: File,
-        onProgress: (bytes: Long, total: Long) -> Unit,
-    ): Stream {
-        part.parentFile?.mkdirs()
-        var startOffset = if (part.exists()) part.length() else 0L
+    private fun open(fileName: String, offset: Long): HttpsURLConnection {
+        val url = "${SystemBuild.otaServer()}/$fileName"
         // HTTPS only. The signature check is the real boundary, but there is no reason to let a
         // gigabyte of anything arrive over a connection nobody authenticated.
-        val connection = URL(url).openConnection() as? HttpsURLConnection
-            ?: return Stream.Error("refusing a non-HTTPS OTA URL")
+        val connection = URL(url).openConnection() as HttpsURLConnection
         connection.connectTimeout = CONNECT_TIMEOUT_MS
         connection.readTimeout = READ_TIMEOUT_MS
         connection.requestMethod = "GET"
         connection.useCaches = false
-        if (startOffset > 0L) connection.setRequestProperty("Range", "bytes=$startOffset-")
+        if (offset > 0L) connection.setRequestProperty("Range", "bytes=$offset-")
+        return connection
+    }
 
+    private sealed interface Stream {
+        data object Ok : Stream
+        data class Error(val reason: String) : Stream
+    }
+
+    private suspend fun stream(
+        context: Context,
+        store: DataStoreUtils,
+        connection: HttpsURLConnection,
+        code: Int,
+        fileName: String,
+        requestedOffset: Long,
+        onProgress: (bytes: Long, total: Long) -> Unit,
+    ): Stream {
         try {
-            connection.connect()
-            val append = when (val code = connection.responseCode) {
+            val append = when (code) {
                 HttpURLConnection.HTTP_PARTIAL -> true
-                // The server ignored the Range and is sending the whole file, so the partial we
-                // already have is not a prefix of what is arriving. Start over.
-                HttpURLConnection.HTTP_OK -> {
-                    startOffset = 0L
-                    false
-                }
-
-                HttpURLConnection.HTTP_NOT_FOUND -> return Stream.NotFound
-                // A stale `.part` from a since-replaced artifact makes the server reject the
-                // range as unsatisfiable. Drop it so the next attempt starts clean.
-                HTTP_RANGE_NOT_SATISFIABLE -> {
-                    part.delete()
-                    return Stream.Error("the partial download no longer matches the server")
-                }
-
+                // The server ignored the Range and is sending the whole file, so what we have is
+                // not a prefix of what is arriving. Start over.
+                HttpURLConnection.HTTP_OK -> false
                 else -> return Stream.Error("the OTA server returned HTTP $code")
             }
+            val offset = if (append) requestedOffset else 0L
 
             // contentLengthLong is the REMAINING bytes on a 206, not the file size.
             val remaining = connection.contentLengthLong
-            val total = if (remaining >= 0) startOffset + remaining else -1L
-            var soFar = startOffset
+            val total = if (remaining >= 0) offset + remaining else -1L
+            if (total > 0) allocate(context, total - offset)
+
+            // Recorded before the first byte lands: a crash mid-download must leave the name of
+            // whatever is actually in the file, not the name of the last completed one.
+            store.setString(UpdaterPreferences.DOWNLOAD_FILE, fileName)
+
+            var soFar = offset
             var lastReport = 0L
             onProgress(soFar, total)
 
-            FileOutputStream(part, append).use { output ->
+            FileOutputStream(UPDATE_PATH, append).use { output ->
                 connection.inputStream.use { input ->
                     val buffer = ByteArray(BUFFER_SIZE)
                     while (true) {
@@ -203,7 +205,7 @@ object OtaDownloader {
                         }
                     }
                 }
-                // Force the bytes out before the file is renamed and handed to verifyPackage.
+                // Force the bytes out before the file is handed to verifyPackage.
                 output.fd.sync()
             }
             if (total > 0 && soFar != total) {
@@ -216,17 +218,38 @@ object OtaDownloader {
         }
     }
 
-    /** Rename is atomic within a filesystem; the copy is the cross-filesystem fallback. */
-    private fun promote(part: File, target: File): Boolean {
-        if (target.exists()) target.delete()
-        if (part.renameTo(target)) return true
-        return try {
-            part.copyTo(target, overwrite = true)
-            part.delete()
-            true
-        } catch (e: IOException) {
-            Log.w(TAG, "could not move ${part.name} into place", e)
-            false
-        }
+    /**
+     * Ask the system to make room, aggressively.
+     *
+     * Best-effort: failing here is not fatal, because space is often freed later and the write
+     * itself will say so if it is not.
+     *
+     * Reached by reflection because both the three-argument `allocateBytes` and
+     * `FLAG_ALLOCATE_AGGRESSIVE` are `@hide`. The GrapheneOS updater calls them directly
+     * (`Service.java:396`) because it is built against the platform APIs; this app is built
+     * against the public SDK, so the same call will not compile. It resolves at runtime because
+     * we are a privileged system app.
+     *
+     * The aggressive flag is the point of the exercise — it is what lets the allocation evict
+     * cached data to make room for a 1-2 GB package — so falling back to the public two-argument
+     * overload would quietly defeat it. If reflection fails we simply do not pre-allocate, and
+     * the write reports the real problem if there is one.
+     */
+    private fun allocate(context: Context, bytes: Long) {
+        runCatching {
+            val storage = context.getSystemService<StorageManager>() ?: return
+            val uuid = storage.getUuidForPath(UPDATE_PATH)
+            val flag = StorageManager::class.java
+                .getField("FLAG_ALLOCATE_AGGRESSIVE")
+                .getInt(null)
+            StorageManager::class.java
+                .getMethod(
+                    "allocateBytes",
+                    java.util.UUID::class.java,
+                    Long::class.javaPrimitiveType,
+                    Int::class.javaPrimitiveType,
+                )
+                .invoke(storage, uuid, bytes, flag)
+        }.onFailure { Log.i(TAG, "could not reserve $bytes bytes; continuing anyway", it) }
     }
 }

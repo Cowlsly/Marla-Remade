@@ -18,7 +18,7 @@ import com.vayunmathur.maps.util.RouteService
 import com.vayunmathur.maps.util.SearchActions
 import com.vayunmathur.maps.util.SearchResult
 import com.vayunmathur.maps.util.SearchUiState
-import org.maplibre.spatialk.geojson.Position
+import com.vayunmathur.library.map.GeoPoint
 import kotlin.time.Duration.Companion.minutes
 import kotlin.time.Duration.Companion.seconds
 
@@ -28,7 +28,7 @@ private const val PHONE = "spec:width=411dp,height=891dp,dpi=420"
 /**
  * Store listing images for `:maps`. See `common-conventions-preview-metadata`.
  *
- * The basemap is a MapLibre native surface fed by pmtiles, and routing goes through the
+ * The basemap is a Vulkan surface fed by pmtiles, and routing goes through the
  * Rust offline router over JNI — neither exists inside Layoutlib, so [MapPage] itself is
  * not previewable and is deliberately left alone. What these render is the Compose chrome
  * around the map: search, the directions panel, and the turn-by-turn overlay. The
@@ -69,7 +69,7 @@ class MetadataPreviews {
         phone = null,
         website = null,
         openingHours = null,
-        position = Position(-122.3933, 37.7955),
+        position = GeoPoint(-122.3933, 37.7955),
     )
 
     @PreviewTest
@@ -77,22 +77,32 @@ class MetadataPreviews {
     @Composable
     fun Preview1Search() {
         DynamicTheme(darkTheme = true) {
-            SearchScreen(
-                SearchUiState(
-                    query = "ferry",
-                    results = listOf(
-                        SearchResult("1", "Ferry Building Marketplace", "1 Ferry Building, San Francisco", 37.7955, -122.3933, "Marketplace"),
-                        SearchResult("2", "Ferry Plaza Farmers Market", "1 Ferry Building, San Francisco", 37.7959, -122.3937, "Farmers market"),
-                        SearchResult("3", "Golden Gate Ferry Terminal", "Pier 1, San Francisco", 37.7936, -122.3927, "Ferry terminal"),
-                        SearchResult("4", "Oakland Ferry Dock", "Clay St, Oakland", 37.7947, -122.2783, "Ferry terminal"),
-                    ),
-                    // Explicitly not searching: with results present and this left at its
-                    // default the state would resolve to Results anyway, but the listing image
-                    // should not depend on that inference.
-                    searching = false,
-                ),
-                SearchActions.Noop,
-            )
+            Surface(Modifier.fillMaxSize()) {
+                // On a device this sheet sits over the live map; Layoutlib has no map, so the
+                // listing image shows the sheet on a flat surface the same way the directions
+                // preview below does.
+                Column(Modifier.padding(vertical = 8.dp)) {
+                    SearchSheet(
+                        SearchUiState(
+                            query = "ferry",
+                            results = listOf(
+                                SearchResult("1", "Ferry Building Marketplace", "1 Ferry Building, San Francisco", 37.7955, -122.3933, "Marketplace"),
+                                SearchResult("2", "Ferry Plaza Farmers Market", "1 Ferry Building, San Francisco", 37.7959, -122.3937, "Farmers market"),
+                                SearchResult("3", "Golden Gate Ferry Terminal", "Pier 1, San Francisco", 37.7936, -122.3927, "Ferry terminal"),
+                                SearchResult("4", "Oakland Ferry Dock", "Clay St, Oakland", 37.7947, -122.2783, "Ferry terminal"),
+                            ),
+                            // Explicitly not searching: with results present and this left at its
+                            // default the state would resolve to Results anyway, but the listing
+                            // image should not depend on that inference.
+                            searching = false,
+                        ),
+                        SearchActions.Noop,
+                        // Nothing to raise a keyboard for, and the focus request needs a real
+                        // window to land in.
+                        autoFocus = false,
+                    )
+                }
+            }
         }
     }
 
@@ -149,7 +159,7 @@ class MetadataPreviews {
                 NavigationOverlay(
                     navState = NavigationSessionManager.NavState.Navigating(
                         NavigationProgress(
-                            snappedPosition = Position(-122.4041, 37.7815),
+                            snappedPosition = GeoPoint(-122.4041, 37.7815),
                             segmentIndex = 14,
                             currentStepIndex = 2,
                             distanceAlongRoute = 2280.0,

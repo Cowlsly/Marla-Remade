@@ -57,6 +57,9 @@ fun BoxScope.MapFabStack(
             latitude = latitude,
             modifier = Modifier
                 .align(Alignment.BottomStart)
+                // Lifted like the column: the search bar spans the full width of the bottom, so
+                // anything anchored down there is behind it otherwise.
+                .offset { IntOffset(0, -lift()) }
                 .windowInsetsPadding(WindowInsets.systemBars)
                 .padding(MapChromeMetrics.chromeMargin),
         )

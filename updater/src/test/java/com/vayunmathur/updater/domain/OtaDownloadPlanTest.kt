@@ -2,55 +2,59 @@ package com.vayunmathur.updater.domain
 
 import kotlin.test.Test
 import kotlin.test.assertEquals
-import kotlin.test.assertFalse
+import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
 class OtaDownloadPlanTest {
 
     @Test
-    fun `the incremental is tried before the full package`() {
-        val candidates = OtaDownloadPlan.candidates("shiba", "2026090500", "2026090700")
-        assertEquals(
-            listOf("shiba-incremental-2026090500-2026090700.zip", "shiba-ota_update-2026090700.zip"),
-            candidates.map { it.fileName },
-        )
-        assertTrue(candidates.first().incremental)
-        assertFalse(candidates.last().incremental)
+    fun `both artifacts are named when the running build is known`() {
+        val artifacts = OtaDownloadPlan.artifacts("shiba", "2026090500", "2026090700")
+        assertEquals("shiba-incremental-2026090500-2026090700.zip", artifacts.incremental)
+        assertEquals("shiba-ota_update-2026090700.zip", artifacts.full)
     }
 
     @Test
-    fun `an unknown running build leaves only the full package`() {
+    fun `an unknown running build leaves no incremental`() {
         // The incremental filename embeds the source build, so without one there is nothing to
         // ask the server for.
-        val candidates = OtaDownloadPlan.candidates("shiba", "", "2026090700")
-        assertEquals(listOf("shiba-ota_update-2026090700.zip"), candidates.map { it.fileName })
+        assertNull(OtaDownloadPlan.artifacts("shiba", "", "2026090700").incremental)
     }
 
     @Test
     fun `a blank running build is treated the same as an absent one`() {
-        assertEquals(1, OtaDownloadPlan.candidates("shiba", "   ", "2026090700").size)
+        assertNull(OtaDownloadPlan.artifacts("shiba", "   ", "2026090700").incremental)
     }
 
     @Test
-    fun `targeting the running build offers no incremental`() {
-        // A self-to-self incremental is not a thing the publisher produces, and asking for one
+    fun `targeting the running build names no incremental`() {
+        // A self-to-self incremental is not something the publisher produces, and asking for one
         // would spend a round trip to be told so.
-        val candidates = OtaDownloadPlan.candidates("shiba", "2026090700", "2026090700")
-        assertEquals(listOf("shiba-ota_update-2026090700.zip"), candidates.map { it.fileName })
+        assertNull(OtaDownloadPlan.artifacts("shiba", "2026090700", "2026090700").incremental)
     }
 
     @Test
-    fun `no candidate asks for a streaming-layout artifact`() {
+    fun `the full package is always named`() {
+        assertEquals(
+            "shiba-ota_update-2026090700.zip",
+            OtaDownloadPlan.artifacts("shiba", "", "2026090700").full,
+        )
+    }
+
+    @Test
+    fun `neither artifact asks for a streaming layout`() {
         // Streaming was removed deliberately: applyPayload against an https URL never reaches
         // RecoverySystem.verifyPackage, so the signature is never checked. If a '-streaming'
-        // name ever reappears here, that bypass has come back with it.
-        val candidates = OtaDownloadPlan.candidates("shiba", "2026090500", "2026090700")
-        assertTrue(candidates.none { it.fileName.contains("-streaming") })
+        // name reappears here, that bypass has come back with it.
+        val artifacts = OtaDownloadPlan.artifacts("shiba", "2026090500", "2026090700")
+        assertTrue(artifacts.incremental?.contains("-streaming") == false)
+        assertTrue(!artifacts.full.contains("-streaming"))
     }
 
     @Test
     fun `the device name is used verbatim`() {
-        val candidates = OtaDownloadPlan.candidates("comet", "2026090500", "2026090700")
-        assertTrue(candidates.all { it.fileName.startsWith("comet-") })
+        val artifacts = OtaDownloadPlan.artifacts("comet", "2026090500", "2026090700")
+        assertTrue(artifacts.full.startsWith("comet-"))
+        assertTrue(artifacts.incremental!!.startsWith("comet-"))
     }
 }

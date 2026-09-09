@@ -11,6 +11,7 @@
 //!   half of a frame that actually costs something.
 //! * [`style`] — which layers are drawn, in what order, in what colour.
 //! * [`camera`] — a camera snapshot from Kotlin to a per-tile clip matrix.
+//! * [`overlay`] — geographic polylines that are not tile data: the navigation route.
 //! * [`tile`] — the streaming PMTiles reader, its range cache, and tile selection.
 //! * `vulkan` — device, swapchain, pipelines, frame. Android only.
 //!
@@ -32,6 +33,7 @@
 //! with no device attached.
 
 pub mod camera;
+pub mod overlay;
 pub mod style;
 pub mod tess;
 pub mod tile;

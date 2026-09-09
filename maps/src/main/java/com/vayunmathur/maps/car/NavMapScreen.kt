@@ -33,7 +33,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.launch
-import org.maplibre.spatialk.geojson.Position
+import com.vayunmathur.library.map.GeoPoint
 import java.util.TimeZone
 import kotlin.math.roundToInt
 
@@ -45,17 +45,23 @@ import kotlin.math.roundToInt
  * [NavigationSessionManager] — the same singleton the phone uses) the template
  * shows the upcoming maneuver, step cue, distance to the maneuver, lane guidance
  * (P5a) and an ETA/remaining-distance [TravelEstimate], and the camera follows
- * the puck heading-up. When idle it shows the map centred on the current
- * location with a Search action.
+ * the puck. When idle it shows the map centred on the current location with a
+ * Search action.
  *
- * This screen only *renders* nav state and forwards camera/route/puck to the
- * renderer; all routing, progress, reroute and voice guidance stay in the
- * existing stack.
+ * This screen only *renders* nav state and forwards camera/puck to the renderer;
+ * all routing, progress, reroute and voice guidance stay in the existing stack.
  */
 class NavMapScreen(carContext: CarContext) : Screen(carContext) {
 
     private val renderer = CarMapRenderer(carContext)
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
+
+    /**
+     * The route whose geometry is already on the GPU. Identity, not equality: the route
+     * mesh is tessellated once when set, so pushing the same polyline on every GPS fix
+     * would re-tessellate a cross-city route a few times a second.
+     */
+    private var pushedRoute: RouteService.Route? = null
 
     init {
         lifecycle.addObserver(object : DefaultLifecycleObserver {
@@ -103,23 +109,34 @@ class NavMapScreen(carContext: CarContext) : Screen(carContext) {
     // ----------------------------------------------------------------
 
     private fun pushCameraAndOverlay(state: NavState) {
-        renderer.setRoute(NavigationSessionManager.session.value.route?.polyline ?: emptyList())
+        pushRouteIfChanged()
         val progress = (state as? NavState.Navigating)?.progress
         if (progress != null) {
-            renderer.setPuck(progress.snappedPosition)
+            // Heading-up: courseOverGround is the direction of travel in degrees clockwise
+            // from north, and camera bearing is the compass direction that points UP, so it
+            // goes across unmodified. The puck's cone rotates with the map, so feeding it
+            // the same absolute course leaves it pointing up the screen.
+            renderer.setPuck(progress.snappedPosition, progress.courseOverGround)
             renderer.setCamera(
                 target = progress.snappedPosition,
-                zoom = 17.0,
+                zoom = NAVIGATING_ZOOM,
                 bearing = progress.courseOverGround.toDouble(),
-                tilt = 45.0,
             )
         } else {
             val pos = lastKnownPosition()
             if (pos != null) {
-                renderer.setPuck(pos)
-                renderer.setCamera(pos, 15.0, 0.0, 0.0)
+                // Idle: north-up, and no cone because there is no heading.
+                renderer.setPuck(pos, null)
+                renderer.setCamera(pos, IDLE_ZOOM)
             }
         }
+    }
+
+    private fun pushRouteIfChanged() {
+        val route = NavigationSessionManager.session.value.route
+        if (route === pushedRoute) return
+        pushedRoute = route
+        renderer.setRoute(route?.polyline)
     }
 
     // ----------------------------------------------------------------
@@ -214,7 +231,7 @@ class NavMapScreen(carContext: CarContext) : Screen(carContext) {
         }
     }
 
-    private fun lastKnownPosition(): Position? {
+    private fun lastKnownPosition(): GeoPoint? {
         if (ContextCompat.checkSelfPermission(
                 carContext, Manifest.permission.ACCESS_FINE_LOCATION
             ) != PackageManager.PERMISSION_GRANTED
@@ -225,6 +242,11 @@ class NavMapScreen(carContext: CarContext) : Screen(carContext) {
             lm.getLastKnownLocation(LocationManager.GPS_PROVIDER)
                 ?: lm.getLastKnownLocation(LocationManager.NETWORK_PROVIDER)
         }.getOrNull()
-        return loc?.let { Position(longitude = it.longitude, latitude = it.latitude) }
+        return loc?.let { GeoPoint(longitude = it.longitude, latitude = it.latitude) }
+    }
+
+    private companion object {
+        const val NAVIGATING_ZOOM = 17.0
+        const val IDLE_ZOOM = 15.0
     }
 }

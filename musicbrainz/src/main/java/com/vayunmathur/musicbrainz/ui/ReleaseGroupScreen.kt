@@ -25,6 +25,8 @@ import com.vayunmathur.library.ui.MaterialTheme
 import com.vayunmathur.library.ui.Text
 import com.vayunmathur.library.ui.appBarScrollBehavior
 import com.vayunmathur.library.util.NavBackStack
+import com.vayunmathur.library.util.sharedContainer
+import com.vayunmathur.library.util.sharedText
 import com.vayunmathur.musicbrainz.R
 import com.vayunmathur.musicbrainz.Route
 import com.vayunmathur.musicbrainz.ui.components.CoverArtImage
@@ -40,7 +42,13 @@ fun ReleaseGroupPage(
 ) {
     LaunchedEffect(releaseGroupId) { viewModel.loadReleaseGroup(releaseGroupId) }
     val state by viewModel.releaseGroup.collectAsStateWithLifecycle()
-    ReleaseGroupScreen(state, viewModel, backStack)
+    ReleaseGroupScreen(
+        state,
+        viewModel,
+        backStack,
+        sharedTextKey = "mb-release-group-title-$releaseGroupId",
+        sharedCoverKey = "mb-release-group-cover-$releaseGroupId",
+    )
 }
 
 /**
@@ -55,10 +63,19 @@ fun ReleaseGroupScreen(
     state: ReleaseGroupUiState,
     actions: com.vayunmathur.musicbrainz.platform.MusicBrainzActions,
     backStack: NavBackStack<Route>,
+    /** Pairs the heading with the row this album was opened from. */
+    sharedTextKey: Any? = null,
+    /** Pairs the hero cover with the thumbnail on that same row. */
+    sharedCoverKey: Any? = null,
 ) {
     AppScaffold(
-        title = state.title.ifBlank { stringResource(R.string.album) },
-        backStack = backStack,
+        title = {
+            Text(
+                state.title.ifBlank { stringResource(R.string.album) },
+                modifier = if (sharedTextKey == null) Modifier else Modifier.sharedText(sharedTextKey),
+            )
+        },
+        onNavigateBack = { backStack.pop() },
         scrollBehavior = appBarScrollBehavior(),
     ) { padding ->
         when {
@@ -77,7 +94,15 @@ fun ReleaseGroupScreen(
             ) {
                 item {
                     Column(Modifier.fillMaxWidth().padding(16.dp)) {
-                        CoverArtImage(state.coverUrl, size = 160)
+                        CoverArtImage(
+                            state.coverUrl,
+                            modifier = if (sharedCoverKey == null) {
+                                Modifier
+                            } else {
+                                Modifier.sharedContainer(sharedCoverKey)
+                            },
+                            size = 160,
+                        )
                         Text(state.artist, style = MaterialTheme.typography.titleMedium)
                         Text(
                             pluralStringResource(
@@ -92,12 +117,23 @@ fun ReleaseGroupScreen(
                 }
                 items(state.releases, key = { it.id }) { release ->
                     ListItem(
-                        headlineContent = { Text(release.title) },
+                        headlineContent = {
+                            Text(
+                                release.title,
+                                modifier = Modifier.sharedText("mb-release-title-${release.id}"),
+                            )
+                        },
                         modifier = Modifier
                             .fillMaxWidth()
                             .clickable { backStack.add(Route.Release(release.id)) },
                         supportingContent = { SecondaryText(release.subtitle) },
-                        leadingContent = { CoverArtImage(release.coverUrl, fallbackUrl = release.fallbackCoverUrl) },
+                        leadingContent = {
+                            CoverArtImage(
+                                release.coverUrl,
+                                modifier = Modifier.sharedContainer("mb-release-cover-${release.id}"),
+                                fallbackUrl = release.fallbackCoverUrl,
+                            )
+                        },
                         trailingContent = if (release.onDevice) {
                             { IconCheckCircle(tint = MaterialTheme.colorScheme.primary) }
                         } else {

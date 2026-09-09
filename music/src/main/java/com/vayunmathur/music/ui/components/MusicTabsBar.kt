@@ -1,6 +1,7 @@
 package com.vayunmathur.music.ui.components
 
 import androidx.compose.runtime.Composable
+import androidx.compose.ui.Modifier
 import androidx.compose.ui.res.stringResource
 import com.vayunmathur.library.ui.ExperimentalMaterial3ExpressiveApi
 import com.vayunmathur.library.ui.IconAlbum
@@ -17,7 +18,7 @@ import com.vayunmathur.music.R
  */
 @OptIn(ExperimentalMaterial3ExpressiveApi::class)
 @Composable
-fun MusicTabsBar(selectedTab: Int, onSelectTab: (Int) -> Unit) {
+fun MusicTabsBar(selectedTab: Int, onSelectTab: (Int) -> Unit, modifier: Modifier = Modifier) {
     val tabs = listOf<Triple<String, @Composable () -> Unit, Int>>(
         Triple(stringResource(R.string.nav_home), { IconLibraryMusic() }, 0),
         Triple(stringResource(R.string.nav_albums), { IconAlbum() }, 1),
@@ -27,7 +28,7 @@ fun MusicTabsBar(selectedTab: Int, onSelectTab: (Int) -> Unit) {
 
     // Tabs are a selected index here, so this uses the content slot rather
     // than the back-stack overload of BottomNavBar.
-    BottomNavBar {
+    BottomNavBar(modifier) {
         tabs.forEach { (name, icon, index) ->
             BottomNavBarItem(
                 selected = selectedTab == index,

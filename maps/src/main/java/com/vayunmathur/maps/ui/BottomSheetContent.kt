@@ -52,17 +52,22 @@ import com.vayunmathur.maps.util.TransitStopsViewModel
 import com.vayunmathur.maps.util.formatDistance
 import com.vayunmathur.maps.util.formatDuration
 import com.vayunmathur.maps.util.formatEta
-import org.maplibre.spatialk.geojson.Position
+import com.vayunmathur.library.map.GeoPoint
 
+/**
+ * Everything on the map's bottom sheet below the fold — what expanding it reveals.
+ *
+ * The fixed part above, which the sheet peeks at, is [BottomSheetHeader]. The
+ * "Directions" action lives there, which is why nothing here needs to change the
+ * selection any more.
+ */
 @Composable
 fun BottomSheetContent(
     viewModel: SelectedFeatureViewModel,
     selectedFeature: SpecificFeature?,
-    setSelectedFeature: (SpecificFeature?) -> Unit,
     route: Map<RouteService.TravelMode, RouteService.RouteType?>?,
     selectedRouteType: RouteService.TravelMode,
     setSelectedRouteType: (RouteService.TravelMode) -> Unit,
-    inactiveNavigation: SpecificFeature.Route?,
     savedPlacesViewModel: SavedPlacesViewModel,
     transitViewModel: TransitStopsViewModel,
     navState: NavigationSessionManager.NavState = NavigationSessionManager.NavState.Idle,
@@ -76,20 +81,17 @@ fun BottomSheetContent(
             AdminLabelHeader(selectedFeature.name, selectedFeature.wikipedia)
         is SpecificFeature.Restaurant -> {
             Column {
-                PlaceSheet(viewModel, savedPlacesViewModel, inactiveNavigation, selectedFeature) {
-                    if(inactiveNavigation == null) {
-                        setSelectedFeature(SpecificFeature.Route(listOf(null, selectedFeature)))
-                    } else {
-                        setSelectedFeature(SpecificFeature.Route(inactiveNavigation.waypoints + listOf(selectedFeature)))
-                    }
-                }
+                // Weighted so the chips below are measured first: the tab panel scrolls and
+                // would otherwise take every pixel of a tall sheet and leave them at zero
+                // height. They used to be safe behind the panel's 300 dp cap.
+                PlaceSheet(viewModel, selectedFeature, Modifier.weight(1f, fill = false))
                 SavedPlaceActions(selectedFeature, savedPlacesViewModel)
             }
         }
         is SpecificFeature.GenericPlace -> {
             Column {
                 PlaceSheet(
-                    viewModel, savedPlacesViewModel, inactiveNavigation, selectedFeature,
+                    viewModel, selectedFeature, Modifier.weight(1f, fill = false),
                     onDepartures = if (selectedFeature.poiType == 50) {
                         {
                             transitViewModel.openNearestStop(
@@ -98,19 +100,7 @@ fun BottomSheetContent(
                             )
                         }
                     } else null,
-                ) {
-                    if (inactiveNavigation == null) {
-                        setSelectedFeature(SpecificFeature.Route(listOf(null, selectedFeature)))
-                    } else {
-                        setSelectedFeature(
-                            SpecificFeature.Route(
-                                inactiveNavigation.waypoints + listOf(
-                                    selectedFeature
-                                )
-                            )
-                        )
-                    }
-                }
+                )
                 SavedPlaceActions(selectedFeature, savedPlacesViewModel)
             }
         }
@@ -180,7 +170,7 @@ fun RouteSheet(
     selectedRouteType: RouteService.TravelMode,
     setSelectedRouteType: (RouteService.TravelMode) -> Unit,
     navState: NavigationSessionManager.NavState = NavigationSessionManager.NavState.Idle,
-    userPosition: Position? = null,
+    userPosition: GeoPoint? = null,
     modifier: Modifier = Modifier,
 ) {
     val context = LocalContext.current

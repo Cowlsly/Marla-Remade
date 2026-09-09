@@ -2,7 +2,7 @@ package com.vayunmathur.maps.util
 
 import com.vayunmathur.maps.util.RouteService.Route
 import com.vayunmathur.maps.util.RouteService.Step
-import org.maplibre.spatialk.geojson.Position
+import com.vayunmathur.library.map.GeoPoint
 import kotlin.math.PI
 import kotlin.math.cos
 import kotlin.math.max
@@ -12,8 +12,8 @@ import kotlin.math.sqrt
 /**
  * Pure-Kotlin geometry + progress engine for navigation.
  *
- * All distances are in meters. Position uses lon-first per
- * [org.maplibre.spatialk.geojson.Position] convention.
+ * All distances are in meters. Coordinates are lon-first per the [GeoPoint]
+ * convention.
  *
  * There is no Android dependency here so the file is trivially unit-testable
  * and is shared between the foreground service ([NavigationSessionManager])
@@ -28,7 +28,7 @@ private const val DEG_TO_RAD = PI / 180.0
  * route-snapping workload (a few thousand vertices at <= ~tens of km,
  * sampled at 1 Hz). Avoids the trig overhead of full haversine.
  */
-fun equirectangularDistance(a: Position, b: Position): Double {
+fun equirectangularDistance(a: GeoPoint, b: GeoPoint): Double {
     val midLatRad = (a.latitude + b.latitude) * 0.5 * DEG_TO_RAD
     val dxMeters = (b.longitude - a.longitude) * DEG_TO_RAD * EARTH_RADIUS_M * cos(midLatRad)
     val dyMeters = (b.latitude - a.latitude) * DEG_TO_RAD * EARTH_RADIUS_M
@@ -36,7 +36,7 @@ fun equirectangularDistance(a: Position, b: Position): Double {
 }
 
 /** Project [p] onto segment [a]-[b] in local-meters tangent plane. */
-fun projectOntoSegment(p: Position, a: Position, b: Position): SegmentProjection {
+fun projectOntoSegment(p: GeoPoint, a: GeoPoint, b: GeoPoint): SegmentProjection {
     // Use a tangent plane centered on segment midpoint.
     val midLatRad = (a.latitude + b.latitude) * 0.5 * DEG_TO_RAD
     val mPerLon = DEG_TO_RAD * EARTH_RADIUS_M * cos(midLatRad)
@@ -64,14 +64,14 @@ fun projectOntoSegment(p: Position, a: Position, b: Position): SegmentProjection
     val projLat = a.latitude + (projY / mPerLat)
     return SegmentProjection(
         fraction = clamped,
-        projectedPosition = Position(projLon, projLat),
+        projectedPosition = GeoPoint(projLon, projLat),
         perpendicularDistance = perpDistMeters
     )
 }
 
 data class SegmentProjection(
     val fraction: Double,
-    val projectedPosition: Position,
+    val projectedPosition: GeoPoint,
     val perpendicularDistance: Double,
 )
 
@@ -141,7 +141,7 @@ class PolylineIndex(val route: Route) {
      * didn't reach a boundary).
      */
     fun snap(
-        position: Position,
+        position: GeoPoint,
         lastSegmentIndex: Int = 0,
         windowRadius: Int = 30,
     ): SnapResult {
@@ -167,7 +167,7 @@ class PolylineIndex(val route: Route) {
         }
     }
 
-    private fun bestSnapInRange(position: Position, from: Int, to: Int): SnapResult {
+    private fun bestSnapInRange(position: GeoPoint, from: Int, to: Int): SnapResult {
         var bestIdx = from
         var bestProj = projectOntoSegment(position, route.polyline[from], route.polyline[from + 1])
         for (i in (from + 1)..to) {
@@ -233,7 +233,7 @@ class PolylineIndex(val route: Route) {
 data class SnapResult(
     val segmentIndex: Int,
     val fraction: Double,
-    val snappedPosition: Position,
+    val snappedPosition: GeoPoint,
     val distanceOffRoute: Double,
     val distanceAlongRoute: Double,
 )
@@ -243,7 +243,7 @@ data class SnapResult(
  * in-progress navigation session.
  */
 data class NavigationProgress(
-    val snappedPosition: Position,
+    val snappedPosition: GeoPoint,
     val segmentIndex: Int,
     val currentStepIndex: Int,
     val distanceAlongRoute: Double,

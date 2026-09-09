@@ -269,7 +269,16 @@ fun EditEventScreen(viewModel: CalendarViewModel, editRoute: Route.EditEvent, ba
         },
         scrollBehavior = appBarScrollBehavior(),
     ) {
-            OutlinedTextField(title, { title = it }, Modifier.fillMaxWidth().padding(8.dp), label = { Text(stringResource(R.string.label_title)) })
+            // The detail screen's title morphs into this field. Keyed on the instance, matching the
+            // detail side - the grid keys per instance so a recurring event has one origin per key.
+            // Null when the edit was not reached from a detail screen.
+            LabeledTextField(
+                value = title,
+                onValueChange = { title = it },
+                label = stringResource(R.string.label_title),
+                modifier = Modifier.fillMaxWidth().padding(8.dp),
+                sharedTextKey = editRoute.instanceId?.let { "calendar-event-title-$it" },
+            )
 
             // Calendar selector: moved above the datetime section — only when creating a new event
             if (eventId == null) {

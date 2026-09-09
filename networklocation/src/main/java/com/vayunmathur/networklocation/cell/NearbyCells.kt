@@ -15,7 +15,7 @@ import com.vayunmathur.networklocation.BeaconId
 
 /**
  * Reads nearby cell towers from [TelephonyManager]. Only towers with a full,
- * non-sentinel identity (MCC/MNC/cell id/area code) are usable as gs-loc beacons.
+ * non-sentinel identity (MCC/MNC/cell id/area code) are usable as beacons.
  */
 class NearbyCells(context: Context) {
     private val telephonyManager =

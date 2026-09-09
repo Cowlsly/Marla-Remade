@@ -12,8 +12,7 @@ import com.vayunmathur.maps.util.PoiIndex
 import com.vayunmathur.maps.util.SearchResult
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
-import org.maplibre.spatialk.geojson.Point
-import org.maplibre.spatialk.geojson.Position
+import com.vayunmathur.maps.data.Point
 
 /**
  * In-memory pin features for hit-testing.
@@ -28,7 +27,7 @@ import org.maplibre.spatialk.geojson.Position
 /** Screen position of a point feature, or null when it has no point geometry. */
 fun Feature1.screenPos(projection: Projection): DpOffset? {
     val pos = (geometry as? Point)?.coordinates ?: return null
-    return projection.screenLocationFromPosition(GeoPoint(pos.longitude, pos.latitude))
+    return projection.screenLocationFromPosition(pos)
 }
 
 /** The [features] whose screen position falls inside [box]. */
@@ -42,7 +41,7 @@ fun featuresInBox(
 }
 
 fun parkingPinFeature(spot: ParkingSpot): Feature1 = Feature1(
-    Point(Position(spot.lon, spot.lat)),
+    Point(GeoPoint(spot.lon, spot.lat)),
     JsonObject(
         mapOf(
             "lat" to JsonPrimitive(spot.lat),
@@ -52,7 +51,7 @@ fun parkingPinFeature(spot: ParkingSpot): Feature1 = Feature1(
 )
 
 fun searchPinFeature(result: SearchResult): Feature1 = Feature1(
-    Point(Position(result.lon, result.lat)),
+    Point(GeoPoint(result.lon, result.lat)),
     JsonObject(
         mapOf(
             "id" to JsonPrimitive(result.id),
@@ -65,7 +64,7 @@ fun searchPinFeature(result: SearchResult): Feature1 = Feature1(
 )
 
 fun savedPinFeature(place: SavedPlace): Feature1 = Feature1(
-    Point(Position(place.lon, place.lat)),
+    Point(GeoPoint(place.lon, place.lat)),
     JsonObject(
         mapOf(
             "name" to JsonPrimitive(place.name),
@@ -76,7 +75,7 @@ fun savedPinFeature(place: SavedPlace): Feature1 = Feature1(
 )
 
 fun familyPinFeature(member: FamilyMember): Feature1 = Feature1(
-    Point(Position(member.lng, member.lat)),
+    Point(GeoPoint(member.lng, member.lat)),
     JsonObject(
         mapOf(
             "id" to JsonPrimitive(member.id),

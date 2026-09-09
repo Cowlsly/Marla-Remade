@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- The pair prompt appears over Settings, so the window itself draws nothing and the Compose
+         scrim is the only thing between the card and the page underneath. Same recipe as
+         `Theme.SharePopup`, which is the repo's other over-another-app Compose surface. -->
+    <style name="Theme.CastPair" parent="Theme.General">
+        <item name="android:windowBackground">@android:color/transparent</item>
+        <item name="android:windowIsTranslucent">true</item>
+    </style>
+</resources>

@@ -14,7 +14,7 @@ import java.io.IOException
  * before the user unlocks after a reboot.
  *
  * Absence is a supported state, not an error: every reader treats a zero handle as "no data",
- * so beacon lookups fall through to gs-loc and the geocoder reports itself unavailable.
+ * so beacon lookups miss and the geocoder reports itself unavailable.
  */
 object OfflineDatabases {
     const val GEOCODER = "geocoder.geodb"

@@ -111,10 +111,12 @@ for entry in "${MODELS[@]}"; do
     echo "             ^ update the pin for ${graph} in this script, then re-pin the"
     echo "               layer digest with maml_convert.py --print-digest"
     fail=1
+    continue
   else
     printf '  MISMATCH %-8s\n             want %s\n             got  %s\n' "$graph" "$want" "$got"
     echo "             Upstream moved. Re-run with --update to accept it." >&2
     fail=1
+    continue
   fi
 
   extra=""

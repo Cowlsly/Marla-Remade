@@ -29,6 +29,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
 import com.vayunmathur.library.util.NavBackStack
+import com.vayunmathur.library.util.sharedText
 import com.vayunmathur.library.ui.IconDelete
 import com.vayunmathur.library.ui.IconLink
 import com.vayunmathur.library.ui.IconLinkOff
@@ -151,9 +152,17 @@ fun PasskeyPage(
                 }
             }
         }
-        DetailCard(stringResource(R.string.passkey_rp_name), passkey.rpName)
+        DetailCard(
+            stringResource(R.string.passkey_rp_name),
+            passkey.rpName,
+            sharedKey = "passkey-name-${passkey.id}",
+        )
         DetailCard(stringResource(R.string.passkey_rp_id), passkey.rpId)
-        DetailCard(stringResource(R.string.passkey_user_name), passkey.userName)
+        DetailCard(
+            stringResource(R.string.passkey_user_name),
+            passkey.userName,
+            sharedKey = "passkey-user-${passkey.id}",
+        )
         DetailCard(stringResource(R.string.passkey_user_display_name), passkey.userDisplayName)
         DetailCard(
             stringResource(R.string.passkey_credential_id),
@@ -165,12 +174,16 @@ fun PasskeyPage(
 }
 
 @Composable
-private fun DetailCard(label: String, value: String) {
+private fun DetailCard(label: String, value: String, sharedKey: Any? = null) {
     Card(shape = RoundedCornerShape(8.dp), modifier = Modifier.fillMaxWidth()) {
         Column(Modifier.padding(12.dp)) {
             Text(label, style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
             Spacer(Modifier.height(4.dp))
-            Text(value.ifBlank { "—" }, style = MaterialTheme.typography.bodyLarge)
+            Text(
+                value.ifBlank { "—" },
+                style = MaterialTheme.typography.bodyLarge,
+                modifier = if (sharedKey == null) Modifier else Modifier.sharedText(sharedKey),
+            )
         }
     }
 }

@@ -401,6 +401,16 @@ pub struct Layer {
     /// behaviour and what MapLibre does with no variable anchor declared.
     pub variable_anchor: Vec<Anchor>,
     pub min_zoom: u8,
+    /// The floor that applies while *browsing*, i.e. with no category filter active.
+    ///
+    /// `min_zoom` says which zooms the archive is worth asking for. This says which zooms are
+    /// worth *showing* when the user has not asked for anything in particular. They differ for
+    /// exactly one reason: a category chip should reach further out than the ambient map does.
+    /// Restaurants everywhere at z12 is clutter; restaurants at z12 *because you tapped
+    /// Restaurants* is the feature.
+    ///
+    /// Defaults to `min_zoom`, so a layer that does not set it behaves exactly as before.
+    pub browse_min_zoom: u8,
     pub max_zoom: u8,
     /// The `style/basemap.json` layer this was transcribed from.
     ///
@@ -472,6 +482,24 @@ impl Layer {
     /// appeared and vanished while zooming.
     pub fn draws_at(&self, zoom: u8) -> bool {
         zoom >= self.min_zoom && zoom <= self.max_zoom
+    }
+
+    /// [`draws_at`](Self::draws_at), but honouring the browse floor unless this layer is what the
+    /// user asked for.
+    ///
+    /// `focused` means at least one of this layer's kinds is in the active category filter. When
+    /// it is, the layer falls back to its data floor and appears as early as the archive allows;
+    /// when it is not, [`browse_min_zoom`](Self::browse_min_zoom) applies.
+    pub fn draws_at_focused(&self, zoom: u8, focused: bool) -> bool {
+        let floor = if focused { self.min_zoom } else { self.browse_min_zoom.max(self.min_zoom) };
+        zoom >= floor && zoom <= self.max_zoom
+    }
+
+    /// Does the active category filter name any of this layer's kinds?
+    ///
+    /// An empty filter is "no category selected", not "select nothing", so it focuses nothing.
+    pub fn focused_by(&self, filter: &KindFilter) -> bool {
+        !filter.is_empty() && self.kind_ids.iter().any(|k| filter.admits(self, *k))
     }
 
     /// This label's size in px at `zoom`, for a place of population rank `pop`.

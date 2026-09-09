@@ -27,7 +27,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
-import org.maplibre.spatialk.geojson.Position
+import com.vayunmathur.library.map.GeoPoint
 
 /**
  * Process-global state machine for an in-progress navigation session.
@@ -115,7 +115,7 @@ object NavigationSessionManager {
     private lateinit var appContext: Context
 
     private var polylineIndex: PolylineIndex? = null
-    private var destination: Position? = null
+    private var destination: GeoPoint? = null
     private var lastSegmentIndex: Int = 0
     private var offRouteSinceMs: Long? = null
     private var lastRecalcMs: Long = 0L
@@ -147,7 +147,7 @@ object NavigationSessionManager {
     fun start(
         route: RouteService.Route,
         mode: TravelMode,
-        destination: Position,
+        destination: GeoPoint,
         destinationLabel: String,
     ) {
         if (!initialized.load()) {
@@ -294,7 +294,7 @@ object NavigationSessionManager {
         if (_state.value is NavState.Arrived || _state.value is NavState.Failed) return
 
         val index = polylineIndex ?: return
-        val position = Position(longitude = location.longitude, latitude = location.latitude)
+        val position = GeoPoint(longitude = location.longitude, latitude = location.latitude)
         val snap = index.snap(position, lastSegmentIndex)
         lastSegmentIndex = snap.segmentIndex
 
@@ -348,7 +348,7 @@ object NavigationSessionManager {
     // Off-route recalculation
     // ----------------------------------------------------------------
 
-    private fun triggerRecalculate(from: Position) {
+    private fun triggerRecalculate(from: GeoPoint) {
         val dest = destination ?: return
         val mode = _session.value.travelMode ?: return
         Log.i(TAG, "off-route; recalculating from $from to $dest (attempt ${recalcAttempts + 1})")

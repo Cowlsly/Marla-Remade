@@ -74,6 +74,9 @@ data class ContactGroupMembership(val contactId: Long, val groupId: Long)
  * the navigating members keep their no-op defaults and are overridden per screen, since the
  * ViewModel has no back stack.
  */
+/** Query-token separator. Hoisted so a keystroke does not recompile the pattern. */
+private val WHITESPACE = Regex("\\s+")
+
 class ContactViewModel(application: Application) : AndroidViewModel(application), ContactsActions {
 
     private val dataStore = DataStoreUtils.getInstance(application)
@@ -96,22 +99,37 @@ class ContactViewModel(application: Application) : AndroidViewModel(application)
 
     private fun accountKey(type: String?, name: String?): String = "${type ?: ""}|${name ?: ""}"
 
+    /**
+     * Each contact paired with the lowercased text [filterBySearch] matches against.
+     *
+     * Built once per change to the address book rather than once per keystroke. The haystack
+     * concatenates every name, nickname, phone number, email, note and company a contact has and
+     * then lowercases the lot; doing that for the whole book between two frames of typing was the
+     * expensive half of search, and none of it depends on what was typed.
+     */
+    private val searchIndex: StateFlow<List<Pair<com.vayunmathur.contacts.data.Contact, String>>> =
+        _allContacts
+            .map { all -> all.map { it to searchHaystack(it) } }
+            .flowOn(Dispatchers.Default)
+            .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
+
     val contacts: StateFlow<List<com.vayunmathur.contacts.data.Contact>> = combine(
-        _allContacts,
+        searchIndex,
         _searchQuery,
         hiddenAccounts
-    ) { all, query, hidden ->
-        val filtered = all.filter { c ->
+    ) { indexed, query, hidden ->
+        val visible = indexed.filter { (c, _) ->
             val key = accountKey(c.accountType, c.accountName)
             // Support legacy hidden entries that stored only accountName
             key !in hidden && c.accountName !in hidden
         }
-        filterBySearch(filtered, query)
+        val tokens = query.trim().lowercase().split(WHITESPACE).filter { it.isNotBlank() }
+        if (tokens.isEmpty()) visible.map { it.first }
+        else visible.filter { (_, haystack) -> tokens.all { haystack.contains(it) } }
+            .map { it.first }
     }
-        // viewModelScope is Main.immediate, so without this the whole address book was filtered
-        // on the UI thread on every keystroke - and filterBySearch builds a fresh concatenated,
-        // lowercased haystack per contact, so that is O(contacts x fields) of string allocation
-        // between one frame and the next.
+        // viewModelScope is Main.immediate, so without this the whole address book was filtered on
+        // the UI thread between one frame of typing and the next.
         .flowOn(Dispatchers.Default)
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
 
@@ -226,26 +244,20 @@ class ContactViewModel(application: Application) : AndroidViewModel(application)
     }
 
     /**
-     * In-memory search over the provider-backed contact list. Splits the query
-     * into whitespace-separated tokens; a contact matches when every token is a
-     * case-insensitive substring of its searchable text (names, nicknames, phone
-     * numbers, emails, notes, organizations). An empty query returns the full list.
+     * The lowercased text a contact is matched against: names, nicknames, phone numbers, emails,
+     * notes and organizations, run together.
+     *
+     * Built once per contact when the address book changes (see [searchIndex]), not per keystroke.
+     * A query matches when every whitespace-separated token is a substring of this.
      */
-    private fun filterBySearch(list: List<Contact>, query: String): List<Contact> {
-        val tokens = query.trim().lowercase().split(Regex("\\s+")).filter { it.isNotBlank() }
-        if (tokens.isEmpty()) return list
-        return list.filter { contact ->
-            val haystack = buildString {
-                append(contact.details.names.joinToString(" ") { it.value }); append(' ')
-                append(contact.details.nicknames.joinToString(" ") { it.nickname }); append(' ')
-                append(contact.details.phoneNumbers.joinToString(" ") { it.number }); append(' ')
-                append(contact.details.emails.joinToString(" ") { it.address }); append(' ')
-                append(contact.details.notes.joinToString(" ") { it.content }); append(' ')
-                append(contact.details.orgs.joinToString(" ") { it.company })
-            }.lowercase()
-            tokens.all { haystack.contains(it) }
-        }
-    }
+    private fun searchHaystack(contact: Contact): String = buildString {
+        append(contact.details.names.joinToString(" ") { it.value }); append(' ')
+        append(contact.details.nicknames.joinToString(" ") { it.nickname }); append(' ')
+        append(contact.details.phoneNumbers.joinToString(" ") { it.number }); append(' ')
+        append(contact.details.emails.joinToString(" ") { it.address }); append(' ')
+        append(contact.details.notes.joinToString(" ") { it.content }); append(' ')
+        append(contact.details.orgs.joinToString(" ") { it.company })
+    }.lowercase()
 
     fun setCalendarSyncEnabled(enabled: Boolean) {
         viewModelScope.launch {

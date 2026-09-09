@@ -192,6 +192,7 @@ class SetupViewModel(app: Application) : AndroidViewModel(app) {
         // itself as soon as there is a network. Done here rather than at the Wi-Fi step so it
         // still happens on a device that finished setup offline.
         system.enableAutomaticTime()
+        system.seedDisplayMirroring()
         if (disableOemUnlocking) system.setOemUnlockAllowedByUser(false)
         system.markSetupComplete(activity)
         system.finishAllTasks(activity)

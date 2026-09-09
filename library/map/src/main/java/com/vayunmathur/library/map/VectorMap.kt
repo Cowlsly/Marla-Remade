@@ -58,6 +58,10 @@ import kotlin.math.roundToInt
  * @param userPuck the user's own location, drawn inside the renderer's frame so it stays
  *   glued to the ground while the map moves. Defaults to drawing nothing; see [UserPuck]
  *   for why this is not a [MapMarker].
+ * @param regionMask dims everything outside the administrative region it names, for showing
+ *   which city or country a details sheet is about. Drawn inside the renderer's frame for the
+ *   same reason as [userPuck]: an overlay composed on top would lag the map by a frame while
+ *   panning. `null` draws no mask.
  * @param onFrame called after each presented frame.
  *
  *   Kept for `library/map/src/androidTest/.../BasemapScreenshotTest.kt`, which counts frames
@@ -80,12 +84,13 @@ fun VectorMap(
     options: MapOptions = MapOptions(),
     imageOverlay: ImageOverlay? = null,
     userPuck: UserPuck? = null,
+    regionMask: RegionMask? = null,
     onMapClick: (GeoPoint) -> Unit = {},
     /**
      * Tap with the screen point attached (see [MapClick]): what
      * `MapFeaturePicker`-style hit-testing needs. Null (default) means
-     * taps report geo only, exactly as before — existing call sites,
-     * including mapcompare, are unaffected.
+     * taps report geo only, exactly as before - existing call sites are
+     * unaffected.
      *
      * When [LayerOptions.poi] is on, [MapClick.poi] carries the topmost drawn POI under
      * the finger, so a host can open a place sheet for it and skip whatever it does with a
@@ -156,6 +161,7 @@ fun VectorMap(
             layerOptions = options.layerOptions,
             archivePath = archivePath,
             userPuck = userPuck,
+            regionMask = regionMask,
             modifier = Modifier.fillMaxSize(),
             onFrame = onFrame,
             fallback = fallback,

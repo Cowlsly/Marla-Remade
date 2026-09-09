@@ -221,9 +221,9 @@ impl Sink {
             self.props.push((NAME_KEY.to_string(), Value::String(name.to_string())));
         }
         if id != tilecodec::mamaps::body::ID_NONE {
-            if !crate::extract::is_label(class.layer) {
+            if !crate::extract::tracks_ids(class) {
                 return err(format!(
-                    "layer {} carries a feature id, which only places and poi may",
+                    "layer {} carries a feature id, which only places, poi and a boundaries region shape may",
                     class.layer,
                 ));
             }

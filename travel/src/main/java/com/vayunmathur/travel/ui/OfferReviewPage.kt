@@ -32,6 +32,8 @@ import com.vayunmathur.library.ui.Text
 import com.vayunmathur.library.ui.TopAppBar
 import com.vayunmathur.library.ui.appBarScrollBehavior
 import com.vayunmathur.library.util.NavBackStack
+import com.vayunmathur.library.util.sharedContainer
+import com.vayunmathur.library.util.sharedText
 import com.vayunmathur.travel.Route
 import com.vayunmathur.travel.network.OfferDto
 import com.vayunmathur.travel.network.SliceDto
@@ -76,8 +78,17 @@ fun OfferReviewPage(
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.spacedBy(12.dp),
             ) {
-                AirlineLogo(offer.ownerLogoUrl, offer.ownerIata, size = 40.dp)
-                Text(offer.owner.ifBlank { stringResource(R.string.flight) }, style = MaterialTheme.typography.titleLarge)
+                AirlineLogo(
+                    offer.ownerLogoUrl,
+                    offer.ownerIata,
+                    size = 40.dp,
+                    modifier = Modifier.sharedContainer("travel-offer-logo-${route.offerId}"),
+                )
+                Text(
+                    offer.owner.ifBlank { stringResource(R.string.flight) },
+                    style = MaterialTheme.typography.titleLarge,
+                    modifier = Modifier.sharedText("travel-offer-owner-${route.offerId}"),
+                )
             }
 
             val chips = conditionsLabels(offer.conditions)

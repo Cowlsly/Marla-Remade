@@ -76,6 +76,18 @@ public class UpdateEngine {
         throw new UnsupportedOperationException("stub");
     }
 
+    /**
+     * Unbinds the last bound callback.
+     *
+     * <p>Returns false when the unbind failed. The GrapheneOS updater logs that case rather than
+     * ignoring it, because a callback left registered against the update_engine service outlives
+     * the object that owns it, and a later {@code bind} in the same process then competes with
+     * a stale registration.
+     */
+    public boolean unbind() {
+        throw new UnsupportedOperationException("stub");
+    }
+
     public void applyPayload(String url, long offset, long size, String[] headerKeyValuePairs) {
         throw new UnsupportedOperationException("stub");
     }

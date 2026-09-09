@@ -59,12 +59,17 @@ internal object MapNative {
      * Longitude and latitude are `Float` rather than `Double` deliberately: a float has
      * ~7 significant digits, which at the equator is about a centimetre, and the camera
      * is a viewing position rather than a measurement.
+     *
+     * [bearing] is degrees clockwise from north for whatever points up the screen. Zero
+     * is north-up, which is every frame the Compose path draws; the native side
+     * short-circuits it, so a north-up frame composes exactly the matrices it always did.
      */
     external fun render(
         handle: Long,
         centerLon: Float,
         centerLat: Float,
         zoom: Float,
+        bearing: Float,
         widthDp: Float,
         heightDp: Float,
         density: Float,
@@ -129,6 +134,64 @@ internal object MapNative {
 
     /** Take the puck away: no fix, or a host that stopped asking for one. */
     external fun clearUserPuck(handle: Long)
+
+    /**
+     * Draw a navigation route line over the basemap and under the puck.
+     *
+     * [points] is a flat `[lon0, lat0, lon1, lat1, …]` array — one array rather than a
+     * list of objects because a route is thousands of points and a per-point crossing is
+     * exactly what this boundary exists to avoid. `Float` for the same reason [render]'s
+     * coordinates are. A trailing odd element is ignored, and fewer than two distinct
+     * points draws nothing.
+     *
+     * One polyline and one colour, which is what the consumer draws — see [RouteStyle].
+     *
+     * Not free, but paid **once**: the native side tessellates the polyline on the calling
+     * thread and uploads it. It never rebuilds it after that — the mesh is normalised into
+     * the route's own bounding square, and Web Mercator is a pure scale in zoom, so the
+     * same vertices are correct at every zoom and only the matrix changes per frame. A
+     * navigation session therefore costs one tessellation, not one per zoom step, which is
+     * the difference that matters on a car's power budget.
+     *
+     * An array that cannot be read leaves the route **unchanged** rather than clearing it:
+     * a bad frame of route data must not blank a route being followed.
+     *
+     * Widths are Dp and colours are ARGB, like everything else here.
+     */
+    external fun setRoute(
+        handle: Long,
+        points: FloatArray,
+        widthDp: Float,
+        casingDp: Float,
+        color: Int,
+        casingColor: Int,
+    )
+
+    /** Take the route away: navigation ended, or the host cleared it. */
+    external fun clearRoute(handle: Long)
+
+    /**
+     * Dim everything outside the region containing [lon]/[lat], and return which region
+     * that is.
+     *
+     * Takes a point rather than a region id because nothing in the archive links a place to
+     * its outline: a city is a `places` node with its own OSM id, while its boundary is a
+     * `boundaries` relation, and OSM does not oblige the node to belong to the relation.
+     * Containment is the link.
+     *
+     * [levelMin]/[levelMax] bound the OSM `admin_level` band the selection means, inclusive.
+     * They are required because containment alone is ambiguous: every label sits inside a
+     * whole stack of regions, so without a level a tap on a state resolves to whichever
+     * county its label happens to sit in.
+     *
+     * Returns the region's OSM relation id, or 0 when no resident tile covers the point.
+     * Callers can tell "there is no region here" from "the tiles have not landed yet" only by
+     * retrying, which is why the id comes back rather than nothing.
+     */
+    external fun setRegionMask(handle: Long, lon: Float, lat: Float, levelMin: Int, levelMax: Int): Long
+
+    /** Take the region mask away: the details sheet closed, or the selection moved on. */
+    external fun clearRegionMask(handle: Long)
 
     /**
      * Pick placed labels (task 17): the last frame's placed symbol labels

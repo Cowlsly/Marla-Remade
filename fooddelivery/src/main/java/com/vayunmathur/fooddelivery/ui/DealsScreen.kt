@@ -38,6 +38,7 @@ import com.vayunmathur.library.ui.LinearProgressIndicator
 import com.vayunmathur.library.ui.MaterialTheme
 import com.vayunmathur.library.ui.Scaffold
 import com.vayunmathur.library.ui.Text
+import com.vayunmathur.library.util.sharedText
 import com.vayunmathur.fooddelivery.R
 import com.vayunmathur.fooddelivery.api.BitesApi
 import com.vayunmathur.fooddelivery.data.Deal
@@ -126,8 +127,15 @@ private fun DealCard(deal: Deal, progress: DealProgress?, onClick: () -> Unit) {
                 Text(deal.title, style = MaterialTheme.typography.titleSmall,
                     fontWeight = FontWeight.Bold)
                 if (deal.merchantName.isNotEmpty()) {
+                    // Shares the restaurant's name key with the Home card. Both are pages of the
+                    // same pager with Cart between them, and TabbedPagerScaffold composes only the
+                    // settled page, so the morph never has two origins to choose from. Guarded on
+                    // merchantId because a deal without one opens nothing and several such deals
+                    // would collide on the same key.
                     Text(deal.merchantName, style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = if (deal.merchantId == 0) Modifier
+                            else Modifier.sharedText("food-merchant-name-${deal.merchantId}"))
                 }
                 if (deal.description.isNotEmpty()) {
                     Spacer(Modifier.height(4.dp))

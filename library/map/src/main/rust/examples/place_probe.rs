@@ -40,9 +40,9 @@ impl RangeReader for CurlReader {
 }
 
 fn main() {
-    // mapcompare-ish phone viewport. Assumption noted: collision outcome
+    // Phone viewport. Assumption noted: collision outcome
     // scales with viewport, so counts are comparative, not absolute.
-    // The comparator is side-by-side (two weight(1f) panels): each map gets
+    // Side-by-side layout (two weight(1f) panels): each map gets
     // HALF the phone width. Override with HALF=0 for a full-width run.
     let half = std::env::var("HALF").map(|v| v != "0").unwrap_or(true);
     let (w, h) = if half { (205.0, 800.0) } else { (411.0, 891.0) };
@@ -53,6 +53,7 @@ fn main() {
         width_dp: w,
         height_dp: h,
         density: 3.0,
+        bearing_deg: 0.0,
     };
     let extent = ((camera.width_dp * camera.density) as u32, (camera.height_dp * camera.density) as u32);
     println!("camera    z6 SF viewport {extent:?} device px");

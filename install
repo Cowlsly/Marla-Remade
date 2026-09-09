@@ -416,13 +416,21 @@ else
   exit 1
 fi
 
+# --- Extra Gradle args: cap R8 workers for 'release all' (whole-repo minified build) ---
+GRADLE_ARGS=()
+gradle_args_str=""
+if [[ "$VARIANT_LC" == "release" && $ALL_EXPANDED -eq 1 ]]; then
+  GRADLE_ARGS+=(-P"android.r8.maxWorkers=8" --continue)
+  gradle_args_str=" -Pandroid.r8.maxWorkers=8 --continue"
+fi
+
 if [[ $DRY_RUN -eq 1 ]]; then
-  echo "[DRY-RUN] Would execute: $SCRIPT_DIR/gradlew $tasks_str"
+  echo "[DRY-RUN] Would execute: $SCRIPT_DIR/gradlew $tasks_str$gradle_args_str"
   exit 0
 fi
-echo "Running: $SCRIPT_DIR/gradlew $tasks_str"
+echo "Running: $SCRIPT_DIR/gradlew $tasks_str$gradle_args_str"
 echo ""
 
 # Execute with all tasks expanded via index loop (preserving word splitting safety)
 set +u
-exec "$SCRIPT_DIR/gradlew" "${TASKS[@]}"
+exec "$SCRIPT_DIR/gradlew" "${TASKS[@]}" "${GRADLE_ARGS[@]}"

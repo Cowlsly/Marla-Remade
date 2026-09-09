@@ -247,6 +247,21 @@ abstract class FFDatabase : RoomDatabase() {
             // a stale last known position. Existing rows were all live reports, so `reportedAt`
             // backfills from `timestamp` and `source` defaults to LIVE. The index mirrors the
             // existing (userid, timestamp) one because getLatest now ranks on `reportedAt`.
+            //
+            // The `DEFAULT` clauses below exist only because SQLite requires one to add a NOT NULL
+            // column to a populated table. They are NOT part of the schema Room expects: the
+            // entity declares no `@ColumnInfo(defaultValue = ...)`, so Room's expected
+            // `TableInfo.Column.defaultValue` is null and its equality check skips the comparison
+            // entirely. That is what makes this migration validate.
+            //
+            // FORWARD HAZARD, and it is a quiet one. These defaults persist in the migrated
+            // schema forever, while a fresh install's `createAllTables` creates the same columns
+            // with no default at all. Upgraded and clean databases therefore differ in
+            // `dflt_value` — invisibly, today. The day someone adds
+            // `@ColumnInfo(defaultValue = ...)` to `reportedAt` or `source`, Room starts comparing
+            // that field and the two populations stop behaving alike: one may validate and the
+            // other throw at open, on the upgrade path only, which no fresh-install test reaches.
+            // If you add an entity default here, rebuild the table rather than trusting ALTER.
             androidx.room3.migration.Migration(11, 12) {
                 it.execSQL("ALTER TABLE `LocationValue` ADD COLUMN `reportedAt` INTEGER NOT NULL DEFAULT 0")
                 it.execSQL("UPDATE `LocationValue` SET `reportedAt` = `timestamp`")

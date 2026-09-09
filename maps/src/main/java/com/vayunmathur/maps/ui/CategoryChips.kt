@@ -2,7 +2,9 @@ package com.vayunmathur.maps.ui
 
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Modifier
@@ -62,16 +64,21 @@ val MAP_CATEGORIES: List<MapCategory> = listOf(
  * with the tapped [MapCategory] — on browse this toggles the on-map POI filter,
  * on the search page it runs the category's Google query. [selected] is the
  * currently-active category (shown highlighted), or null when none is active.
+ *
+ * [contentPadding] is the row's inset, and is applied *inside* the scroll rather than
+ * around it. A margin on the modifier would clip the first and last chip against the
+ * inset edge instead of letting them scroll past it.
  */
 @Composable
 fun CategoryChips(
     onCategory: (MapCategory) -> Unit,
     modifier: Modifier = Modifier,
     selected: MapCategory? = null,
+    contentPadding: PaddingValues = PaddingValues(0.dp),
 ) {
     val haptics = rememberHaptics()
     Row(
-        modifier = modifier.horizontalScroll(rememberScrollState()),
+        modifier = modifier.horizontalScroll(rememberScrollState()).padding(contentPadding),
         horizontalArrangement = Arrangement.spacedBy(Spacing.sm),
     ) {
         // Material's unselected filter chip has a *transparent* container. On the

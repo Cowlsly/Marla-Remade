@@ -18,7 +18,7 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
-import org.maplibre.spatialk.geojson.Position
+import com.vayunmathur.library.map.GeoPoint
 
 /**
  * A single row in the search list. Since search is now Google-only (Decision D2,
@@ -199,7 +199,8 @@ class MapsSearchViewModel(application: Application) : AndroidViewModel(applicati
                 hit?.let {
                     osmPlace(
                         name = it.name.ifBlank { it.address ?: address },
-                        position = Position(it.lng, it.lat),
+                        position = GeoPoint(it.lng, it.lat),
+                        poiType = null,
                     )
                 }
             )
@@ -233,7 +234,7 @@ class MapsSearchViewModel(application: Application) : AndroidViewModel(applicati
      * else. It is also a mapped-file read, hence [osmPlace] and this suspend.
      */
     suspend fun toFeature(result: SearchResult): SpecificFeature.GenericPlace =
-        osmPlace(name = result.title, position = Position(result.lon, result.lat))
+        osmPlace(name = result.title, position = GeoPoint(result.lon, result.lat))
 
     /**
      * Reverse-geocode [lat],[lon] to the nearest addressable place and hand it
@@ -248,7 +249,7 @@ class MapsSearchViewModel(application: Application) : AndroidViewModel(applicati
                 hit?.let {
                     osmPlace(
                         name = it.name.ifBlank { it.address ?: "" },
-                        position = Position(it.lng, it.lat),
+                        position = GeoPoint(it.lng, it.lat),
                     )
                 }
             )

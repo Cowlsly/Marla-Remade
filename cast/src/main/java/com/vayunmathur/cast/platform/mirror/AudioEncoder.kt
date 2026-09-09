@@ -5,6 +5,7 @@ import android.media.AudioAttributes
 import android.media.AudioFormat
 import android.media.AudioPlaybackCaptureConfiguration
 import android.media.AudioRecord
+import android.media.MediaRecorder
 import android.media.projection.MediaProjection
 import android.util.Log
 
@@ -30,7 +31,7 @@ private const val TAG = "AudioEncoder"
  * `RECORD_AUDIO` is required even though no microphone is involved - the permission gates
  * `AudioRecord` itself, not the source.
  */
-class AudioEncoder(private val projection: MediaProjection) : AudioStream {
+class AudioEncoder(private val projection: MediaProjection?) : AudioStream {
 
     private var record: AudioRecord? = null
     private val opus = OpusEncoder()
@@ -39,11 +40,6 @@ class AudioEncoder(private val projection: MediaProjection) : AudioStream {
     override fun start(): Boolean {
         if (!opus.start()) return false
         return try {
-            val config = AudioPlaybackCaptureConfiguration.Builder(projection)
-                .addMatchingUsage(AudioAttributes.USAGE_MEDIA)
-                .addMatchingUsage(AudioAttributes.USAGE_GAME)
-                .addMatchingUsage(AudioAttributes.USAGE_UNKNOWN)
-                .build()
             val format = AudioFormat.Builder()
                 .setEncoding(AudioFormat.ENCODING_PCM_16BIT)
                 .setSampleRate(OpusEncoder.SAMPLE_RATE)
@@ -54,11 +50,34 @@ class AudioEncoder(private val projection: MediaProjection) : AudioStream {
                 AudioFormat.CHANNEL_IN_STEREO,
                 AudioFormat.ENCODING_PCM_16BIT,
             ).coerceAtLeast(OpusEncoder.FRAME_BYTES * 4)
-            val created = AudioRecord.Builder()
+            val builder = AudioRecord.Builder()
                 .setAudioFormat(format)
                 .setBufferSizeInBytes(minBuffer)
-                .setAudioPlaybackCaptureConfig(config)
-                .build()
+            if (projection != null) {
+                // Screen mirroring. AudioPlaybackCapture is scoped by the projection the user
+                // consented to, and honours each app's own allowCapture policy.
+                val config = AudioPlaybackCaptureConfiguration.Builder(projection)
+                    .addMatchingUsage(AudioAttributes.USAGE_MEDIA)
+                    .addMatchingUsage(AudioAttributes.USAGE_GAME)
+                    .addMatchingUsage(AudioAttributes.USAGE_UNKNOWN)
+                    .build()
+                builder.setAudioPlaybackCaptureConfig(config)
+            } else {
+                // Desktop mode. There is no projection to scope a capture with - that is the
+                // point of the path - so audio comes from REMOTE_SUBMIX, the source the platform
+                // provides for remote displays. It needs CAPTURE_AUDIO_OUTPUT, which is
+                // signature|privileged and allowlisted for this app in
+                // privapp-permissions-modern-apps.xml.
+                //
+                // TWO DIFFERENCES FROM THE MIRRORING PATH, both inherent to the source:
+                //  - It takes the whole output mix, not a per-usage selection, so it is not
+                //    filtered by USAGE the way the capture config above is.
+                //  - It does NOT honour an app's allowCapture policy, because that policy is
+                //    enforced by AudioPlaybackCapture rather than by REMOTE_SUBMIX. An app that
+                //    opts out of being captured is still audible on the TV.
+                builder.setAudioSource(MediaRecorder.AudioSource.REMOTE_SUBMIX)
+            }
+            val created = builder.build()
             if (created.state != AudioRecord.STATE_INITIALIZED) {
                 Log.w(TAG, "AudioRecord did not initialise")
                 created.release()

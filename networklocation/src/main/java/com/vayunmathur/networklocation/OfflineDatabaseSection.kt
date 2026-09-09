@@ -25,10 +25,10 @@ import com.vayunmathur.library.util.DataStoreUtils
  * fetch what is not.
  *
  * The download is user-initiated rather than automatic because it is several gigabytes, and
- * unmetered-only so it never lands on a cellular bill. Nothing here gates the provider — the two
- * framework services keep running throughout, resolving beacons via gs-loc while the stores are
- * missing. Only geocoding is genuinely unavailable until `geocoder.geodb` arrives, since it has
- * no online fallback.
+ * unmetered-only so it never lands on a cellular bill. Nothing here gates the provider - the two
+ * framework services keep running throughout, but with no store present every beacon lookup
+ * misses, so no position is reported until `wifi.wpsdb` / `cells.wpsdb` arrive. Geocoding is
+ * likewise unavailable until `geocoder.geodb` arrives.
  */
 @Composable
 fun OfflineDatabaseSection(modifier: Modifier = Modifier) {

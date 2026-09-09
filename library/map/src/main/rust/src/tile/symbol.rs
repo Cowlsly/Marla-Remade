@@ -134,6 +134,10 @@ fn sprite_for(kind: u16) -> Option<Sprite> {
 /// for hamlets) standing in for the authored data-driven size arms. The style carries
 /// those arms properly now - see `Layer::text_size_for` - so the caller resolves the
 /// size and this just draws it.
+///
+/// `rotation` is the camera's `(cos, sin)` (see [`crate::camera::Camera::rotation`]): the
+/// emitted quads are counter-rotated about the anchor so the label stays **upright**
+/// under a heading-up camera. `(1.0, 0.0)` is north-up and costs nothing.
 #[allow(clippy::too_many_arguments)]
 pub fn emit_label(
     label: &ShapedLabel,
@@ -141,10 +145,12 @@ pub fn emit_label(
     offset_em: (f32, f32),
     text_px: f32,
     tile_span_px: f32,
+    rotation: (f32, f32),
     vertices: &mut Vec<f32>,
     indices: &mut Vec<u32>,
 ) {
     let atlas = crate::tile::glyph::atlas();
+    let start = vertices.len();
     text::emit(
         atlas,
         label.weight,
@@ -157,6 +163,7 @@ pub fn emit_label(
         vertices,
         indices,
     );
+    text::upright(&mut vertices[start..], label.anchor, rotation);
 }
 
 /// Emit one POI icon's quad, centred on the label's anchor point.
@@ -169,12 +176,17 @@ pub fn emit_label(
 /// Goes into a **separate** buffer from the text: the two sample different atlases through
 /// different fragment shaders (a picture against a distance field), so they cannot share a
 /// draw even though they share a pipeline layout and a vertex format.
+///
+/// `rotation` counter-rotates the quad exactly as it does for the text beside it, so a POI
+/// pictogram stays the right way up under a heading-up camera.
+#[allow(clippy::too_many_arguments)]
 pub fn emit_icon(
     label: &ShapedLabel,
     sprite: Sprite,
     dark: bool,
     density: f32,
     tile_span_px: f32,
+    rotation: (f32, f32),
     vertices: &mut Vec<f32>,
     indices: &mut Vec<u32>,
 ) {
@@ -193,11 +205,13 @@ pub fn emit_icon(
     let dv = if dark { crate::tile::sprite::atlas().dark_v_offset() } else { 0.0 };
     let (v0, v1) = (uv.v0 + dv, uv.v1 + dv);
     let base = (vertices.len() / FLOATS_PER_VERTEX) as u32;
+    let start = vertices.len();
     vertices.extend_from_slice(&[x0, y0, uv.u0, v0]);
     vertices.extend_from_slice(&[x1, y0, uv.u1, v0]);
     vertices.extend_from_slice(&[x1, y1, uv.u1, v1]);
     vertices.extend_from_slice(&[x0, y1, uv.u0, v1]);
     indices.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
+    text::upright(&mut vertices[start..], label.anchor, rotation);
 }
 
 /// The feature's point in tile-local 0..1. Places are single-point features; the
@@ -327,6 +341,7 @@ mod tests {
             halo_dark: 0xFFE2DFDA,
             halo_width: 1.0,
             min_zoom: 0,
+            browse_min_zoom: 0,
             max_zoom: 22,
             authored: "places_country".to_string(),
         };
@@ -433,6 +448,7 @@ mod tests {
             halo_dark: 0xFF0D1B2A,
             halo_width: 1.0,
             min_zoom: 0,
+            browse_min_zoom: 0,
             max_zoom: 22,
             authored: "pois".to_string(),
         }

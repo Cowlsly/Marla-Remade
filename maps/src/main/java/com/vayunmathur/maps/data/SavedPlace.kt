@@ -1,6 +1,6 @@
 package com.vayunmathur.maps.data
 
-import org.maplibre.spatialk.geojson.Position
+import com.vayunmathur.library.map.GeoPoint
 import kotlinx.serialization.Serializable
 
 /**
@@ -18,7 +18,7 @@ data class SavedPlace(val name: String, val lat: Double, val lon: Double) {
             phone = null,
             website = null,
             openingHours = null,
-            position = Position(lon, lat),
+            position = GeoPoint(lon, lat),
         )
 
     /** True if [feature] is the same place that is stored in this slot. */

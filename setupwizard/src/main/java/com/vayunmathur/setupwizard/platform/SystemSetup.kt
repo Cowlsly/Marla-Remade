@@ -265,6 +265,30 @@ class SystemSetup(context: Context) {
         }.onFailure { Log.w(TAG, "could not enable automatic time", it) }
     }
 
+    // ---- displays -------------------------------------------------------------------------
+
+    /**
+     * Default a cast display to mirroring rather than extending.
+     *
+     * `enable_display_content_mode_management` moved the platform default for a connected
+     * display to extended, so casting puts an empty desktop on the TV until someone finds the
+     * switch buried on that display's page under Connected Displays. Mirroring is what casting
+     * is taken to mean; the switch still overrides this.
+     *
+     * Written only when the setting is absent, never when it is present and zero:
+     * `finishSetup` runs again on every launch after setup, and an unconditional write would
+     * undo a deliberate choice of desktop mode each time. [Settings.Secure], so each user seeds
+     * their own.
+     */
+    fun seedDisplayMirroring() {
+        runCatching {
+            val resolver = appContext.contentResolver
+            if (Settings.Secure.getString(resolver, SETTING_MIRROR_BUILT_IN_DISPLAY) != null) {
+                return@runCatching
+            }
+            Settings.Secure.putInt(resolver, SETTING_MIRROR_BUILT_IN_DISPLAY, 1)
+        }.onFailure { Log.w(TAG, "could not seed display mirroring", it) }
+    }
 
     // ---- emergency dialer -----------------------------------------------------------------
 
@@ -335,6 +359,9 @@ class SystemSetup(context: Context) {
 
         /** `Settings.Secure.USER_SETUP_COMPLETE` is itself `@hide`. */
         const val SETTING_USER_SETUP_COMPLETE = "user_setup_complete"
+
+        /** `Settings.Secure.MIRROR_BUILT_IN_DISPLAY` is itself `@hide`. */
+        const val SETTING_MIRROR_BUILT_IN_DISPLAY = "mirror_built_in_display"
     }
 }
 

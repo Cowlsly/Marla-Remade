@@ -114,5 +114,6 @@ private fun ProfileRow(profile: Profile, backStack: NavBackStack<Route>) {
         supportingText = profile.serviceProvider.ifBlank { profile.iccidDisplay },
         onClick = { backStack.add(Route.ProfileDetail(profile.iccid)) },
         leadingContent = { IconSim() },
+        titleSharedKey = "euicc-profile-name-${profile.iccid}",
     )
 }

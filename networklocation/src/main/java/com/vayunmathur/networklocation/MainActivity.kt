@@ -40,9 +40,11 @@ class MainActivity : ComponentActivity() {
                             style = MaterialTheme.typography.headlineSmall,
                         )
                         Text(
-                            "Provides the system network-location provider (via the " +
-                                "GrapheneOS proxy) and an on-device, offline geocoder. " +
-                                "Always on — there is no disable switch.",
+                            "Provides the system network-location provider and an " +
+                                "on-device, offline geocoder. Both resolve entirely on " +
+                                "device from the downloaded databases below — nothing is " +
+                                "sent to a positioning service. Always on — there is no " +
+                                "disable switch.",
                             modifier = Modifier.padding(top = 12.dp),
                             style = MaterialTheme.typography.bodyMedium,
                         )

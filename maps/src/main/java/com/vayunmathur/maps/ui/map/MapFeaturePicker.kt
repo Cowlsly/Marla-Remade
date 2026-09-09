@@ -6,6 +6,7 @@ import androidx.compose.ui.unit.DpSize
 import com.vayunmathur.library.map.GeoPoint
 import com.vayunmathur.library.map.PlacedLabel
 import com.vayunmathur.maps.data.Feature1
+import com.vayunmathur.maps.data.Point
 import com.vayunmathur.maps.data.SpecificFeature
 import com.vayunmathur.maps.data.transit.TransitStop
 import com.vayunmathur.maps.ui.FAMILY_LOCATION_LAYER_ID
@@ -18,10 +19,8 @@ import com.vayunmathur.maps.ui.toSelectedFamilyMember
 import com.vayunmathur.maps.ui.toSelectedSavedPlace
 import com.vayunmathur.maps.ui.toSelectedSearchResult
 import com.vayunmathur.maps.ui.toTransitStop
-import com.vayunmathur.maps.util.toPosition
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
-import org.maplibre.spatialk.geojson.Point
 
 /**
  * What a tap on the map resolved to.
@@ -179,7 +178,7 @@ class MapFeaturePicker(
         fun PlacedLabel.toFeature1(): Feature1? {
             if (nativeToBase(layerId) == null) return null
             return Feature1(
-                Point(position.toPosition()),
+                Point(position),
                 JsonObject(
                     mapOf(
                         "kind" to JsonPrimitive(kind),

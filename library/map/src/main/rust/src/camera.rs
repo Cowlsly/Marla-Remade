@@ -34,6 +34,13 @@ pub struct Camera {
     pub height_dp: f32,
     /// Device pixels per Dp. The only place a physical pixel enters.
     pub density: f32,
+    /// Which compass direction points **up** the screen, in degrees clockwise from
+    /// north. Zero is north-up, which is every path but heading-up car navigation.
+    ///
+    /// A rotation, not a tilt: the projection stays orthographic, so this composes
+    /// into the clip matrices as a plain 2x2 and nothing downstream needs a
+    /// perspective divide. Tilt would be a different and much larger change.
+    pub bearing_deg: f64,
 }
 
 /// A point in Web Mercator world pixels at some zoom.
@@ -70,13 +77,58 @@ pub fn unproject(x: f64, y: f64, zoom: f64) -> (f64, f64) {
 }
 
 impl Camera {
+    /// `(cos, sin)` of the bearing: the 2x2 that turns a world-px offset from the camera
+    /// centre into a screen-px offset.
+    ///
+    /// Public because the symbol path needs the inverse of it — labels counter-rotate to
+    /// stay upright, see [`crate::tess::text::upright`] — and deriving the angle twice is
+    /// how the two would eventually disagree.
+    ///
+    /// Short-circuited at zero so the north-up path — every phone frame — takes the
+    /// literal `(1, 0)` rather than `cos(0)`/`sin(0)`, and the matrices below reduce
+    /// term by term to the unrotated ones.
+    pub fn rotation(&self) -> (f64, f64) {
+        if self.bearing_deg == 0.0 {
+            return (1.0, 0.0);
+        }
+        let radians = self.bearing_deg.to_radians();
+        (radians.cos(), radians.sin())
+    }
+
     /// The world-px position of the viewport's top-left corner.
+    ///
+    /// Only meaningful north-up: a rotated viewport has no axis-aligned corner in world
+    /// space. Anything that needs the ground a rotated viewport covers wants
+    /// [`viewport_bounds`](Self::viewport_bounds) instead.
     pub fn viewport_origin(&self) -> WorldPx {
         let center = project(self.center_lon, self.center_lat, self.zoom);
         WorldPx {
             x: center.x - self.width_dp as f64 / 2.0,
             y: center.y - self.height_dp as f64 / 2.0,
         }
+    }
+
+    /// The world-px axis-aligned box the viewport covers.
+    ///
+    /// **Larger than the viewport whenever the camera is rotated**, and that is the whole
+    /// reason this exists: a 45-degree bearing makes the covered box up to `sqrt(2)` times
+    /// the viewport across each axis, so a caller that derived it from an unrotated
+    /// `origin .. origin + size` leaves the four corners of the screen uncovered. At
+    /// bearing zero it is exactly `viewport_origin() .. + (width, height)`.
+    pub fn viewport_bounds(&self) -> (WorldPx, WorldPx) {
+        let center = project(self.center_lon, self.center_lat, self.zoom);
+        let (cos, sin) = self.rotation();
+        let half_w = self.width_dp as f64 / 2.0;
+        let half_h = self.height_dp as f64 / 2.0;
+        // The half-extents of the rotated rectangle's bounding box: the support function
+        // of a box under a rotation, which is why the terms are absolute values rather
+        // than signed — the widest corner is on a different side for each quadrant.
+        let extent_x = cos.abs() * half_w + sin.abs() * half_h;
+        let extent_y = sin.abs() * half_w + cos.abs() * half_h;
+        (
+            WorldPx { x: center.x - extent_x, y: center.y - extent_y },
+            WorldPx { x: center.x + extent_x, y: center.y + extent_y },
+        )
     }
 
     /// The screen size of one tile at zoom level `z`, in logical px.
@@ -103,20 +155,46 @@ impl Camera {
     /// easy to miss on a symmetric city and obvious on a coastline.
     pub fn tile_to_clip(&self, z: u8, x: u32, y: u32) -> [f32; 16] {
         let span = self.tile_span_dp(z);
-        let origin = self.viewport_origin();
-        let tile_x = x as f64 * span;
-        let tile_y = y as f64 * span;
+        self.world_quad_to_clip(WorldPx { x: x as f64 * span, y: y as f64 * span }, span)
+    }
 
-        let sx = 2.0 * span / self.width_dp as f64;
-        let sy = 2.0 * span / self.height_dp as f64;
-        let tx = 2.0 * (tile_x - origin.x) / self.width_dp as f64 - 1.0;
-        let ty = 2.0 * (tile_y - origin.y) / self.height_dp as f64 - 1.0;
+    /// Column-major 4x4 taking a local 0..1 square to Vulkan clip space, where the
+    /// square's `(0, 0)` corner sits at `origin` world px and its side is `span` world px
+    /// at this camera's zoom.
+    ///
+    /// [`tile_to_clip`](Self::tile_to_clip) is the case where the square is a tile. A
+    /// geographic overlay — a route line — is the case where it is not: its geometry is
+    /// normalised into its own bounding square rather than into a tile, because it is not
+    /// tile-bound and never goes through tile decode. Sharing the derivation is what keeps
+    /// the overlay glued to the same ground as the basemap under it.
+    ///
+    /// Bearing enters here and only here (plus its screen-anchored sibling below), as the
+    /// rotation that takes a world-px offset from the camera centre to a screen-px offset:
+    ///
+    /// ```text
+    /// screen = ( cos*dx + sin*dy,
+    ///           -sin*dx + cos*dy )
+    /// ```
+    ///
+    /// with `dx`/`dy` measured from the centre. Its sign is fixed by what heading-up
+    /// means: at a bearing of 90 the camera faces east, so east has to come out pointing
+    /// up the screen and north pointing left. Getting it backwards mirrors the turn.
+    pub fn world_quad_to_clip(&self, origin: WorldPx, span: f64) -> [f32; 16] {
+        let center = project(self.center_lon, self.center_lat, self.zoom);
+        let (cos, sin) = self.rotation();
+        // Measured from the camera centre, not from a viewport corner: a rotated viewport
+        // has no world-space corner to measure from, and the centre is the fixed point of
+        // the rotation.
+        let dx = origin.x - center.x;
+        let dy = origin.y - center.y;
+        let kx = 2.0 / self.width_dp as f64;
+        let ky = 2.0 / self.height_dp as f64;
 
         [
-            sx as f32, 0.0, 0.0, 0.0, //
-            0.0, sy as f32, 0.0, 0.0, //
+            (kx * cos * span) as f32, (ky * -sin * span) as f32, 0.0, 0.0, //
+            (kx * sin * span) as f32, (ky * cos * span) as f32, 0.0, 0.0, //
             0.0, 0.0, 1.0, 0.0, //
-            tx as f32, ty as f32, 0.0, 1.0,
+            (kx * (cos * dx + sin * dy)) as f32, (ky * (-sin * dx + cos * dy)) as f32, 0.0, 1.0,
         ]
     }
 
@@ -133,20 +211,29 @@ impl Camera {
     ///
     /// The y-sign note on [`tile_to_clip`](Self::tile_to_clip) applies here too: Vulkan
     /// clip y and Mercator y both point down, so there is no flip.
+    ///
+    /// The quad's own axes **rotate with the map** under a bearing, rather than staying
+    /// screen-aligned. That is what keeps the puck's bearing cone honest: the cone's angle
+    /// is a geographic heading resolved inside the shader against the quad's local frame,
+    /// so a frame that turns with the map leaves a north-pointing cone pointing north on
+    /// the ground and up the screen when the camera faces north. Freezing the axes to the
+    /// screen instead would leave the cone pointing at the top of a heading-up display no
+    /// matter which way the car was going. The puck's dot and rim are circles, so the
+    /// choice is invisible to everything else the quad draws.
     pub fn screen_quad_to_clip(&self, lon: f64, lat: f64, radius_dp: f64) -> [f32; 16] {
-        let center = project(lon, lat, self.zoom);
-        let origin = self.viewport_origin();
-
-        let sx = 2.0 * radius_dp / self.width_dp as f64;
-        let sy = 2.0 * radius_dp / self.height_dp as f64;
-        let tx = 2.0 * (center.x - origin.x) / self.width_dp as f64 - 1.0;
-        let ty = 2.0 * (center.y - origin.y) / self.height_dp as f64 - 1.0;
+        let anchor = project(lon, lat, self.zoom);
+        let center = project(self.center_lon, self.center_lat, self.zoom);
+        let (cos, sin) = self.rotation();
+        let dx = anchor.x - center.x;
+        let dy = anchor.y - center.y;
+        let kx = 2.0 / self.width_dp as f64;
+        let ky = 2.0 / self.height_dp as f64;
 
         [
-            sx as f32, 0.0, 0.0, 0.0, //
-            0.0, sy as f32, 0.0, 0.0, //
+            (kx * cos * radius_dp) as f32, (ky * -sin * radius_dp) as f32, 0.0, 0.0, //
+            (kx * sin * radius_dp) as f32, (ky * cos * radius_dp) as f32, 0.0, 0.0, //
             0.0, 0.0, 1.0, 0.0, //
-            tx as f32, ty as f32, 0.0, 1.0,
+            (kx * (cos * dx + sin * dy)) as f32, (ky * (-sin * dx + cos * dy)) as f32, 0.0, 1.0,
         ]
     }
 }
@@ -163,6 +250,7 @@ mod tests {
             width_dp: 512.0,
             height_dp: 512.0,
             density: 1.0,
+            bearing_deg: 0.0,
         }
     }
 
@@ -226,6 +314,7 @@ mod tests {
             width_dp: 512.0,
             height_dp: 512.0,
             density: 1.0,
+            bearing_deg: 0.0,
         };
         // The tile containing SF at z10, and SF's tile-local position in it.
         let world = project(-122.4194, 37.7749, 10.0);
@@ -350,6 +439,121 @@ mod tests {
         let (left, _) = transform(&m, -1.0, 0.0);
         let (right, _) = transform(&m, 1.0, 0.0);
         assert!(left > 1.0 && right > 1.0, "Paris at {left}..{right} should be off to the right");
+    }
+
+    // --- bearing ------------------------------------------------------------
+
+    #[test]
+    fn a_zero_bearing_leaves_every_matrix_exactly_as_it_was() {
+        // The whole Compose/phone path runs at bearing zero, so this is the regression
+        // guard for it: the rotated derivation must reduce term for term, not merely to
+        // within a tolerance.
+        let north_up = Camera { center_lon: -122.4194, center_lat: 37.7749, ..camera(12.0) };
+        let m = north_up.tile_to_clip(12, 654, 1583);
+        assert_eq!(m[1], 0.0, "no shear into y");
+        assert_eq!(m[4], 0.0, "no shear into x");
+        let quad = north_up.screen_quad_to_clip(-122.4194, 37.7749, 28.0);
+        assert_eq!(quad[1], 0.0);
+        assert_eq!(quad[4], 0.0);
+    }
+
+    #[test]
+    fn a_bearing_of_ninety_puts_east_at_the_top_of_the_screen() {
+        // The sign of the rotation, which is the one thing easy to get backwards: facing
+        // east means east is up and north is to the left. A mirrored rotation sends the
+        // car around every corner the wrong way.
+        let heading_east = Camera { bearing_deg: 90.0, ..camera(10.0) };
+        let centre = project(0.0, 0.0, 10.0);
+        let span = heading_east.tile_span_dp(10);
+        // A point one tile-span due east of the camera centre, addressed through the
+        // shared quad matrix so this pins the same arithmetic every draw uses.
+        let m = heading_east
+            .world_quad_to_clip(WorldPx { x: centre.x + span, y: centre.y }, span);
+        let (x, y) = transform(&m, 0.0, 0.0);
+        assert!(x.abs() < 1e-5, "east must sit on the vertical centreline, not at x {x}");
+        assert!(y < -1e-3, "east must be above the centre, not at y {y}");
+
+        // And due north lands to the left.
+        let north = heading_east
+            .world_quad_to_clip(WorldPx { x: centre.x, y: centre.y - span }, span);
+        let (nx, ny) = transform(&north, 0.0, 0.0);
+        assert!(nx < -1e-3, "north must be left of centre, not at x {nx}");
+        assert!(ny.abs() < 1e-5, "north must sit on the horizontal centreline, not at y {ny}");
+    }
+
+    #[test]
+    fn the_camera_centre_stays_on_the_clip_origin_at_every_bearing() {
+        // The rotation's fixed point. If it drifts, the map slides sideways as the car
+        // turns instead of pivoting under the puck.
+        for bearing in [0.0, 37.0, 90.0, 180.0, 271.5, -45.0] {
+            let camera = Camera {
+                center_lon: -122.4194,
+                center_lat: 37.7749,
+                bearing_deg: bearing,
+                ..camera(14.0)
+            };
+            let m = camera.screen_quad_to_clip(-122.4194, 37.7749, 28.0);
+            let (x, y) = transform(&m, 0.0, 0.0);
+            assert!(x.abs() < 1e-5, "bearing {bearing}: x {x}");
+            assert!(y.abs() < 1e-5, "bearing {bearing}: y {y}");
+        }
+    }
+
+    #[test]
+    fn rotation_preserves_ground_distance_on_a_square_viewport() {
+        // A rotation must not scale: two points a tile apart have to stay a tile apart on
+        // screen whichever way the camera faces, or roads change width as the car turns.
+        let span = camera(10.0).tile_span_dp(10);
+        let centre = project(0.0, 0.0, 10.0);
+        let length = |bearing: f64| {
+            let c = Camera { bearing_deg: bearing, ..camera(10.0) };
+            let m = c.world_quad_to_clip(WorldPx { x: centre.x + span, y: centre.y }, span);
+            let (x, y) = transform(&m, 0.0, 0.0);
+            (x * x + y * y).sqrt()
+        };
+        let north_up = length(0.0);
+        for bearing in [17.0, 45.0, 90.0, 213.0] {
+            assert!(
+                (length(bearing) - north_up).abs() < 1e-5,
+                "bearing {bearing} scaled the map: {} vs {north_up}",
+                length(bearing),
+            );
+        }
+    }
+
+    #[test]
+    fn the_viewport_bounds_are_the_plain_viewport_when_north_up() {
+        let camera = Camera { center_lon: -122.4194, center_lat: 37.7749, ..camera(14.0) };
+        let (min, max) = camera.viewport_bounds();
+        let origin = camera.viewport_origin();
+        assert!((min.x - origin.x).abs() < 1e-9, "{} vs {}", min.x, origin.x);
+        assert!((min.y - origin.y).abs() < 1e-9);
+        assert!((max.x - (origin.x + camera.width_dp as f64)).abs() < 1e-9);
+        assert!((max.y - (origin.y + camera.height_dp as f64)).abs() < 1e-9);
+    }
+
+    #[test]
+    fn a_rotated_viewport_covers_more_ground_than_an_axis_aligned_one() {
+        // The corners of a rotated screen reach further out in world space than the
+        // screen's own width and height. This is what tile selection has to be derived
+        // from; deriving it from the unrotated box leaves the corners of the display
+        // permanently empty.
+        let square = Camera { bearing_deg: 45.0, ..camera(14.0) };
+        let (min, max) = square.viewport_bounds();
+        let across = max.x - min.x;
+        let expected = 512.0 * 2f64.sqrt();
+        assert!((across - expected).abs() < 1e-6, "{across} should be {expected}");
+
+        // Every corner of the rotated viewport really is inside the box.
+        let centre = project(square.center_lon, square.center_lat, square.zoom);
+        let radians = 45f64.to_radians();
+        for (sx, sy) in [(-256.0, -256.0), (256.0, -256.0), (256.0, 256.0), (-256.0, 256.0)] {
+            // Screen offset back to world: the inverse of the rotation the matrix applies.
+            let wx: f64 = centre.x + radians.cos() * sx - radians.sin() * sy;
+            let wy: f64 = centre.y + radians.sin() * sx + radians.cos() * sy;
+            assert!(wx >= min.x - 1e-6 && wx <= max.x + 1e-6, "corner x {wx} outside the box");
+            assert!(wy >= min.y - 1e-6 && wy <= max.y + 1e-6, "corner y {wy} outside the box");
+        }
     }
 }
 

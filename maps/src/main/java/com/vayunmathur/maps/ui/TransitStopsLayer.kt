@@ -39,7 +39,7 @@ fun TransitStopsLayer() {
  */
 fun Feature1.toTransitStop(): TransitStop? {
     val props = properties ?: return null
-    val position = (geometry as? org.maplibre.spatialk.geojson.Point)?.coordinates ?: return null
+    val position = (geometry as? com.vayunmathur.maps.data.Point)?.coordinates ?: return null
     val name = props.string("name")?.ifBlank { null }
     val motisId = props.string("motis_id")?.ifBlank { null }
     val id = motisId ?: name ?: return null

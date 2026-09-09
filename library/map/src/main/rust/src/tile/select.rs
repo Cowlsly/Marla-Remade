@@ -1,6 +1,6 @@
 //! Which tiles cover the viewport.
 //!
-//! A pure function of the camera, so it cannot accidentally depend on GPU state. Two
+//! A pure function of the camera, so it cannot accidentally depend on GPU state. Three
 //! behaviours are load-bearing:
 //!
 //! * **Overzoom.** Past the archive's `max_zoom` the same tiles are kept and drawn
@@ -10,6 +10,12 @@
 //!   gets antimeridian wrapping from MapLibre; the five consumer apps show a city, and
 //!   duplicating every tile's geometry to render the seam twice would cost more than it
 //!   is worth.
+//! * **Rotation widens the footprint.** Coverage comes from
+//!   [`Camera::viewport_bounds`], which is the bounding box of the *rotated* viewport,
+//!   not `origin .. origin + size`. A heading-up camera at 45 degrees covers `sqrt(2)`
+//!   times the viewport across each axis, and a selection derived from the unrotated box
+//!   leaves the four corners of the display blank — which is exactly where the road the
+//!   driver is about to turn onto is.
 
 use crate::camera::{Camera, TILE_SIZE};
 
@@ -75,6 +81,10 @@ pub fn stands_in_for_visible(key: u64, visible: &[TileId], depth: u8) -> bool {
 }
 
 /// The tiles covering `camera`'s viewport, clamped to the archive's zoom range.
+///
+/// Coverage is the bounding box of the viewport **as the camera actually orients it**, so
+/// a bearing pulls in the extra ring of tiles the rotated corners reach into. At bearing
+/// zero the box is the viewport and this is what it always was.
 pub fn visible(camera: &Camera, min_zoom: u8, max_zoom: u8) -> Vec<TileId> {
     if camera.width_dp <= 0.0 || camera.height_dp <= 0.0 {
         return Vec::new();
@@ -82,12 +92,12 @@ pub fn visible(camera: &Camera, min_zoom: u8, max_zoom: u8) -> Vec<TileId> {
     let z = (camera.zoom.floor().max(0.0) as u32).clamp(min_zoom as u32, max_zoom as u32) as u8;
     let n = 1i64 << z;
     let span = camera.tile_span_dp(z);
-    let origin = camera.viewport_origin();
+    let (min, max) = camera.viewport_bounds();
 
-    let min_tx = (origin.x / span).floor() as i64;
-    let max_tx = ((origin.x + camera.width_dp as f64) / span).floor() as i64;
-    let min_ty = (origin.y / span).floor() as i64;
-    let max_ty = ((origin.y + camera.height_dp as f64) / span).floor() as i64;
+    let min_tx = (min.x / span).floor() as i64;
+    let max_tx = (max.x / span).floor() as i64;
+    let min_ty = (min.y / span).floor() as i64;
+    let max_ty = (max.y / span).floor() as i64;
 
     let mut out = Vec::new();
     for ty in min_ty..=max_ty {
@@ -156,9 +166,13 @@ pub fn resident_set(camera: &Camera, min_zoom: u8, max_zoom: u8) -> Vec<TileId> 
 }
 
 /// A rough bound on how many tiles a viewport can want, for capacity hints.
+///
+/// Measured off the same rotated box [`visible`] selects from, so it stays a bound rather
+/// than becoming a lie the moment the camera turns.
 pub fn bound(camera: &Camera) -> usize {
-    let across = camera.width_dp as f64 / TILE_SIZE + 2.0;
-    let down = camera.height_dp as f64 / TILE_SIZE + 2.0;
+    let (min, max) = camera.viewport_bounds();
+    let across = (max.x - min.x) / TILE_SIZE + 2.0;
+    let down = (max.y - min.y) / TILE_SIZE + 2.0;
     (across * down).ceil() as usize
 }
 
@@ -174,6 +188,7 @@ mod tests {
             width_dp: w,
             height_dp: h,
             density: 1.0,
+            bearing_deg: 0.0,
         }
     }
 
@@ -247,6 +262,66 @@ mod tests {
         let tiles = visible(&c, 0, 16);
         assert!(tiles.len() <= bound(&c), "{} exceeds the bound {}", tiles.len(), bound(&c));
         assert!(!tiles.is_empty(), "a phone viewport at z14 covers tiles");
+    }
+
+    #[test]
+    fn a_rotated_viewport_pulls_in_the_tiles_its_corners_reach() {
+        // The heading-up failure this guards: a rotated screen's corners stick out past
+        // the unrotated box, and a selection that ignores that leaves them blank. z12 with
+        // a phone-shaped viewport at 45 degrees must ask for strictly more than north-up
+        // does, and every north-up tile must still be in the set.
+        let north_up = camera(-122.4194, 37.7749, 12.0, 411.0, 891.0);
+        let turned = Camera { bearing_deg: 45.0, ..north_up };
+        let straight = visible(&north_up, 0, 16);
+        let rotated = visible(&turned, 0, 16);
+        assert!(
+            rotated.len() > straight.len(),
+            "a 45-degree camera covers more ground: {} vs {}",
+            rotated.len(),
+            straight.len(),
+        );
+        for tile in &straight {
+            assert!(rotated.contains(tile), "{tile:?} was dropped by the rotation");
+        }
+    }
+
+    #[test]
+    fn every_corner_of_a_rotated_viewport_lands_in_a_selected_tile() {
+        // The property that actually matters, checked against the same rotation the clip
+        // matrix applies rather than against a tile count: whatever the bearing, the
+        // ground under each corner of the screen belongs to a tile that was asked for.
+        for bearing in [0.0, 30.0, 45.0, 90.0, 137.0, 250.0, -80.0] {
+            let c = Camera { bearing_deg: bearing, ..camera(2.3522, 48.8566, 13.0, 411.0, 891.0) };
+            let tiles = visible(&c, 0, 16);
+            let span = c.tile_span_dp(13);
+            let centre = crate::camera::project(c.center_lon, c.center_lat, c.zoom);
+            let radians = bearing.to_radians();
+            let (half_w, half_h) = (c.width_dp as f64 / 2.0, c.height_dp as f64 / 2.0);
+            for (sx, sy) in [
+                (-half_w, -half_h),
+                (half_w, -half_h),
+                (half_w, half_h),
+                (-half_w, half_h),
+            ] {
+                let wx = centre.x + radians.cos() * sx - radians.sin() * sy;
+                let wy = centre.y + radians.sin() * sx + radians.cos() * sy;
+                let tx = (wx / span).floor() as i64;
+                let ty = (wy / span).floor() as i64;
+                assert!(
+                    tiles.iter().any(|t| t.x as i64 == tx && t.y as i64 == ty),
+                    "bearing {bearing}: nothing covers the corner in tile 13/{tx}/{ty}",
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn the_rotated_tile_count_stays_within_the_area_bound() {
+        // The bound is what sizes the residency hint, so it has to grow with the rotation
+        // rather than being quietly exceeded by every turned frame.
+        let c = Camera { bearing_deg: 45.0, ..camera(-122.4194, 37.7749, 14.0, 411.0, 891.0) };
+        let tiles = visible(&c, 0, 16);
+        assert!(tiles.len() <= bound(&c), "{} exceeds the bound {}", tiles.len(), bound(&c));
     }
 
     #[test]

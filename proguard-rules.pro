@@ -31,7 +31,7 @@
 # points nowhere near the real cause.
 
 # library/jni-http/src/main/rust/src/lib.rs:78,121 — every .so reaches the network
-# through this one bridge, so this covers maps, mapcompare, youpipe, weather, ...
+# through this one bridge, so this covers maps, youpipe, weather, ...
 -keep class com.vayunmathur.library.network.NativeHttpBridge {
     public static byte[] request(int, java.lang.String, byte[], byte[]);
 }

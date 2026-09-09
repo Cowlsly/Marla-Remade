@@ -28,6 +28,7 @@ import com.vayunmathur.library.ui.IconNavigation
 import com.vayunmathur.library.ui.IconPlay
 import com.vayunmathur.library.ui.appBarScrollBehavior
 import com.vayunmathur.library.util.NavBackStack
+import com.vayunmathur.library.util.sharedText
 import androidx.compose.ui.res.stringResource
 import com.vayunmathur.education.R
 
@@ -38,8 +39,15 @@ fun LessonPage(backStack: NavBackStack<Route>, viewModel: EducationViewModel, le
     val lesson = content.lesson(lessonId)
 
     AppScaffold(
-        title = lesson?.title ?: stringResource(R.string.lesson),
-        backStack = backStack,
+        title = {
+            Text(
+                lesson?.title ?: stringResource(R.string.lesson),
+                modifier = lesson
+                    ?.let { Modifier.sharedText("education-lesson-title-${it.id}") }
+                    ?: Modifier,
+            )
+        },
+        onNavigateBack = { backStack.pop() },
         scrollBehavior = appBarScrollBehavior(),
     ) { padding ->
         if (lesson == null) {

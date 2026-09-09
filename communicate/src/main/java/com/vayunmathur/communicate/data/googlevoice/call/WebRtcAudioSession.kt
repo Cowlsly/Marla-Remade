@@ -32,8 +32,7 @@ import kotlinx.coroutines.CompletableDeferred
  * ICE fully before handing the SDP back (non-trickle) to keep the SIP body self-contained.
  *
  * Exposes mute (sender track enabled), speaker routing (AudioManager), and DTMF via the
- * audio [RtpSender]'s [DtmfSender] (`insertDtmf`). Uses the maintained
- * `io.getstream:stream-webrtc-android` prebuilt (`org.webrtc.*`).
+ * audio [RtpSender]'s [DtmfSender] (`insertDtmf`).
  */
 class WebRtcAudioSession(private val appContext: Context) {
 

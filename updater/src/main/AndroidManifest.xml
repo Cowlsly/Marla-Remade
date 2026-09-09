@@ -57,6 +57,15 @@
                 android:value="Downloads, signature-verifies and applies a full system OTA to the inactive A/B slot. The transfer is 1-2 GB and the slot write cannot be interrupted partway without leaving the update unusable." />
         </service>
 
+        <!--
+          BIND_JOB_SERVICE is required by the platform for any JobService. Idle detection is
+          the scheduler's (setRequiresDeviceIdle), not ours.
+        -->
+        <service
+            android:name=".platform.IdleReboot"
+            android:exported="false"
+            android:permission="android.permission.BIND_JOB_SERVICE" />
+
         <!-- Re-schedules the periodic check; see the class doc for why it does not install. -->
         <receiver
             android:name=".platform.UpdateBootReceiver"
@@ -68,11 +77,11 @@
         </receiver>
 
         <!--
-          Not exported: the only intents it accepts come from this app's own PendingIntents, and
-          what they lead to is rebooting the device.
+          Not exported: the only intent it accepts comes from this app's own PendingIntent on
+          the update-ready notification, and what it does is reboot the device.
         -->
         <receiver
-            android:name=".platform.IdleRebootReceiver"
+            android:name=".platform.RebootReceiver"
             android:exported="false" />
     </application>
 

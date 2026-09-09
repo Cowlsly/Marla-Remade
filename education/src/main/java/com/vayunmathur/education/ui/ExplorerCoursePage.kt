@@ -40,6 +40,7 @@ import com.vayunmathur.education.util.EducationViewModel
 import com.vayunmathur.library.ui.IconNavigation
 import com.vayunmathur.library.ui.appBarScrollBehavior
 import com.vayunmathur.library.util.NavBackStack
+import com.vayunmathur.library.util.sharedText
 import androidx.compose.ui.res.stringResource
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -52,8 +53,15 @@ fun ExplorerCoursePage(backStack: NavBackStack<Route>, viewModel: EducationViewM
         ?: SubjectColors(MaterialTheme.colorScheme.primaryContainer, MaterialTheme.colorScheme.onPrimaryContainer)
 
     AppScaffold(
-        title = course?.title ?: stringResource(R.string.topic),
-        backStack = backStack,
+        title = {
+            Text(
+                course?.title ?: stringResource(R.string.topic),
+                modifier = course
+                    ?.let { Modifier.sharedText("education-course-title-${it.id}") }
+                    ?: Modifier,
+            )
+        },
+        onNavigateBack = { backStack.pop() },
         scrollBehavior = appBarScrollBehavior(),
     ) { padding ->
         if (course == null) {
@@ -151,7 +159,11 @@ private fun PathNode(
                         fontWeight = FontWeight.Bold,
                     )
                 }
-                Text(unit.title, style = MaterialTheme.typography.titleMedium)
+                Text(
+                    unit.title,
+                    style = MaterialTheme.typography.titleMedium,
+                    modifier = Modifier.sharedText("education-unit-title-${unit.id}"),
+                )
                 Row(
                     Modifier.padding(top = 4.dp),
                     verticalAlignment = Alignment.CenterVertically,

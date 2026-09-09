@@ -33,6 +33,8 @@ import com.vayunmathur.games.alchemist.platform.AlchemistViewModel
 import com.vayunmathur.games.alchemist.platform.CollectionUiState
 import com.vayunmathur.games.alchemist.ui.components.DynamicAlchemyIcon
 import com.vayunmathur.library.util.NavBackStack
+import com.vayunmathur.library.util.sharedContent
+import com.vayunmathur.library.util.sharedCrop
 
 /** Binds [AlchemistViewModel] to the stateless [CollectionScreen]. */
 @Composable
@@ -89,11 +91,16 @@ fun CollectionScreen(
                 items(state.discoveredItems, key = { it.id }) { item ->
                     Column(
                         horizontalAlignment = Alignment.CenterHorizontally,
-                        modifier = Modifier.clickable { onOpenItemDetails(item.id) }
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clickable { onOpenItemDetails(item.id) }
+                            .sharedCrop("alchemist-item-${item.id}")
                     ) {
                         DynamicAlchemyIcon(
                             iconId = item.id,
-                            modifier = Modifier.size(64.dp)
+                            modifier = Modifier
+                                .size(64.dp)
+                                .sharedContent("alchemist-item-icon-${item.id}")
                         )
                         Text(
                             text = item.name,

@@ -5,6 +5,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.Modifier
 import androidx.compose.ui.res.stringResource
 import com.vayunmathur.euicc.R
 import com.vayunmathur.euicc.Route
@@ -19,6 +20,7 @@ import com.vayunmathur.library.ui.Text
 import com.vayunmathur.library.ui.TextButton
 import com.vayunmathur.library.ui.appBarScrollBehavior
 import com.vayunmathur.library.util.NavBackStack
+import com.vayunmathur.library.util.sharedText
 
 /**
  * One profile: what it is, and the three things that can be done to it.
@@ -57,8 +59,12 @@ fun ProfileDetailScreen(
     val currentlyEnabled = state.profiles.firstOrNull { it.isEnabled }
 
     DetailScaffold(
-        title = label,
-        backStack = backStack,
+        // The row the user tapped on the home list carries this name up into the bar. The slot
+        // overload rather than the `backStack` one, which only takes a plain String.
+        title = {
+            Text(label, modifier = Modifier.sharedText("euicc-profile-name-${profile.iccid}"))
+        },
+        onNavigateBack = { backStack.pop() },
         actions = {
             TextButton(onClick = { renaming = true }, enabled = !state.loading) {
                 Text(stringResource(R.string.rename_profile_title))

@@ -5,6 +5,7 @@ import android.os.ParcelFileDescriptor
 import android.os.SystemClock
 import android.util.Log
 import android.view.Surface
+import com.vayunmathur.cast.platform.remotedisplay.CastSystemDisplay
 import com.vayunmathur.cast.network.CastUdpTransport
 import com.vayunmathur.cast.protocol.NegotiatedStream
 import com.vayunmathur.cast.protocol.Negotiation
@@ -166,6 +167,7 @@ class MirrorEngine(
 
     private var transport: CastUdpTransport? = null
     private var capture: ScreenCapture? = null
+    private var systemDisplay: CastSystemDisplay? = null
     private var videoEncoder: VideoEncoder? = null
     private var audioEncoder: AudioStream? = null
 
@@ -263,6 +265,19 @@ class MirrorEngine(
                 }
                 capture = screen
             }
+            is MirrorSource.SystemDisplay -> {
+                // Same shape as ScreenCapture on purpose, but a system display rather than a
+                // mirror of the phone. The id is written back onto the source so the caller can
+                // publish it to the route - the framework will not go looking for it.
+                val desktop = CastSystemDisplay(appContext)
+                if (!desktop.start(surface, geometry, source.receiverId)) {
+                    encoder.release()
+                    desktop.release()
+                    return false
+                }
+                systemDisplay = desktop
+                source.displayId = desktop.displayId
+            }
             is MirrorSource.Content -> contentSurface = surface
         }
         Log.i(
@@ -275,6 +290,9 @@ class MirrorEngine(
         val sender = StreamSender(stream, udp, StreamingSession())
         senders[StreamKind.Video] = sender
         videoJob = scope.launch {
+            // A system display is a pending connection until the user picks mirror or desktop, so
+            // it is legitimately blank for as long as they take to answer.
+            val watchForNoOutput = source !is MirrorSource.SystemDisplay
             // When the encoder first produced anything, which is what the codec-config watchdog is
             // timed from. Zero until then, so a session whose content has not started drawing yet is
             // simply waiting rather than failing.
@@ -285,7 +303,13 @@ class MirrorEngine(
                 if (chunks.isEmpty()) {
                     // The one condition the codec-config watchdog below cannot reach, because its
                     // clock never starts. See [NO_VIDEO_OUTPUT_TIMEOUT_MS].
-                    if (firstOutputAt == 0L &&
+                    //
+                    // Disarmed for a system display, which is created as a pending connection and
+                    // composes nothing at all until the user answers the mirror-or-desktop dialog.
+                    // That is an unbounded wait on a person, so a fixed deadline here would end
+                    // the session while the sheet was still on screen.
+                    if (watchForNoOutput &&
+                        firstOutputAt == 0L &&
                         SystemClock.elapsedRealtime() - startedAt >= NO_VIDEO_OUTPUT_TIMEOUT_MS
                     ) {
                         Log.w(
@@ -324,6 +348,10 @@ class MirrorEngine(
     private fun startAudio(stream: NegotiatedStream, udp: CastUdpTransport): Boolean {
         val encoder = when (source) {
             is MirrorSource.Screen -> AudioEncoder(source.projection)
+            // Desktop mode has no MediaProjection to scope a capture with, so audio comes from
+            // REMOTE_SUBMIX instead - the platform's own remote-display audio source. Same
+            // encoder, different source; see AudioEncoder for what differs.
+            is MirrorSource.SystemDisplay -> AudioEncoder(projection = null)
             is MirrorSource.Content -> {
                 if (!source.wantAudio) return false
                 val pipe = try {
@@ -502,12 +530,14 @@ class MirrorEngine(
         }
         // The display goes before the encoder: it is what is writing into the encoder's surface.
         capture?.release()
+        systemDisplay?.release()
         videoEncoder?.release()
         audioEncoder?.release()
         transport?.close()
         // Only our own copy; the client's Binder-duplicated one is closed when the client goes away.
         runCatching { audioWriteEnd?.close() }
         capture = null
+        systemDisplay = null
         videoEncoder = null
         audioEncoder = null
         transport = null

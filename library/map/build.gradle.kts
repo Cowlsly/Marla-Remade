@@ -32,26 +32,23 @@ dependencies {
     // :sdk:games onto this module's compile classpath for one object.
     implementation(project(":library:network"))
 
-    // Own GeoPoint/GeoBounds – no spatialk exposure for non-maplibre apps.
-    // :maps gets spatialk transitively via maplibre-compose where required.
-    // spatialk dependency fully removed from :library:map after migration.
+    // Own GeoPoint/GeoBounds – this module has no third-party geometry dependency.
 
     // :library:image is deliberately gone: it existed to fetch and decode CARTO raster
     // PNGs, and there is no raster tile path any more.
 
     // The on-device screenshot harness (`src/androidTest`), which is the only way to see what
     // the renderer draws: Vulkan needs a real GPU, so the host probes can only measure the CPU
-    // pipeline. Coordinates are literal rather than catalog aliases on purpose — these are the
-    // only androidTest dependencies in the repo, and adding four aliases to the shared
-    // `gradle/libs.versions.toml` for one module's diagnostic is a conflict waiting to happen.
-    androidTestImplementation("androidx.test:runner:1.6.2")
-    androidTestImplementation("androidx.test:core:1.6.1")
-    androidTestImplementation("androidx.test.ext:junit:1.2.1")
+    // pipeline. These are the only androidTest dependencies in the repo; the coordinates live
+    // in the version catalog with the rest of the repo's dependencies.
+    androidTestImplementation(libs.androidx.test.runner)
+    androidTestImplementation(libs.androidx.test.core)
+    androidTestImplementation(libs.androidx.test.ext.junit)
     androidTestImplementation(platform(libs.androidx.compose.bom))
     androidTestImplementation(libs.androidx.activity.compose)
     androidTestImplementation(libs.androidx.compose.foundation)
     // Supplies the bare `ComponentActivity` the harness hosts the map in.
-    androidTestImplementation("androidx.compose.ui:ui-test-manifest")
+    androidTestImplementation(libs.androidx.compose.ui.test.manifest)
 }
 
 // The Vulkan vector-tile renderer: `library/map/src/main/rust`, on ash.

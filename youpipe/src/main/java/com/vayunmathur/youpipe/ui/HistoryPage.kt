@@ -79,6 +79,7 @@ fun HistoryPage(backStack: NavBackStack<Route>, youPipeViewModel: YouPipeViewMod
                             )
                         }
                     } else null,
+                    titleSharedKey = "youpipe-video-title-${historyItem.videoItem.videoID}",
                 )
             }
     }

@@ -9,10 +9,12 @@ agp = "9.4.0-alpha04"
 # lint version = 23 + AGP major (AGP 9.x -> lint 32.x)
 lint = "32.4.0-alpha04"
 kotlin = "2.4.0"
-kotlinGradlePlugin = "2.3.20"
+kotlinGradlePlugin = "2.4.0"
+# KSP 2.x is versioned independently of Kotlin: the `<kotlin>-<ksp>` scheme ended at
+# 2.2.21-2.0.5, and releases from 2.3.0 onwards carry KSP's own version. 2.3.10 is therefore
+# not skew against kotlin above, and no 2.4.x KSP release exists.
 ksp = "2.3.10"
 protobufPlugin = "0.10.0"
-protoc = "4.28.3"
 desugarJdkLibs = "2.1.5"
 
 # Kotlin stdlib ecosystem (JetBrains)
@@ -68,13 +70,24 @@ connectClient = "1.2.0-alpha04"
 # AndroidX – ink
 ink = "1.1.0-alpha04"
 
+# AndroidX – Android Auto (car app library), consumed by :maps
+carApp = "1.4.0"
+
+# AndroidX – instrumentation test (androidTest). Only :library:map's on-device renderer
+# harness uses these; they are three independently versioned artifacts, not one train.
+androidxTestRunner = "1.6.2"
+androidxTestCore = "1.6.1"
+androidxTestExtJunit = "1.2.1"
+
 # Google libraries
-protobuf = "4.36.0-RC1"
-protobufJavalite = "4.35.0"
+# One key for the entire protobuf toolchain — protobuf-java, protobuf-javalite and the protoc
+# compiler. Generated sources and the runtime that parses them must come from the same release,
+# so these are deliberately not separable: a bump here moves compiler and runtime together.
+protobufVersion = "4.35.0"
 # gRPC for the Accrescent app source (:appstore). grpc-java + grpc-kotlin coroutine stubs
 # over grpc-okhttp; the messages are generated as protobuf-lite to match the repo's other
-# protobuf module (:networklocation). These versions must stay mutually compatible with
-# protobufJavalite above and are the most likely first build-friction point.
+# protobuf module (:youpipe:extractor). These versions must stay mutually compatible with
+# protobufVersion above and are the most likely first build-friction point.
 grpc = "1.69.0"
 grpcKotlin = "1.4.1"
 # @javax.annotation.Generated referenced by grpc-java generated stubs.
@@ -83,8 +96,6 @@ jsr305 = "3.0.2"
 zxing = "3.5.4"
 libphonenumber = "9.0.34"
 brotli = "0.1.2"
-# Zstandard JNI bindings (com.github.luben) for the offline geocoder block codec.
-zstdJni = "1.5.6-9"
 # Standalone library from the AGP toolchain (com.android.tools.build), not the plugin —
 # :appstore uses it at runtime to verify APK source stamps.
 apksig = "8.7.3"
@@ -92,9 +103,6 @@ apksig = "8.7.3"
 # =============================================================================
 # THIRD PARTY
 # =============================================================================
-
-# Maps & geospatial
-maplibre = "0.13.0"
 
 # JavaScript engines & HTML
 quickjs = "1.0.5"
@@ -120,14 +128,9 @@ robolectric = "4.14.1"
 
 # Payments, telephony & auth
 stripe = "21.12.0"
-appauth = "0.11.1"
 
 # AppStore – Play install via Aurora
 gplayapi = "3.6.4"
-
-# Google Voice virtual line (:communicate) — maintained prebuilt WebRTC (org.webrtc.*)
-# for the calling audio session. HTTP + SIP WebSocket reuse :library:network (no OkHttp).
-streamWebrtc = "1.3.8"
 
 [libraries]
 kotlin-reflect = { module = "org.jetbrains.kotlin:kotlin-reflect", version.ref = "kotlin" }
@@ -247,10 +250,23 @@ androidx-ink-geometry = { group = "androidx.ink", name = "ink-geometry", version
 androidx-ink-strokes = { group = "androidx.ink", name = "ink-strokes", version.ref = "ink" }
 androidx-ink-rendering = { group = "androidx.ink", name = "ink-rendering", version.ref = "ink" }
 
+# AndroidX – Android Auto. `app` provides the CarAppService/Session/Screen template model;
+# `app-projected` provides the phone-projected (Android Auto) host connection.
+androidx-car-app = { module = "androidx.car.app:app", version.ref = "carApp" }
+androidx-car-app-projected = { module = "androidx.car.app:app-projected", version.ref = "carApp" }
+
+# AndroidX – instrumentation test (androidTest); see the version block above.
+androidx-test-runner = { module = "androidx.test:runner", version.ref = "androidxTestRunner" }
+androidx-test-core = { module = "androidx.test:core", version.ref = "androidxTestCore" }
+androidx-test-ext-junit = { module = "androidx.test.ext:junit", version.ref = "androidxTestExtJunit" }
+# Versioned by the Compose BOM.
+androidx-compose-ui-test-manifest = { group = "androidx.compose.ui", name = "ui-test-manifest" }
+
 # Google libraries
-protobuf-java = { module = "com.google.protobuf:protobuf-java", version.ref = "protobuf" }
-protobuf-javalite = { module = "com.google.protobuf:protobuf-javalite", version.ref = "protobufJavalite" }
-protobuf-kotlin-lite = { module = "com.google.protobuf:protobuf-kotlin-lite", version.ref = "protobufJavalite" }
+protobuf-java = { module = "com.google.protobuf:protobuf-java", version.ref = "protobufVersion" }
+protobuf-javalite = { module = "com.google.protobuf:protobuf-javalite", version.ref = "protobufVersion" }
+# The protoc compiler binary. :communicate appends a platform classifier to this coordinate.
+protobuf-protoc = { module = "com.google.protobuf:protoc", version.ref = "protobufVersion" }
 # gRPC runtime + codegen (:appstore Accrescent source)
 grpc-okhttp = { module = "io.grpc:grpc-okhttp", version.ref = "grpc" }
 grpc-protobuf-lite = { module = "io.grpc:grpc-protobuf-lite", version.ref = "grpc" }
@@ -263,15 +279,11 @@ google-jsr305 = { module = "com.google.code.findbugs:jsr305", version.ref = "jsr
 zxing-core = { module = "com.google.zxing:core", version.ref = "zxing" }
 libphonenumber = { module = "com.googlecode.libphonenumber:libphonenumber", version.ref = "libphonenumber" }
 brotli-dec = { module = "org.brotli:dec", version.ref = "brotli" }
-zstd-jni = { module = "com.github.luben:zstd-jni", version.ref = "zstdJni" }
 apksig = { module = "com.android.tools.build:apksig", version.ref = "apksig" }
 
 # =============================================================================
 # THIRD PARTY
 # =============================================================================
-
-# Maps & geospatial
-maplibre-compose = { module = "org.maplibre.compose:maplibre-compose", version.ref = "maplibre" }
 
 # JavaScript engines & HTML
 quickjs-kt = { module = "io.github.dokar3:quickjs-kt", version.ref = "quickjs" }
@@ -292,13 +304,9 @@ robolectric = { module = "org.robolectric:robolectric", version.ref = "robolectr
 
 # Payments, telephony & auth
 stripe-android = { module = "com.stripe:stripe-android", version.ref = "stripe" }
-appauth = { group = "net.openid", name = "appauth", version.ref = "appauth" }
 
 # AppStore – Play install via Aurora
 auroraoss-gplayapi = { module = "com.auroraoss:gplayapi", version.ref = "gplayapi" }
-
-# Google Voice virtual line (:communicate)
-stream-webrtc-android = { module = "io.getstream:stream-webrtc-android", version.ref = "streamWebrtc" }
 
 [plugins]
 

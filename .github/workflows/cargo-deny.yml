@@ -1,0 +1,96 @@
+name: "🔒 Cargo Deny"
+
+# Automated dependency monitoring for the Rust side of the tree
+# (SUPPLY_CHAIN_RISKS.md 6.4). Complements .github/dependabot.yml: Dependabot
+# proposes upgrades, this reports advisories/bans/sources on what is committed.
+#
+# The schedule matters as much as the PR trigger - an advisory can land against
+# an unchanged lockfile, which no pull_request run would ever catch.
+
+on:
+  pull_request:
+    branches:
+      - main
+    paths:
+      - "**/Cargo.toml"
+      - "**/Cargo.lock"
+      - "deny.toml"
+      - ".github/workflows/cargo-deny.yml"
+  push:
+    branches:
+      - main
+    paths:
+      - "**/Cargo.toml"
+      - "**/Cargo.lock"
+      - "deny.toml"
+      - ".github/workflows/cargo-deny.yml"
+  schedule:
+    # Mondays 05:00 UTC.
+    - cron: "0 5 * * 1"
+  workflow_dispatch:
+
+# Read-only. This workflow needs no secrets and writes nothing.
+permissions:
+  contents: read
+
+concurrency:
+  group: cargo-deny-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  cargo-deny:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+
+    strategy:
+      fail-fast: false
+      matrix:
+        # One entry per committed Cargo.lock, i.e. per independent workspace
+        # root. Kept in sync with the cargo `directories` list in
+        # .github/dependabot.yml.
+        root:
+          - "."
+          - "code/src/main/rust"
+          - "games/voxels/src/main/rust"
+          - "library/tilecodec/src/main/rust"
+          - "scripts/maps/gtfs_ingest"
+          - "scripts/maps/mamaps_build"
+          - "scripts/maps/osm_ingest"
+          - "scripts/maps/tile_build"
+          - "scripts/maps/wikidesc"
+
+    name: "cargo-deny (${{ matrix.root }})"
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+
+      # cargo-deny only reads Cargo.toml/Cargo.lock, it never compiles the
+      # crates, so the runner's default toolchain is enough - the pinned
+      # 1.97.0 android toolchain is not needed here.
+      - name: Install cargo-deny
+        uses: taiki-e/install-action@d438492cf8a250514fa2d34b30bc3c0dc37c65ff # v2.87.8
+        with:
+          tool: cargo-deny
+
+      - name: Check advisories, bans and sources
+        run: |
+          cargo deny \
+            --manifest-path "${{ matrix.root }}/Cargo.toml" \
+            --config deny.toml \
+            check advisories bans sources
+
+      # Separate step from the one above only so a licence failure is
+      # attributable at a glance; it is equally blocking. The allow list in
+      # deny.toml is the verified minimal set for the committed lockfiles, so a
+      # failure here means a genuinely new licence arrived and needs a human
+      # decision.
+      - name: Check licenses
+        run: |
+          cargo deny \
+            --manifest-path "${{ matrix.root }}/Cargo.toml" \
+            --config deny.toml \
+            check licenses

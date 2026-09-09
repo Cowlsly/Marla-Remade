@@ -71,7 +71,6 @@ dependencies {
     implementation(libs.grpc.stub)
     implementation(libs.grpc.kotlin.stub)
     implementation(libs.protobuf.javalite)
-    implementation(libs.protobuf.kotlin.lite)
     // grpc-java generated stubs reference @javax.annotation.Generated, absent on Android.
     compileOnly(libs.javax.annotation.api)
     // ed25519 verification of Accrescent's signify-signed repodata allowlist runs in
@@ -80,7 +79,7 @@ dependencies {
 
 protobuf {
     protoc {
-        artifact = "com.google.protobuf:protoc:${libs.versions.protobufJavalite.get()}"
+        artifact = libs.protobuf.protoc.get().toString()
     }
     plugins {
         create("grpc") {
@@ -93,6 +92,8 @@ protobuf {
     generateProtoTasks {
         all().forEach { task ->
             task.builtins {
+                // `create`, not `named` as in :youpipe:extractor: on the Android variant path the
+                // plugin does not pre-register the java builtin, so it has to be added here.
                 create("java") { option("lite") }
             }
             task.plugins {

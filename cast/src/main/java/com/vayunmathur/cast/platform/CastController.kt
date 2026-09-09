@@ -400,14 +400,50 @@ object CastController {
      * after the service is in the foreground - see `MirrorConsentActivity` for the full ordering
      * constraint.
      */
-    fun startMirroring(context: Context, projection: MediaProjection) {
+    fun startMirroring(context: Context, projection: MediaProjection) =
+        startSession(context, MirrorSource.Screen(projection), projection)
+
+    /**
+     * Cast a SYSTEM-OWNED display instead of a mirror of the phone - "desktop mode".
+     *
+     * The difference from [startMirroring] is what the TV receives. That one takes a
+     * `MediaProjection` and sends a copy of the phone's screen; this creates a separate display
+     * that the window manager can place activities on, so the TV becomes a second desktop. Whether
+     * it ends up mirroring or extending is then the SYSTEM's choice, not ours: the display carries
+     * `ALLOWS_CONTENT_MODE_SWITCH` and Settings already draws the switch for it, which is why this
+     * app offers no chooser.
+     *
+     * No consent Activity, because nothing here captures the screen. It needs `ADD_TRUSTED_DISPLAY`
+     * instead, held via the SYSTEM_AUTOMOTIVE_PROJECTION role pinned in `MaosFrameworkResRRO`. On a
+     * build without that role `createVirtualDisplay` throws and the session fails at
+     * [MirrorEngine.start], which is the honest place for a packaging problem to surface.
+     *
+     * [onDisplayId] fires once the display exists, with the framework display id, so a caller that
+     * published a route can hand the id to `RemoteDisplay.setPresentationDisplayId`.
+     */
+    fun startDesktopMode(context: Context, onDisplayId: (Int) -> Unit = {}) =
+        startSession(context, MirrorSource.SystemDisplay(), projection = null, onDisplayId)
+
+    /**
+     * Shared body of [startMirroring] and [startDesktopMode].
+     *
+     * [projection] is non-null only for the screen path, and exists solely so the failure routes
+     * can stop it; the desktop path has nothing to release but its own display, which
+     * [MirrorEngine] owns.
+     */
+    private fun startSession(
+        context: Context,
+        source: MirrorSource,
+        projection: MediaProjection?,
+        onDisplayId: (Int) -> Unit = {},
+    ) {
         val appContext = context.applicationContext
         scope.launch {
             val activeClient = client
             val device = _device.value
             if (activeClient == null || device == null) {
                 Log.w(TAG, "asked to mirror with no session")
-                projection.stop()
+                projection?.stop()
                 return@launch
             }
             // The screen and an app's content are mutually exclusive - there is one session, one
@@ -435,9 +471,21 @@ object CastController {
                 is CodecOutcome.Chosen -> choice
             }
 
-            // The frame size is chosen from the TV's own reported limits, and it is the phone's real
-            // aspect ratio: the receiver letterboxes, so none of the encoded frame is wasted on bars.
-            val geometry = MirrorGeometry.forDisplay(appContext, codec.selection)
+            if (source is MirrorSource.SystemDisplay) {
+                // Before the engine builds the display: the unique id is fixed at creation and is
+                // what every persisted preference for this television is keyed on.
+                source.receiverId = activeClient.receiverId ?: device.id
+            }
+            // The frame size is chosen from the TV's own reported limits. For mirroring it is the
+            // phone's real aspect ratio - the receiver letterboxes, so none of the encoded frame is
+            // wasted on bars. A desktop is composed for the television instead, because the system
+            // lays it out for whatever size the display was created at rather than reproducing the
+            // phone.
+            val geometry = if (source is MirrorSource.SystemDisplay) {
+                MirrorGeometry.forDesktop(appContext, codec.selection, activeClient.displayModes)
+            } else {
+                MirrorGeometry.forDisplay(appContext, codec.selection)
+            }
             val frameRate = MirrorGeometry.frameRateFor(codec.selection.receiverLimits)
             val outcome = mutex.withLock {
                 activeClient.configureStream(
@@ -463,7 +511,7 @@ object CastController {
 
             val newEngine = MirrorEngine(
                 context = appContext,
-                source = MirrorSource.Screen(projection),
+                source = source,
                 receiverHost = device.host,
                 negotiation = ready.negotiation,
                 geometry = geometry,
@@ -476,17 +524,22 @@ object CastController {
             engine = newEngine
             activeCodec = codec.codec
             if (newEngine.start()) {
+                // The framework never discovers this display on its own - MediaRouterService
+                // only reads back an id the provider published. See CastSystemDisplay.
+                if (source is MirrorSource.SystemDisplay) onDisplayId(source.displayId)
                 _mirrorPhase.value = MirrorPhase.Mirroring
                 _sessionState.update {
                     it.copy(phase = ClientPhase.Streaming, negotiation = ready.negotiation)
                 }
-                startWatch(appContext, activeClient, device, codec.codec)
+                // A mirror or desktop session has no inbound control traffic at all, so without a
+                // heartbeat the socket's read deadline is what ends it. See [startWatch].
+                startWatch(appContext, activeClient, device, codec.codec, keepAlive = true)
             } else {
                 // start() already called onStopped, which set the message and the phase; all that is
                 // left is to make sure nothing keeps holding the screen.
                 engine = null
                 activeCodec = null
-                runCatching { projection.stop() }
+                runCatching { projection?.stop() }
             }
         }
     }
@@ -733,10 +786,14 @@ object CastController {
         codec: VideoCodec?,
         transportControls: Boolean = false,
         /**
-         * Whether to keep the control channel warm, which only a served session needs.
+         * Whether to keep the control channel warm, which every session needs.
          *
-         * Screen mirroring is left alone: its traffic is RTP, and adding a heartbeat to it would be
-         * changing a path this work has no business touching.
+         * This once defaulted off for screen mirroring on the grounds that its traffic is RTP.
+         * That was wrong: RTP is a separate [java.nio.channels.DatagramChannel], and nothing it
+         * carries can reset a read deadline on the TCP control socket. A mirror or desktop
+         * session gets no inbound control frames at all, so the read parked in
+         * [MirrorClient.awaitEnd] always expired and killed the session after exactly
+         * `ControlSocket.READ_TIMEOUT_MS`.
          */
         keepAlive: Boolean = false,
     ) {
@@ -845,10 +902,10 @@ object CastController {
     }
 
     /** Give up on mirroring, and make sure the screen stops being captured. */
-    private fun abandonMirroring(context: Context, projection: MediaProjection, message: String) {
+    private fun abandonMirroring(context: Context, projection: MediaProjection?, message: String) {
         _mirrorPhase.value = MirrorPhase.Failed
         _failure.value = message
-        runCatching { projection.stop() }
+        runCatching { projection?.stop() }
         CastService.stopMirroring(context)
     }
 

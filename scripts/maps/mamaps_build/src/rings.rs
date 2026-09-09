@@ -64,6 +64,16 @@ impl Stats {
 /// Rebuilds the parts table and the coordinate arena, because dropping a ring changes both and the
 /// encoder requires the parts to tile the arena exactly.
 pub fn normalise(layer: &mut Layer) -> Stats {
+    normalise_with_ids(layer, None)
+}
+
+/// As [`normalise`], but also drops the id of any feature it drops.
+///
+/// The id table is indexed by feature position, so the retain at the end has to happen to both or
+/// every id after the first casualty describes the wrong feature. This only started mattering when
+/// `boundaries` gained a table: `places` and `poi` are points, and a point never loses its single
+/// part, so the retain was a no-op for every layer that carried ids.
+pub fn normalise_with_ids(layer: &mut Layer, ids: Option<&mut Vec<u64>>) -> Stats {
     let mut stats = Stats::default();
     let mut parts: Vec<Part> = Vec::with_capacity(layer.parts.len());
     let mut coords: Vec<(i16, i16)> = Vec::with_capacity(layer.coords.len());
@@ -165,7 +175,18 @@ pub fn normalise(layer: &mut Layer) -> Stats {
     }
 
     // A feature whose exterior went takes no parts, so it draws nothing. Removed outright rather
-    // than left as an empty group, which the encoder refuses.
+    // than left as an empty group, which the encoder refuses. The id table is indexed by feature
+    // position, so it is filtered by the same predicate, in the same order, first.
+    if let Some(ids) = ids {
+        if ids.len() == layer.features.len() {
+            let mut at = 0;
+            ids.retain(|_| {
+                let keep = layer.features[at].part_count > 0;
+                at += 1;
+                keep
+            });
+        }
+    }
     layer.features.retain(|feature| feature.part_count > 0);
     layer.parts = parts;
     layer.coords = coords;
@@ -408,6 +429,47 @@ mod tests {
         let mut out = ring.to_vec();
         out.reverse();
         out
+    }
+
+    /// **The bug that reached a real build.** A degenerate exterior makes `normalise` drop the
+    /// feature, and the id table is indexed by feature position — so dropping one without dropping
+    /// its id shifts every id after it onto the wrong feature. The encoder catches the length
+    /// mismatch, but only when the casualty happens to be the last feature does it stay a length
+    /// mismatch rather than a silent misattribution.
+    #[test]
+    fn dropping_a_degenerate_feature_drops_its_id_too() {
+        // Three features: a good square, a collapsed exterior, and another good square.
+        let mut layer = layer_of(&[square(0, 0, 100)]);
+        let mut push = |ring: Vec<(i16, i16)>| {
+            layer.features.push(Feature {
+                kind: dict::NONE,
+                kind_detail: dict::NONE,
+                geom_type: GEOM_POLYGON,
+                flags: 0,
+                name_idx: tilecodec::mamaps::body::NAME_NONE,
+                parts_offset: layer.parts.len() as u32,
+                part_count: 1,
+                transit_color: 0,
+                transit_ordinal: 0,
+                transit_lanes: 0,
+                transit_taper: 0,
+            });
+            layer.parts.push(Part {
+                coord_start: layer.coords.len() as u32,
+                point_count: ring.len() as u32,
+                winding: WINDING_OUTER,
+            });
+            layer.coords.extend_from_slice(&ring);
+        };
+        // Zero area: every point the same, so there is no exterior left after normalising.
+        push(vec![(5, 5), (5, 5), (5, 5), (5, 5)]);
+        push(square(200, 200, 100));
+
+        let mut ids = vec![11u64, 22, 33];
+        normalise_with_ids(&mut layer, Some(&mut ids));
+
+        assert_eq!(layer.features.len(), 2, "the collapsed exterior is dropped");
+        assert_eq!(ids, vec![11, 33], "and its id goes with it, not the one after it");
     }
 
     #[test]

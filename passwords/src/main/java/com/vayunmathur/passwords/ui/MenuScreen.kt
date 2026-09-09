@@ -45,8 +45,8 @@ fun MenuScreen(
 
     ListPage<CredentialItem, Route, Route.PasswordEditPage>(backStack, items, "Passwords", {
         when (it) {
-            // Same keys as the detail page's header, so the row's name and user travel there rather
-            // than crossfading. Passkeys have no detail page to morph into, so they stay unkeyed.
+            // Same keys as the detail page, so the row's name and user travel there rather than
+            // crossfading.
             is CredentialItem.PasswordItem -> Row(verticalAlignment = Alignment.CenterVertically) {
                 Text(
                     it.password.name.ifBlank { stringResource(R.string.no_name) },
@@ -66,7 +66,10 @@ fun MenuScreen(
             is CredentialItem.PasskeyItem -> Row(verticalAlignment = Alignment.CenterVertically) {
                 IconKey(Modifier.size(16.dp))
                 Spacer(Modifier.width(4.dp))
-                Text(it.passkey.rpName.ifBlank { it.passkey.rpId })
+                Text(
+                    it.passkey.rpName.ifBlank { it.passkey.rpId },
+                    modifier = Modifier.sharedText("passkey-name-${it.passkey.id}"),
+                )
             }
         }
     }, {
@@ -75,7 +78,10 @@ fun MenuScreen(
                 it.password.username.ifBlank { it.password.email },
                 modifier = Modifier.sharedText("password-user-${it.password.id}"),
             )
-            is CredentialItem.PasskeyItem -> Text(it.passkey.userName)
+            is CredentialItem.PasskeyItem -> Text(
+                it.passkey.userName,
+                modifier = Modifier.sharedText("passkey-user-${it.passkey.id}"),
+            )
         }
     }, {
         when (val item = items.firstOrNull { i -> i.id == it }) {

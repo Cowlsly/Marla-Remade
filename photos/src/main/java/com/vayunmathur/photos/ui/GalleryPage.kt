@@ -61,6 +61,7 @@ import com.vayunmathur.library.ui.IconDelete
 import com.vayunmathur.library.ui.IconSearch
 import com.vayunmathur.library.ui.invisibleClickable
 import com.vayunmathur.library.util.NavBackStack
+import com.vayunmathur.library.util.sharedContainer
 import com.vayunmathur.photos.LocalColumnCount
 import com.vayunmathur.photos.NavigationBar
 import com.vayunmathur.photos.R
@@ -251,8 +252,11 @@ fun GalleryScreen(
     // Only the list actually being displayed is grouped — with the search bar
     // closed, search results are not grouped at all.
     val resources = LocalResources.current
-    val visiblePhotos =
-        if (searchActive && state.searchQuery.isNotEmpty()) state.searchResults else state.photos
+    // The expanded search bar draws its results *over* the main grid, which stays composed
+    // underneath. A photo in both would be one morph key with two origins, so while the results
+    // are up they are the only keyed copy.
+    val searchResultsShown = searchActive && state.searchQuery.isNotEmpty()
+    val visiblePhotos = if (searchResultsShown) state.searchResults else state.photos
     // Computed exactly once (no remember keys), for the first frame only — and for a
     // @Preview, which never gets to run the producer below. It has to be a remember:
     // produceState's initialValue is an ordinary eagerly-evaluated argument, so
@@ -354,6 +358,7 @@ fun GalleryScreen(
                                                 searchActive = false
                                                 backStack.add(Route.PhotoPage(photo.id, state.searchResults))
                                             }
+                                            .sharedContainer("photo-image-${photo.id}")
                                     ) {
                                         thumbnail(photo, Modifier.fillMaxSize())
                                     }
@@ -435,6 +440,7 @@ fun GalleryScreen(
                                     }
                                 },
                                 thumbnail = thumbnail,
+                                sharedKey = if (searchResultsShown) null else photo.id,
                             )
                         }
                     }

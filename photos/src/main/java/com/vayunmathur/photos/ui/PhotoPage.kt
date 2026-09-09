@@ -89,6 +89,7 @@ import com.vayunmathur.library.ui.IconEdit
 import com.vayunmathur.library.ui.IconShare
 import com.vayunmathur.library.ui.IconWallpaper
 import com.vayunmathur.library.util.NavBackStack
+import com.vayunmathur.library.util.sharedContainer
 import com.vayunmathur.photos.R
 import com.vayunmathur.photos.Route
 import com.vayunmathur.photos.data.OcrLayout
@@ -281,7 +282,11 @@ fun PhotoPage(galleryViewModel: GalleryViewModel, photoMapViewModel: PhotoMapVie
                                 backStack?.add(Route.Wallpaper(p.id, p.uri))
                             }
                         },
-                        onDelete = onDeletePhoto
+                        onDelete = onDeletePhoto,
+                        // The route's own photo, not whichever page the pager has settled on:
+                        // after a swipe those differ, and back would then morph into a grid tile
+                        // the user never tapped.
+                        sharedKey = photo.id.takeIf { it == id }
                 )
             }
         }
@@ -332,7 +337,13 @@ fun PhotoDetailView(
         refreshKey: Int = 0,
         onEditPhoto: () -> Unit,
         onSetWallpaper: (Photo) -> Unit = {},
-        onDelete: (Photo) -> Unit = {}
+        onDelete: (Photo) -> Unit = {},
+        /**
+         * Non-null makes this page the destination of the container transform out of the grid
+         * tile. Null for a page the pager keeps composed either side of the current one: they
+         * match live grid tiles too, and three photos would morph at once.
+         */
+        sharedKey: Any? = null
 ) {
     val countryNames by photoMapViewModel.countryNames.collectAsState()
     val countryName = countryNames[photo.id]
@@ -506,6 +517,10 @@ fun PhotoDetailView(
                                 size = layoutCoordinates.size
                             }
                             .then(zoomModifier)
+                            .then(
+                                    if (sharedKey == null) Modifier
+                                    else Modifier.sharedContainer("photo-image-$sharedKey")
+                            )
             if (photo.isGif) {
                 AnimatedImage(
                         uri = photo.uri.toUri(),

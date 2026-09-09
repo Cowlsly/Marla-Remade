@@ -31,6 +31,7 @@ import com.vayunmathur.education.util.CourseUiState
 import com.vayunmathur.education.util.CourseUnitRow
 import com.vayunmathur.education.util.EducationViewModel
 import com.vayunmathur.library.util.NavBackStack
+import com.vayunmathur.library.util.sharedText
 import androidx.compose.ui.res.stringResource
 
 /** Binds [EducationViewModel] and the back stack to the stateless [ScholarCourseScreen]. */
@@ -55,6 +56,7 @@ fun ScholarCoursePage(backStack: NavBackStack<Route>, viewModel: EducationViewMo
                 )
             },
             challenge = course?.challenge,
+            titleSharedKey = course?.let { "education-course-title-${it.id}" },
         ),
         actions = object : CourseActions {
             override fun navigateUp() {
@@ -91,7 +93,14 @@ fun ScholarCourseScreen(state: CourseUiState, actions: CourseActions) {
         return
     }
     DetailLazyColumn(
-        title = state.title,
+        title = {
+            Text(
+                state.title,
+                modifier = state.titleSharedKey
+                    ?.let { Modifier.sharedText(it) }
+                    ?: Modifier,
+            )
+        },
         onNavigateBack = { actions.navigateUp() },
         scrollBehavior = appBarScrollBehavior(),
     ) {
@@ -116,7 +125,11 @@ fun ScholarCourseScreen(state: CourseUiState, actions: CourseActions) {
                         verticalAlignment = Alignment.CenterVertically,
                         horizontalArrangement = Arrangement.SpaceBetween,
                     ) {
-                        Text(unit.title, style = MaterialTheme.typography.titleMedium)
+                        Text(
+                            unit.title,
+                            style = MaterialTheme.typography.titleMedium,
+                            modifier = Modifier.sharedText("education-unit-title-${unit.id}"),
+                        )
                         StarRow(unit.stars)
                     }
                     Text(

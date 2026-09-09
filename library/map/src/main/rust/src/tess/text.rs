@@ -385,6 +385,37 @@ pub fn emit(
     }
 }
 
+/// Rotate already-emitted quads about `pivot`, so they draw upright through a rotated
+/// clip matrix.
+///
+/// `vertices` is the `[x, y, u, v]` run this label just appended, `pivot` its tile-local
+/// anchor, and `rotation` the `(cos, sin)` of the camera's bearing. The clip matrix turns
+/// a tile-local offset `d` into a screen offset `R·d`; pre-multiplying by `Rᵀ` here makes
+/// that come out screen-aligned again, which is the whole trick.
+///
+/// **Labels stay upright under a heading-up camera**, which is what car navigation wants
+/// and what MapLibre does with the default `text-rotation-alignment: viewport`. Letting
+/// them turn with the map puts every street name upside down whenever the driver is
+/// heading south. It also keeps [`crate::tile::placement`] honest for free: its collision
+/// boxes are axis-aligned in screen space, which is exactly the box an upright label
+/// occupies and is *not* the box a rotated one would.
+///
+/// Tile-local space is scaled uniformly to the screen (`span` Dp on both axes, see
+/// [`crate::camera::Camera::world_quad_to_clip`]), so a rotation here is a rotation there
+/// — no shear to correct for.
+pub fn upright(vertices: &mut [f32], pivot: (f32, f32), rotation: (f32, f32)) {
+    let (cos, sin) = rotation;
+    if sin == 0.0 && cos == 1.0 {
+        return;
+    }
+    for vertex in vertices.chunks_exact_mut(FLOATS_PER_VERTEX) {
+        let dx = vertex[0] - pivot.0;
+        let dy = vertex[1] - pivot.1;
+        vertex[0] = pivot.0 + cos * dx - sin * dy;
+        vertex[1] = pivot.1 + sin * dx + cos * dy;
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -895,5 +926,65 @@ mod tests {
             v.chunks(FLOATS_PER_VERTEX).map(|c| c[0]).fold(f32::MAX, f32::min)
         };
         assert!((left_edge(-1.1) - left_edge(1.1)).abs() < 1e-6);
+    }
+
+    // --- upright labels under a rotated camera ------------------------------
+
+    /// The rotation the clip matrix applies, so the round trip below is checked against
+    /// the real thing rather than against a restatement of it. Mirrors
+    /// `Camera::world_quad_to_clip`.
+    fn to_screen(offset: (f32, f32), rotation: (f32, f32)) -> (f32, f32) {
+        let (cos, sin) = rotation;
+        (cos * offset.0 + sin * offset.1, -sin * offset.0 + cos * offset.1)
+    }
+
+    #[test]
+    fn a_counter_rotated_quad_comes_out_screen_aligned() {
+        // The point of `upright`: whatever the bearing, the glyph the driver sees is the
+        // same glyph in the same place as at bearing zero.
+        for degrees in [0.0f32, 30.0, 90.0, 180.0, 275.0] {
+            let radians = degrees.to_radians();
+            let rotation = (radians.cos(), radians.sin());
+            let pivot = (0.5f32, 0.5f32);
+            // One quad, offset a known amount right of and above the anchor.
+            let mut quad = vec![
+                0.6, 0.45, 0.0, 0.0, //
+                0.7, 0.45, 1.0, 0.0, //
+                0.7, 0.55, 1.0, 1.0, //
+                0.6, 0.55, 0.0, 1.0,
+            ];
+            let before: Vec<(f32, f32)> = quad
+                .chunks_exact(FLOATS_PER_VERTEX)
+                .map(|v| (v[0] - pivot.0, v[1] - pivot.1))
+                .collect();
+            upright(&mut quad, pivot, rotation);
+            for (at, vertex) in quad.chunks_exact(FLOATS_PER_VERTEX).enumerate() {
+                let (sx, sy) =
+                    to_screen((vertex[0] - pivot.0, vertex[1] - pivot.1), rotation);
+                let (wx, wy) = before[at];
+                assert!((sx - wx).abs() < 1e-5, "{degrees} deg, vertex {at}: {sx} vs {wx}");
+                assert!((sy - wy).abs() < 1e-5, "{degrees} deg, vertex {at}: {sy} vs {wy}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_north_up_camera_leaves_the_quad_byte_identical() {
+        // The whole phone path runs at bearing zero, so this must be a no-op there rather
+        // than a rotation by an angle that happens to round to nothing.
+        let mut quad = vec![0.6, 0.45, 0.0, 0.0, 0.7, 0.55, 1.0, 1.0];
+        let original = quad.clone();
+        upright(&mut quad, (0.5, 0.5), (1.0, 0.0));
+        assert_eq!(quad, original);
+    }
+
+    #[test]
+    fn the_anchor_itself_never_moves() {
+        // The pivot is where the label is glued to the ground; if it drifted, every label
+        // would slide off its own feature as the camera turned.
+        let mut at_pivot = vec![0.25, 0.75, 0.0, 0.0];
+        upright(&mut at_pivot, (0.25, 0.75), (0.5, 3f32.sqrt() / 2.0));
+        assert!((at_pivot[0] - 0.25).abs() < 1e-6);
+        assert!((at_pivot[1] - 0.75).abs() < 1e-6);
     }
 }

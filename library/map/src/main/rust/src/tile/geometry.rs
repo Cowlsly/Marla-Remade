@@ -88,12 +88,45 @@ pub struct ShapedLabel {
     pub feature_id: u64,
 }
 
+/// One region's shape within one tile, for the selection mask.
+///
+/// Kept apart from [`LayerMesh`] because it is not styled and not drawn in layer order: nothing
+/// paints it, the mask pass rasterises it into the stencil so the scrim can be punched out. A
+/// region is clipped to one polygon per tile, so [`id`](Self::id) — the OSM relation it came from
+/// — is the only thing that says two tiles' pieces are the same region.
+pub struct RegionMesh {
+    pub id: u64,
+    pub vertices: Vec<f32>,
+    pub indices: Vec<u32>,
+    /// The exterior rings in tile-local 0..1, kept for the point-in-polygon test that turns a
+    /// tapped place into a region id. Holes are excluded: a city's exclaves matter for the test,
+    /// its inner voids do not, and treating a hole as solid is the safer error here.
+    pub rings: Vec<Vec<(f32, f32)>>,
+    /// Total absolute ring area in tile-local units, for preferring the smallest region that
+    /// contains a point - a city rather than the state around it.
+    pub area: f32,
+    /// The OSM `admin_level` this region was drawn at, carried through as the boundary
+    /// feature's numeric `kind_detail`.
+    ///
+    /// Without it a point lookup can only prefer the smallest shape that contains the tap,
+    /// which answers the wrong question: tapping a state's label lands somewhere inside one
+    /// of its counties, and the county is smaller. The selection already knows whether it is
+    /// a country, a region or a city, so the level is what matches the two up.
+    pub level: u16,
+}
+
 /// Every layer's geometry for one tile, ready to upload.
 pub struct TileMesh {
     pub z: u8,
     pub x: u32,
     pub y: u32,
     pub meshes: Vec<LayerMesh>,
+    /// Region shapes for the selection mask, one per `region_area` feature in this tile.
+    ///
+    /// Tessellated unconditionally rather than on selection: which region is selected changes
+    /// with a tap, and re-tessellating every resident tile at that moment would stall the frame.
+    /// A tile holds a handful of these, so the cost is small and paid once.
+    pub regions: Vec<RegionMesh>,
     /// Symbol candidates: shaped once at tessellation time, sized per frame.
     pub labels: Vec<ShapedLabel>,
     /// The [`crate::style::SharedToggles`] generation this was built at.
@@ -307,7 +340,73 @@ pub fn build_toggled(
         }
     }
 
-    TileMesh { z, x, y, meshes, labels, generation }
+    TileMesh { z, x, y, meshes, labels, regions: region_meshes(tile, extent, rings_validated), generation }
+}
+
+/// Tessellate this tile's `region_area` shapes, one mesh per feature.
+///
+/// Driven off the archive rather than the style: the mask is not a style layer, and giving it one
+/// would mean the boundary line layer strokes these polygons' tile-edge segments into a grid
+/// across the map — which is exactly what made an earlier attempt at region areas unusable.
+fn region_meshes(tile: &Body, extent: u32, rings_validated: bool) -> Vec<RegionMesh> {
+    let Some(kind) = crate::style::kind_id("region_area") else { return Vec::new() };
+    let Some(source) = tile.layer(tilecodec::mamaps::dict::LAYER_BOUNDARIES) else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    for (feature_index, feature) in source.features.iter().enumerate() {
+        if feature.kind != kind || feature.geom_type != GEOM_POLYGON {
+            continue;
+        }
+        // No id means nothing could gather this piece together with the region's other tiles,
+        // so it would mask one tile and leave the rest bright. Better to draw no mask at all.
+        let Some(id) =
+            tile.feature_id(tilecodec::mamaps::dict::LAYER_BOUNDARIES, feature_index)
+        else {
+            continue;
+        };
+        if id == tilecodec::mamaps::body::ID_NONE {
+            continue;
+        }
+        let rings: Vec<Vec<(i32, i32)>> =
+            source.parts_of(feature).iter().map(|part| widen(source.points(part))).collect();
+        let mut vertices = Vec::new();
+        let mut indices = Vec::new();
+        fill::tessellate(&rings, extent, rings_validated, &mut vertices, &mut indices);
+        if indices.is_empty() {
+            continue;
+        }
+        // Exteriors only. `parts_of` yields the exterior first and its holes after, and stage C
+        // has already made that ordering true of every polygon in the archive.
+        let scale = 1.0 / extent as f32;
+        let outer: Vec<Vec<(f32, f32)>> = source
+            .parts_of(feature)
+            .iter()
+            .filter(|part| part.winding != tilecodec::mamaps::body::WINDING_HOLE)
+            .map(|part| {
+                source
+                    .points(part)
+                    .iter()
+                    .map(|&(x, y)| (x as f32 * scale, y as f32 * scale))
+                    .collect()
+            })
+            .collect();
+        let area = outer.iter().map(|ring| ring_area(ring).abs()).sum();
+        out.push(RegionMesh { id, vertices, indices, rings: outer, area, level: feature.kind_detail });
+    }
+    out
+}
+
+/// Twice the signed area of a closed ring, by the shoelace formula.
+///
+/// The factor of two is left in: this is only ever compared against other rings measured the
+/// same way, so halving every term would change nothing.
+fn ring_area(ring: &[(f32, f32)]) -> f32 {
+    let mut sum = 0.0;
+    for window in ring.windows(2) {
+        sum += window[0].0 * window[1].1 - window[1].0 * window[0].1;
+    }
+    sum
 }
 
 /// `[(i16, i16)]` to the `[(i32, i32)]` the fill tessellator takes.
@@ -436,6 +535,7 @@ mod tests {
             halo_dark: 0xFF000000,
             halo_width: 0.0,
             min_zoom,
+            browse_min_zoom: min_zoom,
             max_zoom: 22,
             authored: "roads_major".to_string(),
         }
@@ -751,6 +851,7 @@ mod tests {
             halo_dark: 0x00000000,
             halo_width: 1.0,
             min_zoom: 0,
+            browse_min_zoom: 0,
             max_zoom: 22,
             authored: "water".to_string(),
         }];

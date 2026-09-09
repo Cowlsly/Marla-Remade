@@ -178,7 +178,7 @@ configure<com.android.build.api.dsl.ApplicationExtension> {
     // real res source directory.)
     sourceSets.getByName("main").res.directories.add(File(rootDir, "build-logic/shared-res").absolutePath)
 
-    ndkVersion = "29.0.14206865"
+    ndkVersion = NDK_VERSION
 
     defaultConfig {
         minSdk = 31

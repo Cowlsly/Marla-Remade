@@ -26,6 +26,7 @@ import com.vayunmathur.library.ui.DetailScaffold
 import com.vayunmathur.library.ui.ExperimentalMaterial3Api
 import com.vayunmathur.library.ui.IconClose
 import com.vayunmathur.library.ui.InputChip
+import com.vayunmathur.library.ui.LabeledTextField
 import com.vayunmathur.library.ui.MaterialTheme
 import com.vayunmathur.library.ui.OutlinedTextField
 import com.vayunmathur.library.ui.Text
@@ -95,11 +96,13 @@ fun PasswordEditScreen(
         }
         Card(shape = RoundedCornerShape(10.dp), modifier = Modifier.fillMaxWidth()) {
                 Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                    OutlinedTextField(
+                    // The name is the one field with an unambiguous counterpart on the detail page.
+                    // Null on a brand-new entry, whose id is 0 until it is first saved.
+                    LabeledTextField(
                         value = current.name,
                         onValueChange = { v -> actions.updateDraft { it.copy(name = v) } },
-                        label = { Text(stringResource(R.string.label_name)) },
-                        modifier = Modifier.fillMaxWidth(),
+                        label = stringResource(R.string.label_name),
+                        sharedTextKey = "password-name-${current.id}".takeIf { current.id != 0L },
                     )
                     OutlinedTextField(
                         value = current.username,

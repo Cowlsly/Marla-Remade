@@ -19,7 +19,12 @@ BUILD="$SCRATCH/build"
 PBF="${PBF:-$SCRATCH/planet-latest.osm.pbf}"
 GEOJSON="${GEOJSON:-$SCRATCH/addr.geojsonseq}"
 OUT="${OUT:-$SCRATCH/geocoder.geodb}"
-SIMDJSON_TAG="${SIMDJSON_TAG:-v3.11.0}"
+# Pinned to commit SHAs rather than tags: a tag can be repointed upstream, so it is not a content
+# pin. To bump, resolve the new tag with `git ls-remote <repo> 'refs/tags/<tag>^{}'` and update the
+# SHA and its version comment together. The `^{}` matters: it peels annotated tags (zstd's are) to
+# the commit, whereas the bare ref returns the tag object, which is not a valid content ref here.
+SIMDJSON_REV="${SIMDJSON_REV:-b4242d3b4ffb97854b035175be077aab712a2d46}" # v3.11.0
+ZSTD_REV="${ZSTD_REV:-63779c798237346c2b245c546c40b72a5a5913fe}"         # v1.5.5
 
 mkdir -p "$BUILD"
 
@@ -29,15 +34,15 @@ ZSTD_SO="$(ldconfig -p | awk '/libzstd\.so/{print $NF; exit}')"
 [ -n "$ZSTD_SO" ] || { echo "libzstd runtime not found (libzstd.so*). Install: sudo apt-get install -y libzstd1" >&2; exit 1; }
 echo "    using libzstd: $ZSTD_SO"
 
-echo "==> Headers: simdjson ($SIMDJSON_TAG) + zstd.h"
+echo "==> Headers: simdjson ($SIMDJSON_REV) + zstd.h ($ZSTD_REV)"
 if [ ! -f "$BUILD/simdjson.cpp" ] || [ ! -f "$BUILD/simdjson.h" ]; then
-  base="https://raw.githubusercontent.com/simdjson/simdjson/$SIMDJSON_TAG/singleheader"
+  base="https://raw.githubusercontent.com/simdjson/simdjson/$SIMDJSON_REV/singleheader"
   curl -fL --ipv4 -o "$BUILD/simdjson.h" "$base/simdjson.h"
   curl -fL --ipv4 -o "$BUILD/simdjson.cpp" "$base/simdjson.cpp"
 fi
 if [ ! -f "$BUILD/zstd.h" ]; then
   curl -fL --ipv4 -o "$BUILD/zstd.h" \
-    "https://raw.githubusercontent.com/facebook/zstd/${ZSTD_TAG:-v1.5.5}/lib/zstd.h"
+    "https://raw.githubusercontent.com/facebook/zstd/$ZSTD_REV/lib/zstd.h"
 fi
 
 echo "==> Compiling geocoder_gen"

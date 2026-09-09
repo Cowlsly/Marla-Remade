@@ -481,10 +481,26 @@ fn derive_build_id(
             h = h.wrapping_mul(0x100_0000_01b3);
         }
     };
-    // Revision 9: administrative boundary *relations* are areas rather than lines, so the same
-    // `.pbf` yields different boundary records in the spill. The sea is also synthesised per tile
-    // now, but that happens at encode time and is not in the spill — the boundary change alone is
-    // what makes a warm cache wrong.
+    // Revision 11: the `boundaries` layer populates the id side table, so a region's shape carries
+    // its OSM relation id. Without it a region is an anonymous polygon per tile and nothing says
+    // which pieces belong to the same region, so a mask could only ever punch out the one tile
+    // under the finger.
+    //
+    // Revision 10: POI `min_zoom` floors moved. The kinds a category chip selects are carried
+    // from z12, most other destinations from z13, and `railway=tram_stop` is classified at all
+    // (it was matched by nothing, so street tram stops were absent). Same `.pbf`, different
+    // features in the spill.
+    //
+    // Also `dict::KINDS` gains `region_area`, and an administrative relation now emits the
+    // region's shape alongside its border line, for the region mask to read. Appending to the
+    // frozen table moves no existing id, but it is still a format change: an older reader would
+    // not know the kind.
+    //
+    // Revision 9: burned. It was taken for boundary relations as areas and a synthesised sea, both
+    // of which were reverted before shipping — the areas grew tile-edge segments that the boundary
+    // style stroked as a grid across the map, and neither sea derivation survived contact with a
+    // real coastline (see `tiler::add_ocean`). Nothing was published under it. Left in the sequence
+    // rather than reused, because a revision number's only job is to differ from the last one.
     //
     // Revision 8: `.mamaps` v3. `places` and `poi` features carry a stable OSM id in a new body
     // side table, `dict::KINDS` gains `fuel`, `hotel`, `atm` and `bank`, and v1 bodies are no
@@ -507,7 +523,7 @@ fn derive_build_id(
     // Revision 3: road `min_zoom` is decided per corridor (`corridor`), and place
     // `kind_detail` carries the reference basemap's 0-15 population rank rather than a
     // three-step one (`schema::places::rank_of`).
-    eat(b"mamaps_build/9");
+    eat(b"mamaps_build/11");
     eat(input.to_string_lossy().as_bytes());
     if let Ok(meta) = std::fs::metadata(input) {
         eat(&meta.len().to_le_bytes());

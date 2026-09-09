@@ -364,13 +364,21 @@ Write-Host ''
 
 $gradlew = Join-Path $ScriptDir 'gradlew.bat'
 
+# --- Extra Gradle args: cap R8 workers for 'release all' (whole-repo minified build) ---
+$gradleArgs = @()
+$gradleArgsStr = ''
+if ($VariantLc -eq 'release' -and $allExpanded) {
+    $gradleArgs += @('-Pandroid.r8.maxWorkers=8', '--continue')
+    $gradleArgsStr = ' -Pandroid.r8.maxWorkers=8 --continue'
+}
+
 if ($DryRun) {
-    Write-Host "[DRY-RUN] Would execute: $gradlew $tasksStr"
+    Write-Host "[DRY-RUN] Would execute: $gradlew $tasksStr$gradleArgsStr"
     exit 0
 }
 
-Write-Host "Running: $gradlew $tasksStr"
+Write-Host "Running: $gradlew $tasksStr$gradleArgsStr"
 Write-Host ''
 
-& $gradlew @tasks
+& $gradlew @tasks @gradleArgs
 exit $LASTEXITCODE

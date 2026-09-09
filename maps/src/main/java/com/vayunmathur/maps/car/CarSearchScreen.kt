@@ -38,7 +38,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.launch
-import org.maplibre.spatialk.geojson.Position
+import com.vayunmathur.library.map.GeoPoint
 
 /**
  * Android Auto search screen (P12).
@@ -206,7 +206,7 @@ class CarSearchScreen(carContext: CarContext) : Screen(carContext) {
         loading = true
         invalidate()
         scope.launch {
-            val dest = Position(longitude = result.lng, latitude = result.lat)
+            val dest = GeoPoint(longitude = result.lng, latitude = result.lat)
             val routeFeature = SpecificFeature.Route(
                 listOf(
                     null, // first waypoint = current position (getRouteMulti fills it)
@@ -244,7 +244,7 @@ class CarSearchScreen(carContext: CarContext) : Screen(carContext) {
         }
     }
 
-    private fun lastKnownPosition(): Position? {
+    private fun lastKnownPosition(): GeoPoint? {
         if (ContextCompat.checkSelfPermission(
                 carContext, Manifest.permission.ACCESS_FINE_LOCATION
             ) != PackageManager.PERMISSION_GRANTED
@@ -255,6 +255,6 @@ class CarSearchScreen(carContext: CarContext) : Screen(carContext) {
             lm.getLastKnownLocation(LocationManager.GPS_PROVIDER)
                 ?: lm.getLastKnownLocation(LocationManager.NETWORK_PROVIDER)
         }.getOrNull()
-        return loc?.let { Position(longitude = it.longitude, latitude = it.latitude) }
+        return loc?.let { GeoPoint(longitude = it.longitude, latitude = it.latitude) }
     }
 }

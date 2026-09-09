@@ -1,4 +1,5 @@
-//! The JNI surface: ten entry points, and nothing per-feature or per-vertex.
+//! The JNI surface: a small, fixed set of entry points, and nothing per-feature or
+//! per-vertex.
 //!
 //! Kotlin creates and destroys the renderer for a `Surface`, resizes it, tells it whether
 //! the device is online, and hands it **one camera snapshot per frame**. Tile selection,
@@ -15,6 +16,7 @@
 //! critical path, and no JNI in the hot loop.
 
 use crate::camera::Camera;
+use crate::overlay::RouteStyle;
 use crate::style::{self, Layer, LayerToggles, Palette, SharedToggles};
 use crate::tile::cache::{RangeCache, DEFAULT_MAX_BYTES};
 use crate::tile::geometry::{self, TileMesh};
@@ -24,7 +26,7 @@ use crate::tile::source::{
 };
 use crate::vulkan::context::{ANativeWindow_acquire, ANativeWindow_fromSurface};
 use crate::vulkan::renderer::{Renderer, UserPuck};
-use jni::objects::{JClass, JObject, JString};
+use jni::objects::{JClass, JFloatArray, JObject, JString};
 use jni::sys::{jboolean, jfloat, jint, jlong};
 use jni::JNIEnv;
 use std::collections::HashSet;
@@ -488,6 +490,7 @@ pub extern "system" fn Java_com_vayunmathur_library_map_MapNative_render<'l>(
     center_lon: jfloat,
     center_lat: jfloat,
     zoom: jfloat,
+    bearing: jfloat,
     width_dp: jfloat,
     height_dp: jfloat,
     density: jfloat,
@@ -501,6 +504,9 @@ pub extern "system" fn Java_com_vayunmathur_library_map_MapNative_render<'l>(
     // previously a 256 grid with a +1 offset applied here, which reached the same
     // ground scale but fetched z+1 tiles — four times as many as MapLibre for the
     // same screenful — and read every ramp one level deep.
+    //
+    // `bearing` is degrees clockwise from north for whatever points up the screen: 0 on
+    // every phone frame, and the car's heading during heading-up navigation.
     let camera = Camera {
         center_lon: center_lon as f64,
         center_lat: center_lat as f64,
@@ -508,6 +514,7 @@ pub extern "system" fn Java_com_vayunmathur_library_map_MapNative_render<'l>(
         width_dp,
         height_dp,
         density,
+        bearing_deg: bearing as f64,
     };
     // Task-17 pick needs the frame's density for Dp→device-px; remember it.
     map.density = density;
@@ -577,11 +584,12 @@ pub extern "system" fn Java_com_vayunmathur_library_map_MapNative_render<'l>(
         // differ wherever the authored style ramps a layer's width to zero, so reporting only
         // the first would claim roads are being drawn at zooms where they are gated out.
         log_info(&format!(
-            "z{:.2} @{:.4},{:.4} vp {}x{}dp {}x{}px msaa {}x | resident {} tiles, {} meshes, \
+            "z{:.2} @{:.4},{:.4} b{:.0} vp {}x{}dp {}x{}px msaa {}x | resident {} tiles, {} meshes, \
              {} draws, {} tris | {} in flight, {} absent | archive z{}..{}",
             camera.zoom,
             camera.center_lon,
             camera.center_lat,
+            camera.bearing_deg,
             camera.width_dp,
             camera.height_dp,
             width_px,
@@ -598,7 +606,17 @@ pub extern "system" fn Java_com_vayunmathur_library_map_MapNative_render<'l>(
         ));
     }
 
-    match map.renderer.render(&camera, &map.layers, map.palette, style::background(map.palette.variant)) {
+    // The active category filter goes to the renderer as well as to tessellation: a chip both
+    // narrows which POIs are drawn and pulls its own kinds in earlier than the ambient map shows
+    // them. See `Layer::draws_at_focused`.
+    let (_, kinds, _) = map.toggles.get();
+    match map.renderer.render(
+        &camera,
+        &map.layers,
+        map.palette,
+        style::background(map.palette.variant),
+        &kinds,
+    ) {
         Ok(drawn) => jboolean::from(drawn),
         Err(e) => {
             log(&format!("frame failed: {e}"));
@@ -673,6 +691,133 @@ pub extern "system" fn Java_com_vayunmathur_library_map_MapNative_clearUserPuck<
 ) {
     if let Some(map) = handle_mut(handle) {
         map.renderer.set_user_puck(None);
+    }
+}
+
+/// Draw a navigation route line over the basemap and under the puck.
+///
+/// `points` is a flat `[lon0, lat0, lon1, lat1, …]` array. One array rather than a list of
+/// objects because a route is thousands of points and a per-point JNI crossing is exactly
+/// what the rest of this boundary exists to avoid; `float` rather than `double` for the
+/// same reason the camera's coordinates are (see
+/// [`render`](Java_com_vayunmathur_library_map_MapNative_render)) — seven significant
+/// digits is about a centimetre at the equator, and a route is a shape to follow rather
+/// than a survey. A trailing odd element is ignored.
+///
+/// One polyline and one colour, which is what the consumer draws: the car renderer this
+/// replaces stroked a single `Path` over the whole route twice, a casing under a fill. The
+/// phone's per-step traffic colouring stays in Compose over `VectorMap` and is not
+/// migrating, so a per-segment API here would be surface with no caller.
+///
+/// Tessellated here, on the calling thread, and uploaded once. That is affordable because
+/// it happens when the route is set and never again: the mesh is zoom-independent, so no
+/// frame and no zoom step rebuilds it. See [`crate::overlay`].
+///
+/// An empty array, a single point, or a run of identical points draws nothing, which is
+/// the same outcome as [`clearRoute`](Java_com_vayunmathur_library_map_MapNative_clearRoute).
+#[no_mangle]
+#[allow(clippy::too_many_arguments)]
+pub extern "system" fn Java_com_vayunmathur_library_map_MapNative_setRoute<'l>(
+    env: JNIEnv<'l>,
+    _class: JClass<'l>,
+    handle: jlong,
+    points: JFloatArray<'l>,
+    width_dp: jfloat,
+    casing_dp: jfloat,
+    color: jint,
+    casing_color: jint,
+) {
+    let Some(map) = handle_mut(handle) else { return };
+    let count = match env.get_array_length(&points) {
+        Ok(length) => length.max(0) as usize,
+        // Reading failed, so we know nothing about the intended route. Leaving the current
+        // one alone beats blanking a route the driver is following.
+        Err(_) => {
+            log("the route array could not be measured; leaving the route unchanged");
+            return;
+        }
+    };
+    let mut flat = vec![0f32; count];
+    if env.get_float_array_region(&points, 0, &mut flat).is_err() {
+        log("the route array could not be read; leaving the route unchanged");
+        return;
+    }
+    let coords: Vec<(f64, f64)> =
+        flat.chunks_exact(2).map(|pair| (pair[0] as f64, pair[1] as f64)).collect();
+    let style = RouteStyle {
+        width_dp,
+        casing_dp,
+        // ARGB arrives as a signed `int` because that is what a Kotlin colour is; the bit
+        // pattern is what matters and the cast keeps it.
+        color: color as u32,
+        casing_color: casing_color as u32,
+    };
+    let mesh = crate::overlay::tessellate(&coords, style);
+    if let Err(e) = map.renderer.set_route(mesh.as_ref()) {
+        log(&format!("uploading the route failed: {e}"));
+    }
+}
+
+/// Take the route away: navigation ended, or the host cleared it.
+#[no_mangle]
+pub extern "system" fn Java_com_vayunmathur_library_map_MapNative_clearRoute<'l>(
+    _env: JNIEnv<'l>,
+    _class: JClass<'l>,
+    handle: jlong,
+) {
+    if let Some(map) = handle_mut(handle) {
+        if let Err(e) = map.renderer.set_route(None) {
+            log(&format!("clearing the route failed: {e}"));
+        }
+    }
+}
+
+/// Dim everything outside the region containing this point, and report which one that is.
+///
+/// Takes a place's coordinates rather than a region id because nothing in the archive links the
+/// two: a city is a `places` **node** with its own OSM id, while its outline is a `boundaries`
+/// **relation**, and OSM does not oblige the node to be a member of the relation. Containment is
+/// the link - a city label sits inside its own boundary.
+///
+/// `level_min`/`level_max` are the inclusive OSM `admin_level` band the selection means, and are
+/// not optional: every label is contained by a whole stack of regions, so containment alone
+/// cannot say whether a tap on "California" meant the state or the county its label sits in.
+///
+/// Returns the region's OSM relation id, or 0 when no resident tile covers the point. Returning
+/// it rather than nothing lets the host tell "no region here" from "not loaded yet" and retry.
+#[no_mangle]
+pub extern "system" fn Java_com_vayunmathur_library_map_MapNative_setRegionMask<'l>(
+    _env: JNIEnv<'l>,
+    _class: JClass<'l>,
+    handle: jlong,
+    lon: jfloat,
+    lat: jfloat,
+    level_min: jint,
+    level_max: jint,
+) -> jlong {
+    let Some(map) = handle_mut(handle) else { return 0 };
+    let levels = (level_min.max(0) as u16)..=(level_max.max(0) as u16);
+    match map.renderer.region_at(lon as f64, lat as f64, levels) {
+        Some(id) => {
+            map.renderer.set_region_mask(Some(id));
+            id as jlong
+        }
+        None => {
+            map.renderer.set_region_mask(None);
+            0
+        }
+    }
+}
+
+/// Take the region mask away: the details sheet closed, or the selection moved on.
+#[no_mangle]
+pub extern "system" fn Java_com_vayunmathur_library_map_MapNative_clearRegionMask<'l>(
+    _env: JNIEnv<'l>,
+    _class: JClass<'l>,
+    handle: jlong,
+) {
+    if let Some(map) = handle_mut(handle) {
+        map.renderer.set_region_mask(None);
     }
 }
 

@@ -46,8 +46,20 @@ import kotlinx.serialization.json.Json
  * collapses "a type this build does not know" into the same null as "malformed", and every caller
  * reads null as a dead session - so a version-6 television would not ignore `NOW_PLAYING`, it would
  * hang up mid-track. Refusing at the handshake is the honest version of that.
+ *
+ * 8 lets the television say how big it is. [TvIdentity.displayModes] carries the panel's real modes,
+ * which nothing ever reported before - [DecoderLimits] describes what the decoder will *accept*, not
+ * what the screen *is*, and the two are not the same number. Mirroring never needed the distinction
+ * because it sends the phone's own shape and the TV pads it, but a desktop is composed for the
+ * screen it is displayed on: sending the phone's 1080x2400 portrait geometry produced a portrait
+ * desktop letterboxed into a landscape panel.
+ *
+ * Additive on the wire - [TvIdentity.displayModes] is defaulted, so an older receiver's message
+ * still parses - but the version moves anyway, because a receiver that advertises nothing is
+ * indistinguishable from a panel that enumerated no modes, and silently falling back to phone
+ * geometry is the failure this exists to remove.
  */
-const val PROTOCOL_VERSION = 7
+const val PROTOCOL_VERSION = 8
 
 /** The mDNS service type the TV registers and the phone browses for. */
 const val MACAST_SERVICE_TYPE = "_macast._tcp"
@@ -137,7 +149,34 @@ data class TvIdentity(
     /** Base64 ML-KEM + ML-DSA public bundle, from `PqcIdentity.publicBundle`. */
     val publicBundle: String,
     val limits: DecoderLimits,
+    /**
+     * The panel's own modes, largest first is not assumed - the sender sorts.
+     *
+     * Distinct from [limits], which is the *decoder's* envelope: a TV whose decoder tops out at 4K
+     * may well have a 1080p panel, and composing a desktop for the decoder ceiling would render a
+     * surface the screen then has to scale back down. Empty when the receiver enumerated nothing,
+     * which the sender treats as "fall back to the phone's geometry" rather than as a failure -
+     * mirroring is unaffected either way, because it deliberately sends the phone's own shape.
+     */
+    val displayModes: List<DisplayMode> = emptyList(),
 ) : ControlMessage
+
+/**
+ * One mode the television's panel can display.
+ *
+ * [refreshRate] is carried because two modes can share a resolution and differ only in rate, and
+ * dropping it would make them collide when the sender picks. It is not currently used to drive the
+ * encoder's frame rate, which stays negotiated through [CodecLimits.maxFrameRate].
+ */
+@Serializable
+data class DisplayMode(
+    val width: Int,
+    val height: Int,
+    val refreshRate: Float = 0f,
+) {
+    /** Pixels, for choosing the largest mode. */
+    val area: Long get() = width.toLong() * height
+}
 
 /**
  * What the TV's decoder will actually accept.

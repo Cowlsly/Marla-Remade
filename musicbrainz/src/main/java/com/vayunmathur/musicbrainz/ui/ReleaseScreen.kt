@@ -25,6 +25,8 @@ import com.vayunmathur.library.ui.MaterialTheme
 import com.vayunmathur.library.ui.Text
 import com.vayunmathur.library.ui.appBarScrollBehavior
 import com.vayunmathur.library.util.NavBackStack
+import com.vayunmathur.library.util.sharedContainer
+import com.vayunmathur.library.util.sharedText
 import com.vayunmathur.musicbrainz.R
 import com.vayunmathur.musicbrainz.Route
 import com.vayunmathur.musicbrainz.ui.components.CoverArtImage
@@ -39,7 +41,13 @@ import com.vayunmathur.musicbrainz.platform.ReleaseUiState
 fun ReleasePage(backStack: NavBackStack<Route>, viewModel: MusicBrainzViewModel, releaseId: String) {
     LaunchedEffect(releaseId) { viewModel.loadRelease(releaseId) }
     val state by viewModel.release.collectAsStateWithLifecycle()
-    ReleaseScreen(state, viewModel, backStack)
+    ReleaseScreen(
+        state,
+        viewModel,
+        backStack,
+        sharedTextKey = "mb-release-title-$releaseId",
+        sharedCoverKey = "mb-release-cover-$releaseId",
+    )
 }
 
 /**
@@ -53,11 +61,20 @@ fun ReleaseScreen(
     state: ReleaseUiState,
     actions: MusicBrainzActions,
     backStack: NavBackStack<Route>,
+    /** Pairs the heading with the edition row this release was opened from. */
+    sharedTextKey: Any? = null,
+    /** Pairs the hero cover with the thumbnail on that same row. */
+    sharedCoverKey: Any? = null,
 ) {
     val missing = state.tracks.size - state.ownedCount
     AppScaffold(
-        title = state.title.ifBlank { stringResource(R.string.album) },
-        backStack = backStack,
+        title = {
+            Text(
+                state.title.ifBlank { stringResource(R.string.album) },
+                modifier = if (sharedTextKey == null) Modifier else Modifier.sharedText(sharedTextKey),
+            )
+        },
+        onNavigateBack = { backStack.pop() },
         floatingActionButton = {
             if (missing > 0) {
                 ExtendedFloatingActionButton(
@@ -87,7 +104,16 @@ fun ReleaseScreen(
             ) {
                 item {
                     Column(Modifier.fillMaxWidth().padding(16.dp)) {
-                        CoverArtImage(state.coverUrl, size = 160, fallbackUrl = state.fallbackCoverUrl)
+                        CoverArtImage(
+                            state.coverUrl,
+                            modifier = if (sharedCoverKey == null) {
+                                Modifier
+                            } else {
+                                Modifier.sharedContainer(sharedCoverKey)
+                            },
+                            size = 160,
+                            fallbackUrl = state.fallbackCoverUrl,
+                        )
                         Text(state.artist, style = MaterialTheme.typography.titleMedium)
                         SecondaryText(state.subtitle)
                         Text(

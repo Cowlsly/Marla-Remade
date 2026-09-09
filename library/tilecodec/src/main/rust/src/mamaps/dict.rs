@@ -214,6 +214,16 @@ pub const KINDS: &[&str] = &[
     "hotel",
     "atm",
     "bank",
+    // v4. The *shape* of an administrative region, as opposed to `country`/`region`/`county`/
+    // `locality`, which are its border drawn as a line.
+    //
+    // A separate kind rather than reusing those, because the two cannot share one: the style's
+    // `boundaries` layer is `type: line`, and a line layer strokes a polygon's outline. Clipping a
+    // polygon to a tile adds segments along the tile edge to close the ring, so carrying regions
+    // under the existing kinds drew a grid of tile borders across the whole map. That was tried
+    // and reverted. This kind is excluded from the `boundaries` layer's `kinds` list, so nothing
+    // in the basemap draws it — it exists only for the region mask to read.
+    "region_area",
 ];
 
 /// Every `kind_detail` value, id 1 upward. Index 0 is [`NONE`].

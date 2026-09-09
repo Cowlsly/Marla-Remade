@@ -19,22 +19,6 @@ dependencyResolutionManagement {
     repositories {
         google()
         mavenCentral()
-        // JitPack serves one third-party coordinate, com.github.luben:zstd-jni. Scoped to
-        // com.github.* because JitPack
-        // answers unknown coordinates with 401/429 rather than 404, and Gradle treats that as a hard
-        // failure — an unscoped JitPack breaks resolution of anything Central hasn't yet
-        // propagated (e.g. a freshly published artifact).
-        //
-        // No personal fork is served from here any more: ncnn-android went with ncnn, and
-        // Stockfish-Library went when `:games:chess` moved to Maia3 on `:library:ml`.
-        //
-        // `mavenLocal()` used to come first, so that a freshly built ncnn-android resolved even
-        // when JitPack was rate-limited. Nothing is built locally now that SMaLL-100 runs on
-        // `:library:ml`, and a local repository ahead of the remotes is a supply-chain hazard of
-        // its own: any coordinate in `~/.m2` silently wins over the pinned one.
-        maven("https://jitpack.io") {
-            content { includeGroupByRegex("com\\.github\\..*") }
-        }
         // RingRTC is published by Signal, not to Maven Central. Scoped to org.signal so nothing else
         // resolves through it.
         maven("https://build-artifacts.signal.org/libraries/maven/") {
@@ -130,7 +114,6 @@ include(":launcher")
 include(":cast")
 include(":cast:protocol")
 include(":cast:tv")
-include(":mapcompare")
 include(":tuner")
 include(":setupwizard")
 include(":logviewer")
