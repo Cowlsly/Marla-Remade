@@ -4,6 +4,7 @@ import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
@@ -23,6 +24,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.stringResource
+import com.vayunmathur.library.ui.CompassCalibrationHint
 import com.vayunmathur.library.ui.ExperimentalMaterial3Api
 import com.vayunmathur.library.ui.FreeHeightBottomSheetScaffold
 import com.vayunmathur.library.ui.IconSettings
@@ -40,7 +42,6 @@ import com.vayunmathur.maps.Route
 import com.vayunmathur.maps.data.SavedPlace
 import com.vayunmathur.maps.data.SpecificFeature
 import com.vayunmathur.maps.ui.map.LayerToggles
-import com.vayunmathur.maps.ui.map.MapBrowseHeader
 import com.vayunmathur.maps.ui.map.MapFabStack
 import com.vayunmathur.maps.ui.map.MapOverlay
 import com.vayunmathur.maps.ui.map.MapOverlays
@@ -245,6 +246,19 @@ fun MapPage(
     // that path owns the pane — see the `pendingFocus` effect above.
     var searchWasOpen by remember { mutableStateOf(false) }
 
+    // Rebuilt only when the label changes: `TopAppBarOverlay` takes a list, so an inline one
+    // would be a fresh instance every recomposition of the map.
+    val settingsLabel = stringResource(MapsR.string.settings_title)
+    val settingsAction = remember(settingsLabel, backStack) {
+        listOf(
+            OverlayAction(
+                icon = { IconSettings() },
+                contentDescription = settingsLabel,
+                onClick = { backStack.add(Route.SettingsPage) },
+            )
+        )
+    }
+
     // The two sheets take turns: search covers the place pane while it is up, and hands it back
     // on the way out. The selection is read off the ViewModel rather than the collected state
     // because picking a result sets it and closes search in the same breath, and the flow has not
@@ -437,21 +451,44 @@ fun MapPage(
 
                 // The chrome's inset, in one place. `windowInsetsPadding` *consumes* what it
                 // applies, so the pieces below that inset themselves — the FAB stack, the scale
-                // bar, the navigation overlay — become no-ops rather than insetting twice, and
-                // the ones that never did, the category chips and the waypoint list, pick up the
-                // status bar they used to get from the app bar.
+                // bar, the navigation overlay, the overlay bar — become no-ops rather than
+                // insetting twice, and the waypoint list, which never did, picks up the status
+                // bar it used to get from the app bar.
                 Box(Modifier.windowInsetsPadding(WindowInsets.systemBars).fillMaxSize()) {
-                    // Stacked, not overlaid: the settings button and the category chips both want
-                    // the top of the screen, and the chips are a full-width scrolling row that
-                    // would run underneath the button.
+                    val routeFeature =
+                        (selectedFeature as? SpecificFeature.Route) ?: inactiveNavigation
                     Column(Modifier.align(Alignment.TopCenter)) {
                         // Turn-by-turn puts its maneuver banner in this exact slot, so the bar
                         // stands down for the duration rather than floating over it.
                         if (!isNavigating) {
-                            TopAppBarOverlay(actions = settingsAction)
+                            TopAppBarOverlay(
+                                actions = settingsAction,
+                                // The chips ride in the bar's title rather than in a row of their
+                                // own below it. They bring their own filled containers, which is
+                                // what keeps them readable over the map; the bar itself stays
+                                // transparent, so the map runs straight through behind them.
+                                title = {
+                                    // Dropped while a route is up: the waypoint list takes that
+                                    // space and filtering POIs is not what you are doing then —
+                                    // the same rule the chips followed before they moved. The
+                                    // slot stays, so the settings button does not shift.
+                                    if (routeFeature == null) {
+                                        CategoryChips(
+                                            onCategory = { chrome.toggleCategory(it) },
+                                            selected = chrome.selectedCategory,
+                                            // Inside the scroll, never as a margin: the chips have
+                                            // to slide past the screen inset rather than clip
+                                            // against it. The bar gives its title no inset of its
+                                            // own precisely so this can be the only one.
+                                            contentPadding = PaddingValues(
+                                                start = Spacing.lg,
+                                                end = Spacing.sm,
+                                            ),
+                                        )
+                                    }
+                                },
+                            )
                         }
-                        val routeFeature =
-                            (selectedFeature as? SpecificFeature.Route) ?: inactiveNavigation
                         if (routeFeature != null) {
                             WaypointList(
                                 route = routeFeature,
@@ -459,10 +496,13 @@ fun MapPage(
                                 onEditWaypoint = { index -> openSearch(waypointIndex = index) },
                             )
                         } else {
-                            MapBrowseHeader(
-                                selectedCategory = chrome.selectedCategory,
-                                onCategory = { chrome.toggleCategory(it) },
-                                headingAccuracy = userHeadingAccuracy,
+                            // The quiet variant: a hint over the map, not a card. See
+                            // [CompassCalibrationHint].
+                            CompassCalibrationHint(
+                                accuracy = userHeadingAccuracy,
+                                modifier = Modifier
+                                    .align(Alignment.CenterHorizontally)
+                                    .padding(top = Spacing.sm),
                             )
                         }
                     }
@@ -604,4 +644,22 @@ fun MapPage(
                             chrome.dismissOverlay()
                             coroutineScope.launch { sheetState.partialExpand() }
                         },
-                        onParkingNoteChange = { parkingViewModel.u
+                        onParkingNoteChange = { parkingViewModel.updateNote(it) },
+                        selectedStop = selectedTransitStop,
+                        departures = departuresState,
+                        onCloseStop = { transitViewModel.closeStop() },
+                        onRefreshDepartures = { transitViewModel.refresh() },
+                    )
+                }
+            }
+        }
+    }
+}
+
+/** End the session and stop the foreground service that outlives this screen. */
+private fun stopNavigation(context: android.content.Context) {
+    NavigationSessionManager.stop()
+    context.stopService(
+        android.content.Intent(context, com.vayunmathur.maps.util.NavigationService::class.java)
+    )
+}

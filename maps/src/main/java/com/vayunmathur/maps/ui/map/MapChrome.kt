@@ -1,13 +1,8 @@
 package com.vayunmathur.maps.ui.map
 
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.layout.Box
-import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
-import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.runtime.Composable
@@ -20,12 +15,8 @@ import com.vayunmathur.library.ui.IconSearch
 import com.vayunmathur.library.ui.MaterialTheme
 import com.vayunmathur.library.ui.Spacing
 import com.vayunmathur.library.ui.Text
-import com.vayunmathur.maps.ui.CategoryChips
-import com.vayunmathur.library.ui.CompassCalibrationBanner
 import com.vayunmathur.maps.ui.ContactAddressButton
-import com.vayunmathur.maps.ui.MapCategory
 import com.vayunmathur.maps.ui.VoiceSearchButton
-import com.vayunmathur.maps.ui.theme.MapChromeMetrics
 import com.vayunmathur.maps.R as MapsR
 
 /**
@@ -62,37 +53,6 @@ fun MapSearchBar(
             ContactAddressButton(onAddress = onContactAddress)
             // Voice search (P8): a transcript opens the search sheet pre-filled.
             VoiceSearchButton(onResult = { onOpenSearch(it) })
-        }
-    }
-}
-
-/**
- * The browse-mode row over the map: category chips, plus a compass hint when the heading is bad.
- *
- * Tapping a chip FILTERS the on-map POIs to that category's OSM types rather than running a text
- * search; tapping the active chip clears it.
- */
-@Composable
-fun MapBrowseHeader(
-    selectedCategory: MapCategory?,
-    onCategory: (MapCategory) -> Unit,
-    headingAccuracy: Int,
-    modifier: Modifier = Modifier,
-) {
-    Column(modifier.padding(vertical = MapChromeMetrics.chromeMargin).fillMaxWidth()) {
-        CategoryChips(
-            onCategory = onCategory,
-            selected = selectedCategory,
-            modifier = Modifier.fillMaxWidth(),
-            contentPadding = PaddingValues(horizontal = MapChromeMetrics.chromeMargin),
-        )
-        Spacer(Modifier.height(Spacing.sm))
-        // Only nag when the heading is genuinely unreliable; MEDIUM is good enough to draw a
-        // puck with, and a banner that is always up is a banner nobody reads.
-        if (headingAccuracy <= android.hardware.SensorManager.SENSOR_STATUS_ACCURACY_LOW) {
-            Box(Modifier.padding(horizontal = MapChromeMetrics.chromeMargin)) {
-                CompassCalibrationBanner(headingAccuracy)
-            }
         }
     }
 }

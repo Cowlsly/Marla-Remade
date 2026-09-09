@@ -72,16 +72,25 @@ data class PanoramaCrop(
  *
  * The surface is rebuilt whenever [textureKey] changes, which is what reloads the
  * texture and resets the look direction for a new panorama.
+ *
+ * [cameraState], if given, receives the live look direction so a caller can
+ * project an overlay into the same scene. [initialYaw] overrides where the view
+ * opens, in radians; the default centres the covered band. A caller stepping
+ * between panoramas uses it to carry the viewer's facing across the move.
  */
 @Composable
 fun PanoramaSphere(
     crop: PanoramaCrop,
     textureKey: Any,
     modifier: Modifier = Modifier,
+    cameraState: PanoramaCameraState? = null,
+    initialYaw: Float? = null,
     loadTexture: (maxTextureSize: Int) -> Bitmap?,
 ) {
     val context = LocalContext.current
-    val glView = remember(textureKey) { PanoramaSphereGLView(context, crop, loadTexture) }
+    val glView = remember(textureKey) {
+        PanoramaSphereGLView(context, crop, initialYaw, cameraState, loadTexture)
+    }
 
     DisposableEffect(glView) {
         glView.onResume()
@@ -94,10 +103,12 @@ fun PanoramaSphere(
 private class PanoramaSphereGLView(
     context: Context,
     crop: PanoramaCrop,
+    initialYaw: Float?,
+    private val cameraState: PanoramaCameraState?,
     loadTexture: (Int) -> Bitmap?,
 ) : GLSurfaceView(context) {
 
-    private val renderer = SphereRenderer(crop, loadTexture)
+    private val renderer = SphereRenderer(crop, initialYaw, loadTexture)
     private val scaleDetector: ScaleGestureDetector
 
     private var lastX = 0f
@@ -112,10 +123,16 @@ private class PanoramaSphereGLView(
             override fun onScale(detector: ScaleGestureDetector): Boolean {
                 // Pinch out (scaleFactor > 1) zooms in → narrower FOV.
                 renderer.fov = (renderer.fov / detector.scaleFactor).coerceIn(MIN_FOV, MAX_FOV)
+                publishCamera()
                 requestRender()
                 return true
             }
         })
+        publishCamera()
+    }
+
+    private fun publishCamera() {
+        cameraState?.publish(renderer.yaw, renderer.pitch, renderer.fov)
     }
 
     override fun onTouchEvent(event: MotionEvent): Boolean {
@@ -132,10 +149,11 @@ private class PanoramaSphereGLView(
                     // Drag "grabs" the scene: dragging right/down brings the
                     // content that was to the left/above into view. Scale by FOV
                     // so the feel is consistent across zoom levels.
-                    val speed = DRAG_SPEED * (renderer.fov / DEFAULT_FOV)
+                    val speed = DRAG_SPEED * (renderer.fov / PanoramaCameraState.DEFAULT_FOV_DEG)
                     renderer.addYaw(dx * speed)
                     renderer.addPitch(dy * speed)
                     lastX = event.x; lastY = event.y
+                    publishCamera()
                     requestRender()
                 }
             }
@@ -147,7 +165,6 @@ private class PanoramaSphereGLView(
     companion object {
         // Radians of rotation per pixel of drag at the default FOV.
         private const val DRAG_SPEED = 0.0015f
-        private const val DEFAULT_FOV = 75f
         private const val MIN_FOV = 30f
         private const val MAX_FOV = 100f
     }
@@ -155,14 +172,17 @@ private class PanoramaSphereGLView(
 
 private class SphereRenderer(
     private val crop: PanoramaCrop,
+    initialYaw: Float?,
     private val loadTexture: (Int) -> Bitmap?,
 ) : GLSurfaceView.Renderer {
 
-    @Volatile var fov = 75f
+    @Volatile var fov = PanoramaCameraState.DEFAULT_FOV_DEG
 
     // Look direction, radians. Initialized to the center of the covered band.
-    @Volatile private var yaw = 0f
-    @Volatile private var pitch = 0f
+    @Volatile var yaw = 0f
+        private set
+    @Volatile var pitch = 0f
+        private set
 
     fun addYaw(delta: Float) { yaw += delta }
     fun addPitch(delta: Float) { pitch = (pitch + delta).coerceIn(-MAX_PITCH, MAX_PITCH) }
@@ -189,8 +209,8 @@ private class SphereRenderer(
         val fullH = crop.fullHeight.toFloat().coerceAtLeast(1f)
         val centerU = (crop.croppedLeft + crop.croppedWidth / 2f) / fullW
         val centerV = (crop.croppedTop + crop.croppedHeight / 2f) / fullH
-        // Longitude of the band center; matches the mesh's theta = u * 2π.
-        yaw = (centerU * 2.0 * Math.PI).toFloat()
+        // Negated to match the mesh, where texture u sits at azimuth -u*2pi.
+        yaw = initialYaw ?: (-centerU * 2.0 * Math.PI).toFloat()
         // Latitude of the band center; matches the mesh's phi = π/2 - v * π.
         pitch = ((Math.PI / 2.0 - centerV * Math.PI).toFloat()).coerceIn(-MAX_PITCH, MAX_PITCH)
     }
@@ -261,7 +281,12 @@ private class SphereRenderer(
             for (slice in 0..SLICES) {
                 val uFull = slice.toFloat() / SLICES
                 val theta = uFull * 2.0 * Math.PI
-                val x = (cosPhi * sin(theta)).toFloat()
+                // x is NEGATED so the texture runs the correct way round when the
+                // sphere is viewed from the INSIDE. The camera's screen-right is
+                // f x up, which decreases azimuth, so mapping u straight to +theta
+                // renders the panorama horizontally mirrored (text reads backwards).
+                // Placing u at -theta cancels that. Vertical is unaffected.
+                val x = (-cosPhi * sin(theta)).toFloat()
                 val y = sinPhi.toFloat()
                 val z = (cosPhi * cos(theta)).toFloat()
                 positions.add(x); positions.add(y); positions.add(z)

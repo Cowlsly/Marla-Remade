@@ -272,11 +272,18 @@ class FreeHeightSheetState(private val initialValue: SheetValue) {
     private suspend fun animateToHeight(target: () -> Float) {
         awaitMeasured()
         hostAnimations++
-        // Widen the floor so the animation can leave a hidden sheet, then re-arm it
-        // on the way out — including on cancellation, when the user grabs the handle
-        // mid-flight and the drag path takes over.
-        offset.updateBounds(0f, expandedPx)
         try {
+            // Widen the floor so the animation can leave a hidden sheet, then re-arm it
+            // on the way out — including on cancellation, when the user grabs the handle
+            // mid-flight and the drag path takes over.
+            //
+            // Inside the `try`, matching [hide]: it is the only statement between the
+            // increment above and the animation that could throw, and if it escaped the
+            // count would never come back down. Nothing here enforces the invariant that
+            // makes it safe — `expandedPx` is coerced non-negative over in [applyBounds] —
+            // and the cost of it being wrong is silent, since a stuck count does not crash,
+            // it just quietly costs the sheet its peek floor and its fling for good.
+            offset.updateBounds(0f, expandedPx)
             offset.animateTo(target())
         } finally {
             hostAnimations--

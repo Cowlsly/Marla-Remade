@@ -2,17 +2,11 @@ package com.vayunmathur.maps.ui.streetview
 
 import android.graphics.Bitmap
 import androidx.compose.foundation.background
-import androidx.compose.foundation.horizontalScroll
-import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
-import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.rememberScrollState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -24,19 +18,17 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.res.stringResource
-import androidx.compose.ui.unit.dp
+import androidx.compose.ui.text.style.TextAlign
 import com.vayunmathur.library.ui.CircularProgressIndicator
-import com.vayunmathur.library.ui.FilledTonalButton
-import com.vayunmathur.library.ui.IconDirectionsWalk
 import com.vayunmathur.library.ui.MaterialTheme
 import com.vayunmathur.library.ui.PanoramaCrop
 import com.vayunmathur.library.ui.PanoramaSphere
 import com.vayunmathur.library.ui.Spacing
 import com.vayunmathur.library.ui.Text
 import com.vayunmathur.library.ui.TopAppBarOverlay
+import com.vayunmathur.library.ui.rememberPanoramaCameraState
 import com.vayunmathur.maps.R
 import com.vayunmathur.maps.data.google.StreetViewDataSource
-import com.vayunmathur.maps.data.google.StreetViewLink
 import com.vayunmathur.maps.data.google.StreetViewPano
 import kotlinx.coroutines.launch
 
@@ -48,14 +40,21 @@ import kotlinx.coroutines.launch
  * photos app uses for 360 photos, lifted into `:library:ui`. Dragging looks around
  * and pinching changes the field of view; there is no flat image to pan.
  *
- * Tapping a neighbour steps to the adjacent pano ([StreetViewPano.neighbors]),
- * refetched by id, and the new panorama reloads its own texture.
+ * NAVIGATION: arrows drawn into the scene by [StreetViewArrows], one per walkable
+ * neighbour, pinned to their compass bearings. Tapping one travels there.
  */
 @Composable
 fun StreetViewScreen(initialPano: StreetViewPano, onClose: () -> Unit) {
     var pano by remember { mutableStateOf(initialPano) }
     var image by remember { mutableStateOf<Bitmap?>(null) }
     var loading by remember { mutableStateOf(true) }
+    // Where to open the next panorama, so a step keeps the viewer facing the way
+    // they were already going. Null for the first pano, which opens at the
+    // capture heading.
+    var carriedYaw by remember { mutableStateOf<Float?>(null) }
+
+    val camera = rememberPanoramaCameraState()
+    val scope = rememberCoroutineScope()
 
     // Load (and reload on pano change) the stitched equirect off the main thread.
     LaunchedEffect(pano.panoId) {
@@ -68,11 +67,26 @@ fun StreetViewScreen(initialPano: StreetViewPano, onClose: () -> Unit) {
     Box(Modifier.fillMaxSize().background(Color.Black)) {
         val current = image
         when {
-            current != null -> PanoramaSphere(
-                crop = PanoramaCrop.full(current.width, current.height),
-                textureKey = pano.panoId,
-                modifier = Modifier.fillMaxSize(),
-            ) { current }
+            current != null -> {
+                PanoramaSphere(
+                    crop = PanoramaCrop.full(current.width, current.height),
+                    textureKey = pano.panoId,
+                    modifier = Modifier.fillMaxSize(),
+                    cameraState = camera,
+                    initialYaw = carriedYaw,
+                ) { current }
+
+                StreetViewArrows(pano = pano, camera = camera) { link ->
+                    // Resolve first, then swap: a failed lookup leaves the viewer
+                    // where it is rather than blanking the screen.
+                    val facing = panoBearingForYaw(pano.headingDeg, camera.yaw)
+                    scope.launch {
+                        val next = StreetViewDataSource.byPano(link.panoId) ?: return@launch
+                        carriedYaw = panoYawForBearing(next.headingDeg, facing)
+                        pano = next
+                    }
+                }
+            }
             loading -> CircularProgressIndicator(Modifier.align(Alignment.Center), color = Color.White)
             else -> Text(
                 stringResource(R.string.street_view_unavailable),
@@ -83,49 +97,19 @@ fun StreetViewScreen(initialPano: StreetViewPano, onClose: () -> Unit) {
 
         TopAppBarOverlay(Modifier.align(Alignment.TopStart), onNavigateBack = onClose)
 
-        Column(
+        Attribution(
+            pano = pano,
             modifier = Modifier
                 .align(Alignment.BottomCenter)
                 .fillMaxWidth()
                 .navigationBarsPadding()
                 .padding(Spacing.md),
-            horizontalAlignment = Alignment.CenterHorizontally,
-            verticalArrangement = Arrangement.spacedBy(Spacing.sm),
-        ) {
-            if (pano.neighbors.isNotEmpty()) {
-                NeighborSteps(pano.neighbors) { link -> stepTo(link) { pano = it } }
-            }
-            Attribution(pano)
-        }
-    }
-}
-
-/** Load a neighbour pano and, if it resolves, swap to it (else keep the current). */
-private suspend fun stepTo(link: StreetViewLink, onResolved: (StreetViewPano) -> Unit) {
-    StreetViewDataSource.byPano(link.panoId)?.let(onResolved)
-}
-
-@Composable
-private fun NeighborSteps(neighbors: List<StreetViewLink>, onStep: suspend (StreetViewLink) -> Unit) {
-    val scope = rememberCoroutineScope()
-    Row(
-        Modifier.horizontalScroll(rememberScrollState()),
-        horizontalArrangement = Arrangement.spacedBy(Spacing.sm),
-    ) {
-        neighbors.forEach { link ->
-            FilledTonalButton(onClick = { scope.launch { onStep(link) } }) {
-                IconDirectionsWalk(Modifier.size(18.dp))
-                Text(
-                    "  ${compass(link.bearingDeg)} · ${link.distanceM.toInt()} m",
-                    style = MaterialTheme.typography.labelMedium,
-                )
-            }
-        }
+        )
     }
 }
 
 @Composable
-private fun Attribution(pano: StreetViewPano) {
+private fun Attribution(pano: StreetViewPano, modifier: Modifier = Modifier) {
     val date = if (pano.captureYear != null && pano.captureMonth != null) {
         " · ${pano.captureYear}-${pano.captureMonth.toString().padStart(2, '0')}"
     } else {
@@ -135,11 +119,7 @@ private fun Attribution(pano: StreetViewPano) {
         (pano.copyright ?: "\u00A9 Google") + date,
         color = Color.White.copy(alpha = 0.7f),
         style = MaterialTheme.typography.labelSmall,
+        textAlign = TextAlign.Center,
+        modifier = modifier,
     )
-}
-
-/** Compass point (8-wind) for a bearing in degrees. */
-private fun compass(bearingDeg: Double): String {
-    val dirs = listOf("N", "NE", "E", "SE", "S", "SW", "W", "NW")
-    return dirs[(((bearingDeg % 360 + 360) % 360) / 45.0).toInt() % 8]
 }
