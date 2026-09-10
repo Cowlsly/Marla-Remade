@@ -53,6 +53,20 @@ layout(push_constant) uniform Push {
 // Mirrors `style::paint::MIN_HALF_WIDTH_PX`; must match `road_surface.vert`.
 const float MIN_HALF_WIDTH_PX = 0.5;
 
+// A `line.z` below this means "paint no markings on this ribbon at all". A real centre-line
+// `t` is an across-road coordinate bounded to [-1, +1], so no road can reach it; the
+// renderer pushes exactly -2.0 (`pipeline::NO_MARKINGS`). The threshold sits halfway
+// between the two so neither side depends on the exact value.
+//
+// It exists for the lane connectors through a junction. Real road paint stops at the stop
+// line and resumes on the far side — an intersection is not marked out into lanes — so a
+// connector carrying edge lines is not merely noisy, it is wrong. And it is *only* noise:
+// a connector is drawn in the same colour as the carriageway it continues, so where it
+// overlies the road its asphalt contributes nothing and its markings are the entire
+// visible ribbon. Twelve of those per junction read as a tangle of hairlines rather than
+// as road surface.
+const float NO_MARKINGS_BELOW = -1.5;
+
 // A painted marking is about 0.15 m in a lane about 3.5 m wide. Held as a fraction of the
 // lane rather than an absolute width so it stays a ground measurement across zooms.
 const float MARK_WIDTH_LANES = 0.045;
@@ -96,7 +110,7 @@ void main() {
         clamp((lanePx - MARK_FADE_START_PX) / (MARK_FADE_FULL_PX - MARK_FADE_START_PX), 0.0, 1.0);
 
     vec3 rgb = push.color.rgb;
-    if (legible > 0.0) {
+    if (legible > 0.0 && push.line.z > NO_MARKINGS_BELOW) {
         float markHalfPx = max(lanePx * MARK_WIDTH_LANES * 0.5, MIN_MARK_HALF_PX);
         bool oneway = push.line.w >= 0.5;
         float centreT = push.line.z;

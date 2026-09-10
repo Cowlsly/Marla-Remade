@@ -15,6 +15,7 @@ use crate::tess::{fill, ribbon, roof, stroke, terrain};
 use crate::tile::arrow::{self, ArrowInstance};
 use crate::tile::symbol;
 use crate::tile::select::ANCESTOR_DEPTH;
+use crate::tile::taper;
 use tilecodec::mamaps::body::{Body, GEOM_LINE, GEOM_POINT, GEOM_POLYGON};
 use tilecodec::mamaps::dict::{
     LAYER_BUILDINGS, LAYER_EARTH, LAYER_JUNCTION, LAYER_ROADS, LAYER_TRAFFIC,
@@ -467,20 +468,7 @@ pub fn build_toggled(
                             (1, true, 0.0)
                         } else {
                             let oneway = feature.is_oneway();
-                            // Most roads carry no `lanes` tag at all, and a zero lane count would
-                            // push a zero width and draw nothing. OSM's own reading of an untagged
-                            // road is one lane each way, which is also what makes the centre line
-                            // appear.
-                            let lanes = match feature.lane_count {
-                                0 => {
-                                    if oneway {
-                                        1
-                                    } else {
-                                        2
-                                    }
-                                }
-                                count => count,
-                            };
+                            let lanes = taper::carriageway_lanes(feature.lane_count, oneway);
                             let split = split_t(tile, layer, feature_index, lanes, left_hand);
                             (lanes, oneway, split)
                         };
@@ -680,6 +668,14 @@ fn terrain_mesh(tile: &Body, ground_width_m: f64) -> TerrainMesh {
 /// actually carries — the extra lane going to the forward direction — and runs it through the same
 /// arithmetic as a known one. On an even count that still comes out at 0.0, and it is what real
 /// data gives anyway: a three-lane two-way road is tagged 2/1, not "centred".
+///
+/// # Its counterpart is the arrow fan
+///
+/// That no-table assumption is made a second time, independently, in [`arrow_meshes`] — which fans
+/// each direction's arrows over the very boundary this line is painted on. **The two are
+/// counterparts and have to be changed together.** If one starts assuming a different split and
+/// the other does not, the arrows detach from the centre line on exactly the archives that carry
+/// no table, which is the case with no third source to catch the disagreement.
 fn split_t(tile: &Body, layer: &Layer, feature_index: usize, lanes: u8, left_hand: bool) -> f32 {
     let (forward, backward) = known_split(tile, layer.source_layer_id, feature_index)
         .unwrap_or_else(|| {
@@ -695,8 +691,9 @@ fn split_t(tile: &Body, layer: &Layer, feature_index: usize, lanes: u8, left_han
 ///
 /// The single read of that table. [`split_t`] puts the centre line at the boundary it implies and
 /// [`arrow_meshes`] fans each direction's arrows over its own side of that same boundary; reading
-/// it once means the marking and the arrows cannot disagree about where the road divides. They
-/// differ only in what they assume when it is absent, which is a judgement each makes for itself.
+/// it once means the marking and the arrows cannot disagree about where the road divides. Where it
+/// is absent the two synthesise a split separately instead, and those syntheses are counterparts
+/// that have to be kept in step — see the note on [`split_t`].
 fn known_split(tile: &Body, layer_id: u8, feature_index: usize) -> Option<(u16, u16)> {
     tile.feature_carriageway(layer_id, feature_index)
         .map(|shape| (shape.forward as u16, shape.backward as u16))
@@ -745,20 +742,14 @@ fn arrow_meshes(tile: &Body, z: u8, left_hand: bool) -> Vec<ArrowInstance> {
         }
         // How the road divides, from the same table the centre line is placed from, so an arrow
         // and the marking beside it cannot disagree about which lanes belong to which direction.
-        // Absent that, the same fallback the ribbon and `split_t` use — an untagged road is one
-        // lane each way, or one lane for a one-way, and an odd count gives the extra lane forward.
+        // Absent that, this synthesises a split and so does `split_t`: the two are counterparts
+        // and must be changed together, or the arrows come away from the centre line on precisely
+        // the archives that carry no table. They agree on every two-way road. They differ only for
+        // a one-way — all lanes forward here, an even division there — and that is harmless solely
+        // because a one-way carriageway draws no centre line for the split to be wrong about.
         // Not read off the mask lists, which describe only the lanes that carry a turn indication.
         let oneway = feature.is_oneway();
-        let lanes = match feature.lane_count {
-            0 => {
-                if oneway {
-                    1
-                } else {
-                    2
-                }
-            }
-            count => count,
-        };
+        let lanes = taper::carriageway_lanes(feature.lane_count, oneway);
         let lanes_each_way = known_split(tile, LAYER_ROADS, index).unwrap_or_else(|| {
             let lanes = u16::from(lanes);
             if oneway {
@@ -1664,6 +1655,47 @@ mod tests {
         assert!(
             !published.meshes.iter().any(|m| m.layer_index == connectors),
             "the connector layer must not draw a stroked mesh either",
+        );
+    }
+
+    /// **What makes the `NO_MARKINGS` sentinel safe.** The renderer signals "paint no markings on
+    /// this ribbon" by pushing -2.0 into `Push.line.z`, the slot that otherwise carries the
+    /// centre-line split. That is only sound because a real split is an across-road coordinate and
+    /// so cannot leave `[-1, +1]` — a road that ever pushed a value below -1.5 would silently lose
+    /// its lane markings.
+    ///
+    /// `vulkan/` is `#[cfg(target_os = "android")]`, so the sentinel itself is not reachable from a
+    /// host test. This pins the half that is: the producer side, over every shape a road can take,
+    /// including the lopsided splits that push furthest toward a kerb.
+    #[test]
+    fn a_roads_split_can_never_reach_the_no_markings_sentinel() {
+        use tilecodec::mamaps::body::{Carriageway, MarkingConvention};
+
+        let mut worst: f32 = 0.0;
+        for left_hand in [false, true] {
+            for lanes in 1..=12u8 {
+                // The unknown-split path, which is what every archive takes today.
+                let mut body = carriageway_body(&[(lanes, false), (lanes, true)]);
+                body.convention = Some(MarkingConvention { left_hand, yellow_centre: false });
+                for mesh in build(&body, carriageway_only(), 16, 0, 0, false).carriageways {
+                    worst = worst.max(mesh.split.abs());
+                }
+                // And every tagged division of those lanes, including all-forward and
+                // all-backward, which are the extremes that land the split on a kerb.
+                for forward in 0..=lanes {
+                    let shape = Carriageway {
+                        forward,
+                        backward: lanes - forward,
+                        solid_dividers: 0,
+                    };
+                    worst = worst.max(split_for(lanes, shape).abs());
+                }
+            }
+        }
+        assert!(
+            worst <= 1.0,
+            "a road pushed a split of {worst}, outside the +/-1 an across-road coordinate can \
+             take; anything past -1.5 would be read as the no-markings sentinel",
         );
     }
 

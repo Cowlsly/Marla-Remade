@@ -28,6 +28,13 @@ pub const PUSH_CONSTANT_BYTES: u32 = 64 + 16 + 16 + 16 + 16;
 /// The default `Push::morph`: fully present, no LOD cross-fade. Every draw but WS-D's uses it.
 pub const MORPH_NONE: [f32; 4] = [1.0, 0.0, 0.0, 0.0];
 
+/// `Push::line[2]` for a ribbon that carries no markings at all — see the [`Push`] doc comment.
+///
+/// Below the `[-1, +1]` a real centre-line `t` is bounded to, so it cannot collide with one.
+/// `road_surface.frag` tests against its own `NO_MARKINGS_BELOW` of -1.5, halfway between this and
+/// the nearest legal split, so neither side is sensitive to the exact value.
+pub const NO_MARKINGS: f32 = -2.0;
+
 /// The push constant block, matching the `Push` block the shaders declare.
 ///
 /// `repr(C)` so the field order is the declaration order, which is what the SPIR-V
@@ -72,6 +79,24 @@ pub const MORPH_NONE: [f32; 4] = [1.0, 0.0, 0.0, 0.0];
 /// ```
 ///
 /// It is ignored when `line.w` is set, so a one-way may push anything there.
+///
+/// # `line.z` also carries "no markings at all", as [`NO_MARKINGS`]
+///
+/// Because a real split is an across-road coordinate it cannot leave `[-1, +1]`, so a value below
+/// that range is free to mean something else. [`NO_MARKINGS`] (-2.0) tells `road_surface.frag` to
+/// paint the asphalt and nothing on it — no edge lines, no dividers, no centre line.
+///
+/// The junction layer's lane connectors use it. A connector is a notional path across an
+/// intersection, and road paint does not mark those out on the ground; it is also drawn in the
+/// carriageway's own colour, so where it overlies the road its asphalt is invisible and its
+/// markings are the whole of what shows. Twelve connectors at a crossroads then read as a tangle
+/// of hairlines rather than as a widening of the junction.
+///
+/// Chosen over a new slot or a wider block deliberately: a connector is always a one-way, so
+/// `line.z` is *already* dead on exactly the draws this applies to — the shader has never read it
+/// there. That makes the reuse something the code enforces rather than a convention a reader has
+/// to hold, and it costs no vertex attribute, no `Push` growth past the guaranteed 128 bytes, and
+/// no archive format change.
 ///
 /// `misc.z` is the driving convention, resolved per tile at archive build time — the Americas paint
 /// the line between opposing traffic yellow and most of the rest of the world paints it white. It

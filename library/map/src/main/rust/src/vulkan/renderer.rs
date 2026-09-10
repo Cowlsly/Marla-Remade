@@ -11,7 +11,7 @@ use crate::vulkan::buffers::Buffer;
 use crate::vulkan::context::{ANativeWindow, Context};
 use crate::vulkan::images::{AtlasSet, SampledImage};
 use crate::vulkan::pick::Pick;
-use crate::vulkan::pipeline::{Pipelines, Push, MORPH_NONE};
+use crate::vulkan::pipeline::{Pipelines, Push, MORPH_NONE, NO_MARKINGS};
 use crate::vulkan::swapchain::Swapchain;
 use ash::vk;
 use std::cell::Cell;
@@ -19,6 +19,7 @@ use std::cmp::Reverse;
 use std::collections::HashMap;
 use std::collections::HashSet;
 use std::ops::RangeInclusive;
+use tilecodec::mamaps::dict::LAYER_JUNCTION;
 
 /// How many frames may be in flight. Two is enough to keep the GPU fed behind vsync
 /// without adding latency the user can feel when panning.
@@ -1754,13 +1755,24 @@ impl Renderer {
                 // The asphalt only. The markings are the shader's own palette, because they have
                 // to match the white it antialiases them against.
                 let asphalt = scale_alpha(layer.color(palette), layer.opacity_at(camera.zoom));
+                // A lane connector carries no paint. An intersection is not marked out into
+                // lanes on the ground, and a connector is drawn in the carriageway's own colour,
+                // so its markings would be the only part of it with any contrast against the road
+                // beneath — twelve hairline pairs per junction rather than a widening of the
+                // asphalt. `NO_MARKINGS` rides in the centre-line slot, which a one-way leaves
+                // dead; see the `Push` doc comment in [`crate::vulkan::pipeline`].
+                let centre_t = if layer.source_layer_id == LAYER_JUNCTION {
+                    NO_MARKINGS
+                } else {
+                    road.split
+                };
                 let push = Push {
                     tile_to_clip,
                     color: argb_to_rgba(asphalt),
                     line: [
                         half_width_px,
                         road.lanes as f32,
-                        road.split,
+                        centre_t,
                         f32::from(road.oneway),
                     ],
                     misc: [tile_span_px, edge_aa, yellow, camera.time_seconds],

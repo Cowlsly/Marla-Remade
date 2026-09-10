@@ -13,3 +13,4 @@ pub mod select;
 pub mod source;
 pub mod sprite;
 pub mod symbol;
+pub mod taper;
