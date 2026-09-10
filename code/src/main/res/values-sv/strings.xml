@@ -8,4 +8,6 @@
     <string name="create">Skapa</string>
     <string name="close">Stäng</string>
     <string name="search">Sök</string>
+    <string name="reload">Ladda om</string>
+    <string name="all">Alla</string>
 </resources>
