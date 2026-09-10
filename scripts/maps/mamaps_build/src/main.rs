@@ -85,6 +85,13 @@ mod tilespill;
 #[global_allocator]
 static ALLOCATOR: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
+/// The deepest zoom an archive is built to unless `--max-zoom` says otherwise.
+///
+/// Named rather than inlined because layer code is bounded by it: a layer's tiler-side `min_zoom`
+/// past this lands its features in no tile at all, so [`schema::junction`] pins itself against
+/// this constant and lowering it fails that test instead of silently emptying a layer.
+pub const DEFAULT_MAX_ZOOM: u8 = 14;
+
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().collect();
     let mut input: Option<PathBuf> = None;
@@ -94,7 +101,7 @@ fn main() -> ExitCode {
     let mut reuse_store = false;
     let mut layers = schema::Layers::all();
     let mut min_zoom = 0u8;
-    let mut max_zoom = 14u8;
+    let mut max_zoom = DEFAULT_MAX_ZOOM;
     let mut simplification = tiler::DEFAULT_SIMPLIFICATION;
     let mut build_id: Option<u64> = None;
     let mut coastline: Option<PathBuf> = None;
