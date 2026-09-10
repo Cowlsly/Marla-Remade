@@ -10,4 +10,5 @@
     <string name="search">Sök</string>
     <string name="reload">Ladda om</string>
     <string name="all">Alla</string>
+    <string name="font_size">Teckenstorlek</string>
 </resources>
