@@ -2,4 +2,5 @@
 <resources>
     <string name="color">Färg</string>
     <string name="recent">Senaste</string>
+    <string name="apply">Tillämpa</string>
 </resources>
