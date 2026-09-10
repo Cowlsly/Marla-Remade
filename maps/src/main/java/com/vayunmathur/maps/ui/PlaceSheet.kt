@@ -58,6 +58,7 @@ import com.vayunmathur.maps.data.google.PoiSection
 import com.vayunmathur.maps.data.timeFormat
 import com.vayunmathur.maps.util.SelectedFeatureViewModel
 import kotlinx.coroutines.launch
+import kotlinx.datetime.DayOfWeek
 import kotlinx.datetime.TimeZone
 import kotlinx.datetime.format
 import kotlinx.datetime.toLocalDateTime
@@ -116,16 +117,22 @@ private fun PlaceSheetContent(
     val selectedSection by viewModel.poiSection.collectAsState()
     val context = LocalContext.current
 
-    // Google wins on hours when it has them, and OSM fills in otherwise — including
-    // offline, where the fetch simply returns nothing (there is no connectivity
-    // check anywhere in this module, and none is needed: a failed request is
-    // indistinguishable from "no data", which is exactly the behaviour wanted).
-    val googleHours = poi?.hours.orEmpty()
-    val osmHours = openingHours?.takeIf { googleHours.isEmpty() }
+    // OSM is the source of truth for the weekly schedule: it carries all seven days,
+    // and it is what renders. Google's keyless scrape only ever returns *today* (see
+    // GooglePoiDataSource.readHours), so it cannot be a schedule — it is a live
+    // override for the single day it knows about. We hand that one day to OsmHours,
+    // which swaps it into today's row (flagged "Live") and keeps the other six from
+    // OSM. Only when OSM has nothing at all do we fall back to showing Google's lone
+    // line through the enrichment's own hours section.
+    //
+    // There is no connectivity check anywhere in this module, and none is needed: a
+    // failed request is indistinguishable from "no data", which is exactly the
+    // behaviour wanted.
+    val todayOverride = googleTodayHours(poi?.hours.orEmpty())
     PlaceTabPanel(
         poi,
         resolvePoiSection(selectedSection, poi),
-        showGoogleHours = osmHours == null,
+        showGoogleHours = openingHours == null,
         modifier = modifier,
     ) {
         // Departures (train/transit stations): resolve the nearest Transitous
@@ -137,8 +144,26 @@ private fun PlaceSheetContent(
             RestaurantItem({ IconMenuBook() }, stringResource(R.string.menu_label)) { goto(context, it) }
         }
         address?.let { AddressRow(it) }
-        osmHours?.let { OsmHours(it) }
+        openingHours?.let { OsmHours(it, todayOverride) }
     }
+}
+
+/**
+ * Google's lone "today" hours line reduced to (day, hours), or null if it sent nothing
+ * usable.
+ *
+ * The scrape returns at most one entry, shaped `"Tuesday: 6 AM–10 PM"` — the day it
+ * names is today (see GooglePoiDataSource.readHours). We key it by that named day rather
+ * than by the device clock so a row only ever gets overridden by a line that actually
+ * claims to be that day.
+ */
+private fun googleTodayHours(lines: List<String>): Pair<DayOfWeek, String>? {
+    val line = lines.firstOrNull() ?: return null
+    val dayName = line.substringBefore(':', "").trim()
+    val hours = line.substringAfter(':', "").trim()
+    if (hours.isEmpty()) return null
+    val day = DayOfWeek.entries.firstOrNull { it.name.equals(dayName, ignoreCase = true) } ?: return null
+    return day to hours
 }
 
 /**
@@ -222,7 +247,7 @@ internal fun RatingStars(rating: Double, modifier: Modifier = Modifier) {
 }
 
 @Composable
-private fun OsmHours(openingHours: OpeningHours) {
+private fun OsmHours(openingHours: OpeningHours, todayOverride: Pair<DayOfWeek, String>? = null) {
     var showDetails by remember { mutableStateOf(false) }
 
     val now = Clock.System.now().toLocalDateTime(TimeZone.currentSystemDefault())
@@ -234,6 +259,7 @@ private fun OsmHours(openingHours: OpeningHours) {
     val opensAtStr = stringResource(R.string.opens_at, nextChangeTime.time.format(timeFormat))
     val openColor = MaterialTheme.colorScheme.tertiary
     val closedColor = MaterialTheme.colorScheme.error
+    val liveLabel = stringResource(R.string.poi_hours_live)
     val text = AnnotatedString.Builder().apply {
         if (isOpen) withStyle(SpanStyle(openColor)) { append(openStr) } else withStyle(SpanStyle(closedColor)) { append(closedStr) }
         append(" \u2022 ")
@@ -252,10 +278,20 @@ private fun OsmHours(openingHours: OpeningHours) {
             Spacer(Modifier.padding(2.dp))
             Card(shape = verticalShape(1, 2)) {
                 for ((day, hours) in openingHours.openingHours()) {
+                    // Today's row shows Google's live value when it sent one, tagged so
+                    // the swap is visible; the other six stay straight off OSM.
+                    val live = todayOverride?.takeIf { it.first == day }?.second
+                    val trailing = if (live != null) {
+                        AnnotatedString.Builder().apply {
+                            append(live)
+                            append("  ")
+                            withStyle(SpanStyle(openColor)) { append(liveLabel) }
+                        }.toAnnotatedString()
+                    } else AnnotatedString(hours)
                     ListItem(
                         { Text(day.name.lowercase().firstLetterUppercase()) },
                         leadingContent = {},
-                        trailingContent = { Text(hours) },
+                        trailingContent = { Text(trailing) },
                         colors = ListItemDefaults.colors(Color.Transparent),
                     )
                 }

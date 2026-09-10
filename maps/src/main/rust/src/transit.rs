@@ -1441,6 +1441,26 @@ pub struct StopDeparture {
     pub real_time: bool,
 }
 
+/// A simulated in-service vehicle: a point interpolated along a trip's shape at
+/// the query instant. Positions are computed on-device from the pack schedule +
+/// shape + realtime [`DelayOverlay`]; there is no live GPS feed.
+pub struct Vehicle {
+    /// WGS84 longitude, degrees.
+    pub lon: f64,
+    /// WGS84 latitude, degrees.
+    pub lat: f64,
+    /// Heading in degrees, 0 = north, clockwise, along the direction of travel.
+    pub bearing: f64,
+    /// GTFS `route_color` packed as 0xRRGGBB, or 0 when the feed omits it.
+    pub route_color: u32,
+    /// GTFS `route_type`, so the caller can pick a bus/tram/train icon.
+    pub route_type: u32,
+    /// Identity stable across recomputes for the same trip within a pack, so the
+    /// renderer can animate one sprite between 1 Hz recomputes rather than
+    /// spawning a new one. Packs `(route_idx, trip_index, prev_day)`.
+    pub id: i64,
+}
+
 /// Build an offline departure board for the stop(s) nearest to `(lat,lon)`.
 ///
 /// Gathers every route serving the nearest stop (and its co-located platforms
@@ -1775,6 +1795,283 @@ fn make_walk_leg(
         board_stop_motis_id: String::new(),
         alight_stop_motis_id: String::new(),
     }
+}
+
+/// Initial compass bearing from `a` to `b`, degrees in `[0, 360)`, 0 = north,
+/// increasing clockwise — the heading a vehicle travelling `a`→`b` faces.
+fn bearing_deg(a: (f64, f64), b: (f64, f64)) -> f64 {
+    let (lat1, lon1) = (a.0.to_radians(), a.1.to_radians());
+    let (lat2, lon2) = (b.0.to_radians(), b.1.to_radians());
+    let dlon = lon2 - lon1;
+    let y = dlon.sin() * lat2.cos();
+    let x = lat1.cos() * lat2.sin() - lat1.sin() * lat2.cos() * dlon.cos();
+    let deg = y.atan2(x).to_degrees();
+    (deg + 360.0) % 360.0
+}
+
+/// Point at fraction `frac` of the cumulative ground length of `points` (a
+/// `(lat, lon)` polyline in travel order), with the bearing of the segment it
+/// lands on. `frac` is clamped to `[0, 1]`; the endpoints return the endpoint
+/// coordinates exactly, which is what keeps a vehicle sitting on its stop.
+fn interp_along(points: &[(f64, f64)], frac: f64) -> (f64, f64, f64) {
+    if points.is_empty() {
+        return (0.0, 0.0, 0.0);
+    }
+    if points.len() == 1 {
+        return (points[0].0, points[0].1, 0.0);
+    }
+    let frac = frac.clamp(0.0, 1.0);
+    let mut seglen: Vec<f64> = Vec::with_capacity(points.len() - 1);
+    let mut total = 0.0;
+    for w in points.windows(2) {
+        let d = dist_m(w[0].0, w[0].1, w[1].0, w[1].1);
+        seglen.push(d);
+        total += d;
+    }
+    // A zero-length polyline (all vertices coincident) has no direction; place at
+    // the first vertex and take the first segment's (degenerate) bearing.
+    if total <= 0.0 {
+        return (points[0].0, points[0].1, bearing_deg(points[0], points[1]));
+    }
+    let target = frac * total;
+    let mut acc = 0.0;
+    for (i, &d) in seglen.iter().enumerate() {
+        if acc + d >= target || i == seglen.len() - 1 {
+            let local = if d <= 0.0 { 0.0 } else { ((target - acc) / d).clamp(0.0, 1.0) };
+            let (alat, alon) = points[i];
+            let (blat, blon) = points[i + 1];
+            let lat = alat + (blat - alat) * local;
+            let lon = alon + (blon - alon) * local;
+            return (lat, lon, bearing_deg(points[i], points[i + 1]));
+        }
+        acc += d;
+    }
+    let last = points[points.len() - 1];
+    (last.0, last.1, bearing_deg(points[points.len() - 2], last))
+}
+
+/// The vehicle path between stop-positions `from`..=`to` of a route, in travel
+/// order as `(lat, lon)`. Prefers the feed's `shapes.txt` geometry (the path the
+/// vehicle actually takes); falls back to a straight line between the two stops
+/// on a v3 pack or a route the ingester attached no shape to. Mirrors the shape
+/// handling in [`make_transit_leg`].
+fn segment_points(
+    idx: &TransitIndex,
+    route_idx: u32,
+    route: &RouteRec,
+    from: u32,
+    to: u32,
+) -> Vec<(f64, f64)> {
+    let shaped = idx.route_shape_off(route_idx).and_then(|off| {
+        let fv = idx.route_stop_shape(route.first_route_stop + from);
+        let tv = idx.route_stop_shape(route.first_route_stop + to);
+        if fv == NONE || tv == NONE || tv < fv {
+            return None;
+        }
+        let pts = idx.shape_slice(off, fv, tv);
+        if pts.len() < 2 {
+            None
+        } else {
+            Some(pts)
+        }
+    });
+    shaped.unwrap_or_else(|| {
+        vec![
+            idx.stop_ll(idx.route_stop(route.first_route_stop + from)),
+            idx.stop_ll(idx.route_stop(route.first_route_stop + to)),
+        ]
+    })
+}
+
+/// Bound on how many vehicles a single query returns, so a dense metro area at a
+/// wide zoom can't make the ~1 Hz recompute unbounded. The visible bbox already
+/// caps it in practice; this is a backstop.
+const MAX_VEHICLES: usize = 4000;
+/// Margin (degrees) by which a route's stops may fall outside the query bbox and
+/// still have the route enumerated, so a vehicle currently between an off-screen
+/// and an on-screen stop is not missed.
+const VEHICLE_BBOX_MARGIN_DEG: f64 = 0.02;
+
+/// Simulate the position of every in-service transit vehicle within the bbox at
+/// `now` (seconds since the query day's local midnight; see [`QueryDay`]).
+///
+/// For each trip that runs on the query service day (or the previous one, for a
+/// `>24:00:00` overnight trip) and is currently between its first departure and
+/// last arrival, this finds the two stops bracketing `now`, applies the realtime
+/// [`DelayOverlay`] (skipping cancelled trips), lerps along the polyline between
+/// them, and takes the bearing from the direction of travel. Reuses the same
+/// read-only shape/profile helpers as the planner; it changes no on-disk format.
+///
+/// Enumeration is bounded to the bbox: a route none of whose stops fall in the
+/// bbox (plus a small margin) is skipped before its trips are scanned.
+pub fn active_vehicles(
+    idx: &TransitIndex,
+    now: u32,
+    schedule: Schedule,
+    min_lat: f64,
+    min_lon: f64,
+    max_lat: f64,
+    max_lon: f64,
+) -> Vec<Vehicle> {
+    let mut out: Vec<Vehicle> = Vec::new();
+    if idx.stop_count == 0 {
+        return out;
+    }
+    let m = VEHICLE_BBOX_MARGIN_DEG;
+    let in_bbox = |lat: f64, lon: f64| {
+        lat >= min_lat && lat <= max_lat && lon >= min_lon && lon <= max_lon
+    };
+    let near_bbox = |lat: f64, lon: f64| {
+        lat >= min_lat - m && lat <= max_lat + m && lon >= min_lon - m && lon <= max_lon + m
+    };
+
+    let mut prof_cache: HashMap<u32, ProfileDec> = HashMap::new();
+    for r in 0..idx.route_count {
+        let route = idx.route(r);
+        if route.n_stops < 2 {
+            continue;
+        }
+        // Bbox cull: skip the whole route (and its trip scan) unless one of its
+        // stops falls in (or just outside) the visible bbox.
+        let mut serves_bbox = false;
+        for pos in 0..route.n_stops {
+            let (lat, lon) = idx.stop_ll(idx.route_stop(route.first_route_stop + pos));
+            if near_bbox(lat, lon) {
+                serves_bbox = true;
+                break;
+            }
+        }
+        if !serves_bbox {
+            continue;
+        }
+
+        let trips = idx.trips_for(r, &route);
+        for ti in 0..trips.len() {
+            let Some(td) = trips.get(ti) else { break };
+            // The previous service day contributes its `>24:00:00` trips to the
+            // query day; try it first (earlier times), then today.
+            for prev_day in [true, false] {
+                if !schedule.runs(idx, td.service_idx, prev_day) {
+                    continue;
+                }
+                let (arr_rel, dep_rel) = {
+                    let p = get_profile(&mut prof_cache, idx, td.profile_id);
+                    (p.arr_rel.clone(), p.dep_rel.clone())
+                };
+                let n = (route.n_stops as usize).min(arr_rel.len()).min(dep_rel.len());
+                if n < 2 {
+                    continue;
+                }
+                let day_shift = if prev_day { SECS_PER_DAY as i64 } else { 0 };
+                // A previous-day trip only counts if it actually runs into the
+                // query day (its last arrival is at or past midnight).
+                let last_arr_frame = td.start_time as i64 + arr_rel[n - 1] as i64 - day_shift;
+                if last_arr_frame < 0 {
+                    continue;
+                }
+
+                // Resolve the trip-wide realtime shift and cancellation from the
+                // overlay, keyed on each stop's scheduled departure (query-day
+                // frame). A delay is trip-wide, so the first match applies to the
+                // whole run; any cancellation suppresses the vehicle.
+                let mut cancelled = false;
+                let mut delay_secs = 0i32;
+                let mut found_delay = false;
+                for p in 0..n {
+                    let sched_dep = td.start_time as i64 + dep_rel[p] as i64 - day_shift;
+                    if sched_dep < 0 {
+                        continue;
+                    }
+                    if let Some(adj) = schedule.adjustment(r, p as u32, sched_dep as u32) {
+                        if adj.cancelled {
+                            cancelled = true;
+                        }
+                        if !found_delay {
+                            delay_secs = adj.delay_secs;
+                            found_delay = true;
+                        }
+                    }
+                }
+                if cancelled {
+                    continue;
+                }
+
+                let arr_t = |p: usize| {
+                    delayed(abs_time_on(td.start_time, arr_rel[p], prev_day), delay_secs)
+                };
+                let dep_t = |p: usize| {
+                    delayed(abs_time_on(td.start_time, dep_rel[p], prev_day), delay_secs)
+                };
+                // In service only between the first departure and last arrival.
+                if now < dep_t(0) || now > arr_t(n - 1) {
+                    continue;
+                }
+
+                // Locate `now`: dwelling at a stop, or travelling between two.
+                let mut placement: Option<(usize, usize, f64)> = None;
+                for p in 0..n {
+                    if now >= arr_t(p) && now <= dep_t(p) {
+                        placement = Some((p, p, 0.0));
+                        break;
+                    }
+                    if p + 1 < n && now > dep_t(p) && now < arr_t(p + 1) {
+                        let denom = arr_t(p + 1).saturating_sub(dep_t(p)) as f64;
+                        let frac = if denom <= 0.0 {
+                            0.0
+                        } else {
+                            (now - dep_t(p)) as f64 / denom
+                        };
+                        placement = Some((p, p + 1, frac));
+                        break;
+                    }
+                }
+                let Some((from_pos, to_pos, frac)) = placement else {
+                    continue;
+                };
+
+                let (lat, lon, bearing) = if from_pos == to_pos {
+                    // Sitting at a stop: the exact stop coordinate, headed toward
+                    // the next stop (or, at the terminus, along the last segment).
+                    let here = idx.stop_ll(idx.route_stop(route.first_route_stop + from_pos as u32));
+                    let bearing = if from_pos + 1 < n {
+                        let nxt = idx
+                            .stop_ll(idx.route_stop(route.first_route_stop + from_pos as u32 + 1));
+                        bearing_deg(here, nxt)
+                    } else if from_pos > 0 {
+                        let prv = idx
+                            .stop_ll(idx.route_stop(route.first_route_stop + from_pos as u32 - 1));
+                        bearing_deg(prv, here)
+                    } else {
+                        0.0
+                    };
+                    (here.0, here.1, bearing)
+                } else {
+                    let pts = segment_points(idx, r, &route, from_pos as u32, to_pos as u32);
+                    interp_along(&pts, frac)
+                };
+
+                if !in_bbox(lat, lon) {
+                    continue;
+                }
+
+                out.push(Vehicle {
+                    lon,
+                    lat,
+                    bearing,
+                    route_color: route.color,
+                    route_type: route.route_type,
+                    id: ((r as i64) << 32) | ((ti as i64) << 1) | prev_day as i64,
+                });
+                if out.len() >= MAX_VEHICLES {
+                    return out;
+                }
+                // A trip is placed at most once (today wins over the previous-day
+                // sweep once both could match), so stop after the first hit.
+                break;
+            }
+        }
+    }
+    out
 }
 
 const _: () = {
@@ -3155,5 +3452,165 @@ mod tests {
         );
         let crow = dist_m(37.700, -122.400, 37.720, -122.400);
         assert!(ride.dist_m > crow, "shape distance {} must exceed {crow}", ride.dist_m);
+    }
+
+    // --- WS-F: simulated in-service vehicle positions ---
+
+    /// A bbox comfortably around the `one_route_pack` stops (which sit on the
+    /// -122.400 meridian between 37.700 and 37.720).
+    const VEH_BBOX: (f64, f64, f64, f64) = (37.69, -122.41, 37.73, -122.39);
+
+    #[test]
+    fn a_vehicle_sits_exactly_on_a_stop_at_its_scheduled_time() {
+        let idx = one_route_pack().index();
+        let (m0, m1, m2, m3) = VEH_BBOX;
+        // 08:00: the 08:00 trip is dwelling at Alpha (stop 0).
+        let vs = active_vehicles(&idx, 28_800, sched(wednesday()), m0, m1, m2, m3);
+        assert_eq!(vs.len(), 1, "exactly the one in-service trip");
+        assert!((vs[0].lat - 37.700).abs() < 1e-9, "at Alpha's latitude");
+        assert!((vs[0].lon - (-122.400)).abs() < 1e-9, "at Alpha's longitude");
+
+        // 08:10: it has reached Gamma, the terminus (stop 2), exactly on its coord.
+        let vs = active_vehicles(&idx, 29_400, sched(wednesday()), m0, m1, m2, m3);
+        assert_eq!(vs.len(), 1, "the 09:00 trip has not started yet");
+        assert!((vs[0].lat - 37.720).abs() < 1e-9);
+        assert!((vs[0].lon - (-122.400)).abs() < 1e-9);
+    }
+
+    #[test]
+    fn a_vehicle_between_two_stops_lies_between_them() {
+        let idx = one_route_pack().index();
+        let (m0, m1, m2, m3) = VEH_BBOX;
+        // 08:02:30: halfway between Alpha (departs 28_800) and Beta (arrives 29_100).
+        let vs = active_vehicles(&idx, 28_950, sched(wednesday()), m0, m1, m2, m3);
+        assert_eq!(vs.len(), 1);
+        let v = &vs[0];
+        assert!(
+            v.lat > 37.700 && v.lat < 37.710,
+            "strictly between Alpha and Beta, got {}",
+            v.lat
+        );
+        assert!((v.lat - 37.705).abs() < 1e-6, "halfway, got {}", v.lat);
+        assert!((v.lon - (-122.400)).abs() < 1e-9);
+        // Alpha -> Beta is due north (same longitude, rising latitude).
+        assert!(v.bearing < 1.0 || v.bearing > 359.0, "heading north, got {}", v.bearing);
+    }
+
+    #[test]
+    fn a_cancelled_trip_shows_no_vehicle() {
+        let idx = one_route_pack().index();
+        let (m0, m1, m2, m3) = VEH_BBOX;
+        // Cancel the 08:00 departure from Alpha (route 0, stop position 0).
+        let overlay = DelayOverlay::build(
+            &idx,
+            &[DelayEntry {
+                lat: 37.700,
+                lon: -122.400,
+                route_name: "N".to_string(),
+                sched_secs: 28_800,
+                delay_secs: 0,
+                cancelled: true,
+            }],
+        );
+        // At 08:02:30 the 08:00 trip would be mid-route, but it is cancelled and
+        // the 09:00 trip is not yet running.
+        let vs = active_vehicles(
+            &idx,
+            28_950,
+            Schedule { day: wednesday(), overlay: Some(&overlay) },
+            m0,
+            m1,
+            m2,
+            m3,
+        );
+        assert!(vs.is_empty(), "a cancelled trip yields no vehicle");
+    }
+
+    #[test]
+    fn a_delayed_vehicle_is_placed_at_its_live_position() {
+        let idx = one_route_pack().index();
+        let (m0, m1, m2, m3) = VEH_BBOX;
+        let overlay = DelayOverlay::build(
+            &idx,
+            &[DelayEntry {
+                lat: 37.700,
+                lon: -122.400,
+                route_name: "N".to_string(),
+                sched_secs: 28_800,
+                delay_secs: 300,
+                cancelled: false,
+            }],
+        );
+        // 08:05: a 5-min-late trip is where the schedule put it at 08:00 — dwelling
+        // at Alpha.
+        let vs = active_vehicles(
+            &idx,
+            29_100,
+            Schedule { day: wednesday(), overlay: Some(&overlay) },
+            m0,
+            m1,
+            m2,
+            m3,
+        );
+        assert_eq!(vs.len(), 1);
+        assert!((vs[0].lat - 37.700).abs() < 1e-9, "held back to Alpha by the delay");
+        // Schedule-only, the same instant would already have it dwelling at Beta.
+        let vs2 = active_vehicles(&idx, 29_100, sched(wednesday()), m0, m1, m2, m3);
+        assert!((vs2[0].lat - 37.710).abs() < 1e-9, "schedule-only is at Beta");
+    }
+
+    #[test]
+    fn an_overnight_trip_is_placed_in_the_query_day_frame() {
+        let mut pack = one_route_pack();
+        // A single 24:30:00 trip: GTFS files it under the previous service day.
+        pack.routes[0].trips = vec![Trip {
+            start: 88_200,
+            stoptimes: vec![(88_200, 88_200), (88_500, 88_500), (88_800, 88_800)],
+            service: 0,
+            headsign: "Owl",
+        }];
+        let idx = pack.index();
+        let (m0, m1, m2, m3) = VEH_BBOX;
+        let day = QueryDay {
+            weekday: 3,
+            date: 20_240_104,
+            prev_weekday: 2,
+            prev_date: 20_240_103,
+        };
+        // 00:32:30 Thursday: the trip runs 00:30->00:38 in Thursday's frame, so it
+        // is halfway between Alpha (departs 00:30) and Beta (arrives 00:35).
+        let vs = active_vehicles(&idx, 1_950, sched(day), m0, m1, m2, m3);
+        assert_eq!(vs.len(), 1, "the overnight trip is in service after midnight");
+        assert!(vs[0].lat > 37.700 && vs[0].lat < 37.710, "between Alpha and Beta");
+    }
+
+    #[test]
+    fn a_vehicle_follows_the_gtfs_shape_between_stops() {
+        let idx = shaped_route_pack().index();
+        let (m0, m1, m2, m3) = VEH_BBOX;
+        // Mid Alpha->Beta hop: the shape detours east, so the point must swing off
+        // the straight -122.400 line the two stops share.
+        let vs = active_vehicles(&idx, 28_950, sched(wednesday()), m0, m1, m2, m3);
+        assert_eq!(vs.len(), 1);
+        assert!(vs[0].lon > -122.400, "on the eastward shape detour, got {}", vs[0].lon);
+    }
+
+    #[test]
+    fn a_route_outside_the_bbox_is_not_enumerated() {
+        let idx = one_route_pack().index();
+        // Far from the SF stops: nothing to place, and the route is culled before
+        // its trips are ever scanned.
+        let vs = active_vehicles(&idx, 28_950, sched(wednesday()), 40.0, -75.0, 41.0, -74.0);
+        assert!(vs.is_empty(), "the route is nowhere near this bbox");
+    }
+
+    #[test]
+    fn no_vehicle_before_the_first_departure_or_after_the_last_arrival() {
+        let idx = one_route_pack().index();
+        let (m0, m1, m2, m3) = VEH_BBOX;
+        // 07:00: before the 08:00 trip departs and long before the 09:00 one.
+        assert!(active_vehicles(&idx, 25_200, sched(wednesday()), m0, m1, m2, m3).is_empty());
+        // 09:20: after the 09:00 trip has reached its terminus (09:10).
+        assert!(active_vehicles(&idx, 33_600, sched(wednesday()), m0, m1, m2, m3).is_empty());
     }
 }

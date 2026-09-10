@@ -6,45 +6,26 @@ import com.vayunmathur.taxi.data.LatLng
 import com.vayunmathur.taxi.data.Place
 
 /**
- * Wire contract for the cross-app taxi hand-off exposed to a co-signed app (the maps app).
+ * Wire contract for the `taxi://book?…` cross-app booking deep link exposed to a co-signed app
+ * (the maps app): a fire-and-forget VIEW hand-off that opens the taxi app on the ride screen with a
+ * trip (pickup + destination lat/lng + labels) pre-filled and immediately compared.
  *
- * There are two channels, both keyed on an origin→destination:
- *  - a `taxi://book?…` VIEW deep link that opens the app on the ride screen with the trip
- *    (pickup + destination lat/lng + labels) pre-filled and immediately compared, and
- *  - a signature-guarded estimate [android.content.ContentProvider] ([RideEstimateProvider]) at
- *    [AUTHORITY] that answers { available, fareEstimate, etaMinutes } so the caller can show a
- *    fare/ETA inline before launching.
+ * The live fare/ETA estimate that used to live alongside this as a signature-guarded
+ * ContentProvider is now the `com.vayunmathur.taxi.intents.RideEstimateIntent`
+ * [AssistantIntent][com.vayunmathur.library.util.AssistantIntent] — a request/response fits
+ * time-varying quote data better than a cursor. Only the booking deep link remains here.
  *
  * The two apps deliberately do NOT share a module: maps keeps its own byte-for-byte mirror of
- * these constants (see maps' `RideEstimateClient`). Reading the provider is gated by [PERMISSION]
- * (signature-level), granted only because both MA apps share the signing key; on any other signer
- * it is simply not granted and the maps taxi option is absent.
+ * these deep-link constants (see maps' `RideEstimateClient`).
  */
 object RideHandoffContract {
-    /** Authority of the exported ride-estimate provider. */
-    const val AUTHORITY = "com.vayunmathur.taxi.ridelookup"
-
-    /** Signature-level permission required to read the provider. */
-    const val PERMISSION = "com.vayunmathur.taxi.permissions.ACCESS_RIDES"
-
-    /** Single query path: content://<AUTHORITY>/estimate?pickup_lat=&pickup_lng=&dest_lat=&dest_lng= */
-    const val PATH_ESTIMATE = "estimate"
-
-    // ---- query / deep-link parameters (caller → app) ----
+    // ---- deep-link parameters (caller → app) ----
     const val PARAM_PICKUP_LAT = "pickup_lat"
     const val PARAM_PICKUP_LNG = "pickup_lng"
     const val PARAM_PICKUP_LABEL = "pickup_label"
     const val PARAM_DEST_LAT = "dest_lat"
     const val PARAM_DEST_LNG = "dest_lng"
     const val PARAM_DEST_LABEL = "dest_label"
-
-    // ---- estimate result columns (provider → caller) ----
-    /** Int 1/0: whether a live quote was found for the trip. */
-    const val COL_AVAILABLE = "available"
-    /** String: formatted fare (e.g. "$12.50" or "$12.50 – $15.00"); "" when unavailable. */
-    const val COL_FARE_ESTIMATE = "fare_estimate"
-    /** Int: pickup ETA in minutes; -1 when unknown/unavailable. */
-    const val COL_ETA_MINUTES = "eta_minutes"
 
     // ---- deep link (open the ride screen with a trip pre-filled) ----
     const val DEEP_LINK_SCHEME = "taxi"

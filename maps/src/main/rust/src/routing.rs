@@ -70,6 +70,8 @@ pub struct RoutingContext {
 pub struct Direct {
     /// Start projection to end projection along the road, inclusive.
     pub coords: Vec<LatLon>,
+    /// Ground elevation in metres parallel to [`Direct::coords`].
+    pub elevations: Vec<f64>,
     pub dist_mm: u32,
     pub time_10ms: u32,
     pub name_offset: u32,
@@ -87,6 +89,12 @@ pub struct StepData {
     pub dist_mm: u64,
     pub time_10ms: u64,
     pub coords: Vec<f64>, // flat [lon, lat, lon, lat, ...]
+    /// Ground elevation in metres for each coordinate in [`StepData::coords`], so
+    /// `elevations.len() == coords.len() / 2`. Interpolated from the per-node
+    /// elevation baked into the graph (WS-G): interior polyline vertices are
+    /// linearly interpolated by cumulative distance between their edge's two node
+    /// elevations. All zero when the graph carries no `elevation.bin`.
+    pub elevations: Vec<f64>,
     pub maneuver: i32,
     pub speed_ratio: f64,
     /// Derived turn-lane guidance for this step's maneuver. Each entry is one
@@ -102,6 +110,84 @@ pub struct StepData {
 
 /// Sentinel for "no junction node" in [`StepBuilder::add_segment`].
 const INVALID_NODE: u32 = 0xFFFF_FFFF;
+
+/// Cumulative ascent and descent (metres) over a sequence of per-coordinate
+/// elevations: ascent sums the positive steps, descent the magnitude of the
+/// negative ones. Pure, so the route-profile arithmetic is testable without a
+/// graph.
+pub fn ascent_descent(elevs: &[f64]) -> (f64, f64) {
+    let mut asc = 0.0;
+    let mut desc = 0.0;
+    for w in elevs.windows(2) {
+        let d = w[1] - w[0];
+        if d > 0.0 {
+            asc += d;
+        } else {
+            desc -= d;
+        }
+    }
+    (asc, desc)
+}
+
+/// Total cumulative ascent/descent (metres) of a whole route. Consecutive steps
+/// share their join coordinate, so each step after the first contributes its
+/// elevations minus that first (duplicate) point, giving one continuous profile.
+pub fn route_ascent_descent(steps: &[StepData]) -> (f64, f64) {
+    let mut all: Vec<f64> = Vec::new();
+    for s in steps {
+        if all.is_empty() {
+            all.extend_from_slice(&s.elevations);
+        } else if s.elevations.len() > 1 {
+            all.extend_from_slice(&s.elevations[1..]);
+        }
+    }
+    ascent_descent(&all)
+}
+
+/// Linear interpolation of an elevation for every entry of `cum` (a monotonic
+/// non-decreasing cumulative-distance array), ramping from `e0` at distance 0 to
+/// `e1` at the final distance. A zero-length span reads `e0` throughout. Pure.
+fn interp_by_cumdist(cum: &[f64], e0: f64, e1: f64) -> Vec<f64> {
+    let total = cum.last().copied().unwrap_or(0.0);
+    cum.iter()
+        .map(|&c| if total > 0.0 { e0 + (e1 - e0) * c / total } else { e0 })
+        .collect()
+}
+
+/// Per-point elevations (metres) for `pts` in traversal order, linearly
+/// interpolated by cumulative ground distance between the source elevation `e_src`
+/// (at `pts[0]`) and the target elevation `e_dst` (at the last point). Interior
+/// polyline vertices have no baked elevation of their own, so they ride the ramp
+/// between the two junction nodes the edge connects.
+fn edge_point_elevations(g: &Graph, pts: &[LatLon], e_src: f64, e_dst: f64) -> Vec<f64> {
+    let n = pts.len();
+    if n == 0 {
+        return Vec::new();
+    }
+    if n == 1 {
+        return vec![e_src];
+    }
+    let mut cum = vec![0f64; n];
+    for i in 1..n {
+        let d = fast_dist_mm(g, pts[i - 1].lat_e7, pts[i - 1].lon_e7, pts[i].lat_e7, pts[i].lon_e7);
+        cum[i] = cum[i - 1] + f64::from(d);
+    }
+    interp_by_cumdist(&cum, e_src, e_dst)
+}
+
+/// The elevation (metres) of a projection sitting `dist_a_mm` along an edge whose
+/// two endpoint nodes are at `e_a` and `e_b`, `dist_b_mm` being the remaining
+/// distance to the far node. A degenerate zero-length edge reads `e_a`.
+fn proj_elevation(g: &Graph, node_a: u32, node_b: u32, dist_a_mm: u32, dist_b_mm: u32) -> f64 {
+    let e_a = f64::from(g.node_elevation(node_a));
+    let e_b = f64::from(g.node_elevation(node_b));
+    let total = f64::from(dist_a_mm) + f64::from(dist_b_mm);
+    if total > 0.0 {
+        e_a + (e_b - e_a) * f64::from(dist_a_mm) / total
+    } else {
+        e_a
+    }
+}
 
 /// Convert an OSM lane indication mask (`LANE_*` bits from the generator) into a
 /// maneuver-ordinal bitmask (bit `i` set => `Maneuver` ordinal `i` is offered by
@@ -574,9 +660,16 @@ fn direct_path(
             .saturating_add(fast_dist_mm(g, w[0].lat_e7, w[0].lon_e7, w[1].lat_e7, w[1].lon_e7));
     }
     let type_ = e.type_ & ROAD_TYPE_MASK;
+    // Elevation ramps from the start projection to the end projection: each is itself an
+    // interpolation of the edge's two node elevations at its own distance along the road, and the
+    // interior coords ride the cumulative-distance ramp between them.
+    let elev_s = proj_elevation(g, start.node_a, start.node_b, start.dist_a_mm, start.dist_b_mm);
+    let elev_e = proj_elevation(g, end.node_a, end.node_b, end.dist_a_mm, end.dist_b_mm);
+    let elevations = edge_point_elevations(g, &coords, elev_s, elev_e);
     Some(Direct {
         time_10ms: get_edge_time_10ms(g, traffic, edge_idx, dist_mm, type_, e.speed_limit, mode),
         coords,
+        elevations,
         dist_mm,
         name_offset: g.edge_name_offset(edge_idx).unwrap_or(NO_NAME),
         type_,
@@ -708,6 +801,8 @@ impl<'a> StepBuilder<'a> {
         limit: u8,
         dist_mm: u32,
         edge_idx: u64,
+        elev1: f64,
+        elev2: f64,
     ) {
         // Junction context for lane derivation is set on the builder before the
         // first segment of a main-path edge and consumed (then cleared) here.
@@ -775,6 +870,7 @@ impl<'a> StepBuilder<'a> {
                 dist_mm: 0,
                 time_10ms: 0,
                 coords: vec![lon1, lat1],
+                elevations: vec![elev1],
                 maneuver,
                 speed_ratio: ratio,
                 lanes,
@@ -786,6 +882,7 @@ impl<'a> StepBuilder<'a> {
         back.time_10ms += time_10ms as u64;
         back.coords.push(lon2);
         back.coords.push(lat2);
+        back.elevations.push(elev2);
         self.last_bearing = bearing;
     }
 }
@@ -829,7 +926,7 @@ fn direct_steps(g: &Graph, traffic: &TrafficSpeeds, mode: i32, d: &Direct) -> Ve
         pending_prev: INVALID_NODE,
         pending_approach: INVALID_EDGE,
     };
-    for w in d.coords.windows(2) {
+    for (i, w) in d.coords.windows(2).enumerate() {
         let dist = fast_dist_mm(g, w[0].lat_e7, w[0].lon_e7, w[1].lat_e7, w[1].lon_e7);
         b.add_segment(
             f64::from(w[0].lat_e7) * 1e-7,
@@ -841,9 +938,66 @@ fn direct_steps(g: &Graph, traffic: &TrafficSpeeds, mode: i32, d: &Direct) -> Ve
             d.speed_limit,
             dist,
             d.edge_idx,
+            d.elevations[i],
+            d.elevations[i + 1],
         );
     }
     b.steps
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn step(elevations: Vec<f64>) -> StepData {
+        StepData {
+            name_off: NO_NAME,
+            dist_mm: 0,
+            time_10ms: 0,
+            coords: elevations.iter().flat_map(|_| [0.0, 0.0]).collect(),
+            elevations,
+            maneuver: 0,
+            speed_ratio: 1.0,
+            lanes: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn ascent_and_descent_sum_the_signed_steps() {
+        // A climb to 10, back to 5, up to 20: ascent 10 + 15 = 25, descent 5.
+        let (asc, desc) = ascent_descent(&[0.0, 10.0, 5.0, 20.0]);
+        assert_eq!(asc, 25.0);
+        assert_eq!(desc, 5.0);
+        // A flat profile has neither.
+        assert_eq!(ascent_descent(&[7.0, 7.0, 7.0]), (0.0, 0.0));
+        // Too short to have any step.
+        assert_eq!(ascent_descent(&[3.0]), (0.0, 0.0));
+    }
+
+    #[test]
+    fn a_route_over_synthetic_terrain_has_the_expected_profile_and_cumulative_ascent() {
+        // Two coalesced steps that share their join coordinate (elevation 5). The route profile is
+        // the concatenation minus that duplicate: [0, 10, 5, 20, 15].
+        let steps = vec![step(vec![0.0, 10.0, 5.0]), step(vec![5.0, 20.0, 15.0])];
+        let (asc, desc) = route_ascent_descent(&steps);
+        // Climbs: 0->10 (+10) and 5->20 (+15) = 25. Drops: 10->5 (-5) and 20->15 (-5) = 10.
+        assert_eq!(asc, 25.0, "cumulative ascent");
+        assert_eq!(desc, 10.0, "cumulative descent");
+    }
+
+    #[test]
+    fn a_single_climbing_edge_interpolates_monotonically() {
+        // Interior vertices ride the ramp between the two node elevations by cumulative distance.
+        let elevs = interp_by_cumdist(&[0.0, 25.0, 50.0, 100.0], 0.0, 200.0);
+        assert_eq!(elevs, vec![0.0, 50.0, 100.0, 200.0]);
+        assert!(elevs.windows(2).all(|w| w[1] >= w[0]), "a climb is monotonic non-decreasing");
+    }
+
+    #[test]
+    fn a_zero_length_span_reads_the_source_elevation() {
+        // A degenerate edge (both endpoints coincident) has no ramp; every point reads e0.
+        assert_eq!(interp_by_cumdist(&[0.0, 0.0, 0.0], 42.0, 99.0), vec![42.0, 42.0, 42.0]);
+    }
 }
 
 /// Rebuild the step list from `ctx.target_node`. Returns an empty vec if no
@@ -905,9 +1059,22 @@ pub fn reconstruct_path(
         if let Some((count, is_reversed)) = geom.filter(|&(c, _)| c >= 2) {
             let num_pts = count;
             let seg_idx = ctx.start.segment_idx;
+            // Per-point elevation for the whole start edge (node_a -> node_b traversal order), and
+            // the projection's own interpolated elevation where the route joins the edge.
+            let pts: Vec<LatLon> =
+                (0..count).map(|p| get_pt_at(&coords, count, is_reversed, p)).collect();
+            let elevs = edge_point_elevations(
+                g,
+                &pts,
+                f64::from(g.node_elevation(ctx.start.node_a)),
+                f64::from(g.node_elevation(ctx.start.node_b)),
+            );
+            let elev_proj = proj_elevation(
+                g, ctx.start.node_a, ctx.start.node_b, ctx.start.dist_a_mm, ctx.start.dist_b_mm,
+            );
 
             if n0 == ctx.start.node_a {
-                let p_next = get_pt_at(&coords, count, is_reversed, seg_idx);
+                let p_next = pts[seg_idx as usize];
                 let d1 = fast_dist_mm(
                     g, ctx.start.proj_lat, ctx.start.proj_lon, p_next.lat_e7, p_next.lon_e7,
                 );
@@ -917,21 +1084,23 @@ pub fn reconstruct_path(
                     p_next.lat_e7 as f64 * 1e-7,
                     p_next.lon_e7 as f64 * 1e-7,
                     ctx.start.name_offset, ctx.start.type_, ctx.start.speed_limit, d1, j,
+                    elev_proj, elevs[seg_idx as usize],
                 );
                 let mut p = seg_idx as i32;
                 while p >= 1 {
-                    let p_from = get_pt_at(&coords, count, is_reversed, p as u32);
-                    let p_to = get_pt_at(&coords, count, is_reversed, (p - 1) as u32);
+                    let p_from = pts[p as usize];
+                    let p_to = pts[(p - 1) as usize];
                     let d_seg = fast_dist_mm(g, p_from.lat_e7, p_from.lon_e7, p_to.lat_e7, p_to.lon_e7);
                     b.add_segment(
                         p_from.lat_e7 as f64 * 1e-7, p_from.lon_e7 as f64 * 1e-7,
                         p_to.lat_e7 as f64 * 1e-7, p_to.lon_e7 as f64 * 1e-7,
                         ctx.start.name_offset, ctx.start.type_, ctx.start.speed_limit, d_seg, j,
+                        elevs[p as usize], elevs[(p - 1) as usize],
                     );
                     p -= 1;
                 }
             } else {
-                let p_next = get_pt_at(&coords, count, is_reversed, seg_idx + 1);
+                let p_next = pts[seg_idx as usize + 1];
                 let d1 = fast_dist_mm(
                     g, ctx.start.proj_lat, ctx.start.proj_lon, p_next.lat_e7, p_next.lon_e7,
                 );
@@ -941,15 +1110,17 @@ pub fn reconstruct_path(
                     p_next.lat_e7 as f64 * 1e-7,
                     p_next.lon_e7 as f64 * 1e-7,
                     ctx.start.name_offset, ctx.start.type_, ctx.start.speed_limit, d1, j,
+                    elev_proj, elevs[seg_idx as usize + 1],
                 );
                 for p in seg_idx + 1..num_pts - 1 {
-                    let p_from = get_pt_at(&coords, count, is_reversed, p);
-                    let p_to = get_pt_at(&coords, count, is_reversed, p + 1);
+                    let p_from = pts[p as usize];
+                    let p_to = pts[p as usize + 1];
                     let d_seg = fast_dist_mm(g, p_from.lat_e7, p_from.lon_e7, p_to.lat_e7, p_to.lon_e7);
                     b.add_segment(
                         p_from.lat_e7 as f64 * 1e-7, p_from.lon_e7 as f64 * 1e-7,
                         p_to.lat_e7 as f64 * 1e-7, p_to.lon_e7 as f64 * 1e-7,
                         ctx.start.name_offset, ctx.start.type_, ctx.start.speed_limit, d_seg, j,
+                        elevs[p as usize], elevs[p as usize + 1],
                     );
                 }
             }
@@ -959,12 +1130,16 @@ pub fn reconstruct_path(
             } else {
                 ctx.start.dist_b_mm
             };
+            let elev_proj = proj_elevation(
+                g, ctx.start.node_a, ctx.start.node_b, ctx.start.dist_a_mm, ctx.start.dist_b_mm,
+            );
             b.add_segment(
                 ctx.start.proj_lat as f64 * 1e-7,
                 ctx.start.proj_lon as f64 * 1e-7,
                 node0.lat_e7 as f64 * 1e-7,
                 node0.lon_e7 as f64 * 1e-7,
                 ctx.start.name_offset, ctx.start.type_, ctx.start.speed_limit, dist, INVALID_EDGE,
+                elev_proj, f64::from(g.node_elevation(n0)),
             );
         }
     }
@@ -1016,14 +1191,23 @@ pub fn reconstruct_path(
             .get_edge_coordinates_from(u, best_e_idx, &mut coords)
             .filter(|&(c, _)| c >= 2)
         {
+            let pts: Vec<LatLon> =
+                (0..count).map(|p| get_pt_at(&coords, count, is_reversed, p)).collect();
+            let elevs = edge_point_elevations(
+                g,
+                &pts,
+                f64::from(g.node_elevation(u)),
+                f64::from(g.node_elevation(v)),
+            );
             for p in 0..count - 1 {
-                let p1 = get_pt_at(&coords, count, is_reversed, p);
-                let p2 = get_pt_at(&coords, count, is_reversed, p + 1);
+                let p1 = pts[p as usize];
+                let p2 = pts[p as usize + 1];
                 let seg_dist = fast_dist_mm(g, p1.lat_e7, p1.lon_e7, p2.lat_e7, p2.lon_e7);
                 b.add_segment(
                     p1.lat_e7 as f64 * 1e-7, p1.lon_e7 as f64 * 1e-7,
                     p2.lat_e7 as f64 * 1e-7, p2.lon_e7 as f64 * 1e-7,
                     e_name, e.type_, e.speed_limit, seg_dist, best_e_idx,
+                    elevs[p as usize], elevs[p as usize + 1],
                 );
             }
         } else {
@@ -1031,6 +1215,7 @@ pub fn reconstruct_path(
                 node_u.lat_e7 as f64 * 1e-7, node_u.lon_e7 as f64 * 1e-7,
                 node_v.lat_e7 as f64 * 1e-7, node_v.lon_e7 as f64 * 1e-7,
                 e_name, e.type_, e.speed_limit, d, best_e_idx,
+                f64::from(g.node_elevation(u)), f64::from(g.node_elevation(v)),
             );
         }
     }
@@ -1049,44 +1234,59 @@ pub fn reconstruct_path(
         if let Some((count, is_reversed)) = geom.filter(|&(c, _)| c >= 2) {
             let num_pts = count;
             let seg_idx = ctx.end.segment_idx;
+            let pts: Vec<LatLon> =
+                (0..count).map(|p| get_pt_at(&coords, count, is_reversed, p)).collect();
+            let elevs = edge_point_elevations(
+                g,
+                &pts,
+                f64::from(g.node_elevation(ctx.end.node_a)),
+                f64::from(g.node_elevation(ctx.end.node_b)),
+            );
+            let elev_proj = proj_elevation(
+                g, ctx.end.node_a, ctx.end.node_b, ctx.end.dist_a_mm, ctx.end.dist_b_mm,
+            );
 
             if nk == ctx.end.node_a {
                 for p in 0..seg_idx {
-                    let p_from = get_pt_at(&coords, count, is_reversed, p);
-                    let p_to = get_pt_at(&coords, count, is_reversed, p + 1);
+                    let p_from = pts[p as usize];
+                    let p_to = pts[p as usize + 1];
                     let d_seg = fast_dist_mm(g, p_from.lat_e7, p_from.lon_e7, p_to.lat_e7, p_to.lon_e7);
                     b.add_segment(
                         p_from.lat_e7 as f64 * 1e-7, p_from.lon_e7 as f64 * 1e-7,
                         p_to.lat_e7 as f64 * 1e-7, p_to.lon_e7 as f64 * 1e-7,
                         ctx.end.name_offset, ctx.end.type_, ctx.end.speed_limit, d_seg, j,
+                        elevs[p as usize], elevs[p as usize + 1],
                     );
                 }
-                let p_last = get_pt_at(&coords, count, is_reversed, seg_idx);
+                let p_last = pts[seg_idx as usize];
                 let d2 = fast_dist_mm(g, p_last.lat_e7, p_last.lon_e7, ctx.end.proj_lat, ctx.end.proj_lon);
                 b.add_segment(
                     p_last.lat_e7 as f64 * 1e-7, p_last.lon_e7 as f64 * 1e-7,
                     ctx.end.proj_lat as f64 * 1e-7, ctx.end.proj_lon as f64 * 1e-7,
                     ctx.end.name_offset, ctx.end.type_, ctx.end.speed_limit, d2, j,
+                    elevs[seg_idx as usize], elev_proj,
                 );
             } else {
                 let mut p = num_pts as i32 - 1;
                 while p > seg_idx as i32 + 1 {
-                    let p_from = get_pt_at(&coords, count, is_reversed, p as u32);
-                    let p_to = get_pt_at(&coords, count, is_reversed, (p - 1) as u32);
+                    let p_from = pts[p as usize];
+                    let p_to = pts[(p - 1) as usize];
                     let d_seg = fast_dist_mm(g, p_from.lat_e7, p_from.lon_e7, p_to.lat_e7, p_to.lon_e7);
                     b.add_segment(
                         p_from.lat_e7 as f64 * 1e-7, p_from.lon_e7 as f64 * 1e-7,
                         p_to.lat_e7 as f64 * 1e-7, p_to.lon_e7 as f64 * 1e-7,
                         ctx.end.name_offset, ctx.end.type_, ctx.end.speed_limit, d_seg, j,
+                        elevs[p as usize], elevs[(p - 1) as usize],
                     );
                     p -= 1;
                 }
-                let p_last = get_pt_at(&coords, count, is_reversed, seg_idx + 1);
+                let p_last = pts[seg_idx as usize + 1];
                 let d2 = fast_dist_mm(g, p_last.lat_e7, p_last.lon_e7, ctx.end.proj_lat, ctx.end.proj_lon);
                 b.add_segment(
                     p_last.lat_e7 as f64 * 1e-7, p_last.lon_e7 as f64 * 1e-7,
                     ctx.end.proj_lat as f64 * 1e-7, ctx.end.proj_lon as f64 * 1e-7,
                     ctx.end.name_offset, ctx.end.type_, ctx.end.speed_limit, d2, j,
+                    elevs[seg_idx as usize + 1], elev_proj,
                 );
             }
         } else {
@@ -1095,10 +1295,14 @@ pub fn reconstruct_path(
             } else {
                 ctx.end.dist_b_mm
             };
+            let elev_proj = proj_elevation(
+                g, ctx.end.node_a, ctx.end.node_b, ctx.end.dist_a_mm, ctx.end.dist_b_mm,
+            );
             b.add_segment(
                 nodek.lat_e7 as f64 * 1e-7, nodek.lon_e7 as f64 * 1e-7,
                 ctx.end.proj_lat as f64 * 1e-7, ctx.end.proj_lon as f64 * 1e-7,
                 ctx.end.name_offset, ctx.end.type_, ctx.end.speed_limit, dist, INVALID_EDGE,
+                f64::from(g.node_elevation(nk)), elev_proj,
             );
         }
     }

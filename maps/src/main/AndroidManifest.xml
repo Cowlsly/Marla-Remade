@@ -33,6 +33,12 @@
         <package android:name="com.vayunmathur.taxi" />
     </queries>
 
+    <!-- Guards the exported DirectionsIntent so only same-signature installs (the taxi app)
+         can ask maps to plan a route. -->
+    <permission
+        android:name="com.vayunmathur.maps.permissions.ACCESS_MAPS"
+        android:protectionLevel="signature" />
+
 
     <application
         android:largeHeap="true"
@@ -82,6 +88,12 @@
                 <data android:host="goo.gl" android:pathPrefix="/maps" />
             </intent-filter>
         </activity>
+
+        <activity
+            android:name=".intents.DirectionsIntent"
+            android:exported="true"
+            android:theme="@android:style/Theme.NoDisplay"
+            android:permission="com.vayunmathur.maps.permissions.ACCESS_MAPS" />
 
         <service
             android:name=".util.NavigationService"

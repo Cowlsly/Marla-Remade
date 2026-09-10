@@ -20,9 +20,9 @@ import java.util.concurrent.atomic.AtomicBoolean
  * initialises an SSLContext, and the saved auth token has to be read out of
  * SharedPreferences and JSON-decoded — none of which may happen on the main thread or a
  * binder thread. Both process entry points ([com.vayunmathur.fooddelivery.FoodDeliveryApplication]
- * and [com.vayunmathur.fooddelivery.ipc.OrderLookupProvider], which is created first) call
- * [start], which is idempotent; anything that needs the token or the pinned trust anchors
- * awaits [awaitReady] from a coroutine instead of blocking.
+ * and [com.vayunmathur.fooddelivery.intents.OrderLookupIntent], which may launch into a cold
+ * process) call [start], which is idempotent; anything that needs the token or the pinned trust
+ * anchors awaits [awaitReady] from a coroutine instead of blocking.
  */
 object AppInit {
 

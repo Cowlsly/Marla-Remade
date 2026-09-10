@@ -40,6 +40,7 @@ fun StepsSheet(
     currentStepIndex: Int,
     onClose: () -> Unit,
     modifier: Modifier = Modifier,
+    route: RouteService.Route? = null,
 ) {
     Card(
         modifier = modifier.fillMaxWidth(),
@@ -59,6 +60,16 @@ fun StepsSheet(
             IconButton(onClose) { IconClose() }
         }
         HorizontalDivider()
+        // Route elevation profile (WS-G), when the graph carried DEM data. Renders nothing for a
+        // flat/transit route, so it is safe to place unconditionally above the step list.
+        if (route != null && route.elevationProfile.size >= 2) {
+            ElevationChart(
+                profile = route.elevationProfile,
+                ascentMeters = route.ascentMeters,
+                descentMeters = route.descentMeters,
+            )
+            HorizontalDivider()
+        }
         LazyColumn(Modifier.fillMaxWidth()) {
             itemsIndexed(steps) { index, step ->
                 val dim = index < currentStepIndex

@@ -19,6 +19,7 @@ import com.vayunmathur.library.ui.DynamicTheme
 import com.vayunmathur.library.util.OfflineAware
 import com.vayunmathur.library.ui.PermissionsChecker
 import com.vayunmathur.library.util.DataStoreUtils
+import com.vayunmathur.library.util.IntentLauncher
 import com.vayunmathur.library.util.MainNavigation
 import com.vayunmathur.library.util.NavKey
 import com.vayunmathur.library.util.rememberNavBackStack
@@ -31,6 +32,7 @@ import com.vayunmathur.maps.ui.SavedPlacesPage
 import com.vayunmathur.maps.ui.settings.MapSettingsPage
 import com.vayunmathur.maps.data.MapPreferences
 import com.vayunmathur.maps.data.ThemeMode
+import com.vayunmathur.maps.util.MapTileCache
 import com.vayunmathur.maps.util.MapsSearchViewModel
 import com.vayunmathur.maps.util.NavigationService
 import com.vayunmathur.maps.util.NavigationSessionManager
@@ -50,6 +52,15 @@ import java.io.File
 
 class MainActivity : ComponentActivity() {
 
+    companion object {
+        private const val TAG = "MapsIntent"
+
+        // Hosts the cross-app AssistantIntent client for maps (mirrors taxi/openassistant
+        // MainActivity.intentLauncher). WS-C's RideEstimate/OrderLookup clients launch taxi's
+        // and fooddelivery's intents through this.
+        lateinit var intentLauncher: IntentLauncher
+    }
+
     // Same instances the Compose tree gets via viewModel() (both resolve to this
     // Activity's ViewModelStore), so an external geo:/maps/navigation intent handled
     // here shows up in the map UI: selecting a place opens its bottom pane, and a
@@ -62,6 +73,7 @@ class MainActivity : ComponentActivity() {
         // FIRST_PARTY: data.vayunmathur.com tiles + amenities + api.vayunmathur.com -> ISRG+GTS
         NetworkClient.init(this, TrustBundle.FIRST_PARTY)
         enableEdgeToEdge()
+        intentLauncher = IntentLauncher(this)
         // Reclaim the ~44 MB bundled basemap copied into filesDir by older
         // builds; the basemap now streams live and is cached on demand.
         File(filesDir, "world_z0-6.pmtiles").delete()
@@ -103,7 +115,15 @@ class MainActivity : ComponentActivity() {
                     // a device that ends up without them is slow rather than broken.
                     Triple("https://data.vayunmathur.com/poi_spatial.bin", "poi_spatial.bin", getString(R.string.downloading_poi_data)),
                     Triple("https://data.vayunmathur.com/poi_name_index.bin", "poi_name_index.bin", getString(R.string.downloading_poi_data)),
-                    Triple("https://data.vayunmathur.com/world.transit", "world.transit", getString(R.string.downloading_transit_data))
+                    Triple("https://data.vayunmathur.com/world.transit", "world.transit", getString(R.string.downloading_transit_data)),
+                    // The basemap itself. It used to be range-requested for the life of the
+                    // install, which made every pan over cold ground a network round trip and
+                    // the map unusable off-grid; fetched once it is a plain file the renderer
+                    // mmaps. Same hosting hazard as the sidecars above, and a much larger one
+                    // here: this entry gates app start, so the URL must be live before the
+                    // version ships. An `adb push` to the same filename satisfies the gate,
+                    // which is how a locally built archive is sideloaded.
+                    Triple(MapTileCache.BASEMAP_ARCHIVE_URL, MapTileCache.BASEMAP_ARCHIVE_FILE, getString(R.string.downloading_basemap))
                 )) {
                     val perms = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
                         // POST_NOTIFICATIONS is runtime-grantable on API 33+
@@ -264,10 +284,6 @@ class MainActivity : ComponentActivity() {
             name = name, phone = null, website = null, openingHours = null,
             position = GeoPoint(lng, lat),
         )
-
-    companion object {
-        private const val TAG = "MapsIntent"
-    }
 }
 
 @Serializable

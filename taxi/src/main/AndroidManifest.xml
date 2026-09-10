@@ -8,9 +8,13 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
 
+    <!-- WS-B: taxi's DirectionsClient launches maps' signature-guarded DirectionsIntent. -->
+    <uses-permission android:name="com.vayunmathur.maps.permissions.ACCESS_MAPS" />
+
     <queries>
         <package android:name="com.ubercab" />
         <package android:name="me.lyft.android" />
+        <package android:name="com.vayunmathur.maps" />
     </queries>
 
     <permission
@@ -44,10 +48,10 @@
             </intent-filter>
         </activity>
 
-        <provider
-            android:name=".ipc.RideEstimateProvider"
-            android:authorities="com.vayunmathur.taxi.ridelookup"
+        <activity
+            android:name=".intents.RideEstimateIntent"
             android:exported="true"
+            android:theme="@android:style/Theme.NoDisplay"
             android:permission="com.vayunmathur.taxi.permissions.ACCESS_RIDES" />
 
         <service

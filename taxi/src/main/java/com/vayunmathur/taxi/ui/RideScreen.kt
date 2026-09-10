@@ -3,6 +3,7 @@ package com.vayunmathur.taxi.ui
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -44,8 +45,12 @@ import androidx.compose.ui.text.style.TextDecoration
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.DpOffset
 import androidx.compose.ui.unit.dp
+import com.vayunmathur.library.intents.maps.DirectionsResult
 import com.vayunmathur.library.map.CameraPosition
 import com.vayunmathur.library.map.GeoPoint
+import com.vayunmathur.library.map.RouteOverlay
+import com.vayunmathur.library.map.RouteSegment
+import com.vayunmathur.library.map.RouteStyle
 import com.vayunmathur.library.map.VectorMap
 import com.vayunmathur.library.map.rememberCameraState
 import com.vayunmathur.library.ui.AppScaffold
@@ -69,6 +74,7 @@ import com.vayunmathur.taxi.data.Place
 import com.vayunmathur.taxi.data.Provider
 import com.vayunmathur.taxi.data.QuoteResult
 import com.vayunmathur.taxi.data.RideQuote
+import com.vayunmathur.taxi.ipc.DirectionsClient
 import com.vayunmathur.taxi.platform.deeplink.RideDeepLinks
 import com.vayunmathur.taxi.platform.location.LocationProvider
 import com.vayunmathur.taxi.provider.QuoteRepository
@@ -93,6 +99,7 @@ fun RideScreen(bookingTrip: MutableState<BookingTrip?>? = null) {
     val scope = rememberCoroutineScope()
     val focus = LocalFocusManager.current
     val camera = rememberCameraState(CameraPosition(GeoPoint(-122.4194, 37.7749), 12.0))
+    val isDark = isSystemInDarkTheme()
 
     var calculatedPickup by remember { mutableStateOf<Place?>(null) }
     var pickup by remember { mutableStateOf<Place?>(null) }
@@ -105,6 +112,7 @@ fun RideScreen(bookingTrip: MutableState<BookingTrip?>? = null) {
     var results by remember { mutableStateOf<Map<Provider, QuoteResult>>(emptyMap()) }
     var comparing by remember { mutableStateOf(false) }
     var booking by remember { mutableStateOf<LyftBookingRequest?>(null) }
+    var routeOverlay by remember { mutableStateOf<RouteOverlay?>(null) }
 
     // Lyft cost tokens expire; re-quote shortly before the soonest one lapses so a booking never
     // uses a stale token. Re-runs whenever results change (each refresh reschedules the next).
@@ -152,6 +160,28 @@ fun RideScreen(bookingTrip: MutableState<BookingTrip?>? = null) {
         delay(300)
         suggestions = LocationProvider.search(context, q)
         searching = false
+    }
+
+    // Ask the maps app to plan the driving route for the selected trip, draw it inside the map
+    // (coloured by traffic the way maps draws it), and frame the camera to the whole route.
+    // Degrades to no route when maps is absent or the plan fails. Re-runs on either endpoint.
+    LaunchedEffect(pickup, destination) {
+        val from = pickup
+        val to = destination
+        if (from == null || to == null) {
+            routeOverlay = null
+            return@LaunchedEffect
+        }
+        val result = DirectionsClient.directions(
+            context,
+            fromLat = from.location.latitude,
+            fromLng = from.location.longitude,
+            toLat = to.location.latitude,
+            toLng = to.location.longitude,
+        )
+        routeOverlay = result?.toRouteOverlay(isDark)
+        val points = result?.polyline?.map { GeoPoint(it.lng, it.lat) }.orEmpty()
+        routeBoundsCamera(points)?.let { camera.animateTo(it) }
     }
 
     fun quote() {
@@ -244,7 +274,7 @@ fun RideScreen(bookingTrip: MutableState<BookingTrip?>? = null) {
                     .height(220.dp)
                     .clip(RoundedCornerShape(bottomStart = 24.dp, bottomEnd = 24.dp)),
             ) {
-                VectorMap(cameraState = camera, modifier = Modifier.fillMaxSize())
+                VectorMap(cameraState = camera, route = routeOverlay, modifier = Modifier.fillMaxSize())
                 // Overlay pins for pickup and destination, positioned from the live camera
                 // projection so they track pan/zoom (same pattern as fooddelivery's map).
                 val projection = camera.projection
@@ -705,4 +735,49 @@ private fun formatOriginalFare(quote: RideQuote): String {
     val low = quote.originalFareLowMinor ?: quote.fareLowMinor
     val high = quote.originalFareHighMinor ?: quote.fareHighMinor
     return if (low != high) "${money(low)} – ${money(high)}" else money(low)
+}
+
+/**
+ * Turn a planned [DirectionsResult] into the coloured [RouteOverlay] the map renderer draws,
+ * colouring each run by maps' own red/amber/green congestion ramp so a taxi route reads the same
+ * as it does in the maps app. No casing and an 8 dp stroke, matching maps' phone route style.
+ */
+private fun DirectionsResult.toRouteOverlay(isDark: Boolean): RouteOverlay? {
+    val runs = segments
+        .filter { it.points.size >= 2 }
+        .map { seg ->
+            RouteSegment(
+                seg.points.map { GeoPoint(it.lng, it.lat) },
+                trafficColor(seg.speedRatio, isDark),
+            )
+        }
+    if (runs.isEmpty()) return null
+    return RouteOverlay(runs, RouteStyle(width = 8.dp, casingWidth = 0.dp))
+}
+
+/**
+ * The congestion colour for a step's [speedRatio], on the same three-band ramp and the same
+ * light/dark hues maps' `MapTokens.traffic` uses, so the two apps agree on what a jam looks like.
+ */
+private fun trafficColor(speedRatio: Double, isDark: Boolean): Color = when {
+    speedRatio < 0.5 -> if (isDark) Color(0xFFEF5350) else Color(0xFFF44336)
+    speedRatio < 0.9 -> if (isDark) Color(0xFFFFCA28) else Color(0xFFFFC107)
+    else -> if (isDark) Color(0xFF66BB6A) else Color(0xFF4CAF50)
+}
+
+/**
+ * A [CameraPosition] framing all of [points]: centred on their bounding box with a zoom picked
+ * from its span. Mirrors the endpoint-framing math in [RideScreen]'s quote step. Null when there
+ * is nothing to frame.
+ */
+private fun routeBoundsCamera(points: List<GeoPoint>): CameraPosition? {
+    if (points.isEmpty()) return null
+    val minLon = points.minOf { it.longitude }
+    val maxLon = points.maxOf { it.longitude }
+    val minLat = points.minOf { it.latitude }
+    val maxLat = points.maxOf { it.latitude }
+    val centre = GeoPoint((minLon + maxLon) / 2.0, (minLat + maxLat) / 2.0)
+    val spread = maxOf(maxLon - minLon, maxLat - minLat)
+    val zoom = if (spread <= 0.0) 14.0 else (ln(360.0 / spread) / ln(2.0) - 1.0).coerceIn(10.0, 15.0)
+    return CameraPosition(centre, zoom)
 }

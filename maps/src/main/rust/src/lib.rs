@@ -29,7 +29,7 @@ use jni::JNIEnv;
 
 use crate::geometry::TrafficSpeeds;
 use crate::graph::{Graph, WALK};
-use crate::routing::{perform_search_loop, prepare_routing, reconstruct_path};
+use crate::routing::{perform_search_loop, prepare_routing, reconstruct_path, route_ascent_descent};
 use crate::state::{RadixHeap, RoutingScratchpad};
 
 // ---------------------------------------------------------------------------
@@ -229,6 +229,9 @@ pub extern "system" fn Java_com_vayunmathur_maps_util_OfflineRouter_findRouteNat
     }
 
     let steps = reconstruct_path(&g, &speeds, mode, &ctx, scratch);
+    // Whole-route elevation totals (WS-G): cumulative ascent/descent in metres, computed once and
+    // carried on every RawStep so Kotlin can read them off any step.
+    let (ascent_m, descent_m) = route_ascent_descent(&steps);
 
     // --- Marshal steps into OfflineRouter.RawStep[] ---
     let class = match env.find_class("com/vayunmathur/maps/util/OfflineRouter$RawStep") {
@@ -236,8 +239,10 @@ pub extern "system" fn Java_com_vayunmathur_maps_util_OfflineRouter_findRouteNat
         Err(_) => return null,
     };
     // MUST match the descriptor at the transit call site below: one ctor, two
-    // callers. The trailing two Strings are the ride's MOTIS board/alight ids.
-    let ctor = "(ILjava/lang/String;JJ[DDZLjava/lang/String;Ljava/lang/String;Ljava/lang/String;I[ILjava/lang/String;IIILjava/lang/String;Ljava/lang/String;)V";
+    // callers. The trailing two Strings are the ride's MOTIS board/alight ids;
+    // the trailing `[DDD` is WS-G's per-coordinate elevation array (parallel to
+    // the geometry) plus the route's cumulative ascent/descent in metres.
+    let ctor = "(ILjava/lang/String;JJ[DDZLjava/lang/String;Ljava/lang/String;Ljava/lang/String;I[ILjava/lang/String;IIILjava/lang/String;Ljava/lang/String;[DDD)V";
 
     let array = match env.new_object_array(steps.len() as i32, &class, JObject::null()) {
         Ok(a) => a,
@@ -271,6 +276,18 @@ pub extern "system" fn Java_com_vayunmathur_maps_util_OfflineRouter_findRouteNat
         }
         let jlanes_obj: JObject = jlanes.into();
 
+        // Per-coordinate elevation (metres), parallel to the geometry double[].
+        let jelev = match env.new_double_array(step.elevations.len() as i32) {
+            Ok(a) => a,
+            Err(_) => return null,
+        };
+        if !step.elevations.is_empty()
+            && env.set_double_array_region(&jelev, 0, &step.elevations).is_err()
+        {
+            return null;
+        }
+        let jelev_obj: JObject = jelev.into();
+
         let obj = match env.new_object(
             &class,
             ctor,
@@ -297,6 +314,10 @@ pub extern "system" fn Java_com_vayunmathur_maps_util_OfflineRouter_findRouteNat
                 // No MOTIS stop ids on a road-graph step.
                 JValue::Object(&JObject::null()),
                 JValue::Object(&JObject::null()),
+                // WS-G elevation profile: per-coordinate elevations + route totals.
+                JValue::Object(&jelev_obj),
+                JValue::Double(ascent_m),
+                JValue::Double(descent_m),
             ],
         ) {
             Ok(o) => o,
@@ -577,8 +598,10 @@ pub extern "system" fn Java_com_vayunmathur_maps_util_OfflineRouter_findTransitR
         Err(_) => return null,
     };
     // MUST match the descriptor at the driving call site above: one ctor, two
-    // callers. The trailing two Strings are the ride's MOTIS board/alight ids.
-    let ctor = "(ILjava/lang/String;JJ[DDZLjava/lang/String;Ljava/lang/String;Ljava/lang/String;I[ILjava/lang/String;IIILjava/lang/String;Ljava/lang/String;)V";
+    // callers. The trailing two Strings are the ride's MOTIS board/alight ids;
+    // the trailing `[DDD` is WS-G's per-coordinate elevation array + route
+    // ascent/descent, which a transit leg leaves empty/zero (no baked terrain).
+    let ctor = "(ILjava/lang/String;JJ[DDZLjava/lang/String;Ljava/lang/String;Ljava/lang/String;I[ILjava/lang/String;IIILjava/lang/String;Ljava/lang/String;[DDD)V";
     let array = match env.new_object_array(legs.len() as i32, &class, JObject::null()) {
         Ok(a) => a,
         Err(_) => return null,
@@ -654,6 +677,13 @@ pub extern "system" fn Java_com_vayunmathur_maps_util_OfflineRouter_findTransitR
         };
         let jlanes_obj: JObject = jlanes.into();
 
+        // A transit leg carries no baked terrain: an empty elevation array and zero ascent/descent.
+        let jelev = match env.new_double_array(0) {
+            Ok(a) => a,
+            Err(_) => return null,
+        };
+        let jelev_obj: JObject = jelev.into();
+
         let obj = match env.new_object(
             &class,
             ctor,
@@ -676,6 +706,9 @@ pub extern "system" fn Java_com_vayunmathur_maps_util_OfflineRouter_findTransitR
                 JValue::Int(leg.arr_secs as i32),
                 JValue::Object(&jboard),
                 JValue::Object(&jalight),
+                JValue::Object(&jelev_obj),
+                JValue::Double(0.0),
+                JValue::Double(0.0),
             ],
         ) {
             Ok(o) => o,
@@ -804,6 +837,119 @@ pub extern "system" fn Java_com_vayunmathur_maps_util_OfflineRouter_getStopDepar
                 JValue::Int(d.delay_secs),
                 JValue::Bool(d.cancelled as u8),
                 JValue::Bool(d.real_time as u8),
+            ],
+        ) {
+            Ok(o) => o,
+            Err(_) => return null,
+        };
+        if env.set_object_array_element(&array, i as i32, &obj).is_err() {
+            return null;
+        }
+    }
+
+    array.into_raw()
+}
+
+// ---------------------------------------------------------------------------
+// JNI: activeVehiclesNative (simulated in-service vehicle positions)
+// ---------------------------------------------------------------------------
+
+/// Simulated moving transit vehicles for the visible bbox (WS-F): every trip in
+/// `<base_path>/<feed>.transit` that is in service at `now_secs` (seconds since
+/// feed-local midnight), interpolated to a live `lon,lat,bearing` along its
+/// shape. Positions are computed on-device from the pack schedule + shape + the
+/// realtime overlay — there is no live GPS feed.
+///
+/// `weekday`/`date`/`prev_*` are the query service days (as in
+/// `findTransitRouteNative`, so a `>24:00:00` overnight trip is placed). The
+/// `overlay_*` arrays carry MOTIS realtime so a delayed trip is drawn at its live
+/// position and a cancelled one is suppressed; pass empty arrays for a
+/// schedule-only simulation. Returns `OfflineRouter.RawVehicle[]` (possibly
+/// empty), or `null` when the feed is absent/malformed.
+#[no_mangle]
+pub extern "system" fn Java_com_vayunmathur_maps_util_OfflineRouter_activeVehiclesNative<
+    'local,
+>(
+    mut env: JNIEnv<'local>,
+    _thiz: JObject<'local>,
+    base_path: JString<'local>,
+    feed: JString<'local>,
+    now_secs: jint,
+    weekday: jint,
+    date: jint,
+    prev_weekday: jint,
+    prev_date: jint,
+    overlay_coords: JDoubleArray<'local>,
+    overlay_routes: JObjectArray<'local>,
+    overlay_times: JIntArray<'local>,
+    min_lat: jdouble,
+    min_lon: jdouble,
+    max_lat: jdouble,
+    max_lon: jdouble,
+) -> jobjectArray {
+    let null = std::ptr::null_mut();
+    let base: String = match env.get_string(&base_path) {
+        Ok(s) => s.into(),
+        Err(_) => return null,
+    };
+    let feed_name: String = match env.get_string(&feed) {
+        Ok(s) => s.into(),
+        Err(_) => return null,
+    };
+
+    let index = match transit_index(&base, &feed_name) {
+        Some(i) => i,
+        None => return null,
+    };
+
+    let entries =
+        read_delay_entries(&mut env, &overlay_coords, &overlay_routes, &overlay_times);
+    let overlay = if entries.is_empty() {
+        None
+    } else {
+        Some(transit::DelayOverlay::build(&index, &entries))
+    };
+
+    let vehicles = transit::active_vehicles(
+        &index,
+        now_secs.max(0) as u32,
+        transit::Schedule {
+            day: transit::QueryDay {
+                weekday: weekday.max(0) as u32,
+                date: date.max(0) as u32,
+                prev_weekday: prev_weekday.max(0) as u32,
+                prev_date: prev_date.max(0) as u32,
+            },
+            overlay: overlay.as_ref(),
+        },
+        min_lat,
+        min_lon,
+        max_lat,
+        max_lon,
+    );
+
+    let class = match env.find_class("com/vayunmathur/maps/util/OfflineRouter$RawVehicle") {
+        Ok(c) => c,
+        Err(_) => return null,
+    };
+    // MUST match the RawVehicle ctor: lon, lat, bearing (D), colour, mode (I), id (J).
+    let ctor = "(DDDIIJ)V";
+    let array = match env.new_object_array(vehicles.len() as i32, &class, JObject::null()) {
+        Ok(a) => a,
+        Err(_) => return null,
+    };
+
+    for (i, v) in vehicles.iter().enumerate() {
+        let obj = match env.new_object(
+            &class,
+            ctor,
+            &[
+                JValue::Double(v.lon),
+                JValue::Double(v.lat),
+                JValue::Double(v.bearing),
+                JValue::Int(v.route_color as i32),
+                JValue::Int(v.route_type as i32),
+                JValue::Long(v.id),
             ],
         ) {
             Ok(o) => o,

@@ -1,28 +1,26 @@
 package com.vayunmathur.maps.ipc
 
 import android.content.Context
-import android.net.Uri
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.State
 import androidx.compose.runtime.produceState
 import androidx.core.net.toUri
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.withContext
+import com.vayunmathur.library.intents.taxi.RideEstimateRequest
+import com.vayunmathur.library.intents.taxi.RideEstimateResult
 
 /**
- * Byte-for-byte mirror of taxi's `RideHandoffContract`.
+ * Byte-for-byte mirror of the deep-link half of taxi's `RideHandoffContract`.
  *
- * As with the P18 family-location channel and the P19 order-lookup channel, the two apps
- * deliberately do NOT share a module: the contract is just an authority, a signature permission,
- * a deep-link shape and a handful of query-param / column names, so duplicating it here keeps maps
- * decoupled from taxi's source while still reading the same provider and building the same deep
- * link. Reading the provider is gated by the signature permission [PERMISSION] (both MA apps share
- * the signing key).
+ * The live fare/ETA estimate is now taxi's `RideEstimateIntent`
+ * [AssistantIntent][com.vayunmathur.library.util.AssistantIntent] (read via [RideEstimateClient]);
+ * only the `taxi://book` booking deep link — a separate fire-and-forget hand-off — lives here. As
+ * with the P18 family-location and P19 order-lookup channels, the two apps deliberately do NOT
+ * share a module: duplicating a scheme, host and a handful of param names keeps maps decoupled from
+ * taxi's source while still building the same deep link.
  */
 object RideHandoffContract {
-    const val AUTHORITY = "com.vayunmathur.taxi.ridelookup"
-    const val PERMISSION = "com.vayunmathur.taxi.permissions.ACCESS_RIDES"
-    const val PATH_ESTIMATE = "estimate"
+    /** Package of the MA taxi app, for the Android 11+ package-visibility / installed check. */
+    const val PACKAGE = "com.vayunmathur.taxi"
 
     const val PARAM_PICKUP_LAT = "pickup_lat"
     const val PARAM_PICKUP_LNG = "pickup_lng"
@@ -31,15 +29,8 @@ object RideHandoffContract {
     const val PARAM_DEST_LNG = "dest_lng"
     const val PARAM_DEST_LABEL = "dest_label"
 
-    const val COL_AVAILABLE = "available"
-    const val COL_FARE_ESTIMATE = "fare_estimate"
-    const val COL_ETA_MINUTES = "eta_minutes"
-
     const val DEEP_LINK_SCHEME = "taxi"
     const val DEEP_LINK_HOST = "book"
-
-    /** Package of the MA taxi app, for the Android 11+ package-visibility / installed check. */
-    const val PACKAGE = "com.vayunmathur.taxi"
 
     /** Builds the `taxi://book?…` deep link that opens the taxi app with this trip pre-filled. */
     fun bookingDeepLink(
@@ -68,15 +59,17 @@ data class RideEstimate(
 )
 
 /**
- * Reads taxi's exported ride-estimate provider (see [RideHandoffContract]) for an
- * origin→destination.
+ * Reads taxi's exported ride-estimate intent (`com.vayunmathur.taxi.intents.RideEstimateIntent`)
+ * for an origin→destination.
  *
- * Absence handling is total: if taxi isn't installed the authority resolves to no provider and the
- * query returns null; if the signature permission isn't held it throws [SecurityException]; a
- * malformed reply or any other failure is caught. In every one of those cases this returns null
- * and the caller shows the launch-only option (or none) — no crash.
+ * Absence handling is total: if taxi isn't installed the launch reports a missing package
+ * ([MissingAppException]); if the signature permission isn't held it throws [SecurityException]; a
+ * timeout or malformed reply throws too. In every one of those cases this returns null and the
+ * caller shows the launch-only option (or none) — no crash.
  */
 object RideEstimateClient {
+    private const val CLASS_NAME = "com.vayunmathur.taxi.intents.RideEstimateIntent"
+
     /** Whether the MA taxi app is installed (so the option is worth offering at all). */
     fun isInstalled(context: Context): Boolean =
         runCatching {
@@ -84,7 +77,7 @@ object RideEstimateClient {
             context.packageManager.getPackageInfo(RideHandoffContract.PACKAGE, 0)
         }.isSuccess
 
-    fun estimate(
+    suspend fun estimate(
         context: Context,
         pickupLat: Double,
         pickupLng: Double,
@@ -93,27 +86,24 @@ object RideEstimateClient {
         pickupLabel: String? = null,
         destLabel: String? = null,
     ): RideEstimate? {
-        val uri = Uri.parse("content://${RideHandoffContract.AUTHORITY}/${RideHandoffContract.PATH_ESTIMATE}")
-            .buildUpon()
-            .appendQueryParameter(RideHandoffContract.PARAM_PICKUP_LAT, pickupLat.toString())
-            .appendQueryParameter(RideHandoffContract.PARAM_PICKUP_LNG, pickupLng.toString())
-            .appendQueryParameter(RideHandoffContract.PARAM_DEST_LAT, destLat.toString())
-            .appendQueryParameter(RideHandoffContract.PARAM_DEST_LNG, destLng.toString())
-            .apply {
-                if (!pickupLabel.isNullOrBlank()) appendQueryParameter(RideHandoffContract.PARAM_PICKUP_LABEL, pickupLabel)
-                if (!destLabel.isNullOrBlank()) appendQueryParameter(RideHandoffContract.PARAM_DEST_LABEL, destLabel)
-            }
-            .build()
         return try {
-            context.contentResolver.query(uri, null, null, null, null)?.use { c ->
-                if (!c.moveToFirst()) return null
-                val available = c.getInt(c.getColumnIndexOrThrow(RideHandoffContract.COL_AVAILABLE)) == 1
-                if (!available) return RideEstimate(false, null, null)
-                val fare = c.getString(c.getColumnIndexOrThrow(RideHandoffContract.COL_FARE_ESTIMATE))
-                    ?.ifBlank { null }
-                val eta = c.getInt(c.getColumnIndexOrThrow(RideHandoffContract.COL_ETA_MINUTES))
-                    .takeIf { it >= 0 }
-                RideEstimate(true, fare, eta)
+            val result: RideEstimateResult = launchIntent(
+                context,
+                RideHandoffContract.PACKAGE,
+                CLASS_NAME,
+                RideEstimateRequest(
+                    pickupLat, pickupLng, destLat, destLng,
+                    pickupLabel?.ifBlank { null }, destLabel?.ifBlank { null },
+                ),
+            )
+            if (!result.available) {
+                RideEstimate(false, null, null)
+            } else {
+                RideEstimate(
+                    true,
+                    result.fareEstimate.ifBlank { null },
+                    result.etaMinutes.takeIf { it >= 0 },
+                )
             }
         } catch (_: SecurityException) {
             null
@@ -139,7 +129,7 @@ fun rememberRideEstimate(
 ): State<RideEstimate?> = produceState<RideEstimate?>(
     null, pickupLat, pickupLng, destLat, destLng, pickupLabel, destLabel,
 ) {
-    value = withContext(Dispatchers.IO) {
-        RideEstimateClient.estimate(context, pickupLat, pickupLng, destLat, destLng, pickupLabel, destLabel)
-    }
+    value = RideEstimateClient.estimate(
+        context, pickupLat, pickupLng, destLat, destLng, pickupLabel, destLabel,
+    )
 }

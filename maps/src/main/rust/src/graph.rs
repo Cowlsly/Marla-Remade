@@ -439,6 +439,7 @@ pub struct Graph {
     _intermediate_region: MmapRegion,
     _road_names_region: Option<MmapRegion>,
     _lanes_region: Option<MmapRegion>,
+    _elevation_region: Option<MmapRegion>,
 
     nodes: *const u8,
     pub node_count: u32, // real nodes; nodes.bin has node_count + 1 (sentinel)
@@ -478,6 +479,13 @@ pub struct Graph {
 
     road_names: *const u8,
     pub road_names_size: usize,
+
+    // `elevation.bin`, an OPTIONAL `i16[node_count]` of per-node ground elevation in metres, baked
+    // from the DEM at graph-build time (WS-G route profile). Null when the file is absent or its
+    // length does not match `node_count`, in which case [`Graph::node_elevation`] reads 0 for every
+    // node and the route profile comes out flat. A sidecar like `road_names.bin`/`lanes.bin`: no
+    // metadata count and no GRAPH_VERSION bump, validated by its own length instead.
+    elevation: *const u8,
 
     // Derived cost tables (computed in `load`, matching the C++ `init`).
     pub lon_to_mm_scale: [u32; 4096],
@@ -710,6 +718,20 @@ impl Graph {
         });
         let (lane_index, lane_edges, lane_data) = lanes.unwrap_or((ptr::null(), 0, ptr::null()));
 
+        // elevation.bin: `i16[node_count]`, one per real node in node-id order. Optional and
+        // validated by length alone — a stale-vintage file whose node_count differs is simply
+        // disabled (elevation reads 0), the same self-check lanes.bin does against `edge_count`.
+        let elevation_region = MmapRegion::map(&format!("{base}elevation.bin"));
+        let elevation = match &elevation_region {
+            Some(r) if r.len as u64 == u64::from(node_count) * std::mem::size_of::<i16>() as u64 => {
+                r.base()
+            }
+            _ => ptr::null(),
+        };
+        // A wrong-length elevation.bin is dropped, not kept mapped: nothing should read a stale
+        // vintage's bytes, and holding the region alive would imply it is usable.
+        let elevation_region = if elevation.is_null() { None } else { elevation_region };
+
         let nodes = nodes_region.base();
         // --- Derived tables (identical formulas to the C++ init) ---
         let mut lon_to_mm_scale = [0u32; 4096];
@@ -761,6 +783,7 @@ impl Graph {
             _intermediate_region: intermediate_region,
             _road_names_region: road_names_region,
             _lanes_region: lanes_region,
+            _elevation_region: elevation_region,
             nodes,
             node_count,
             edge_count,
@@ -780,6 +803,7 @@ impl Graph {
             lane_data,
             road_names,
             road_names_size,
+            elevation,
             lon_to_mm_scale,
             time_scale_fixed,
             edge_time_multipliers,
@@ -815,6 +839,17 @@ impl Graph {
             };
         }
         self.node(id)
+    }
+
+    /// Ground elevation of node `id` in metres, or 0 when the graph carries no `elevation.bin` or
+    /// `id` is out of range. Baked from the DEM at build time (WS-G); a build without a DEM, or a
+    /// node off the DEM's coverage, reads as 0 so the route profile is simply flat there.
+    #[inline]
+    pub fn node_elevation(&self, id: u32) -> i16 {
+        if self.elevation.is_null() || id >= self.node_count {
+            return 0;
+        }
+        unsafe { read_at::<i16>(self.elevation, id as usize) }
     }
 
     /// `[start, end)` of node `id`'s outgoing edges in `edges.bin`. `id` must be a

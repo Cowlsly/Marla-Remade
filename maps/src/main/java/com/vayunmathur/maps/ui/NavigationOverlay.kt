@@ -80,6 +80,7 @@ fun NavigationOverlay(
     onToggleNorthUp: () -> Unit = {},
     destinationName: String? = null,
     darkBasemap: Boolean = false,
+    route: RouteService.Route? = null,
     modifier: Modifier = Modifier,
 ) {
     if (navState is NavigationSessionManager.NavState.Idle) return
@@ -182,6 +183,7 @@ fun NavigationOverlay(
                 steps = steps,
                 currentStepIndex = navState.progress.currentStepIndex,
                 onClose = { showSteps = false },
+                route = route,
                 // Insets before the clearance padding, matching the speedometer above. The
                 // two were in opposite orders, which shifted them apart by the nav-bar
                 // height on top of the clearance they already disagreed on.

@@ -14,11 +14,19 @@ import androidx.core.content.ContextCompat
 import com.vayunmathur.library.network.NetworkClient
 import com.vayunmathur.library.network.TrustBundle
 import com.vayunmathur.library.ui.DynamicTheme
+import com.vayunmathur.library.util.IntentLauncher
 import com.vayunmathur.taxi.data.BookingTrip
 import com.vayunmathur.taxi.ipc.RideHandoffContract
 import com.vayunmathur.taxi.notifications.RideLiveUpdate
 
 class MainActivity : ComponentActivity() {
+    companion object {
+        // Hosts the cross-app AssistantIntent client for taxi (mirrors
+        // openassistant MainActivity.intentLauncher). WS-B's DirectionsClient and
+        // WS-C's RideEstimate/OrderLookup callers launch intents through this.
+        lateinit var intentLauncher: IntentLauncher
+    }
+
     // The ride to open on the tracking screen, set from a notification tap. Held as Compose
     // state so onNewIntent can push a new deep link into the running UI.
     private val trackRideId = mutableStateOf<String?>(null)
@@ -35,6 +43,7 @@ class MainActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
         NetworkClient.init(this, TrustBundle.STANDARD)
         enableEdgeToEdge()
+        intentLauncher = IntentLauncher(this)
 
         trackRideId.value = intent.trackRideIdOrNull()
         bookingTrip.value = intent.bookingTripOrNull()

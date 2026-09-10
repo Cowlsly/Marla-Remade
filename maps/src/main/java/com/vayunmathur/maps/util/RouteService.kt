@@ -38,7 +38,20 @@ object RouteService {
         val step: List<Step>,
         val departureTime: String? = null,
         val arrivalTime: String? = null,
+        /**
+         * Ground elevation samples along the route for the nav elevation chart
+         * (WS-G): each point pairs a cumulative distance from the start (metres)
+         * with an elevation (metres). Empty for transit and for any route whose
+         * graph carried no elevation data.
+         */
+        val elevationProfile: List<ElevationPoint> = emptyList(),
+        /** Total cumulative ascent over the route in metres. */
+        val ascentMeters: Double = 0.0,
+        /** Total cumulative descent over the route in metres. */
+        val descentMeters: Double = 0.0,
     ): RouteType
+    /** One sample of the [Route.elevationProfile]: elevation at a cumulative distance. */
+    data class ElevationPoint(val distanceMeters: Double, val elevationMeters: Double)
     data class Step(val distanceMeters: Double, val staticDuration: Duration, val polyline: List<GeoPoint>, val navInstruction: API.NavInstruction, val travelMode: TravelMode, val transitDetails: API.TransitDetails? = null, val speedRatio: Double = 1.0, val lanes: List<API.Lane> = emptyList())
     interface RouteType { val duration: Duration; val distanceMeters: Double }
     class EmptyRoute: RouteType { override val duration: Duration = 0.seconds; override val distanceMeters: Double = 0.0 }

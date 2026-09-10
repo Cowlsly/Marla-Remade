@@ -616,6 +616,7 @@ fun MapPage(
                         onToggleNorthUp = { chrome.northUp = !chrome.northUp },
                         destinationName = navSession.destinationName,
                         darkBasemap = darkMap,
+                        route = navSession.route,
                     )
 
                     MapOverlays(

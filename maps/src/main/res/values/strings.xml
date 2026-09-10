@@ -72,6 +72,8 @@
     <string name="poi_about_header">About</string>
     <!-- Place detail: Google hours section header. Noun. -->
     <string name="poi_hours_header">Hours</string>
+    <!-- Place detail: badge beside the one weekday whose hours came from Google's live feed, overriding the OSM schedule for today only. -->
+    <string name="poi_hours_live">Live</string>
     <!-- Place detail: Content description for a business photo thumbnail. -->
     <string name="poi_photo_description">Business photo</string>
     <!-- Place detail: Content description for a reviewer's profile picture. -->
@@ -157,6 +159,8 @@
     <string name="downloading_poi_data">Downloading Points of Interest…</string>
     <!-- MainActivity: Status text while the offline world transit index downloads -->
     <string name="downloading_transit_data">Downloading Transit Schedules…</string>
+    <!-- MainActivity: Status text while the offline map basemap archive downloads -->
+    <string name="downloading_basemap">Downloading Map Data…</string>
     <!-- MainActivity: Button to request location permission -->
     <string name="grant_location_permission">Grant Location Permission</string>
 
@@ -280,6 +284,10 @@
     <string name="nav_action_recenter">Recenter</string>
     <!-- Header for the full turn-by-turn step list sheet. -->
     <string name="nav_steps_title">Steps</string>
+    <!-- Header for the route elevation profile chart. -->
+    <string name="nav_elevation_title">Elevation</string>
+    <!-- Route elevation gain/loss summary. %1$d=metres climbed, %2$d=metres descended. -->
+    <string name="nav_elevation_gain_loss">↑ <xliff:g id="ascent" example="120">%1$d</xliff:g> m   ↓ <xliff:g id="descent" example="80">%2$d</xliff:g> m</string>
     <!-- Button: Start navigation for selected mode. Verb. -->
     <string name="nav_action_start">Start Navigation</string>
     <!-- Notification content for drive. %1$s=distance/duration, %2$s=ETA time -->

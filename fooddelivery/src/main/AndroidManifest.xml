@@ -37,10 +37,10 @@
             </intent-filter>
         </activity>
 
-        <provider
-            android:name=".ipc.OrderLookupProvider"
-            android:authorities="com.vayunmathur.fooddelivery.orderlookup"
+        <activity
+            android:name=".intents.OrderLookupIntent"
             android:exported="true"
+            android:theme="@android:style/Theme.NoDisplay"
             android:permission="com.vayunmathur.fooddelivery.permissions.ACCESS_ORDERS" />
 
         <service

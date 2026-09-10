@@ -44,6 +44,9 @@ class ItineraryWordingTest {
         arrSecs = arrSecs,
         boardStopId = null,
         alightStopId = null,
+        elevations = DoubleArray(0),
+        ascentM = 0.0,
+        descentM = 0.0,
     )
 
     private val wait = RouteService.API.Maneuver.WAIT.ordinal

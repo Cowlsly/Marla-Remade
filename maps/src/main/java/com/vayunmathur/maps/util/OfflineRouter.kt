@@ -194,6 +194,34 @@ object OfflineRouter {
             lat: Double,
             lon: Double
     ): String?
+    /**
+     * Simulated in-service transit vehicles for the visible bbox (WS-F): every
+     * trip in `<basePath>/<feed>.transit` running at `nowSecs` (seconds since
+     * feed-local midnight), interpolated to a live `lon,lat,bearing` along its
+     * shape. Positions are computed on-device from the pack schedule + shape +
+     * the realtime overlay; there is no live GPS feed.
+     *
+     * Time and `overlay*` arguments are as in [findTransitRouteNative], so a
+     * `>24:00:00` overnight trip is placed and a delayed/cancelled trip is drawn
+     * live/suppressed. Returns [RawVehicle]s (possibly empty), or null when the
+     * feed is missing/malformed.
+     */
+    private external fun activeVehiclesNative(
+            basePath: String,
+            feed: String,
+            nowSecs: Int,
+            weekday: Int,
+            date: Int,
+            prevWeekday: Int,
+            prevDate: Int,
+            overlayCoords: DoubleArray,
+            overlayRoutes: Array<String>,
+            overlayTimes: IntArray,
+            minLat: Double,
+            minLon: Double,
+            maxLat: Double,
+            maxLon: Double
+    ): Array<RawVehicle>?
     private external fun updateTrafficNative(
             edgeIds: LongArray,
             speeds: ByteArray,
@@ -205,6 +233,58 @@ object OfflineRouter {
 
     private val _trafficVersion = kotlinx.coroutines.flow.MutableStateFlow(0)
     val trafficVersion = _trafficVersion.asStateFlow()
+
+    /**
+     * Live per-component traffic for **display**, as a flat id→ratio table.
+     *
+     * Separate from the big-edge speeds that feed [updateTrafficNative] (routing/ETA, which
+     * stay entirely native): these component-level values are pushed to the renderer as an
+     * id→colour table by the map layer, which resolves the colour from the theme. [ids] and
+     * [ratioPct] are parallel; [ratioPct] is the wire's `u8 = round(speedRatio*100)`, where
+     * `0` means "no data" (the consumer skips those). The renderer draws a colour only for
+     * ids present here and present in a resident tile, so ids for squares that scrolled off
+     * are harmless — which is why this is an accumulating session cache rather than something
+     * pruned on every pan (see [trafficComponents]).
+     */
+    class TrafficComponents(val ids: LongArray, val ratioPct: ByteArray) {
+        companion object {
+            val EMPTY = TrafficComponents(LongArray(0), ByteArray(0))
+        }
+    }
+
+    /**
+     * Component traffic keyed by the packed 1° square it was fetched for (the same
+     * `packedSquare` [fetchTrafficData] receives). The native prefetch dedups squares for the
+     * whole session ([ensureTrafficLoadedNative] never re-asks for a square it already
+     * requested), so a square is fetched once and kept: dropping it here would leave a
+     * re-panned area permanently uncoloured with no way to refetch. Cleared only on [reload]
+     * (a graph swap can renumber ids).
+     */
+    private val componentBySquare = java.util.concurrent.ConcurrentHashMap<Int, TrafficComponents>()
+    private val _trafficComponents =
+            kotlinx.coroutines.flow.MutableStateFlow(TrafficComponents.EMPTY)
+
+    /**
+     * The merged component table across every fetched square, republished whenever a fetch
+     * lands. The map layer collects this, converts each ratio to an ARGB colour against the
+     * current palette, and pushes `id→colour` to the renderer.
+     */
+    val trafficComponents = _trafficComponents.asStateFlow()
+
+    /** Concatenate the per-square tables into one flat id/ratio snapshot and publish it. */
+    private fun republishComponents() {
+        val squares = componentBySquare.values.toList()
+        val total = squares.sumOf { it.ids.size }
+        val ids = LongArray(total)
+        val ratios = ByteArray(total)
+        var off = 0
+        for (s in squares) {
+            System.arraycopy(s.ids, 0, ids, off, s.ids.size)
+            System.arraycopy(s.ratioPct, 0, ratios, off, s.ratioPct.size)
+            off += s.ids.size
+        }
+        _trafficComponents.value = TrafficComponents(ids, ratios)
+    }
 
     private var cacheDirPath: String? = null
     private var trafficUpdateJob: kotlinx.coroutines.Job? = null
@@ -234,7 +314,7 @@ object OfflineRouter {
                 "fetchTrafficData START: bbox ($minLat,$minLon)-($maxLat,$maxLon) packed=$packedSquare forceAsync=$forceAsync"
         )
         
-        val block: suspend () -> Unit = {
+        val block: suspend () -> Unit = block@{
             try {
                 val (status, bytes) =
                         NetworkClient.performRequestBytes(
@@ -245,16 +325,54 @@ object OfflineRouter {
                         "TRAFFIC_DATA",
                         "fetchTrafficData NETWORK DONE: status=$status, size=${bytes.size}"
                 )
-                // Response layout: n * 8-byte LE u64 edge IDs, then n * 1-byte speeds.
-                if (status == 200 && bytes.size >= 9) {
-                    val n = bytes.size / 9
-                    val edgeIds = LongArray(n)
+                // Two-level response (little-endian):
+                //   u32 n_big, u32 n_component
+                //   n_big       x (u64 big_edge_id,  u8 kph)         -- routing, unchanged
+                //   n_component x (u64 component_id,  u8 ratio_pct)  -- display
+                // ratio_pct = round(speedRatio*100); 0 = no data. Records are interleaved
+                // (id then speed), not struct-of-arrays. The big level still feeds
+                // updateTrafficNative exactly as before; the component level is kept in
+                // Kotlin and pushed to the renderer as an id->colour table.
+                if (status == 200 && bytes.size >= 8) {
                     val buffer = ByteBuffer.wrap(bytes).order(ByteOrder.LITTLE_ENDIAN)
-                    for (i in 0 until n) edgeIds[i] = buffer.long
-                    val speeds = ByteArray(n)
-                    buffer.get(speeds)
-                    Log.d("TRAFFIC_DATA", "fetchTrafficData PROCESSING: $n edges")
+                    val nBig = buffer.int.toLong() and 0xFFFF_FFFFL
+                    val nComponent = buffer.int.toLong() and 0xFFFF_FFFFL
+                    val expected = 8L + 9L * (nBig + nComponent)
+                    if (bytes.size.toLong() != expected) {
+                        Log.w(
+                                "TRAFFIC_DATA",
+                                "fetchTrafficData SIZE MISMATCH: got ${bytes.size}, expected $expected (n_big=$nBig n_component=$nComponent)"
+                        )
+                        notifyTrafficFetchFinishedNative(packedSquare)
+                        return@block
+                    }
+                    val nBigI = nBig.toInt()
+                    val nComponentI = nComponent.toInt()
+
+                    // Big level: split the interleaved (id, kph) records into the parallel
+                    // arrays updateTrafficNative expects.
+                    val edgeIds = LongArray(nBigI)
+                    val speeds = ByteArray(nBigI)
+                    for (i in 0 until nBigI) {
+                        edgeIds[i] = buffer.long
+                        speeds[i] = buffer.get()
+                    }
+
+                    // Component level: kept for display.
+                    val compIds = LongArray(nComponentI)
+                    val compRatios = ByteArray(nComponentI)
+                    for (i in 0 until nComponentI) {
+                        compIds[i] = buffer.long
+                        compRatios[i] = buffer.get()
+                    }
+
+                    Log.d(
+                            "TRAFFIC_DATA",
+                            "fetchTrafficData PROCESSING: $nBigI big edges, $nComponentI components"
+                    )
                     updateTrafficNative(edgeIds, speeds, packedSquare)
+                    componentBySquare[packedSquare] = TrafficComponents(compIds, compRatios)
+                    republishComponents()
                     notifyTrafficUpdated()
                 } else {
                     Log.w("TRAFFIC_DATA", "fetchTrafficData NO DATA: status=$status")
@@ -317,6 +435,17 @@ object OfflineRouter {
             val boardStopId: String?,
             /** MOTIS/Transitous id of the ride's alight stop. See [boardStopId]. */
             val alightStopId: String?,
+            /**
+             * Per-coordinate ground elevation in metres, parallel to [geometry]
+             * (so `elevations.size == geometry.size / 2`). Baked from the DEM at
+             * graph-build time (WS-G) and interpolated along each edge. Empty on a
+             * transit leg or when the graph carries no elevation data.
+             */
+            val elevations: DoubleArray,
+            /** Whole-route cumulative ascent in metres (repeated on every step). */
+            val ascentM: Double,
+            /** Whole-route cumulative descent in metres (repeated on every step). */
+            val descentM: Double,
     )
 
     /** One offline scheduled departure from the baked `.transit` index. */
@@ -338,6 +467,40 @@ object OfflineRouter {
             val cancelled: Boolean,
             /** Whether the realtime overlay covered this departure. */
             val realTime: Boolean
+    )
+
+    /**
+     * One simulated in-service vehicle as it crosses the JNI boundary. Flat like
+     * [RawStep]/[RawDeparture]; [Vehicle] is the typed form callers consume.
+     */
+    class RawVehicle
+    @Keep
+    constructor(
+            val lon: Double,
+            val lat: Double,
+            /** Heading in degrees, 0 = north, clockwise, along the direction of travel. */
+            val bearing: Double,
+            /** GTFS `route_color` packed as 0xRRGGBB, or 0 when absent. */
+            val colour: Int,
+            /** GTFS `route_type`. */
+            val mode: Int,
+            /** Stable per-trip id, so a sprite animates between recomputes. */
+            val id: Long,
+    )
+
+    /**
+     * A simulated moving transit vehicle for the map overlay (WS-F). [bearing] is
+     * degrees (0 = north, clockwise); [colour] is 0xRRGGBB (0 when absent);
+     * [mode] is a coarse label (BUS/TRAM/RAIL/…) for icon selection; [id] is
+     * stable across the ~1 Hz recomputes for the same trip.
+     */
+    data class Vehicle(
+            val lon: Double,
+            val lat: Double,
+            val bearing: Float,
+            val colour: Int,
+            val mode: String,
+            val id: Long,
     )
 
     /**
@@ -384,6 +547,10 @@ object OfflineRouter {
     fun reload(context: Context) {
         isInitialized = false
         cachedTransitFeeds = null
+        // A new graph vintage can renumber edge/component ids, so the display cache from the
+        // old graph must not survive the swap.
+        componentBySquare.clear()
+        _trafficComponents.value = TrafficComponents.EMPTY
         initialize(context)
     }
 
@@ -456,8 +623,11 @@ object OfflineRouter {
         if (legs.size == 1) return@withContext legs.first()
         val combinedPolyline = mutableListOf<GeoPoint>()
         val combinedSteps = mutableListOf<RouteService.Step>()
+        val combinedElevation = mutableListOf<RouteService.ElevationPoint>()
         var totalDist = 0.0
         var totalSec = 0L
+        var totalAscent = 0.0
+        var totalDescent = 0.0
         for (leg in legs) {
             if (combinedPolyline.isEmpty()) combinedPolyline.addAll(leg.polyline)
             else {
@@ -466,10 +636,25 @@ object OfflineRouter {
                 else combinedPolyline.addAll(leg.polyline)
             }
             combinedSteps.addAll(leg.step)
+            // Offset each leg's profile by the route distance before it so the chart is continuous.
+            val distOffset = totalDist
+            for (p in leg.elevationProfile) {
+                combinedElevation.add(p.copy(distanceMeters = p.distanceMeters + distOffset))
+            }
             totalDist += leg.distanceMeters
             totalSec += leg.duration.inWholeSeconds
+            totalAscent += leg.ascentMeters
+            totalDescent += leg.descentMeters
         }
-        RouteService.Route(duration = totalSec.seconds, distanceMeters = totalDist, polyline = combinedPolyline, step = combinedSteps)
+        RouteService.Route(
+            duration = totalSec.seconds,
+            distanceMeters = totalDist,
+            polyline = combinedPolyline,
+            step = combinedSteps,
+            elevationProfile = combinedElevation,
+            ascentMeters = totalAscent,
+            descentMeters = totalDescent,
+        )
     }
 
     /**
@@ -622,6 +807,68 @@ object OfflineRouter {
             return@withContext TransitStop(id = id, name = id, lat = lat, lon = lon)
         }
         null
+    }
+
+    /**
+     * Simulated moving transit vehicles within the visible bbox (WS-F). Positions
+     * are interpolated on-device from each downloaded `*.transit` pack's schedule +
+     * shape by the native [activeVehiclesNative]; there is no live GPS feed. The
+     * result is meant to be recomputed at ~1 Hz by a ticker (the renderer's frame
+     * clock smooths motion between recomputes) and pushed to the map overlay.
+     *
+     * Schedule-only for now: the realtime [Overlay] would need a board fetch per
+     * visible stop, which the 1 Hz ticker (task #8) assembles via [realtimeOverlay]
+     * and folds in before pushing — the native call already accepts it.
+     */
+    suspend fun activeVehicles(
+            context: Context,
+            minLat: Double,
+            minLon: Double,
+            maxLat: Double,
+            maxLon: Double,
+    ): List<Vehicle> = withContext(Dispatchers.Default) {
+        if (!isInitialized) initialize(context)
+        val base = basePath ?: return@withContext emptyList()
+        val feeds = transitFeeds(base)
+        if (feeds.isEmpty()) return@withContext emptyList()
+
+        val out = mutableListOf<Vehicle>()
+        for (feed in feeds) {
+            // The pack is world-merged, so query time must be in the feed's zone;
+            // resolve it at the bbox centre.
+            val clock = transitClock(
+                    runCatching {
+                        getFeedTimezoneNative(
+                                base, feed, (minLat + maxLat) / 2, (minLon + maxLon) / 2
+                        )
+                    }.getOrNull()
+            )
+            val overlay = Overlay.EMPTY
+            val raw = try {
+                activeVehiclesNative(
+                        base, feed,
+                        clock.depSecs, clock.weekday, clock.date,
+                        clock.prevWeekday, clock.prevDate,
+                        overlay.coords, overlay.routes, overlay.times,
+                        minLat, minLon, maxLat, maxLon
+                )
+            } catch (_: Exception) {
+                null
+            } ?: continue
+            for (v in raw) {
+                out.add(
+                        Vehicle(
+                                lon = v.lon,
+                                lat = v.lat,
+                                bearing = v.bearing.toFloat(),
+                                colour = v.colour,
+                                mode = gtfsRouteTypeToMode(v.mode),
+                                id = v.id,
+                        )
+                )
+            }
+        }
+        out
     }
 
     /**
@@ -1102,7 +1349,52 @@ object OfflineRouter {
                         },
                         departureTime = leaveAt(rawSteps),
                         arrivalTime = arriveAt(rawSteps),
+                        elevationProfile = elevationProfile(rawSteps),
+                        // The whole-route total is carried on every RawStep (0 on transit legs),
+                        // so the first one is enough.
+                        ascentMeters = rawSteps.firstOrNull()?.ascentM ?: 0.0,
+                        descentMeters = rawSteps.firstOrNull()?.descentM ?: 0.0,
                 )
+    }
+
+    /**
+     * Build the route-wide elevation profile from the native [RawStep]s: walk every step's
+     * per-coordinate [RawStep.elevations] (parallel to its geometry), drop the join point each step
+     * shares with the previous one, and pair each with its cumulative ground distance from the
+     * start. Empty when no step carries elevation (transit, or a graph with no DEM).
+     */
+    private fun elevationProfile(rawSteps: Array<RawStep>): List<RouteService.ElevationPoint> {
+        val out = mutableListOf<RouteService.ElevationPoint>()
+        var cumDist = 0.0
+        var prevLon = Double.NaN
+        var prevLat = Double.NaN
+        for (raw in rawSteps) {
+            if (raw.elevations.isEmpty()) continue
+            val g = raw.geometry
+            var k = 0
+            while (k + 1 < g.size) {
+                val lon = g[k]
+                val lat = g[k + 1]
+                val elev = raw.elevations.getOrNull(k / 2) ?: break
+                val first = prevLon.isNaN()
+                val dup = !first && lon == prevLon && lat == prevLat
+                if (!dup) {
+                    if (!first) cumDist += crowMeters(prevLat, prevLon, lat, lon)
+                    out.add(RouteService.ElevationPoint(cumDist, elev))
+                    prevLon = lon
+                    prevLat = lat
+                }
+                k += 2
+            }
+        }
+        return out
+    }
+
+    /** Approximate ground distance in metres between two lat/lon points (equirectangular). */
+    private fun crowMeters(lat1: Double, lon1: Double, lat2: Double, lon2: Double): Double {
+        val dlat = (lat2 - lat1) * 111_320.0
+        val dlon = (lon2 - lon1) * 111_320.0 * Math.cos(Math.toRadians((lat1 + lat2) * 0.5))
+        return Math.hypot(dlat, dlon)
     }
 
     /**
