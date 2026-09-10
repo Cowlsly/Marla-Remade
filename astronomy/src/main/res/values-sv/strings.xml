@@ -1,4 +1,5 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <string name="display">Visning</string>
+    <string name="use_current_location">Använd aktuell plats</string>
 </resources>
