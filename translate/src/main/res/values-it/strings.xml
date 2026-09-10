@@ -10,4 +10,10 @@
     <string name="grant_camera_access">Concedi l\'accesso alla fotocamera per tradurre cosa vedi</string>
     <string name="no_voice_installed">Nessuna voce %1$s installa</string>
     <string name="install_voice">Installa</string>
+    <string name="select_source_language">Lingua di origine</string>
+    <string name="select_target_language">Lingua di destinazione</string>
+    <string name="search_languages">Cerca lingue</string>
+    <string name="recent_languages">Lingue recenti</string>
+    <string name="all_languages">Tutte le lingue</string>
+    <string name="no_languages_match">Nessuna lingua corrisponde a \"%1$s\"</string>
 </resources>
