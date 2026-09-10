@@ -1,7 +1,109 @@
 <?xml version="1.0" encoding="utf-8"?>
-<resources>
+<resources xmlns:xliff="urn:oasis:names:tc:xliff:document:1.2">
     <string name="recent">الأحدث</string>
     <string name="apply">تطبيق</string>
     <string name="reset">إعادة الضبط</string>
     <string name="rotate_90">تدوير ٩٠°</string>
+    <string name="app_name">الصور</string>
+    <string name="gif_badge">GIF</string>
+    <string name="photo_widget_description">صورة دوارة من معرض صورك - اضغط للتبديل العشوائي</string>
+    <string name="grant_image_video_permissions">منح أذونات الصور/الفيديو</string>
+    <string name="grant_storage_permission">منح إذن التخزين</string>
+    <string name="media_management_permission_required">إذن إدارة الوسائط مطلوب</string>
+    <string name="this_app_needs_permission_to_manage_medi">يحتاج هذا التطبيق إلى إذن لإدارة ملفات الوسائط ليعمل بشكل صحيح. يرجى منح إذن \"السماح بإدارة الوسائط\" في الإعدادات.</string>
+    <string name="open_settings">فتح الإعدادات</string>
+    <string name="label_gallery">المعرض</string>
+    <string name="label_map">الخريطة</string>
+    <string name="label_people">الأشخاص</string>
+    <string name="label_trash">سلة المهملات</string>
+    <string name="label_secure_folder">المجلد الآمن</string>
+    <string name="secure_folder_is_empty">المجلد الآمن فارغ</string>
+    <string name="trash_is_empty">سلة المهملات فارغة</string>
+    <string name="items_selected">تم تحديد <xliff:g id="count" example="5">%1$d</xliff:g></string>
+    <string name="month_year_format"><xliff:g id="month" example="January">%1$s</xliff:g> <xliff:g id="year" example="2024">%2$d</xliff:g></string>
+    <string name="search_placeholder">البحث عن الصور…</string>
+    <string name="of_photos_processed">تمت معالجة <xliff:g id="percent" example="45"> %1$d</xliff:g> %% من الصور</string>
+    <string name="photos_indexed_for_visual_search">تم فهرسة <xliff:g id="done" example="120"> %1$d</xliff:g>/<xliff:g id="total" example="500">%2$d من</xliff:g> الصور للبحث المرئي</string>
+    <string name="photos_indexed_for_text_search">تم فهرسة <xliff:g id="done" example="120"> %1$d</xliff:g>/<xliff:g id="total" example="500">%2$d من</xliff:g> الصور للبحث النصي</string>
+    <string name="semantic_search_unavailable">البحث عن الصور بالذكاء الاصطناعي غير متاح في هذا التثبيت. لا يزال البحث عن النص واسم الملف يعمل.</string>
+    <string name="people_empty">لم يتم العثور على أشخاص بعد. يتم المسح في الخلفية — تحقق مرة أخرى بعد فهرسة صورك.</string>
+    <string name="people_scanning">تجميع الوجوه... سيظهر الأشخاص هنا عند العثور عليهم.</string>
+    <string name="face_indexing_progress">جارٍ فهرسة <xliff:g id="processed" example="20">%1$d</xliff:g> / <xliff:g id="total" example="100">%2$d</xliff:g></string>
+    <string name="people_model_missing">يتطلب تجميع الوجوه نموذج MobileFaceNet. أضف mobilefacenet.tflite المرخص بشكل متساهل إلى photos/src/main/assets (انظر FaceRecognizer).</string>
+    <plurals name="people_photo_count">
+        <item quantity="zero"><xliff:g id="count" example="12">%1$d</xliff:g> صورة</item>
+        <item quantity="one"><xliff:g id="count" example="12">%1$d</xliff:g> صورة</item>
+        <item quantity="two"><xliff:g id="count" example="12">%1$d</xliff:g> صورتان</item>
+        <item quantity="few"><xliff:g id="count" example="12">%1$d</xliff:g> صور</item>
+        <item quantity="many"><xliff:g id="count" example="12">%1$d</xliff:g> صورة</item>
+        <item quantity="other"><xliff:g id="count" example="12">%1$d</xliff:g> صورة</item>
+    </plurals>
+    <string name="people_unnamed">بدون اسم</string>
+    <plurals name="people_in_photo">
+        <item quantity="zero"><xliff:g id="count" example="1">%1$d</xliff:g> شخص</item>
+        <item quantity="one"><xliff:g id="count" example="1">%1$d</xliff:g> شخص</item>
+        <item quantity="two"><xliff:g id="count" example="1">%1$d</xliff:g> شخصان</item>
+        <item quantity="few"><xliff:g id="count" example="1">%1$d</xliff:g> أشخاص</item>
+        <item quantity="many"><xliff:g id="count" example="1">%1$d</xliff:g> شخص</item>
+        <item quantity="other"><xliff:g id="count" example="1">%1$d</xliff:g> شخص</item>
+    </plurals>
+    <string name="taken_on">تم الاتقاط في: <xliff:g id="date" example="Jan 5, 2024">%1$s</xliff:g></string>
+    <string name="location">الموقع: <xliff:g id="place" example="Paris, France">%1$s</xliff:g></string>
+    <string name="resolution">الدقة: <xliff:g id="width" example="4000">%1$d</xliff:g> x <xliff:g id="height" example="3000">%2$d</xliff:g></string>
+    <string name="file_size">الحجم: <xliff:g id="size" example="2.5 MB">%1$s</xliff:g></string>
+    <string name="detecting">جارٍ الاكتشاف…</string>
+    <string name="view_360">عرض 360°</string>
+    <string name="view_panorama">عرض البانوراما</string>
+    <string name="panorama">بانوراما</string>
+    <string name="title_edit_photo">تعديل الصورة</string>
+    <string name="action_save">حفظ</string>
+    <string name="action_save_as_copy">حفظ كنسخة</string>
+    <string name="reset_all">إعادة ضبط الكل</string>
+    <string name="export_as_webp">تصدير كـ WebP</string>
+    <string name="export_as_png">تصدير كـ PNG</string>
+    <string name="title_edit_video">تعديل الفيديو</string>
+    <string name="video_trim">قص</string>
+    <string name="video_crop_rotate">اقتصاص وتدوير</string>
+    <string name="video_crop_hint">اسحب الزوايا على المعاينة للقص.</string>
+    <string name="video_audio">الصوت</string>
+    <string name="video_audio_on">الصوت مفعل</string>
+    <string name="video_muted">مكتوم</string>
+    <string name="video_filters">عوامل التصفية</string>
+    <string name="video_filter_none">لا شئ</string>
+    <string name="video_filter_mono">أحادي</string>
+    <string name="video_filter_warm">دافئ</string>
+    <string name="video_filter_cool">بارد</string>
+    <string name="video_filter_vivid">حيوي</string>
+    <string name="video_brightness">السطوع</string>
+    <string name="video_contrast">التباين</string>
+    <string name="video_saturation">التشبع</string>
+    <string name="video_save_prompt">حفظ الفيديو المعدّل كنسخة جديدة أو استبدال الأصلية؟</string>
+    <string name="video_save_copy">حفظ كنسخة</string>
+    <string name="video_overwrite">استبدال</string>
+    <string name="video_exporting">جارٍ التصدير…</string>
+    <string name="video_export_failed">فشل تصدير الفيديو.</string>
+    <string name="video_edit_with_label">تعديل الفيديو بتطبيقي</string>
+    <string name="opacity">الشفافية</string>
+    <string name="thickness">السماكة</string>
+    <string name="color">اللون</string>
+    <string name="draw">الرسم</string>
+    <string name="aspect_ratio">نسبة العرض إلى الارتفاع</string>
+    <string name="drag_corners_to_distort">اسحب الزوايا لتشويه.</string>
+    <string name="rotate">تدوير</string>
+    <string name="tap_to_add_points">انقر لإضافة نقاط (<xliff:g id="mode" example="New">%1$s</xliff:g>)</string>
+    <string name="edge_softness">نعومة الحافة</string>
+    <string name="combine">دمج</string>
+    <string name="tolerance">التسامح</string>
+    <string name="edit_text">تعديل النص</string>
+    <string name="tap_the_image_to_pick_a_color">اضغط على الصورة لتحديد لون.</string>
+    <string name="font">الخط</string>
+    <string name="brush_size">حجم الفرشاة</string>
+    <string name="set_source_point">تعيين نقطة المصدر</string>
+    <string name="show_mask">إظهار القناع</string>
+    <string name="add_mask">إضافة قناع</string>
+    <string name="colors_inverted_toggle_the_layer_s_visib">تم عكس الألوان. بدّل رؤية الطبقة أو احذف طبقة التحويل للتراجع.</string>
+    <string name="draw_freehand_highlight_erase_or_tap_to">ارسم يدويًا، قم بتمييز، مسح أو اضغط لإضافة نص. اضغط على أداة مرة أخرى لتغيير لونها وحجمها.</string>
+    <string name="locks_the_crop_to_a_fixed_width_height_s">يقفل الاقتصاص على شكل ثابت للعرض:الارتفاع. يتيح لك \"حر\" الاقتصاص إلى أي حجم.</string>
+    <string name="drag_the_round_handle_above_the_crop_box">اسحب المقبض الدائري فوق مربع القص لإمالة الصورة وتقويمها.</string>
+    <string name="drag_the_four_corner_handles_to_scale_ro">اسحب المقابض الأربعة الموجودة في الزوايا لتغيير حجم الطبقة النشطة أو تدويرها أو إمالتها أو تشويهها. يؤدي تطبيقها إلى تثبيتها.</string>
 </resources>
