@@ -141,7 +141,22 @@ pub fn from_tile(tile: &Tile) -> Result<(Body, Stats)> {
     let extent = u16::try_from(extent).map_err(|_| {
         crate::proto::Error(format!("an MVT extent of {extent} does not fit a .mamaps body"))
     })?;
-    Ok((Body { extent, layers, names: Vec::new(), ids: Vec::new() }, stats))
+    Ok((
+        Body {
+            extent,
+            layers,
+            names: Vec::new(),
+            ids: Vec::new(),
+            turn_lanes: Vec::new(),
+            buildings: Vec::new(),
+            heightmap: None,
+            // MVT has no lane or carriageway data of any kind, so a body converted from one never
+            // carries the table and the renderer falls back to a plain stroke.
+            carriageways: Vec::new(),
+            convention: None,
+        },
+        stats,
+    ))
 }
 
 /// Append one feature and its parts, skipping degenerate paths.
@@ -192,6 +207,7 @@ fn push_feature(
         transit_ordinal: 0,
         transit_lanes: 0,
         transit_taper: 0,
+        lane_count: 0,
     });
 }
 

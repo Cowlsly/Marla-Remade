@@ -22,7 +22,7 @@
 //!
 //! # Size
 //!
-//! Ten layers, ~108 kinds and 41 details, at a length byte each: under 2 KiB as measured,
+//! Eleven layers, ~108 kinds and 41 details, at a length byte each: under 2 KiB as measured,
 //! which is what lets the header, the dictionary and the root index share one 16 KiB opening
 //! read.
 
@@ -37,9 +37,11 @@ pub const NONE: u16 = 0;
 
 /// The layers this format carries, in draw order.
 ///
-/// A layer's id **is** its index here. Ten: the seven the style draws, plus `places`
-/// (labels), `poi` (icons) and `transit` (reserved by v2; populated when transit lands).
-/// `u8` ids fit with room to spare.
+/// A layer's id **is** its index here. Eleven: the seven the style draws, plus `places`
+/// (labels), `poi` (icons), `transit` (reserved by v2; populated when transit lands) and
+/// `traffic` (v4: one line per drivable component segment, recoloured live from a pushed
+/// id→speed table — geometry from the v6 routing graph, not the basemap). `u8` ids fit with
+/// room to spare.
 pub const LAYERS: &[&str] = &[
     "earth",
     "water",
@@ -51,6 +53,7 @@ pub const LAYERS: &[&str] = &[
     "places",
     "poi",
     "transit",
+    "traffic",
 ];
 
 pub const LAYER_EARTH: u8 = 0;
@@ -63,6 +66,11 @@ pub const LAYER_BUILDINGS: u8 = 6;
 pub const LAYER_PLACES: u8 = 7;
 pub const LAYER_POI: u8 = 8;
 pub const LAYER_TRANSIT: u8 = 9;
+/// v4. One `GEOM_LINE` feature per drivable **component** segment of the v6 routing graph,
+/// each carrying its packed `component_id` in the body's id side table so the renderer can
+/// recolour it from a live id→speed push. Excluded from the basemap style: it draws only
+/// when the traffic overlay is enabled.
+pub const LAYER_TRAFFIC: u8 = 10;
 
 /// Every `kind` value the schema can emit, id 1 upward. Index 0 is [`NONE`].
 ///
@@ -456,7 +464,8 @@ mod tests {
         assert_eq!(d.layer_name(LAYER_PLACES), Some("places"), "v2's label layer");
         assert_eq!(d.layer_name(LAYER_POI), Some("poi"), "v2's icon layer");
         assert_eq!(d.layer_name(LAYER_TRANSIT), Some("transit"), "v2 reserves transit");
-        assert_eq!(d.layer_name(10), None, "past the table");
+        assert_eq!(d.layer_name(LAYER_TRAFFIC), Some("traffic"), "v4's live traffic layer");
+        assert_eq!(d.layer_name(11), None, "past the table");
     }
 
     /// A duplicate would give one value two ids, so half the features carrying it would filter

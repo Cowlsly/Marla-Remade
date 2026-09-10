@@ -17,12 +17,44 @@ pub const MAGIC: &[u8; 7] = b"MAMAPS\0";
 /// Bumped only for a change a reader cannot ignore. The archive carries a
 /// [`build_id`](Header::build_id) for "same format, different data".
 ///
+/// v7 adds what the carriageway renderer needs to paint lane markings onto a road surface rather
+/// than stroke parallel lines over it: a `FLAG_IS_ONEWAY` feature flag (bit 4), and one more
+/// optional trailing body section behind `BODY_FLAG_ROAD_LANES` — a per-road **carriageway table**
+/// (dense-parallel to the `roads` layer: the `lanes:forward`/`lanes:backward` split that says where
+/// the centre line goes, and which dividers are solid) plus a per-tile **marking convention** byte
+/// (left- or right-hand traffic, yellow or white centre line). The 24-byte feature record is
+/// unchanged. The bump is forced twice over: an older reader rejects both an unknown body flag and
+/// an unknown feature flag bit, so a v7 archive is a clean rejection rather than a wrong map.
+///
+/// v6 adds two optional trailing body sections behind new body flags: a per-building **S3DB
+/// attribute table** (`BODY_FLAG_BUILDING_TABLE`, dense-parallel to the `buildings` layer —
+/// heights, roof shape/height/direction/orientation and wall/roof colours for 3D extrusion) and a
+/// per-tile **DEM heightmap** grid (`BODY_FLAG_HEIGHTMAP`, `u16` metres for 3D terrain relief).
+/// The 24-byte feature record is unchanged, so the bump is not forced by the record width — it is
+/// forced because an older reader rejects an unknown body flag, and would otherwise silently draw a
+/// v6 tile flat. `Body::parse` refuses a version it does not speak, so an old v5 archive is a clean
+/// rejection rather than a wrong map.
+///
+/// v5 bakes lane data into the `roads` layer: a per-feature **lane count** in the byte the
+/// feature record kept reserved (byte 23), which the renderer expands into that many parallel
+/// carriageway lanes with dividers at high zoom. The record width is unchanged, so the bump is
+/// not forced by the dictionary (no new `kind`/`kind_detail`) — it is forced because an older
+/// reader would read a v5 body's lane byte as the reserved zero it always was and draw every
+/// multi-lane road as a single line. `Body::parse` refuses a version it does not speak, so the
+/// mismatch is a clean rejection rather than a silently wrong map.
+///
+/// v4 adds the `traffic` layer (id 10) to [`dict::LAYERS`](super::dict::LAYERS): one
+/// `GEOM_LINE` feature per drivable component segment of the v6 routing graph, each carrying
+/// its packed `component_id` in the body id table. The layer addition alone forces the bump —
+/// `read`'s `check_matches_schema` validates the whole dictionary on open, so an older reader
+/// rejects a v4 archive anyway.
+///
 /// v3 adds `fuel`, `hotel` and `atm` to [`dict::KINDS`](super::dict::KINDS) and an optional
 /// per-body feature id table. The kind additions alone force the bump: `read`'s
 /// `check_matches_schema` validates the whole dictionary on open, so an older reader would
 /// reject a v3 archive anyway. v1 is no longer read — the last v1 archive predates `places`,
 /// `poi` and `transit` entirely.
-pub const FORMAT_VERSION: u8 = 3;
+pub const FORMAT_VERSION: u8 = 7;
 
 pub const HEADER_LEN: usize = 128;
 

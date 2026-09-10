@@ -99,10 +99,11 @@ mod tests {
             transit_ordinal: 0,
             transit_lanes: 0,
             transit_taper: 0,
+            lane_count: 0,
         });
         roads.parts.push(Part { coord_start: 0, point_count: 2, winding: WINDING_OUTER });
         roads.coords = vec![(0, 0), (seed, seed)];
-        Body { extent: DEFAULT_EXTENT, layers: vec![roads], names: Vec::new(), ids: Vec::new() }
+        Body { extent: DEFAULT_EXTENT, layers: vec![roads], names: Vec::new(), ids: Vec::new() , turn_lanes: Vec::new(), buildings: Vec::new(), heightmap: None }
     }
 
     /// An archive of `(z, x, y, seed)` tiles, fed in ascending id order as the writer requires.
@@ -180,6 +181,7 @@ mod tests {
             transit_ordinal: 0,
             transit_lanes: 0,
             transit_taper: 0,
+            lane_count: 0,
         });
         roads.parts.push(Part { coord_start: 0, point_count: POINTS, winding: WINDING_OUTER });
         let mut state = seed as u64 ^ 0xA5A5_A5A5_A5A5_A5A5;
@@ -189,7 +191,7 @@ mod tests {
                 ((state >> 33) as i16, (state >> 17) as i16)
             })
             .collect();
-        Body { extent: DEFAULT_EXTENT, layers: vec![roads], names: Vec::new(), ids: Vec::new() }
+        Body { extent: DEFAULT_EXTENT, layers: vec![roads], names: Vec::new(), ids: Vec::new() , turn_lanes: Vec::new(), buildings: Vec::new(), heightmap: None }
     }
 
     #[test]
@@ -652,11 +654,11 @@ mod tests {
         let mut w = StreamWriter::new(opts).expect("opts");
         for (id, seed) in rows { w.append(id, &crate::mamaps::body::Body { extent: 4096, layers: {
             let mut l = crate::mamaps::body::Layer::new(crate::mamaps::dict::LAYER_ROADS);
-            l.features.push(crate::mamaps::body::Feature{kind:1,kind_detail:0,geom_type:1,flags:0,name_idx:0,parts_offset:0,part_count:1,transit_color:0,transit_ordinal:0,transit_lanes:0,transit_taper:0});
+            l.features.push(crate::mamaps::body::Feature{kind:1,kind_detail:0,geom_type:1,flags:0,name_idx:0,parts_offset:0,part_count:1,transit_color:0,transit_ordinal:0,transit_lanes:0,transit_taper:0,lane_count:0});
             l.parts.push(crate::mamaps::body::Part{coord_start:0,point_count:2,winding:0});
             l.coords = vec![(0,0),(seed,seed)];
             vec![l]
-        }, names: Vec::new(), ids: Vec::new() }).expect("append"); }
+        }, names: Vec::new(), ids: Vec::new(), turn_lanes: Vec::new(), buildings: Vec::new(), heightmap: None }).expect("append"); }
         let bytes = w.finish().expect("finish");
         let hdr = crate::mamaps::Header::parse(&bytes).expect("hdr");
         assert_eq!(hdr.leaf_count as usize, (5000+4096-1)/4096);
