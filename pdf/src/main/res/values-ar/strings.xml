@@ -2,4 +2,5 @@
 <resources>
     <string name="password">كلمة المرور</string>
     <string name="open">فتح</string>
+    <string name="color">اللون</string>
 </resources>
