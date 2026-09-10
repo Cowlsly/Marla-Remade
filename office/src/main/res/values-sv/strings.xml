@@ -19,4 +19,10 @@
     <string name="clear_formatting">Rensa formatering</string>
     <string name="computing">Beräknar…</string>
     <string name="unknown">Okänd</string>
+    <string name="name">Namn</string>
+    <string name="line">Rad</string>
+    <string name="go">Gå</string>
+    <string name="discard">Förkasta</string>
+    <string name="auto_save">Spara automatiskt</string>
+    <string name="apply">Tillämpa</string>
 </resources>
