@@ -70,7 +70,7 @@
 
 use std::collections::HashMap;
 
-use tilecodec::mamaps::body::{Layer, Part, GEOM_LINE, WINDING_OUTER};
+use tilecodec::mamaps::body::{BuildingAttrs, LaneTurns, Layer, Part, GEOM_LINE, WINDING_OUTER};
 
 /// What coalescing a build saved, for the report.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
@@ -90,8 +90,10 @@ impl Stats {
     }
 }
 
-/// What makes two line features interchangeable to a renderer.
-type Class = (u16, u16, u8, u32, u8, u8, u8);
+/// What makes two line features interchangeable to a renderer. The trailing `name_idx` keeps two
+/// differently-named roads or rivers of the same class apart, so a curved label is never attached
+/// to a line that merged with a neighbour of another name; same-named fragments still merge.
+type Class = (u16, u16, u8, u32, u8, u8, u8, u8, u16);
 
 /// One line part, as `(coord_start, point_count)` into a layer's existing arena.
 ///
@@ -107,16 +109,24 @@ type Run = Vec<Span>;
 /// Polygon features are left exactly as they were, in place; only the parts table and the arena are
 /// rebuilt around them, which [`crate::rings::normalise`] does immediately afterwards anyway.
 pub fn coalesce_lines(layer: &mut Layer) -> Stats {
-    coalesce_lines_with_ids(layer, None)
+    coalesce_lines_with_ids(layer, None, None, None)
 }
 
-/// As [`coalesce_lines`], but also rewrites an id side table so it stays parallel to the features.
+/// As [`coalesce_lines`], but also rewrites an id side table and a turn-lane side table so they
+/// stay parallel to the features.
 ///
-/// The table is indexed by feature position, so merging lines without rewriting it leaves more ids
-/// than features and the encoder rejects the tile. A merged line takes the id of the first feature
-/// of its class, which is arbitrary — that is why only layers whose id-carrying features are *not*
-/// lines populate the table at all (see `extract::tracks_ids`).
-pub fn coalesce_lines_with_ids(layer: &mut Layer, ids: Option<&mut Vec<u64>>) -> Stats {
+/// The tables are indexed by feature position, so merging lines without rewriting them leaves more
+/// entries than features and the encoder rejects the tile. A merged line takes the id of the first
+/// feature of its class, which is arbitrary — that is why only layers whose id-carrying features
+/// are *not* lines populate the id table at all (see `extract::tracks_ids`). Turn masks are the
+/// opposite: they belong to a *road* line, so a line that carries any is held out of merging
+/// entirely (each becomes its own survivor) rather than folded into a neighbour and losing them.
+pub fn coalesce_lines_with_ids(
+    layer: &mut Layer,
+    ids: Option<&mut Vec<u64>>,
+    turns: Option<&mut Vec<LaneTurns>>,
+    buildings: Option<&mut Vec<BuildingAttrs>>,
+) -> Stats {
     let mut stats = Stats {
         features_before: layer.features.len() as u64,
         parts_before: layer.parts.len() as u64,
@@ -131,12 +141,22 @@ pub fn coalesce_lines_with_ids(layer: &mut Layer, ids: Option<&mut Vec<u64>>) ->
         return stats;
     }
 
+    // A line that carries turn masks is never merged — its arrows belong to that exact segment —
+    // so it is copied through at its position like a non-line. `false` everywhere when the layer
+    // has no turn table, which is every layer but a `roads` tile that had `turn:lanes` in it.
+    let unmergeable: Vec<bool> = match turns.as_deref() {
+        Some(t) => layer.features.iter().enumerate().map(|(i, _)| {
+            t.get(i).is_some_and(|lt| !lt.is_empty())
+        }).collect(),
+        None => vec![false; layer.features.len()],
+    };
+
     // Every line part, grouped by class, in feature-then-part order.
     let mut order: Vec<Class> = Vec::new();
     let mut group_of: HashMap<Class, usize> = HashMap::new();
     let mut groups: Vec<Vec<Span>> = Vec::new();
-    for feature in &layer.features {
-        if feature.geom_type != GEOM_LINE {
+    for (index, feature) in layer.features.iter().enumerate() {
+        if feature.geom_type != GEOM_LINE || unmergeable[index] {
             continue;
         }
         let class = class_of(feature);
@@ -156,15 +176,16 @@ pub fn coalesce_lines_with_ids(layer: &mut Layer, ids: Option<&mut Vec<u64>>) ->
         groups.iter().map(|parts| chain(parts, &layer.coords)).collect();
 
     let mut features = Vec::with_capacity(layer.features.len() - lines + order.len());
-    // The original position of each surviving feature, for remapping the id table below.
+    // The original position of each surviving feature, for remapping the side tables below.
     let mut kept: Vec<usize> = Vec::with_capacity(features.capacity());
     let mut parts: Vec<Part> = Vec::with_capacity(layer.parts.len());
     let mut coords: Vec<(i16, i16)> = Vec::with_capacity(layer.coords.len());
     let mut emitted: Vec<bool> = vec![false; order.len()];
 
     for (index, feature) in layer.features.iter().enumerate() {
-        if feature.geom_type != GEOM_LINE {
-            // Copied through at its original position, so a mixed layer keeps its feature order.
+        if feature.geom_type != GEOM_LINE || unmergeable[index] {
+            // Copied through at its original position, so a mixed layer keeps its feature order and
+            // a turn-masked road keeps its own geometry and its arrows.
             let from = feature.parts_offset as usize;
             let start = parts.len() as u32;
             for part in &layer.parts[from..from + feature.part_count as usize] {
@@ -219,6 +240,16 @@ pub fn coalesce_lines_with_ids(layer: &mut Layer, ids: Option<&mut Vec<u64>>) ->
             *ids = kept.iter().map(|&at| ids[at]).collect();
         }
     }
+    if let Some(turns) = turns {
+        if !turns.is_empty() {
+            *turns = kept.iter().map(|&at| turns[at].clone()).collect();
+        }
+    }
+    if let Some(buildings) = buildings {
+        if !buildings.is_empty() {
+            *buildings = kept.iter().map(|&at| buildings[at]).collect();
+        }
+    }
 
     layer.features = features;
     layer.parts = parts;
@@ -237,6 +268,8 @@ fn class_of(feature: &tilecodec::mamaps::body::Feature) -> Class {
         feature.transit_ordinal,
         feature.transit_lanes,
         feature.transit_taper,
+        feature.lane_count,
+        feature.name_idx,
     )
 }
 
@@ -343,6 +376,7 @@ mod tests {
                 transit_ordinal: 0,
                 transit_lanes: 0,
                 transit_taper: 0,
+                lane_count: 0,
             });
         }
         layer

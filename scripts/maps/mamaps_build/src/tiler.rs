@@ -109,8 +109,8 @@ use tile_build::subdivide;
 use tile_build::progress::Progress;
 use tile_build::simplify;
 use tilecodec::mamaps::body::{
-    Body, Feature as BodyFeature, Layer as BodyLayer, Part, GEOM_LINE, GEOM_POINT, GEOM_POLYGON,
-    WINDING_HOLE, WINDING_OUTER,
+    Body, BuildingAttrs, Feature as BodyFeature, Layer as BodyLayer, Part, GEOM_LINE, GEOM_POINT,
+    GEOM_POLYGON, WINDING_HOLE, WINDING_OUTER,
 };
 use tilecodec::mamaps::write::{Options, StreamWriter};
 use tilecodec::pmtiles::tile_id;
@@ -238,6 +238,10 @@ pub struct Settings {
     /// "no land in this tile means the tile is open water" is only true if land is authoritative.
     /// Without it, every inland tile would come out flooded.
     pub ocean: bool,
+    /// The DEM heightmap dataset to sample one grid per output tile from, or `None` for a build
+    /// with no terrain. See [`crate::dem::Dem`]. A tile with no DEM under it carries no heightmap
+    /// section (stays 16-byte), and a build without a dataset leaves every tile's `heightmap` unset.
+    pub dem: Option<crate::dem::Dem>,
 }
 
 /// One chunk's share of a zoom, keyed on `(tile id, layer id)`.
@@ -272,11 +276,26 @@ pub struct ChunkEntry {
     pub layer: BodyLayer,
     pub names: Vec<String>,
     pub ids: Vec<u64>,
+    /// The per-feature turn-lane masks, dense-parallel to `layer.features` on the `roads` layer and
+    /// empty on every other. Rides the merge the way `ids` does — concatenated, not remapped — and
+    /// is remapped alongside `ids` when `coalesce` and stage C rebuild the feature vector.
+    pub turn_lanes: Vec<tilecodec::mamaps::body::LaneTurns>,
+    /// The per-feature S3DB attributes, dense-parallel to `layer.features` on the `buildings` layer
+    /// and empty on every other. Rides the merge like `ids` (concatenated, not remapped) and is
+    /// remapped alongside it when `coalesce` and stage C rebuild the feature vector, so the body's
+    /// building side table stays aligned to the features it describes.
+    pub buildings: Vec<BuildingAttrs>,
 }
 
 impl ChunkEntry {
     pub(crate) fn new(layer_id: u8) -> ChunkEntry {
-        ChunkEntry { layer: BodyLayer::new(layer_id), names: Vec::new(), ids: Vec::new() }
+        ChunkEntry {
+            layer: BodyLayer::new(layer_id),
+            names: Vec::new(),
+            ids: Vec::new(),
+            turn_lanes: Vec::new(),
+            buildings: Vec::new(),
+        }
     }
 
     /// The body's index for `name`, interning on first use. `None` in, `NAME_NONE` out.
@@ -388,7 +407,7 @@ pub fn build(store: &Store, settings: &Settings) -> Result<(Vec<u8>, Vec<ZoomSta
                 break;
             }
             let encoding = std::time::Instant::now();
-            let done = encode_batch(batch)?;
+            let done = encode_batch(batch, settings.dem.as_ref())?;
             stats.encode_ms += encoding.elapsed().as_millis() as u64;
             let appending = std::time::Instant::now();
             for (id, encoded, rings, lines) in done {
@@ -1006,6 +1025,10 @@ fn concatenate(into: &mut ChunkEntry, from: ChunkEntry) {
     // Ids are values, not indices into a table, so they concatenate with no remap. Appended in
     // the same order the features were, which is what keeps the two parallel.
     into.ids.extend_from_slice(&from.ids);
+    // The turn masks ride the same way: values parallel to features, concatenated in feature order.
+    into.turn_lanes.extend(from.turn_lanes);
+    // The building attrs ride the same way, dense-parallel to the buildings layer's features.
+    into.buildings.extend(from.buildings);
 }
 
 /// Stage C and body encoding for a batch of merged tiles, in parallel, results in tile order.
@@ -1214,7 +1237,9 @@ fn add_ocean(layers: &mut Vec<ChunkEntry>) {
         transit_ordinal: 0,
         transit_lanes: 1,
         transit_taper: u8::MAX,
+        lane_count: 0,
     });
+    // Spliced to the front.
     // Spliced to the front. Within a layer the renderer draws in feature order, and the sea belongs
     // under everything else in `water` — a lake on an island sits on top of the sea, not the other
     // way round. Going first also keeps this layer's features in store order after the synthesised
@@ -1225,7 +1250,7 @@ fn add_ocean(layers: &mut Vec<ChunkEntry>) {
     // the sea has no OSM element to name anyway.
 }
 
-fn encode_batch(batch: Vec<(u64, Vec<ChunkEntry>)>) -> Result<Vec<Encoded>> {
+fn encode_batch(batch: Vec<(u64, Vec<ChunkEntry>)>, dem: Option<&crate::dem::Dem>) -> Result<Vec<Encoded>> {
     let min_len = par::min_task_len(batch.len());
     let on = timing();
     par::install(|| {
@@ -1247,9 +1272,18 @@ fn encode_batch(batch: Vec<(u64, Vec<ChunkEntry>)>) -> Result<Vec<Encoded>> {
                     // keeps stage C off tens of thousands of features it would only copy through.
                     let mut lines = crate::coalesce::Stats::default();
                     for entry in &mut layers {
+                        // The traffic layer is one feature per component segment, each carrying a
+                        // distinct component_id in the id table. Coalescing merges a class's lines
+                        // into one feature, which would collapse every segment's id onto whichever
+                        // came first — so it is skipped, keeping the layer one-to-one with its ids.
+                        if entry.layer.layer_id == tilecodec::mamaps::dict::LAYER_TRAFFIC {
+                            continue;
+                        }
                         lines.add(crate::coalesce::coalesce_lines_with_ids(
                             &mut entry.layer,
                             Some(&mut entry.ids),
+                            Some(&mut entry.turn_lanes),
+                            Some(&mut entry.buildings),
                         ));
                     }
                     // **The sea.** There is no `natural=ocean` in OpenStreetMap — water is defined
@@ -1274,6 +1308,8 @@ fn encode_batch(batch: Vec<(u64, Vec<ChunkEntry>)>) -> Result<Vec<Encoded>> {
                             rings.add(crate::rings::normalise_with_ids(
                                 &mut entry.layer,
                                 Some(&mut entry.ids),
+                                Some(&mut entry.turn_lanes),
+                                Some(&mut entry.buildings),
                             ));
                         }
                         // A layer that ended up empty - every feature in it fell below the minimum
@@ -1338,11 +1374,79 @@ fn encode_batch(batch: Vec<(u64, Vec<ChunkEntry>)>) -> Result<Vec<Encoded>> {
                         }
                         ids.push((entry.layer.layer_id, std::mem::take(&mut entry.ids)));
                     }
+                    // The turn-lane table, built the same way as the id table and checked against
+                    // the feature count for the same reason: coalesce and stage C rebuild a layer's
+                    // features and rewrite this alongside, and a drift would misattribute every
+                    // lane after the first. Only emitted when some road actually has turn masks, so
+                    // a tile with none carries no table at all.
+                    let mut turn_lanes: Vec<(u8, Vec<tilecodec::mamaps::body::LaneTurns>)> =
+                        Vec::new();
+                    for entry in &mut layers {
+                        if entry.turn_lanes.is_empty() {
+                            continue;
+                        }
+                        if entry.turn_lanes.len() != entry.layer.features.len() {
+                            return err(format!(
+                                "layer {} has {} turn record(s) for {} feature(s) after coalesce \
+                                 and stage C",
+                                entry.layer.layer_id,
+                                entry.turn_lanes.len(),
+                                entry.layer.features.len(),
+                            ));
+                        }
+                        if entry.turn_lanes.iter().all(|t| t.is_empty()) {
+                            entry.turn_lanes.clear();
+                            continue;
+                        }
+                        turn_lanes
+                            .push((entry.layer.layer_id, std::mem::take(&mut entry.turn_lanes)));
+                    }
+                    // The building side table, built the same way and checked against the feature
+                    // count for the same reason. A tile whose buildings all carried default attrs
+                    // (no S3DB tags) emits no table at all — the renderer falls back to its own
+                    // default height and colour — so the table is paid for only where 3D data
+                    // exists.
+                    let mut buildings: Vec<(u8, Vec<BuildingAttrs>)> = Vec::new();
+                    for entry in &mut layers {
+                        if entry.buildings.is_empty() {
+                            continue;
+                        }
+                        if entry.buildings.len() != entry.layer.features.len() {
+                            return err(format!(
+                                "layer {} has {} building record(s) for {} feature(s) after \
+                                 coalesce and stage C",
+                                entry.layer.layer_id,
+                                entry.buildings.len(),
+                                entry.layer.features.len(),
+                            ));
+                        }
+                        if entry.buildings.iter().all(|b| *b == BuildingAttrs::default()) {
+                            entry.buildings.clear();
+                            continue;
+                        }
+                        buildings
+                            .push((entry.layer.layer_id, std::mem::take(&mut entry.buildings)));
+                    }
                     let body = Body {
                         extent: EXTENT as u16,
                         layers: layers.into_iter().map(|entry| entry.layer).collect(),
                         names,
                         ids,
+                        turn_lanes,
+                        buildings,
+                        // The DEM heightmap is produced by a separate ingest stage keyed by tile,
+                        // not from OSM geometry. When a dataset was given, sample its grid onto this
+                        // tile's z/x/y; a tile with no DEM under it (ocean, off-coverage) gets None
+                        // and stays 16-byte. Without a dataset every tile stays None.
+                        heightmap: dem.and_then(|d| {
+                            let (z, x, y) = tilecodec::pmtiles::tile_zxy(id);
+                            d.heightmap_for(z, x, y)
+                        }),
+                        // The carriageway table and its marking convention are not wired into the
+                        // tiler yet; every tile stays without one, which the renderer reads as
+                        // "nothing known beyond the lane count" and falls back to a plain stroke.
+                        carriageways: Vec::new(),
+                        convention: None,
                     };
                     let encoded = timed(on, &SERIALIZE_NANOS, || {
                         tilecodec::mamaps::body::serialize_into(&body, scratch)
@@ -1374,6 +1478,16 @@ fn push(entry: &mut ChunkEntry, feature: &Feature, geometry: &IntGeometry) -> (u
     // in the point one so the two vectors cannot drift apart - the table is indexed by feature
     // position, so a feature with no id of its own still needs its `ID_NONE` entry.
     let track_ids = crate::extract::layer_tracks_ids(class.layer);
+    // The `buildings` layer carries an S3DB attribute side table, dense-parallel to its features
+    // exactly as the id table is — so every building feature pushes an entry (a default one when
+    // the building had no S3DB tags), in every branch, so the two vectors cannot drift.
+    let track_buildings = class.layer == tilecodec::mamaps::dict::LAYER_BUILDINGS;
+    // `roads` and `water` line features carry a display name for curved labels; it is interned
+    // into the tile's name table like a point label's, at no format cost.
+    let name_line_layer = matches!(
+        class.layer,
+        tilecodec::mamaps::dict::LAYER_ROADS | tilecodec::mamaps::dict::LAYER_WATER
+    );
     let mut added = (0u64, 0u64);
     match geometry {
         IntGeometry::Polygons(polygons) => {
@@ -1418,9 +1532,13 @@ fn push(entry: &mut ChunkEntry, feature: &Feature, geometry: &IntGeometry) -> (u
                     transit_ordinal: feature.transit_ordinal,
                     transit_lanes: feature.transit_lanes,
                     transit_taper: feature.transit_taper,
+                    lane_count: feature.lane_count,
                 });
                 if track_ids {
                     entry.ids.push(feature.id);
+                }
+                if track_buildings {
+                    entry.buildings.push(feature.building.unwrap_or_default());
                 }
                 added.0 += 1;
             }
@@ -1435,21 +1553,41 @@ fn push(entry: &mut ChunkEntry, feature: &Feature, geometry: &IntGeometry) -> (u
             }
             let part_count = layer.parts.len() as u32 - parts_offset;
             if part_count > 0 {
+                // A road or river's name, interned for a curved label; NAME_NONE otherwise.
+                let name_idx = if name_line_layer {
+                    intern_name(&mut entry.names, feature.name.as_deref())
+                } else {
+                    tilecodec::mamaps::body::NAME_NONE
+                };
                 layer.features.push(BodyFeature {
                     kind: class.kind,
                     kind_detail: class.kind_detail,
                     geom_type: GEOM_LINE,
                     flags: class.flags,
-                    name_idx: tilecodec::mamaps::body::NAME_NONE,
+                    name_idx,
                     parts_offset,
                     part_count,
                     transit_color: feature.transit_color,
                     transit_ordinal: feature.transit_ordinal,
                     transit_lanes: feature.transit_lanes,
                     transit_taper: feature.transit_taper,
+                    lane_count: feature.lane_count,
                 });
                 if track_ids {
                     entry.ids.push(feature.id);
+                }
+                if track_buildings {
+                    entry.buildings.push(feature.building.unwrap_or_default());
+                }
+                // Roads carry a per-feature turn-lane record, dense-parallel to the layer's
+                // features like the id table is for its layers. Pushed here — the one branch a road
+                // ever reaches (a road is a line) — inside the `part_count > 0` guard so it stays
+                // aligned with the feature that was actually added.
+                if class.layer == tilecodec::mamaps::dict::LAYER_ROADS {
+                    entry.turn_lanes.push(tilecodec::mamaps::body::LaneTurns {
+                        forward: feature.turn_fwd.clone(),
+                        backward: feature.turn_bwd.clone(),
+                    });
                 }
                 added.0 += 1;
             }
@@ -1475,9 +1613,13 @@ fn push(entry: &mut ChunkEntry, feature: &Feature, geometry: &IntGeometry) -> (u
                     transit_ordinal: feature.transit_ordinal,
                     transit_lanes: feature.transit_lanes,
                     transit_taper: feature.transit_taper,
+                    lane_count: feature.lane_count,
                 });
                 if track_ids {
                     entry.ids.push(feature.id);
+                }
+                if track_buildings {
+                    entry.buildings.push(feature.building.unwrap_or_default());
                 }
                 added.0 += 1;
             }
@@ -1564,7 +1706,10 @@ mod tests {
         Feature {
             class: Class::area(dict::LAYER_WATER, crate::schema::kind("lake"), min_zoom),
             geometry: square(lon, lat, size),
-            name: None, id: tilecodec::mamaps::body::ID_NONE, transit_color: 0, transit_ordinal: 0, transit_lanes: 0, transit_taper: 0,
+            name: None, id: tilecodec::mamaps::body::ID_NONE, transit_color: 0, transit_ordinal: 0, transit_lanes: 0, transit_taper: 0, lane_count: 0,
+            turn_fwd: Vec::new(),
+            turn_bwd: Vec::new(),
+            building: None,
         }
     }
 
@@ -1584,6 +1729,10 @@ mod tests {
             transit_ordinal: 0,
             transit_lanes: 0,
             transit_taper: 0,
+            lane_count: 0,
+                    turn_fwd: Vec::new(),
+            turn_bwd: Vec::new(),
+            building: None,
         };
         let features = vec![poi, lake(-120.0, 35.0, 0.01, 0)];
         let (bytes, _) = build(&spilled(&features), &settings(14, 14)).expect("build");
@@ -1606,7 +1755,428 @@ mod tests {
         assert!(seen, "the poi should reach at least one tile");
     }
 
-    /// **The grouping property the region mask depends on.** A region is stored as one clipped
+    /// **The lane path, end to end.** A multi-lane road's `lane_count` survives classification,
+    /// the way spill, the tiler's chunk merge and the body encoder, and comes back out of a v5
+    /// archive on the same feature — which is what the renderer's lane fan reads. Also pins that
+    /// the archive is written at the writer's own format version.
+    #[test]
+    fn a_multi_lane_road_carries_its_lane_count_into_the_archive() {
+        let road = Feature {
+            class: Class::line(dict::LAYER_ROADS, crate::schema::kind("major_road"), 12),
+            geometry: Geometry::Lines(vec![vec![(-120.0, 35.0), (-119.99, 35.001)]]),
+            name: None,
+            id: tilecodec::mamaps::body::ID_NONE,
+            transit_color: 0,
+            transit_ordinal: 0,
+            transit_lanes: 0,
+            transit_taper: 0,
+            lane_count: 4,
+                    turn_fwd: Vec::new(),
+            turn_bwd: Vec::new(),
+            building: None,
+        };
+        let (bytes, _) = build(&spilled(&[road]), &settings(14, 14)).expect("build");
+        // The reader's own version byte, so an older reader rejects the archive cleanly.
+        assert_eq!(
+            bytes[7],
+            tilecodec::mamaps::header::FORMAT_VERSION,
+            "the archive header carries the writer's own format version",
+        );
+        let entries = tilecodec::mamaps::read::read_all(&bytes).expect("read");
+        let mut seen = false;
+        for (_, _, body) in &entries {
+            let body = Body::parse(body).expect("parse");
+            let Some(layer) = body.layer(dict::LAYER_ROADS) else { continue };
+            for feature in &layer.features {
+                assert_eq!(feature.lane_count, 4, "the road's four lanes survive the archive");
+                seen = true;
+            }
+        }
+        assert!(seen, "the road should reach at least one tile");
+    }
+
+    /// **The S3DB building path, end to end.** A building's height, roof and colours survive the
+    /// spill, the tiler's chunk merge and stage C, and come back out of a v6 archive on the same
+    /// feature via the body's building side table — which is what the renderer reads to extrude it.
+    #[test]
+    fn a_buildings_s3db_attrs_reach_the_archive() {
+        use tilecodec::mamaps::body::{BuildingAttrs, ROOF_GABLED, ROOF_ORIENT_ACROSS};
+        let attrs = BuildingAttrs {
+            height: 420,
+            min_height: 30,
+            roof_height: 90,
+            roof_shape: ROOF_GABLED,
+            roof_direction: 64,
+            roof_orientation: ROOF_ORIENT_ACROSS,
+            building_colour: 0xFF_C8_A0_78,
+            roof_colour: 0xFF_80_20_20,
+        };
+        let building = Feature {
+            class: Class::area(dict::LAYER_BUILDINGS, crate::schema::kind("building"), 14),
+            geometry: square(-120.001, 35.001, 0.0008),
+            name: None,
+            id: tilecodec::mamaps::body::ID_NONE,
+            transit_color: 0,
+            transit_ordinal: 0,
+            transit_lanes: 0,
+            transit_taper: 0,
+            lane_count: 0,
+            turn_fwd: Vec::new(),
+            turn_bwd: Vec::new(),
+            building: Some(attrs),
+        };
+        let (bytes, _) = build(&spilled(&[building]), &settings(14, 14)).expect("build");
+        assert_eq!(
+            bytes[7],
+            tilecodec::mamaps::header::FORMAT_VERSION,
+            "the archive header carries the writer's own format version",
+        );
+        let entries = tilecodec::mamaps::read::read_all(&bytes).expect("read");
+        let mut seen = false;
+        for (_, _, body) in &entries {
+            let body = Body::parse(body).expect("parse");
+            let Some(layer) = body.layer(dict::LAYER_BUILDINGS) else { continue };
+            for index in 0..layer.features.len() {
+                let got = body
+                    .building_attrs(dict::LAYER_BUILDINGS, index)
+                    .expect("the buildings layer must carry a building table");
+                assert_eq!(got, attrs, "the S3DB attributes survive the archive");
+                seen = true;
+            }
+        }
+        assert!(seen, "the building should reach at least one tile");
+    }
+
+    /// A building with no S3DB tags carries a default record, and a tile where *every* building is
+    /// default carries no building table at all — the renderer falls back to its own height. This
+    /// pins that the table is paid for only where 3D data exists.
+    #[test]
+    fn a_plain_building_tile_carries_no_building_table() {
+        use tilecodec::mamaps::body::BuildingAttrs;
+        let building = Feature {
+            class: Class::area(dict::LAYER_BUILDINGS, crate::schema::kind("building"), 14),
+            geometry: square(-120.001, 35.001, 0.0008),
+            name: None,
+            id: tilecodec::mamaps::body::ID_NONE,
+            transit_color: 0,
+            transit_ordinal: 0,
+            transit_lanes: 0,
+            transit_taper: 0,
+            lane_count: 0,
+            turn_fwd: Vec::new(),
+            turn_bwd: Vec::new(),
+            building: Some(BuildingAttrs::default()),
+        };
+        let (bytes, _) = build(&spilled(&[building]), &settings(14, 14)).expect("build");
+        for (_, _, body) in &tilecodec::mamaps::read::read_all(&bytes).expect("read") {
+            let body = Body::parse(body).expect("parse");
+            if body.layer(dict::LAYER_BUILDINGS).is_some() {
+                assert!(
+                    body.buildings.is_empty(),
+                    "an all-default building tile must not carry a building table",
+                );
+            }
+        }
+    }
+
+    /// **The DEM heightmap path, end to end.** A synthetic per-tile grid handed to the tiler reaches
+    /// the archive on the tile it covers and reads back through [`tilecodec::mamaps::body::Heightmap::sample`]
+    /// — and a build with no DEM leaves every tile's heightmap unset, a valid v6 with no terrain
+    /// section.
+    #[test]
+    fn a_dem_grid_reaches_the_archive_and_reads_back_via_sample() {
+        use tilecodec::mamaps::body::Heightmap;
+        let (z, dim) = (14u8, 17u16);
+        let (tx, ty) = (2730u64, 6335u64);
+        // The tile's centre, so a small building lands squarely inside it (and so in exactly the
+        // tile the synthetic DEM covers).
+        let n = (1u64 << z) as f64;
+        let clon = (tx as f64 + 0.5) / n * 360.0 - 180.0;
+        let clat = {
+            let m = std::f64::consts::PI * (1.0 - 2.0 * (ty as f64 + 0.5) / n);
+            m.sinh().atan().to_degrees()
+        };
+        let building = || Feature {
+            class: Class::area(dict::LAYER_BUILDINGS, crate::schema::kind("building"), 14),
+            geometry: square(clon - 0.001, clat - 0.001, 0.001),
+            name: None,
+            id: tilecodec::mamaps::body::ID_NONE,
+            transit_color: 0,
+            transit_ordinal: 0,
+            transit_lanes: 0,
+            transit_taper: 0,
+            lane_count: 0,
+            turn_fwd: Vec::new(),
+            turn_bwd: Vec::new(),
+            building: None,
+        };
+        // A ramp grid: sample(col, row) = 32768 + row*10 + col, so a read-back names its cell.
+        let mut grid = Vec::with_capacity(dim as usize * dim as usize);
+        for row in 0..dim as usize {
+            for col in 0..dim as usize {
+                grid.push(32768u16 + (row * 10 + col) as u16);
+            }
+        }
+        let dem =
+            crate::dem::Dem::from_grids(z, dim, vec![(tile_id(z, tx, ty), grid.clone())]);
+        let with_dem = Settings { dem: Some(dem), ..settings(14, 14) };
+        let (bytes, _) = build(&spilled(&[building()]), &with_dem).expect("build with dem");
+        assert_eq!(
+            bytes[7],
+            tilecodec::mamaps::header::FORMAT_VERSION,
+            "the archive header carries the writer's own format version",
+        );
+        let entries = tilecodec::mamaps::read::read_all(&bytes).expect("read");
+        let mut saw = false;
+        for (id, _, body) in &entries {
+            let body = Body::parse(body).expect("parse");
+            if *id == tile_id(z, tx, ty) {
+                let hm = body.heightmap.expect("the covered tile carries a heightmap");
+                assert_eq!(hm.dim, dim);
+                assert_eq!(hm.samples, grid, "the grid reaches the archive verbatim at its own zoom");
+                assert_eq!(hm.sample(0, 0), Some(32768), "sea level at the top-left");
+                assert_eq!(hm.sample(4, 3), Some(32768 + 34));
+                assert_eq!(Heightmap::metres(hm.sample(4, 3).unwrap()), 34);
+                saw = true;
+            }
+        }
+        assert!(saw, "the building's tile should be emitted and carry the DEM grid");
+
+        // Without a DEM the same build is a valid v6 whose tiles carry no heightmap section.
+        let (plain, _) = build(&spilled(&[building()]), &settings(14, 14)).expect("build without dem");
+        for (_, _, body) in &tilecodec::mamaps::read::read_all(&plain).expect("read") {
+            let body = Body::parse(body).expect("parse");
+            assert!(body.heightmap.is_none(), "no DEM means no heightmap section");
+        }
+    }
+
+    /// **The road/river name path, end to end.** A street's name survives the spill, the merge and
+    /// coalescing, and comes back interned in the tile's name table on the line feature — which is
+    #[test]
+    fn a_road_name_reaches_the_archive() {
+        let road = Feature {
+            class: Class::line(dict::LAYER_ROADS, crate::schema::kind("major_road"), 12),
+            geometry: Geometry::Lines(vec![vec![(-120.0, 35.0), (-119.98, 35.002)]]),
+            name: Some("Market Street".to_string()),
+            id: tilecodec::mamaps::body::ID_NONE,
+            transit_color: 0,
+            transit_ordinal: 0,
+            transit_lanes: 0,
+            transit_taper: 0,
+            lane_count: 0,
+            turn_fwd: Vec::new(),
+            turn_bwd: Vec::new(),
+            building: None,
+        };
+        let river = Feature {
+            class: Class::line(dict::LAYER_WATER, crate::schema::kind("river"), 12),
+            geometry: Geometry::Lines(vec![vec![(-120.0, 35.0), (-119.97, 35.004)]]),
+            name: Some("Los Gatos Creek".to_string()),
+            id: tilecodec::mamaps::body::ID_NONE,
+            transit_color: 0,
+            transit_ordinal: 0,
+            transit_lanes: 0,
+            transit_taper: 0,
+            lane_count: 0,
+            turn_fwd: Vec::new(),
+            turn_bwd: Vec::new(),
+            building: None,
+        };
+        let (bytes, _) = build(&spilled(&[road, river]), &settings(14, 14)).expect("build");
+        let entries = tilecodec::mamaps::read::read_all(&bytes).expect("read");
+        let (mut saw_road, mut saw_river) = (false, false);
+        for (_, _, body) in &entries {
+            let body = Body::parse(body).expect("parse");
+            if let Some(layer) = body.layer(dict::LAYER_ROADS) {
+                for f in &layer.features {
+                    if f.name(&body) == Some("Market Street") {
+                        saw_road = true;
+                    }
+                }
+            }
+            if let Some(layer) = body.layer(dict::LAYER_WATER) {
+                for f in &layer.features {
+                    if f.name(&body) == Some("Los Gatos Creek") {
+                        saw_river = true;
+                    }
+                }
+            }
+        }
+        assert!(saw_road, "the road's name should reach the archive");
+        assert!(saw_river, "the river's name should reach the archive");
+    }
+    #[test]
+    fn a_roads_turn_masks_reach_the_archive() {
+        use osm_ingest::tags::{LANE_LEFT, LANE_RIGHT, LANE_THROUGH};
+        let (fwd, _) = crate::schema::roads::turn_masks(
+            &[("highway", "primary"), ("oneway", "yes"), ("lanes", "3"),
+              ("turn:lanes", "left|through|through;right")][..],
+        );
+        let road = Feature {
+            class: Class::line(dict::LAYER_ROADS, crate::schema::kind("major_road"), 12),
+            geometry: Geometry::Lines(vec![vec![(-120.0, 35.0), (-119.99, 35.001)]]),
+            name: None,
+            id: tilecodec::mamaps::body::ID_NONE,
+            transit_color: 0,
+            transit_ordinal: 0,
+            transit_lanes: 0,
+            transit_taper: 0,
+            lane_count: 3,
+            turn_fwd: fwd,
+            turn_bwd: Vec::new(),
+            building: None,
+        };
+        let (bytes, _) = build(&spilled(&[road]), &settings(14, 14)).expect("build");
+        let entries = tilecodec::mamaps::read::read_all(&bytes).expect("read");
+        let mut seen = false;
+        for (_, _, body) in &entries {
+            let body = Body::parse(body).expect("parse");
+            let Some(layer) = body.layer(dict::LAYER_ROADS) else { continue };
+            for index in 0..layer.features.len() {
+                let Some(turns) = body.feature_turns(dict::LAYER_ROADS, index) else { continue };
+                if turns.is_empty() {
+                    continue;
+                }
+                assert_eq!(
+                    turns.forward,
+                    vec![LANE_LEFT, LANE_THROUGH, LANE_THROUGH | LANE_RIGHT],
+                    "the road's forward turn masks survive the archive",
+                );
+                assert!(turns.backward.is_empty(), "a oneway carries no backward masks");
+                seen = true;
+            }
+        }
+        assert!(seen, "at least one archived road tile carries the turn masks");
+    }
+
+    /// **The traffic layer's one-id-per-segment invariant, through the full tiler.** Traffic
+    /// features share a class (no kind, no detail), so if the layer were coalesced like every
+    /// other line layer they would collapse into one feature and every segment's `component_id`
+    /// but the first would be lost. This pushes several distinct segments of one edge and asserts
+    /// each survives as its own feature with its own id, decoded back out of the archive.
+    #[test]
+    fn a_traffic_layer_keeps_one_id_per_segment_through_the_tiler() {
+        use crate::schema::traffic::{pack_component_id, traffic_class, unpack_component_id};
+        let mut features = Vec::new();
+        for seg in 0..8u32 {
+            // Spaced tightly so they land in the same z14 tile(s); each its own 2-point line.
+            let x = -120.0 + seg as f64 * 0.0005;
+            features.push(Feature {
+                class: traffic_class(),
+                geometry: Geometry::Lines(vec![vec![(x, 35.0), (x + 0.0004, 35.0004)]]),
+                name: None,
+                id: pack_component_id(7, seg),
+                transit_color: 0,
+                transit_ordinal: 0,
+                transit_lanes: 0,
+                transit_taper: 0,
+                lane_count: 0,
+                            turn_fwd: Vec::new(),
+                turn_bwd: Vec::new(),
+                building: None,
+            });
+        }
+        let (bytes, _) = build(&spilled(&features), &settings(14, 14)).expect("build");
+        let entries = tilecodec::mamaps::read::read_all(&bytes).expect("read");
+        let mut seen: std::collections::BTreeSet<u32> = std::collections::BTreeSet::new();
+        let mut total = 0usize;
+        for (_, _, body) in &entries {
+            let body = Body::parse(body).expect("parse");
+            let Some(layer) = body.layer(dict::LAYER_TRAFFIC) else { continue };
+            for index in 0..layer.features.len() {
+                assert_eq!(layer.features[index].geom_type, GEOM_LINE);
+                let id = body
+                    .feature_id(dict::LAYER_TRAFFIC, index)
+                    .expect("the traffic layer must carry an id table");
+                let (edge, seg) = unpack_component_id(id);
+                assert_eq!(edge, 7, "a component_id must unpack to its source edge");
+                assert!(seg < 8, "seg_index {seg} is past what was pushed");
+                seen.insert(seg);
+                total += 1;
+            }
+        }
+        assert_eq!(seen.len(), 8, "coalescing collapsed the per-segment ids");
+        assert!(total >= 8, "feature count {total} is short of the segments pushed");
+    }
+
+    /// A measurement, not an assertion: build the same z14 region with and without a dense grid of
+    /// traffic segments and print the compressed archive delta, so a real per-segment cost can be
+    /// extrapolated to a region build without the California inputs to hand. Run explicitly:
+    /// `cargo test traffic_layer_size_delta -- --ignored --nocapture`.
+    #[test]
+    #[ignore = "measurement; run with --ignored --nocapture"]
+    fn traffic_layer_size_delta() {
+        use crate::schema::traffic::{pack_component_id, traffic_class};
+        let n = 120i32; // 120x120 = 14,400 cells
+        let coords = |c: i32, r: i32| {
+            let x = -120.0 + c as f64 * 0.0016;
+            let y = 35.0 + r as f64 * 0.0016;
+            vec![vec![(x, y), (x + 0.0014, y)]]
+        };
+        let road = |c: i32, r: i32| Feature {
+            class: Class::line(dict::LAYER_ROADS, crate::schema::kind("minor_road"), 12),
+            geometry: Geometry::Lines(coords(c, r)),
+            name: None,
+            id: tilecodec::mamaps::body::ID_NONE,
+            transit_color: 0,
+            transit_ordinal: 0,
+            transit_lanes: 0,
+            transit_taper: 0,
+            lane_count: 0,
+                    turn_fwd: Vec::new(),
+            turn_bwd: Vec::new(),
+            building: None,
+        };
+        let traffic = |c: i32, r: i32, i: u64| Feature {
+            class: traffic_class(),
+            geometry: Geometry::Lines(coords(c, r)),
+            name: None,
+            id: pack_component_id(i, 0),
+            transit_color: 0,
+            transit_ordinal: 0,
+            transit_lanes: 0,
+            transit_taper: 0,
+            lane_count: 0,
+                    turn_fwd: Vec::new(),
+            turn_bwd: Vec::new(),
+            building: None,
+        };
+
+        let mut base = Vec::new();
+        for r in 0..n {
+            for c in 0..n {
+                base.push(road(c, r));
+            }
+        }
+        let mut both = Vec::new();
+        for r in 0..n {
+            for c in 0..n {
+                both.push(road(c, r));
+            }
+        }
+        let mut i = 0u64;
+        for r in 0..n {
+            for c in 0..n {
+                both.push(traffic(c, r, i));
+                i += 1;
+            }
+        }
+
+        let without = build(&spilled(&base), &settings(12, 14)).expect("without").0;
+        let with = build(&spilled(&both), &settings(12, 14)).expect("with").0;
+        let segs = (n * n) as usize;
+        let delta = with.len() as i64 - without.len() as i64;
+        println!(
+            "traffic size delta: {} segment(s) added {} compressed byte(s) ({:.1} B/segment); \
+             archive {} -> {} bytes (+{:.1}%)",
+            segs,
+            delta,
+            delta as f64 / segs as f64,
+            without.len(),
+            with.len(),
+            delta as f64 / without.len() as f64 * 100.0,
+        );
+    }
     /// polygon per tile, so the id is the only thing that says those pieces are one region. This
     /// pins both halves: the id survives into `boundaries`, and it is the *same* id in every tile
     /// the region touches. Without the second half a mask can only punch out one tile.
@@ -1627,6 +2197,10 @@ mod tests {
             transit_ordinal: 0,
             transit_lanes: 0,
             transit_taper: 0,
+            lane_count: 0,
+                    turn_fwd: Vec::new(),
+            turn_bwd: Vec::new(),
+            building: None,
         };
         let border = Feature {
             class: Class::line(
@@ -1645,6 +2219,10 @@ mod tests {
             transit_ordinal: 0,
             transit_lanes: 0,
             transit_taper: 0,
+            lane_count: 0,
+                    turn_fwd: Vec::new(),
+            turn_bwd: Vec::new(),
+            building: None,
         };
         let (bytes, _) = build(&spilled(&[region, border]), &settings(14, 14)).expect("build");
         let entries = tilecodec::mamaps::read::read_all(&bytes).expect("read");
@@ -1694,6 +2272,10 @@ mod tests {
             transit_ordinal: 0,
             transit_lanes: 0,
             transit_taper: 0,
+            lane_count: 0,
+                    turn_fwd: Vec::new(),
+            turn_bwd: Vec::new(),
+            building: None,
         };
         // One patch of land, and a lake sitting on it so the water layer already exists. Plus a
         // marine protected area out at sea with no land under it at all — a real `landuse` polygon
@@ -1709,6 +2291,10 @@ mod tests {
                 transit_ordinal: 0,
                 transit_lanes: 0,
                 transit_taper: 0,
+                lane_count: 0,
+                            turn_fwd: Vec::new(),
+                turn_bwd: Vec::new(),
+                building: None,
             },
             Feature {
                 class: Class::area(
@@ -1723,6 +2309,10 @@ mod tests {
                 transit_ordinal: 0,
                 transit_lanes: 0,
                 transit_taper: 0,
+                lane_count: 0,
+                            turn_fwd: Vec::new(),
+                turn_bwd: Vec::new(),
+                building: None,
             },
         ];
         let store = spilled(&features);
@@ -1787,6 +2377,10 @@ mod tests {
             transit_ordinal: 0,
             transit_lanes: 0,
             transit_taper: 0,
+            lane_count: 0,
+                    turn_fwd: Vec::new(),
+            turn_bwd: Vec::new(),
+            building: None,
         }];
         let store = spilled(&features);
         let (bytes, _) = build(&store, &settings(8, 8)).expect("build");
@@ -1812,6 +2406,7 @@ mod tests {
             // Off by default here: these fixtures carry no coastline, so "no land in this tile"
             // would flood every one of them. `ocean_fills_a_tile_with_no_land` opts in.
             ocean: false,
+            dem: None,
         }
     }
 
@@ -1893,7 +2488,10 @@ mod tests {
             Feature {
                 class: Class::area(dict::LAYER_BUILDINGS, crate::schema::kind("building"), 0),
                 geometry: square(-120.1, 35.1, 0.02),
-                name: None, id: tilecodec::mamaps::body::ID_NONE, transit_color: 0, transit_ordinal: 0, transit_lanes: 0, transit_taper: 0,
+                name: None, id: tilecodec::mamaps::body::ID_NONE, transit_color: 0, transit_ordinal: 0, transit_lanes: 0, transit_taper: 0, lane_count: 0,
+                            turn_fwd: Vec::new(),
+                turn_bwd: Vec::new(),
+                building: None,
             },
         ];
         let first = build(&spilled(&features), &settings(0, 8)).expect("first").0;
@@ -1918,7 +2516,10 @@ mod tests {
             Feature {
                 class: Class::area(dict::LAYER_BUILDINGS, crate::schema::kind("building"), 0),
                 geometry: square(-120.005, 35.005, 0.002),
-                name: None, id: tilecodec::mamaps::body::ID_NONE, transit_color: 0, transit_ordinal: 0, transit_lanes: 0, transit_taper: 0,
+                name: None, id: tilecodec::mamaps::body::ID_NONE, transit_color: 0, transit_ordinal: 0, transit_lanes: 0, transit_taper: 0, lane_count: 0,
+                            turn_fwd: Vec::new(),
+                turn_bwd: Vec::new(),
+                building: None,
             },
         ];
         let (bytes, _) = build(&spilled(&features), &settings(14, 14)).expect("build");
@@ -1948,7 +2549,10 @@ mod tests {
         let features = vec![Feature {
             class: Class::line(dict::LAYER_WATER, crate::schema::kind("river"), 0),
             geometry: Geometry::Lines(vec![points]),
-            name: None, id: tilecodec::mamaps::body::ID_NONE, transit_color: 0, transit_ordinal: 0, transit_lanes: 0, transit_taper: 0,
+            name: None, id: tilecodec::mamaps::body::ID_NONE, transit_color: 0, transit_ordinal: 0, transit_lanes: 0, transit_taper: 0, lane_count: 0,
+                    turn_fwd: Vec::new(),
+            turn_bwd: Vec::new(),
+            building: None,
         }];
         let (_, stats) = build(&spilled(&features), &settings(6, 14)).expect("build");
         let at = |z: u8| stats.iter().find(|s| s.zoom == z).expect("zoom").points;
@@ -1966,7 +2570,10 @@ mod tests {
             features.push(Feature {
                 class: Class::area(dict::LAYER_BUILDINGS, crate::schema::kind("building"), 0),
                 geometry: square(lon + 0.004, lat + 0.004, 0.004),
-                name: None, id: tilecodec::mamaps::body::ID_NONE, transit_color: 0, transit_ordinal: 0, transit_lanes: 0, transit_taper: 0,
+                name: None, id: tilecodec::mamaps::body::ID_NONE, transit_color: 0, transit_ordinal: 0, transit_lanes: 0, transit_taper: 0, lane_count: 0,
+                            turn_fwd: Vec::new(),
+                turn_bwd: Vec::new(),
+                building: None,
             });
             // A line as well, so the merge has to rebase a `GEOM_LINE` feature's parts too, and a
             // long one so it crosses tiles rather than sitting inside one.
@@ -1975,7 +2582,10 @@ mod tests {
                 geometry: Geometry::Lines(vec![(0..40)
                     .map(|k| (lon + k as f64 * 0.002, lat + (k % 5) as f64 * 0.001))
                     .collect()]),
-                name: None, id: tilecodec::mamaps::body::ID_NONE, transit_color: 0, transit_ordinal: 0, transit_lanes: 0, transit_taper: 0,
+                name: None, id: tilecodec::mamaps::body::ID_NONE, transit_color: 0, transit_ordinal: 0, transit_lanes: 0, transit_taper: 0, lane_count: 0,
+                            turn_fwd: Vec::new(),
+                turn_bwd: Vec::new(),
+                building: None,
             });
         }
         features
@@ -2061,7 +2671,10 @@ mod tests {
                     ..Class::area(dict::LAYER_WATER, crate::schema::kind("lake"), 0)
                 },
                 geometry: square(-120.0 + i as f64 * 0.00005, 35.0, 0.004),
-                name: None, id: tilecodec::mamaps::body::ID_NONE, transit_color: 0, transit_ordinal: 0, transit_lanes: 0, transit_taper: 0,
+                name: None, id: tilecodec::mamaps::body::ID_NONE, transit_color: 0, transit_ordinal: 0, transit_lanes: 0, transit_taper: 0, lane_count: 0,
+                            turn_fwd: Vec::new(),
+                turn_bwd: Vec::new(),
+                building: None,
             })
             .collect();
         let store = spilled(&features);
@@ -2092,7 +2705,7 @@ mod tests {
     #[test]
     fn concatenating_two_chunks_of_a_layer_is_one_layer() {
         let class = Class::area(dict::LAYER_WATER, crate::schema::kind("lake"), 0);
-        let feature = Feature { class, geometry: square(0.0, 0.0, 1.0), name: None, id: tilecodec::mamaps::body::ID_NONE, transit_color: 0, transit_ordinal: 0, transit_lanes: 0, transit_taper: 0 };
+        let feature = Feature { class, geometry: square(0.0, 0.0, 1.0), name: None, id: tilecodec::mamaps::body::ID_NONE, transit_color: 0, transit_ordinal: 0, transit_lanes: 0, transit_taper: 0, lane_count: 0, turn_fwd: Vec::new(), turn_bwd: Vec::new(), building: None };
         // Tile-local already, so the fixture is about the arenas rather than about projection, and
         // big enough that no minimum-area floor can drop it.
         let box_at = |x: i32| {
@@ -2207,7 +2820,10 @@ mod tests {
                 features.push(Feature {
                     class: Class::area(dict::LAYER_BUILDINGS, crate::schema::kind("building"), 14),
                     geometry: square(lon, lat, 0.0003),
-                    name: None, id: tilecodec::mamaps::body::ID_NONE, transit_color: 0, transit_ordinal: 0, transit_lanes: 0, transit_taper: 0,
+                    name: None, id: tilecodec::mamaps::body::ID_NONE, transit_color: 0, transit_ordinal: 0, transit_lanes: 0, transit_taper: 0, lane_count: 0,
+                                    turn_fwd: Vec::new(),
+                    turn_bwd: Vec::new(),
+                    building: None,
                 });
             }
             let store = spilled(&features);

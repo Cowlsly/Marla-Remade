@@ -30,7 +30,7 @@
 //! wedge across a continent, which is visible and inexplicable. So a hole that cannot be placed
 //! cleanly is **dropped and counted**, and the count is in the build report.
 
-use tilecodec::mamaps::body::{Layer, Part, WINDING_HOLE, WINDING_OUTER};
+use tilecodec::mamaps::body::{BuildingAttrs, LaneTurns, Layer, Part, WINDING_HOLE, WINDING_OUTER};
 
 /// What normalising a build cost, for the report.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
@@ -64,16 +64,23 @@ impl Stats {
 /// Rebuilds the parts table and the coordinate arena, because dropping a ring changes both and the
 /// encoder requires the parts to tile the arena exactly.
 pub fn normalise(layer: &mut Layer) -> Stats {
-    normalise_with_ids(layer, None)
+    normalise_with_ids(layer, None, None, None)
 }
 
-/// As [`normalise`], but also drops the id of any feature it drops.
+/// As [`normalise`], but also drops the id and turn-lane records of any feature it drops.
 ///
-/// The id table is indexed by feature position, so the retain at the end has to happen to both or
-/// every id after the first casualty describes the wrong feature. This only started mattering when
-/// `boundaries` gained a table: `places` and `poi` are points, and a point never loses its single
-/// part, so the retain was a no-op for every layer that carried ids.
-pub fn normalise_with_ids(layer: &mut Layer, ids: Option<&mut Vec<u64>>) -> Stats {
+/// The side tables are indexed by feature position, so the retain at the end has to happen to all
+/// of them or every entry after the first casualty describes the wrong feature. This only started
+/// mattering when `boundaries` gained a table: `places` and `poi` are points, and a point never
+/// loses its single part, so the retain was a no-op for every layer that carried ids. A road's
+/// turn table rides along for the same discipline, though a road is a line and a line is never
+/// dropped here.
+pub fn normalise_with_ids(
+    layer: &mut Layer,
+    ids: Option<&mut Vec<u64>>,
+    turns: Option<&mut Vec<LaneTurns>>,
+    buildings: Option<&mut Vec<BuildingAttrs>>,
+) -> Stats {
     let mut stats = Stats::default();
     let mut parts: Vec<Part> = Vec::with_capacity(layer.parts.len());
     let mut coords: Vec<(i16, i16)> = Vec::with_capacity(layer.coords.len());
@@ -181,6 +188,28 @@ pub fn normalise_with_ids(layer: &mut Layer, ids: Option<&mut Vec<u64>>) -> Stat
         if ids.len() == layer.features.len() {
             let mut at = 0;
             ids.retain(|_| {
+                let keep = layer.features[at].part_count > 0;
+                at += 1;
+                keep
+            });
+        }
+    }
+    if let Some(turns) = turns {
+        if turns.len() == layer.features.len() {
+            let mut at = 0;
+            turns.retain(|_| {
+                let keep = layer.features[at].part_count > 0;
+                at += 1;
+                keep
+            });
+        }
+    }
+    // The building side table is indexed by feature position too, so a dropped degenerate building
+    // must drop its attrs with it, in the same order and by the same predicate.
+    if let Some(buildings) = buildings {
+        if buildings.len() == layer.features.len() {
+            let mut at = 0;
+            buildings.retain(|_| {
                 let keep = layer.features[at].part_count > 0;
                 at += 1;
                 keep
@@ -404,6 +433,7 @@ mod tests {
             transit_ordinal: 0,
             transit_lanes: 0,
             transit_taper: 0,
+            lane_count: 0,
         });
         for (index, ring) in rings.iter().enumerate() {
             layer.parts.push(Part {
@@ -453,6 +483,7 @@ mod tests {
                 transit_ordinal: 0,
                 transit_lanes: 0,
                 transit_taper: 0,
+                lane_count: 0,
             });
             layer.parts.push(Part {
                 coord_start: layer.coords.len() as u32,
@@ -466,7 +497,7 @@ mod tests {
         push(square(200, 200, 100));
 
         let mut ids = vec![11u64, 22, 33];
-        normalise_with_ids(&mut layer, Some(&mut ids));
+        normalise_with_ids(&mut layer, Some(&mut ids), None, None);
 
         assert_eq!(layer.features.len(), 2, "the collapsed exterior is dropped");
         assert_eq!(ids, vec![11, 33], "and its id goes with it, not the one after it");
@@ -570,6 +601,7 @@ mod tests {
             transit_ordinal: 0,
             transit_lanes: 0,
             transit_taper: 0,
+            lane_count: 0,
         });
         layer.parts.push(Part { coord_start: 0, point_count: 3, winding: WINDING_OUTER });
         layer.coords = vec![(0, 0), (50, 0), (50, 50)];
@@ -618,6 +650,9 @@ mod tests {
             layers: vec![layer],
             names: Vec::new(),
             ids: Vec::new(),
+            turn_lanes: Vec::new(),
+            buildings: Vec::new(),
+            heightmap: None, carriageways: Vec::new(), convention: None,
         };
         // The encoder's own contiguity check, which is the real proof.
         assert!(tilecodec::mamaps::body::serialize(&body).is_ok());
@@ -646,7 +681,10 @@ mod tests {
                     // A hole, wound the same way as its exterior, which stage C has to reverse.
                     ring(-120.2, 35.2, 0.3),
                 ]]),
-                name: None, id: tilecodec::mamaps::body::ID_NONE, transit_color: 0, transit_ordinal: 0, transit_lanes: 0, transit_taper: 0,
+                name: None, id: tilecodec::mamaps::body::ID_NONE, transit_color: 0, transit_ordinal: 0, transit_lanes: 0, transit_taper: 0, lane_count: 0,
+                            turn_fwd: Vec::new(),
+                turn_bwd: Vec::new(),
+                building: None,
             },
             crate::extract::Feature {
                 class: Class::area(dict::LAYER_WATER, crate::schema::kind("water"), 0),
@@ -655,7 +693,10 @@ mod tests {
                     // A hole nowhere near its exterior, which stage C has to drop.
                     ring(-100.0, 20.0, 0.1),
                 ]]),
-                name: None, id: tilecodec::mamaps::body::ID_NONE, transit_color: 0, transit_ordinal: 0, transit_lanes: 0, transit_taper: 0,
+                name: None, id: tilecodec::mamaps::body::ID_NONE, transit_color: 0, transit_ordinal: 0, transit_lanes: 0, transit_taper: 0, lane_count: 0,
+                            turn_fwd: Vec::new(),
+                turn_bwd: Vec::new(),
+                building: None,
             },
         ];
         let settings = crate::tiler::Settings {
@@ -666,6 +707,7 @@ mod tests {
             scratch: std::env::temp_dir()
                 .join(format!("mamaps_rings_{}.tilechunks", std::process::id())),
             ocean: false,
+            dem: None,
         };
         let store = crate::store::Store::of(&features).expect("spill");
         let (bytes, stats) = crate::tiler::build(&store, &settings).expect("build");

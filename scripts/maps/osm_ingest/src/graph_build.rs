@@ -1,5 +1,5 @@
 //! Road-graph build: `.osm.pbf` -> `metadata.bin` / `nodes.bin` / `edges.bin` /
-//! `lanes.bin` / `intermediate.bin` / `road_names.bin`.
+//! `lanes.bin` / `intermediate.bin` / `road_names.bin` (+ optional `elevation.bin`).
 //!
 //! A port of the former `scripts/maps/generator.cpp`, preserving the on-disk
 //! contract byte for byte. The reader is `maps/src/main/rust/src/graph.rs`, which
@@ -13,6 +13,7 @@
 //! | `lanes.bin` | `u32 n`, then `(u32 edge_idx, u32 blob_byte_off) x (n + 1)` ascending by `edge_idx`, then the packed `u16` mask blob — **sparse**, only lane-bearing edges appear |
 //! | `intermediate.bin` | the delta-encoded polyline blob ([`crate::geom`]) at offset 0, then a trailer: `u64 rank[..]`, `u8 present[..]` (one bit per directed edge), `u64 coarse[..]`, `u16 within[..]` over the *geometry* edges, and `u64 G`. See [`GeomFile`] |
 //! | `road_names.bin` | deduped NUL-terminated string pool |
+//! | `elevation.bin` | **optional** `i16[node_count]` of per-node ground elevation in metres (WS-G), written only with `--dem`; a build without it is still valid and the device reads every node's elevation as 0 |
 //!
 //! Every file's length is now an exact function of `metadata.bin`'s counts, and
 //! the reader checks each one. `road_names.bin` is the exception: it is a byte pool
@@ -515,6 +516,13 @@ pub struct Options {
     pub stats: bool,
     /// Cap on the parallel pool. `None` leaves it to [`crate::par::threads`].
     pub threads: Option<usize>,
+    /// A `.mdem` heightmap dataset (`dem_ingest`) to bake a per-node elevation from.
+    ///
+    /// `None` omits `elevation.bin` entirely — the graph is still valid and the device reads every
+    /// node's elevation as 0 (WS-G's route profile simply comes out flat). When set, every graph
+    /// node is sampled from the DEM and its metres written to `elevation.bin`; a node off the DEM's
+    /// coverage bakes as 0.
+    pub dem: Option<PathBuf>,
 }
 
 impl Options {
@@ -717,6 +725,12 @@ pub fn build_with(input: &Path, out_dir: &Path, opts: Options) -> Result<Stats> 
     drop(stops_final);
 
     // --- Write --------------------------------------------------------------
+    // Load the optional DEM up front so a bad `--dem` path fails before the write starts. `None`
+    // leaves `elevation.bin` unwritten and every node's baked elevation at 0.
+    let dem = match &opts.dem {
+        Some(path) => Some(crate::dem::Dem::load(path)?),
+        None => None,
+    };
     let written = write_graph(
         out_dir,
         &node_coords,
@@ -726,6 +740,7 @@ pub fn build_with(input: &Path, out_dir: &Path, opts: Options) -> Result<Stats> 
         &synth,
         &ids,
         opts.round_count(),
+        dem.as_ref(),
     )?;
     collapsed.spill.remove();
     let unique_names = pool.unique_count();
@@ -1525,6 +1540,7 @@ fn write_graph(
     synth: &[Synth],
     ids: &FinalIds,
     rounds: u32,
+    dem: Option<&crate::dem::Dem>,
 ) -> Result<Written> {
     let kept = node_coords.len() as u32;
     let edge_count = csr.edge_count() + synth.len() as u64;
@@ -1712,6 +1728,23 @@ fn write_graph(
     meta.write_all(&escape_count.to_le_bytes()).map_err(io_err)?;
     meta.write_all(&named_edges.to_le_bytes()).map_err(io_err)?;
     meta.flush().map_err(io_err)?;
+
+    // elevation.bin: `i16[node_count]` metres, one per node in final-id order — an OPTIONAL sidecar
+    // like road_names.bin/lanes.bin, so a build without a DEM simply omits it and the device reads
+    // every node's elevation as 0. `node_coords` is already indexed by final node id, so a single
+    // forward pass matches the order `nodes.bin` was written in. No metadata count and no
+    // GRAPH_VERSION bump: the reader validates its length against node_count and disables it on a
+    // mismatch, exactly as it does for lanes.bin.
+    if let Some(dem) = dem {
+        let mut elev_out = BufWriter::new(create(&out_dir.join("elevation.bin"))?);
+        for &(lat_e7, lon_e7) in node_coords {
+            let lat = f64::from(lat_e7) * 1e-7;
+            let lon = f64::from(lon_e7) * 1e-7;
+            let metres = dem.sample_metres(lon, lat).unwrap_or(0);
+            elev_out.write_all(&metres.to_le_bytes()).map_err(io_err)?;
+        }
+        elev_out.flush().map_err(io_err)?;
+    }
 
     Ok(Written {
         edge_count,
@@ -2301,7 +2334,7 @@ fn io_err(e: std::io::Error) -> Error {
 
 /// Parse the tool's command line:
 /// `road_graph IN.osm.pbf [--out DIR] [--within-way-chains] [--rounds N]
-/// [--spill-dir DIR] [--spill-pts-dir DIR] [--stats]`.
+/// [--spill-dir DIR] [--spill-pts-dir DIR] [--dem DATASET.mdem] [--stats]`.
 pub fn parse_args(
     args: &[String],
 ) -> std::result::Result<(PathBuf, PathBuf, Options), String> {
@@ -2347,6 +2380,13 @@ pub fn parse_args(
                     .ok()
                     .filter(|n| *n > 0)
                     .ok_or_else(|| format!("--rounds wants a positive count, not {n}"))?;
+            }
+            "--dem" => {
+                i += 1;
+                let path = args
+                    .get(i)
+                    .ok_or_else(|| "--dem needs a .mdem dataset path".to_string())?;
+                opts.dem = Some(PathBuf::from(path));
             }
             a if a.starts_with('-') => return Err(format!("unknown option: {a}")),
             a => {
@@ -3131,6 +3171,72 @@ mod tests {
             assert!((target as usize) < 3, "edge {k} targets a node that does not exist");
             assert_eq!(type_ & !REVERSE_GEOMETRY_FLAG, 7);
         }
+    }
+
+    #[test]
+    fn a_dem_bakes_a_per_node_elevation_in_final_id_order() {
+        // A whole-world DEM at zoom 0 (one grid covers every coordinate), so every fixture node is
+        // guaranteed on coverage. A `dim x dim` ramp gives elevation that varies with position, so
+        // the baked value is a real interpolation rather than a constant.
+        let (pbf_path, dir) = testpbf::write_sample("graph_dem_bake");
+        let dem_path = dir.join("world.mdem");
+        let dim: u16 = 4;
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(b"MDEM");
+        bytes.push(1); // version
+        bytes.push(0); // out_zoom 0: a single tile covers the world
+        bytes.extend_from_slice(&dim.to_le_bytes());
+        bytes.extend_from_slice(&1u32.to_le_bytes()); // one tile
+        bytes.extend_from_slice(&0u64.to_le_bytes()); // tile_id(0, 0, 0) == 0
+        for row in 0..dim {
+            for col in 0..dim {
+                // 32768 bias + a ramp, so metres = row * 100 + col * 10 across the grid.
+                let sample = 32768u16 + row * 100 + col * 10;
+                bytes.extend_from_slice(&sample.to_le_bytes());
+            }
+        }
+        std::fs::write(&dem_path, &bytes).unwrap();
+
+        build_with(
+            &pbf_path,
+            &dir,
+            Options {
+                dem: Some(dem_path.clone()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+        // elevation.bin is `i16[node_count]` in final-node-id order, parallel to nodes.bin.
+        let nodes = std::fs::read(dir.join("nodes.bin")).unwrap();
+        let elev = std::fs::read(dir.join("elevation.bin")).unwrap();
+        let node_count = nodes.len() / 12 - 1; // one trailing sentinel node
+        assert_eq!(elev.len(), node_count * 2, "one i16 per real node");
+
+        // Round-trip: each baked metre equals the DEM sampled at that node's own coordinate.
+        let dem = crate::dem::Dem::load(&dem_path).unwrap();
+        let mut any_nonzero = false;
+        for i in 0..node_count {
+            let lat_e7 = i32::from_le_bytes(nodes[i * 12..i * 12 + 4].try_into().unwrap());
+            let lon_e7 = i32::from_le_bytes(nodes[i * 12 + 4..i * 12 + 8].try_into().unwrap());
+            let want = dem
+                .sample_metres(f64::from(lon_e7) * 1e-7, f64::from(lat_e7) * 1e-7)
+                .unwrap_or(0);
+            let got = i16::from_le_bytes([elev[i * 2], elev[i * 2 + 1]]);
+            assert_eq!(got, want, "node {i} baked elevation");
+            any_nonzero |= got != 0;
+        }
+        assert!(any_nonzero, "the ramp should give at least one node a non-zero elevation");
+    }
+
+    #[test]
+    fn a_build_without_a_dem_omits_elevation_bin() {
+        let (pbf_path, dir) = testpbf::write_sample("graph_no_dem");
+        build(&pbf_path, &dir).unwrap();
+        assert!(
+            !dir.join("elevation.bin").exists(),
+            "no --dem means no elevation.bin, and the graph is still valid",
+        );
     }
 
     #[test]

@@ -32,6 +32,7 @@ use std::process::ExitCode;
 
 mod coalesce;
 mod corridor;
+mod dem;
 mod extract;
 mod rings;
 mod shapefile;
@@ -98,6 +99,8 @@ fn main() -> ExitCode {
     let mut build_id: Option<u64> = None;
     let mut coastline: Option<PathBuf> = None;
     let mut transit_routes: Option<PathBuf> = None;
+    let mut graph: Option<PathBuf> = None;
+    let mut dem: Option<PathBuf> = None;
 
     let mut i = 1;
     while i < args.len() {
@@ -131,6 +134,14 @@ fn main() -> ExitCode {
             }),
             "--transit-routes" => value("--transit-routes").map(|v| {
                 transit_routes = Some(PathBuf::from(v));
+                2
+            }),
+            "--graph" => value("--graph").map(|v| {
+                graph = Some(PathBuf::from(v));
+                2
+            }),
+            "--dem" => value("--dem").map(|v| {
+                dem = Some(PathBuf::from(v));
                 2
             }),
             "--layers" => value("--layers").and_then(|v| {
@@ -185,6 +196,8 @@ fn main() -> ExitCode {
         reuse_store,
         coastline,
         transit_routes,
+        graph,
+        dem,
         layers,
         min_zoom,
         max_zoom,
@@ -209,6 +222,14 @@ struct RunSettings {
     /// A prepared GTFS export for `transit`'s coloured rail lines. Without it the layer is empty:
     /// nothing in the `.osm.pbf` produces one.
     transit_routes: Option<PathBuf>,
+    /// The v6 routing graph directory (`nodes.bin`/`edges.bin`/`intermediate.bin`/`metadata.bin`)
+    /// for `traffic`'s per-component lines. Without it the layer is empty: its geometry is the
+    /// graph, not the `.osm.pbf`.
+    graph: Option<PathBuf>,
+    /// The `.mdem` heightmap dataset `dem_ingest` produced (via `build_all.sh --dem`). Without it
+    /// every tile's `heightmap` stays `None` and the archive is a valid v6 with no terrain grids;
+    /// with it, each output tile carries the DEM grid sampled to its own z/x/y.
+    dem: Option<PathBuf>,
     layers: schema::Layers,
     min_zoom: u8,
     max_zoom: u8,
@@ -244,11 +265,23 @@ fn run(
             "no --transit-routes given, so `transit` is empty; its lines come from GTFS, not the .pbf"
         );
     }
+    // The same asymmetry once more, for the traffic layer's graph source: the flag without the
+    // layer is a mistake worth stopping for, the layer without the flag is a legitimate build of
+    // an archive with no traffic overlay.
+    if run.graph.is_some() && !layers.traffic {
+        return Err("--graph was given but the traffic layer is not selected".to_string());
+    }
+    if run.graph.is_none() && layers.traffic {
+        println!(
+            "no --graph given, so `traffic` is empty; its lines come from the v6 routing graph, not the .pbf"
+        );
+    }
     let provenance = store::Provenance::of(
         input,
         layers,
         run.coastline.is_some(),
         run.transit_routes.is_some(),
+        run.graph.is_some(),
     )
     .map_err(|e| e.to_string())?;
     // Stage A is most of a large build -- 17.6 minutes of a north-america run, and identical every
@@ -270,6 +303,7 @@ fn run(
             layers,
             run.coastline.as_deref(),
             run.transit_routes.as_deref(),
+            run.graph.as_deref(),
             &spill,
         )
         .map_err(|e| format!("{}: {e}", input.display()))?;
@@ -291,6 +325,12 @@ fn run(
         }
         if stats.transit_routes > 0 {
             println!("  including {} coloured transit route(s) from GTFS", stats.transit_routes);
+        }
+        if stats.traffic_segments > 0 {
+            println!(
+                "  including {} drivable component segment(s) for the traffic layer",
+                stats.traffic_segments,
+            );
         }
         if stats.corridor_promotions > 0 {
             println!(
@@ -317,8 +357,20 @@ fn run(
             simplification,
             stats.features,
             run.transit_routes.is_some(),
+            run.graph.is_some(),
         )
     });
+
+    // The DEM heightmap dataset, if one was fetched. Loaded here (this is where I/O belongs) and
+    // handed to the tiler, which samples one grid per output tile into the body's heightmap section.
+    let dem = match run.dem.as_deref() {
+        Some(path) => {
+            let dem = dem::Dem::load(path).map_err(|e| e.to_string())?;
+            println!("loaded the DEM dataset at {}", path.display());
+            Some(dem)
+        }
+        None => None,
+    };
 
     let settings = tiler::Settings {
         min_zoom,
@@ -331,6 +383,7 @@ fn run(
         // `tiler::add_ocean`. The green-over-water problem it existed to solve is handled in the
         // style instead, by not painting marine protected areas green in the first place.
         ocean: false,
+        dem,
     };
     let (bytes, per_zoom) = tiler::build(&store, &settings).map_err(|e| e.to_string())?;
     tiler::check_not_empty(&per_zoom).map_err(|e| e.to_string())?;
@@ -473,6 +526,7 @@ fn derive_build_id(
     simplification: f64,
     features: u64,
     transit_routes: bool,
+    graph: bool,
 ) -> u64 {
     let mut h = 0xcbf2_9ce4_8422_2325u64;
     let mut eat = |bytes: &[u8]| {
@@ -481,6 +535,11 @@ fn derive_build_id(
             h = h.wrapping_mul(0x100_0000_01b3);
         }
     };
+    // Revision 12: `.mamaps` v4. A `traffic` layer (id 10) is baked from the v6 routing graph —
+    // one line per drivable component segment, each carrying its packed `component_id` in the
+    // body id table — and `FORMAT_VERSION` bumps 3->4. The layer set and the format both move, so
+    // a warm cache must miss.
+    //
     // Revision 11: the `boundaries` layer populates the id side table, so a region's shape carries
     // its OSM relation id. Without it a region is an anonymous polygon per tile and nothing says
     // which pieces belong to the same region, so a mask could only ever punch out the one tile
@@ -523,7 +582,7 @@ fn derive_build_id(
     // Revision 3: road `min_zoom` is decided per corridor (`corridor`), and place
     // `kind_detail` carries the reference basemap's 0-15 population rank rather than a
     // three-step one (`schema::places::rank_of`).
-    eat(b"mamaps_build/11");
+    eat(b"mamaps_build/12");
     eat(input.to_string_lossy().as_bytes());
     if let Ok(meta) = std::fs::metadata(input) {
         eat(&meta.len().to_le_bytes());
@@ -544,11 +603,14 @@ fn derive_build_id(
         u8::from(layers.places),
         u8::from(layers.poi),
         u8::from(layers.transit),
+        u8::from(layers.traffic),
         min_zoom,
         max_zoom,
         // A build with a transit-routes file and one without carry different layers from the
         // same `.pbf`, and readers cache byte ranges under `(url, build_id)`.
         u8::from(transit_routes),
+        // Likewise a build with a graph carries the whole traffic layer that one without does not.
+        u8::from(graph),
     ]);
     eat(&simplification.to_le_bytes());
     eat(&features.to_le_bytes());
@@ -615,6 +677,8 @@ fn usage() {
          \x20                   [--min-zoom N] [--max-zoom N]\n\
          \x20                   [--coastline LAND.shp|LAND.geojsonseq]\n\
          \x20                   [--transit-routes ROUTES.geojsonseq]\n\
+         \x20                   [--graph GRAPH_DIR]\n\
+         \x20                   [--dem HEIGHTMAPS.mdem]\n\
          \x20                   [--simplification F] [--build-id N] [--report FILE]\n\
          \x20                   [--keep-store] [--reuse-store]\n\
          \n\
@@ -698,15 +762,17 @@ mod tests {
     fn a_build_id_follows_the_inputs_that_decide_the_output() {
         let path = std::path::Path::new("nonexistent.osm.pbf");
         let all = schema::Layers::all();
-        let base = derive_build_id(path, all, 0, 14, 1.0, 100, false);
-        assert_eq!(base, derive_build_id(path, all, 0, 14, 1.0, 100, false), "stable");
+        let base = derive_build_id(path, all, 0, 14, 1.0, 100, false, false);
+        assert_eq!(base, derive_build_id(path, all, 0, 14, 1.0, 100, false, false), "stable");
         for other in [
-            derive_build_id(path, all, 1, 14, 1.0, 100, false),
-            derive_build_id(path, all, 0, 15, 1.0, 100, false),
-            derive_build_id(path, all, 0, 14, 2.0, 100, false),
-            derive_build_id(path, all, 0, 14, 1.0, 101, false),
+            derive_build_id(path, all, 1, 14, 1.0, 100, false, false),
+            derive_build_id(path, all, 0, 15, 1.0, 100, false, false),
+            derive_build_id(path, all, 0, 14, 2.0, 100, false, false),
+            derive_build_id(path, all, 0, 14, 1.0, 101, false, false),
             // A transit-routes file adds a whole layer the same `.pbf` would not produce.
-            derive_build_id(path, all, 0, 14, 1.0, 100, true),
+            derive_build_id(path, all, 0, 14, 1.0, 100, true, false),
+            // A routing graph adds the traffic layer the same `.pbf` would not produce.
+            derive_build_id(path, all, 0, 14, 1.0, 100, false, true),
             derive_build_id(
                 path,
                 schema::Layers { water: true, ..schema::Layers::none() },
@@ -714,6 +780,7 @@ mod tests {
                 14,
                 1.0,
                 100,
+                false,
                 false,
             ),
             derive_build_id(
@@ -723,6 +790,7 @@ mod tests {
                 14,
                 1.0,
                 100,
+                false,
                 false,
             ),
         ] {

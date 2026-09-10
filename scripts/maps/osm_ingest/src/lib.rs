@@ -20,6 +20,7 @@ pub mod admin;
 pub mod bbox;
 pub mod chains;
 pub mod compact;
+pub mod dem;
 pub mod extract;
 pub mod geojson;
 pub mod geom;

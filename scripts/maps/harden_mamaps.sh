@@ -5,7 +5,7 @@
 # Run before publishing.
 #
 # Usage:
-#   ./harden_mamaps.sh --pbf california.osm.pbf --coastline land_polygons.shp [--out DIR] [--max-zoom 14]
+#   ./harden_mamaps.sh --pbf california.osm.pbf --coastline land_polygons.shp [--graph GRAPH_DIR] [--dem HEIGHTMAPS.mdem] [--out DIR] [--max-zoom 14]
 #
 # What it proves:
 #
@@ -26,12 +26,16 @@ set -euo pipefail
 
 PBF=""
 COASTLINE=""
+GRAPH=""
+DEM=""
 OUT="${TMPDIR:-/tmp}/mamaps_harden"
 MAX_ZOOM=14
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --pbf) PBF="$2"; shift 2 ;;
     --coastline) COASTLINE="$2"; shift 2 ;;
+    --graph) GRAPH="$2"; shift 2 ;;
+    --dem) DEM="$2"; shift 2 ;;
     --out) OUT="$2"; shift 2 ;;
     --max-zoom) MAX_ZOOM="$2"; shift 2 ;;
     -h|--help) sed -n '2,26p' "$0"; exit 0 ;;
@@ -47,6 +51,23 @@ done
 # the extract's bbox, so a state-sized extract keeps a few hundred polygons out of ~871k.
 [[ -n "$COASTLINE" ]] || { echo "harden_mamaps: --coastline is required" >&2; exit 2; }
 [[ -f "$COASTLINE" ]] || { echo "harden_mamaps: $COASTLINE does not exist" >&2; exit 1; }
+# The v6 routing graph feeds the `traffic` layer (nodes/edges/intermediate/metadata.bin). Optional:
+# without it the layer is simply empty. When given, every build below reads it so the archive and
+# the traffic server derive identical component ids from the same graph.
+GRAPH_ARG=()
+if [[ -n "$GRAPH" ]]; then
+  [[ -d "$GRAPH" ]] || { echo "harden_mamaps: graph dir $GRAPH does not exist" >&2; exit 1; }
+  GRAPH_ARG=(--graph "$GRAPH")
+fi
+# The .mdem heightmap dataset (build_all.sh --dem writes $OUT_DIR/heightmaps.mdem) feeds the
+# BODY_FLAG_HEIGHTMAP side table so the published archive carries 3D terrain. Optional: without it
+# every tile stays flat (heightmap = None). Passed to every build below so all three rebuilds stay
+# byte-identical with terrain in place.
+DEM_ARG=()
+if [[ -n "$DEM" ]]; then
+  [[ -f "$DEM" ]] || { echo "harden_mamaps: dem $DEM does not exist" >&2; exit 1; }
+  DEM_ARG=(--dem "$DEM")
+fi
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
 mkdir -p "$OUT"
@@ -66,7 +87,8 @@ echo "== 1. byte-identical rebuilds at 1, 3 and 32 threads =="
 HASHES=()
 for threads in 1 3 32; do
   RAYON_NUM_THREADS="$threads" "$BUILD" \
-    --input "$PBF" --out "$OUT/t$threads.mamaps" --max-zoom "$MAX_ZOOM" --coastline "$COASTLINE" >/dev/null
+    --input "$PBF" --out "$OUT/t$threads.mamaps" --max-zoom "$MAX_ZOOM" --coastline "$COASTLINE" \
+    "${GRAPH_ARG[@]+"${GRAPH_ARG[@]}"}" "${DEM_ARG[@]+"${DEM_ARG[@]}"}" >/dev/null
   h="$(sha "$OUT/t$threads.mamaps")"
   echo "  $threads thread(s): ${h:0:16}"
   HASHES+=("$h")
@@ -83,7 +105,8 @@ echo
 echo "== 2. a build id that follows its inputs =="
 id_of() { "$DUMP" "$1" --mode header | awk -F'\t' '$1=="build_id"{print $2}'; }
 BASE_ID="$(id_of "$OUT/t1.mamaps")"
-"$BUILD" --input "$PBF" --out "$OUT/shallow.mamaps" --max-zoom "$((MAX_ZOOM - 1))" --coastline "$COASTLINE" >/dev/null
+"$BUILD" --input "$PBF" --out "$OUT/shallow.mamaps" --max-zoom "$((MAX_ZOOM - 1))" --coastline "$COASTLINE" \
+  "${GRAPH_ARG[@]+"${GRAPH_ARG[@]}"}" "${DEM_ARG[@]+"${DEM_ARG[@]}"}" >/dev/null
 SHALLOW_ID="$(id_of "$OUT/shallow.mamaps")"
 echo "  z0-$MAX_ZOOM        $BASE_ID"
 echo "  z0-$((MAX_ZOOM - 1))        $SHALLOW_ID"

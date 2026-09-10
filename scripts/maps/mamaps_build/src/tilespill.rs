@@ -73,7 +73,7 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
 
-use tilecodec::mamaps::body::{Feature as BodyFeature, Layer as BodyLayer, Part};
+use tilecodec::mamaps::body::{BuildingAttrs, Feature as BodyFeature, Layer as BodyLayer, Part};
 use tilecodec::proto::{err, Error, Result};
 
 use crate::tiler::ChunkEntry;
@@ -83,10 +83,9 @@ pub const ENTRY_HEADER_BYTES: usize = 32;
 
 /// Packed width of one [`BodyFeature`] in the spill: kind, kind_detail, geom_type, flags,
 /// name_idx, parts_offset, part_count, transit_color, transit_ordinal, transit_lanes,
-/// transit_taper. Twenty-three, narrower than the body's 24-byte record only in what it omits
-/// (padding); the fields are the codec's own, so the scratch format never lags the codec by a
-/// version.
-const FEATURE_BYTES: usize = 23;
+/// transit_taper, lane_count. Twenty-four, exactly the body's 24-byte record: the fields are
+/// the codec's own, so the scratch format never lags the codec by a version.
+const FEATURE_BYTES: usize = 24;
 /// Packed width of one [`Part`] in the spill: coord_start, point_count, winding. Ten — the
 /// body's 12-byte entry carries a reserved half-word the scratch format does not need.
 const PART_BYTES: usize = 10;
@@ -95,6 +94,11 @@ const COORD_BYTES: usize = 4;
 /// Packed width of one feature id. Fixed rather than varint for the same reason the body's id
 /// table is: unsorted OSM ids have no ordering to delta against.
 const ID_BYTES: usize = 8;
+
+/// Packed width of one [`BuildingAttrs`] in the spill: height, min_height, roof_height (u16 each),
+/// roof_shape, roof_direction, roof_orientation (u8 each), building_colour, roof_colour (u32
+/// each). Seventeen — no alignment padding, unlike the body's 20-byte on-disk record.
+const BUILDING_BYTES: usize = 17;
 
 /// An entry longer than this is corruption, not a large tile layer. A tile-layer is capped at 65,535
 /// features by the body format, so the largest plausible entry is orders of magnitude below this.
@@ -401,6 +405,61 @@ impl ChunkReader<'_> {
                 return err("a tile chunk feature names past its entry's table".to_string());
             }
         }
+        // The turn-lane section, after the names when the flag is set: one record per feature,
+        // each a u8 forward count, u8 backward count, then that many u16 masks each.
+        if header.has_turns {
+            entry.turn_lanes = Vec::with_capacity(header.features);
+            for _ in 0..header.features {
+                self.fill(2)?;
+                let (fwd, bwd) =
+                    (self.buf[self.used] as usize, self.buf[self.used + 1] as usize);
+                let bytes = 2 + 2 * (fwd + bwd);
+                self.fill(bytes)?;
+                let read = |off: usize, n: usize| -> Vec<u16> {
+                    (0..n)
+                        .map(|k| {
+                            let o = self.used + off + k * 2;
+                            u16::from_le_bytes([self.buf[o], self.buf[o + 1]])
+                        })
+                        .collect()
+                };
+                let forward = read(2, fwd);
+                let backward = read(2 + 2 * fwd, bwd);
+                entry.turn_lanes.push(tilecodec::mamaps::body::LaneTurns { forward, backward });
+                self.used += bytes;
+                consumed += bytes;
+            }
+        }
+        // The building section, after the turn-lane section when the flag is set: one
+        // BUILDING_BYTES record per feature, dense.
+        if header.has_buildings {
+            entry.buildings = Vec::with_capacity(header.features);
+            for _ in 0..header.features {
+                self.fill(BUILDING_BYTES)?;
+                let o = self.used;
+                let u16_at = |k: usize| u16::from_le_bytes([self.buf[o + k], self.buf[o + k + 1]]);
+                let u32_at = |k: usize| {
+                    u32::from_le_bytes([
+                        self.buf[o + k],
+                        self.buf[o + k + 1],
+                        self.buf[o + k + 2],
+                        self.buf[o + k + 3],
+                    ])
+                };
+                entry.buildings.push(BuildingAttrs {
+                    height: u16_at(0),
+                    min_height: u16_at(2),
+                    roof_height: u16_at(4),
+                    roof_shape: self.buf[o + 6],
+                    roof_direction: self.buf[o + 7],
+                    roof_orientation: self.buf[o + 8],
+                    building_colour: u32_at(9),
+                    roof_colour: u32_at(13),
+                });
+                self.used += BUILDING_BYTES;
+                consumed += BUILDING_BYTES;
+            }
+        }
         self.left -= 1;
         self.spill.read.fetch_add(consumed as u64, Ordering::Relaxed);
         self.spill.read_entries.fetch_add(1, Ordering::Relaxed);
@@ -455,7 +514,21 @@ fn entry_bytes(entry: &ChunkEntry) -> Result<u64> {
     for name in &entry.names {
         names_bytes += 4 + name.len() as u64;
     }
-    Ok(ENTRY_HEADER_BYTES as u64 + payload_bytes(features, parts, coords, ids) + names_bytes)
+    let mut turns_bytes = 0u64;
+    for turns in &entry.turn_lanes {
+        turns_bytes += 2 + 2 * (turns.forward.len() as u64 + turns.backward.len() as u64);
+    }
+    // The building section: one fixed record per feature when present.
+    let buildings_bytes = if entry.buildings.is_empty() {
+        0
+    } else {
+        entry.buildings.len() as u64 * BUILDING_BYTES as u64
+    };
+    Ok(ENTRY_HEADER_BYTES as u64
+        + payload_bytes(features, parts, coords, ids)
+        + names_bytes
+        + turns_bytes
+        + buildings_bytes)
 }
 
 /// The payload width implied by an entry's four counts. A pure function of the header, which is
@@ -477,6 +550,14 @@ fn encode_entry(tile: u64, layer_id: u8, entry: &ChunkEntry, out: &mut Vec<u8>) 
     out[base + 12..base + 16].copy_from_slice(&(layer.parts.len() as u32).to_le_bytes());
     out[base + 16..base + 20].copy_from_slice(&(layer.coords.len() as u32).to_le_bytes());
     out[base + 20] = layer_id;
+    // Byte 21 flags a turn-lane section after the names; byte 22 a building section after that;
+    // byte 23 stays reserved zero. The building section is `features` records (one per feature,
+    // dense), each a BUILDING_BYTES packed [`BuildingAttrs`]. Present only for a `buildings` tile
+    // that had S3DB attributes in it.
+    let has_turns = !entry.turn_lanes.is_empty();
+    let has_buildings = !entry.buildings.is_empty();
+    out[base + 21] = has_turns as u8;
+    out[base + 22] = has_buildings as u8;
     out[base + 24..base + 28].copy_from_slice(&(entry.names.len() as u32).to_le_bytes());
     out[base + 28..base + 32].copy_from_slice(&(entry.ids.len() as u32).to_le_bytes());
     for feature in &layer.features {
@@ -494,6 +575,7 @@ fn encode_entry(tile: u64, layer_id: u8, entry: &ChunkEntry, out: &mut Vec<u8>) 
         out.push(feature.transit_ordinal);
         out.push(feature.transit_lanes);
         out.push(feature.transit_taper);
+        out.push(feature.lane_count);
     }
     for part in &layer.parts {
         out.extend_from_slice(&part.coord_start.to_le_bytes());
@@ -511,6 +593,29 @@ fn encode_entry(tile: u64, layer_id: u8, entry: &ChunkEntry, out: &mut Vec<u8>) 
         out.extend_from_slice(&(name.len() as u32).to_le_bytes());
         out.extend_from_slice(name.as_bytes());
     }
+    // The turn-lane section, after the names, when present. One record per feature, dense.
+    if has_turns {
+        for turns in &entry.turn_lanes {
+            out.push(turns.forward.len() as u8);
+            out.push(turns.backward.len() as u8);
+            for m in turns.forward.iter().chain(&turns.backward) {
+                out.extend_from_slice(&m.to_le_bytes());
+            }
+        }
+    }
+    // The building section, after the turn-lane section, when present. One record per feature.
+    if has_buildings {
+        for a in &entry.buildings {
+            out.extend_from_slice(&a.height.to_le_bytes());
+            out.extend_from_slice(&a.min_height.to_le_bytes());
+            out.extend_from_slice(&a.roof_height.to_le_bytes());
+            out.push(a.roof_shape);
+            out.push(a.roof_direction);
+            out.push(a.roof_orientation);
+            out.extend_from_slice(&a.building_colour.to_le_bytes());
+            out.extend_from_slice(&a.roof_colour.to_le_bytes());
+        }
+    }
 }
 
 struct EntryHeader {
@@ -521,13 +626,22 @@ struct EntryHeader {
     coords: usize,
     names: usize,
     ids: usize,
+    has_turns: bool,
+    has_buildings: bool,
 }
 
 fn entry_header(head: &[u8; ENTRY_HEADER_BYTES]) -> Result<EntryHeader> {
-    // The reserved tail must be zero: a newer writer would use it, so a nonzero tail means the
-    // reader is the wrong version for the file. Guessing would decode a field that moved.
-    if head[21..24].iter().any(|v| *v != 0) {
+    // Byte 23 must be zero: a newer writer would use it, so a nonzero value there means the reader
+    // is the wrong version for the file. Bytes 21 (turn-lane flag) and 22 (building flag) are 0 or
+    // 1; anything else is likewise a version mismatch. Guessing would decode a field that moved.
+    if head[23] != 0 {
         return err("a tile chunk entry has a nonzero reserved tail");
+    }
+    if head[21] > 1 {
+        return err("a tile chunk entry has an unknown turn-lane flag");
+    }
+    if head[22] > 1 {
+        return err("a tile chunk entry has an unknown building flag");
     }
     let u32_at =
         |o: usize| u32::from_le_bytes(head[o..o + 4].try_into().expect("4 bytes")) as usize;
@@ -539,6 +653,8 @@ fn entry_header(head: &[u8; ENTRY_HEADER_BYTES]) -> Result<EntryHeader> {
         layer_id: head[20],
         names: u32_at(24),
         ids: u32_at(28),
+        has_turns: head[21] == 1,
+        has_buildings: head[22] == 1,
     };
     // A layer either has an id per feature or none at all. Checked before the length so a garbled
     // count is refused as the desync it is rather than as a size that happens not to fit.
@@ -581,6 +697,7 @@ fn decode_fixed(header: &EntryHeader, payload: &[u8]) -> Result<ChunkEntry> {
             transit_ordinal: b[20],
             transit_lanes: b[21],
             transit_taper: b[22],
+            lane_count: b[23],
         });
         at += FEATURE_BYTES;
     }
@@ -618,6 +735,8 @@ fn decode_fixed(header: &EntryHeader, payload: &[u8]) -> Result<ChunkEntry> {
         layer: BodyLayer { layer_id: header.layer_id, features, parts, coords },
         names,
         ids,
+        turn_lanes: Vec::new(),
+        buildings: Vec::new(),
     })
 }
 
@@ -674,6 +793,7 @@ mod tests {
             transit_ordinal: 0,
             transit_lanes: 0,
             transit_taper: 0,
+            lane_count: 0,
         }
     }
 
@@ -690,6 +810,7 @@ mod tests {
             transit_ordinal: 0,
             transit_lanes: 0,
             transit_taper: 0,
+            lane_count: 0,
         }
     }
 
@@ -708,7 +829,7 @@ mod tests {
         for (i, feature) in layer.features.iter_mut().enumerate() {
             feature.parts_offset = i as u32;
         }
-        ChunkEntry { layer, names: names.iter().map(|s| s.to_string()).collect(), ids: Vec::new() }
+        ChunkEntry { layer, names: names.iter().map(|s| s.to_string()).collect(), ids: Vec::new(), turn_lanes: Vec::new(), buildings: Vec::new() }
     }
 
     /// Every shape an entry can take, including the empty ones that a naive length check would let
@@ -719,6 +840,8 @@ mod tests {
             layer: BodyLayer { layer_id, features, parts: Vec::new(), coords: Vec::new() },
             names: Vec::new(),
             ids: Vec::new(),
+            turn_lanes: Vec::new(),
+            buildings: Vec::new(),
         };
         vec![
             // Empty layer: no features, no parts, no coords.
@@ -741,6 +864,8 @@ mod tests {
                     },
                     names: Vec::new(),
                     ids: Vec::new(),
+                    turn_lanes: Vec::new(),
+                    buildings: Vec::new(),
                 },
             ),
             // The extremes of every field: `u16::MAX` kinds, `i16` at both ends, a hole.
@@ -768,6 +893,8 @@ mod tests {
                     },
                     names: Vec::new(),
                     ids: Vec::new(),
+                    turn_lanes: Vec::new(),
+                    buildings: Vec::new(),
                 },
             ),
             // Several layers on one tile, which is what the merge collapses.
@@ -787,6 +914,8 @@ mod tests {
                     },
                     names: Vec::new(),
                     ids: Vec::new(),
+                    turn_lanes: Vec::new(),
+                    buildings: Vec::new(),
                 },
             ),
             ((5, 10), ChunkEntry::new(10)),
@@ -853,6 +982,7 @@ mod tests {
                 transit_ordinal: 0,
                 transit_lanes: 0,
                 transit_taper: 0,
+                lane_count: 0,
             })
             .collect();
         let mut layer = BodyLayer::new(8);
@@ -866,7 +996,7 @@ mod tests {
             layer.coords.push((i as i16, 0));
         }
         let mut map: BTreeMap<(u64, u8), ChunkEntry> = BTreeMap::new();
-        map.insert((7, 8), ChunkEntry { layer, names: names.clone(), ids: Vec::new() });
+        map.insert((7, 8), ChunkEntry { layer, names: names.clone(), ids: Vec::new() , turn_lanes: Vec::new(), buildings: Vec::new() });
         let at = spill.write_chunk(map).expect("write");
         // Window of one header: every name tops up (and compacts) mid-entry.
         let read = drain(&spill, &at, ENTRY_HEADER_BYTES);

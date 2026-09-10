@@ -202,6 +202,47 @@ fn flags(tags: &(impl TagSource + ?Sized), value: &str) -> u8 {
     flags
 }
 
+/// The carriageway lane count baked into a `roads` feature, or zero when the way carries no
+/// `lanes` tag.
+///
+/// The OSM `lanes` total (both directions), parsed by the same [`osm_ingest::tags::parse_int_tag`]
+/// the routing graph and the `roads.pmtiles` layer use, so a road cannot describe its lane count
+/// one way to the router and another to the basemap. Capped at [`osm_ingest::tags::MAX_LANES`]
+/// (64), which fits a byte — the renderer stores it in the feature record's last byte and expands
+/// it into that many parallel lanes with dividers at high zoom. A mistagged `lanes=999999999`
+/// therefore becomes the cap rather than an absurd fan.
+///
+/// Only the total is baked, not the per-lane `turn:lanes` masks: those are variable length and
+/// belong in a side table (the turn-arrow pass), while the count is one byte the parallel-lane
+/// geometry needs first.
+pub fn lane_count(tags: &(impl TagSource + ?Sized)) -> u8 {
+    osm_ingest::tags::parse_int_tag(tags.get("lanes")).min(osm_ingest::tags::MAX_LANES) as u8
+}
+
+/// The per-lane turn-indication masks for a road, `(forward, backward)`, each a left-to-right
+/// list of `LANE_*` bit sets from OSM `turn:lanes[:forward|:backward]`.
+///
+/// A verbatim reuse of the routing graph's own derivation
+/// ([`osm_ingest::roads::lane_masks`]) via a [`RoadTags`](osm_ingest::roads::RoadTags) built from
+/// this tag source, so a road cannot describe its lanes one way to the router and another to the
+/// arrows drawn over it. Empty vectors when the way has no `turn:lanes`, which is almost every
+/// road. Forward lanes are traversed toward the way's end (its junction), backward toward its
+/// start — which is where the renderer places each direction's arrows.
+pub fn turn_masks(tags: &(impl TagSource + ?Sized)) -> (Vec<u16>, Vec<u16>) {
+    let rt = osm_ingest::roads::RoadTags {
+        highway: tags.get("highway"),
+        lanes: tags.get("lanes"),
+        lanes_forward: tags.get("lanes:forward"),
+        lanes_backward: tags.get("lanes:backward"),
+        turn_lanes: tags.get("turn:lanes"),
+        turn_lanes_forward: tags.get("turn:lanes:forward"),
+        turn_lanes_backward: tags.get("turn:lanes:backward"),
+        oneway: tags.get("oneway"),
+        ..Default::default()
+    };
+    osm_ingest::roads::lane_masks(&rt)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -312,6 +353,46 @@ mod tests {
         let crossing = classify_tags(&[("railway", "rail"), ("highway", "residential")])
             .expect("crossing");
         assert_eq!(names(&crossing).0, "minor_road");
+    }
+
+    /// The carriageway lane count baked for the renderer's parallel-lane draw: the OSM `lanes`
+    /// total, zero when absent, and capped so a mistagged count cannot become an absurd fan.
+    #[test]
+    fn the_lane_count_is_the_capped_osm_lanes_total() {
+        assert_eq!(lane_count(&[("highway", "primary"), ("lanes", "4")][..]), 4);
+        assert_eq!(lane_count(&[("highway", "residential")][..]), 0, "no tag, no lanes");
+        assert_eq!(lane_count(&[("highway", "primary"), ("lanes", "0")][..]), 0);
+        // A byte, and never past the shared MAX_LANES the router and pmtiles layer use.
+        assert_eq!(
+            lane_count(&[("highway", "motorway"), ("lanes", "999999999")][..]),
+            osm_ingest::tags::MAX_LANES as u8,
+        );
+    }
+
+    /// The per-lane turn masks reuse the routing graph's derivation, so the arrows drawn over a
+    /// road agree with how it is routed: a oneway's plain `turn:lanes` is forward, a two-way's is
+    /// neither, and the masks are the graph's `LANE_*` bits left to right.
+    #[test]
+    fn the_turn_masks_match_the_routing_graphs_derivation() {
+        use osm_ingest::tags::{LANE_LEFT, LANE_RIGHT, LANE_THROUGH};
+        // A oneway carries its plain `turn:lanes` as forward, none backward.
+        let oneway: &[(&str, &str)] =
+            &[("highway", "primary"), ("oneway", "yes"), ("turn:lanes", "left|through|through;right")];
+        let (fwd, bwd) = turn_masks(oneway);
+        assert_eq!(fwd, vec![LANE_LEFT, LANE_THROUGH, LANE_THROUGH | LANE_RIGHT]);
+        assert!(bwd.is_empty());
+        // Explicit forward/backward split on a two-way street.
+        let split: &[(&str, &str)] = &[
+            ("highway", "secondary"),
+            ("turn:lanes:forward", "through|right"),
+            ("turn:lanes:backward", "left"),
+        ];
+        let (fwd, bwd) = turn_masks(split);
+        assert_eq!(fwd, vec![LANE_THROUGH, LANE_RIGHT]);
+        assert_eq!(bwd, vec![LANE_LEFT]);
+        // A road with no turn tags carries nothing either way.
+        let (fwd, bwd) = turn_masks(&[("highway", "residential")][..]);
+        assert!(fwd.is_empty() && bwd.is_empty());
     }
 
     #[test]

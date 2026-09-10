@@ -63,6 +63,17 @@ param(
     [switch] $Force,
     [switch] $DryRun,
 
+    # Terrain (WS-G): fetch AWS Terrain Tiles (terrarium, ~30 m) for -Bbox and decode
+    # them into heightmaps.mdem, a per-tile u16 grid dataset for the v6 heightmap side
+    # table. Opt-in and bbox-scoped (the California test build first). Needs a bbox and
+    # a network reach to the terrarium source. See dem_ingest.
+    [string] $Bbox = "",
+    [switch] $Dem,
+    [int] $DemZoom = 12,
+    [int] $DemOutZoom = 14,
+    [int] $DemDim = 17,
+    [string] $DemSource = "https://s3.amazonaws.com/elevation-tiles-prod/terrarium",
+
     # Engines, per layer, so a ported layer rolls back with a flag. A 'rust' value
     # is refused until that layer is actually ported.
     [ValidateSet("rust", "legacy")] [string] $EnginePois = "rust",
@@ -469,6 +480,63 @@ if (Test-Stage "tiles") {
             "--bin", "tile_join", "--", "--out", $Out) + $inputs)
         Write-Warning "admin_country and admin_region are NOT in $Out (they come from Natural Earth shapefiles, not OSM -- build under WSL for those two)"
         Set-Stamp "tiles"
+    }
+}
+
+# --- stage: dem (heightmaps.mdem) ---
+# The terrain half of WS-G: fetch terrarium tiles for -Bbox and decode them into a per-tile u16
+# heightmap grid dataset. Opt-in via -Dem, and it needs -Bbox: fetching terrarium tiles for a
+# continent is a different order of magnitude, so this is scoped to the California test region
+# first. Network I/O (the download loop) lives here; dem_ingest does only the decode + downsample.
+if ($Dem) {
+    if (Test-Stamp "dem") {
+        Write-Host "=== dem: stamp present, skipping (-Force to redo) ==="
+    } else {
+        if (-not $Bbox) { throw "-Dem needs -Bbox (the region to fetch terrain for)" }
+        $DemTiles = Join-Path $Work "dem\tiles"
+        $DemOut = Join-Path $OutDir "heightmaps.mdem"
+        Write-Host "=== dem -> $DemOut (terrarium z$DemZoom over $Bbox) ==="
+        $parts = $Bbox -split ','
+        if ($parts.Count -ne 4) { throw "-Bbox is minlon,minlat,maxlon,maxlat" }
+        $minLon = [double]$parts[0]; $minLat = [double]$parts[1]
+        $maxLon = [double]$parts[2]; $maxLat = [double]$parts[3]
+        $n = [math]::Pow(2, $DemZoom)
+        function LonToX([double]$lon) { [math]::Floor(($lon + 180.0) / 360.0 * $n) }
+        function LatToY([double]$lat) {
+            $r = $lat * [math]::PI / 180.0
+            [math]::Floor((1.0 - [math]::Log([math]::Tan($r) + 1.0 / [math]::Cos($r)) / [math]::PI) / 2.0 * $n)
+        }
+        $x0 = [int](LonToX $minLon); $x1 = [int](LonToX $maxLon)
+        $y0 = [int](LatToY $maxLat); $y1 = [int](LatToY $minLat)
+        if ($x1 -lt $x0) { $t = $x0; $x0 = $x1; $x1 = $t }
+        if ($y1 -lt $y0) { $t = $y0; $y0 = $y1; $y1 = $t }
+        Write-Host "[all] terrarium z$DemZoom tiles x $x0..$x1, y $y0..$y1"
+        if ($DryRun) {
+            $count = ($x1 - $x0 + 1) * ($y1 - $y0 + 1)
+            Write-Host "[dry-run] would fetch $count terrarium tile(s) and run dem_ingest"
+        } else {
+            for ($tx = $x0; $tx -le $x1; $tx++) {
+                $dir = Join-Path $DemTiles "$DemZoom\$tx"
+                New-Item -ItemType Directory -Force -Path $dir | Out-Null
+                for ($ty = $y0; $ty -le $y1; $ty++) {
+                    $dest = Join-Path $dir "$ty.png"
+                    if (Test-Path $dest) { continue }
+                    $url = "$DemSource/$DemZoom/$tx/$ty.png"
+                    try {
+                        Invoke-WebRequest -Uri $url -OutFile $dest -UseBasicParsing -ErrorAction Stop
+                    } catch {
+                        Write-Host "[all] no terrarium tile at $DemZoom/$tx/$ty (ocean?), skipping"
+                        if (Test-Path $dest) { Remove-Item $dest -Force }
+                    }
+                }
+            }
+            $DemCargo = Join-Path $Here "dem_ingest\Cargo.toml"
+            Invoke-Step "cargo" @("run", "--release", "--quiet", "--manifest-path", $DemCargo,
+                "--bin", "dem_ingest", "--", "--tiles-dir", $DemTiles, "--bbox", $Bbox,
+                "--out", $DemOut, "--dem-zoom", "$DemZoom", "--out-zoom", "$DemOutZoom",
+                "--dim", "$DemDim", "--skip-flat")
+            Set-Stamp "dem"
+        }
     }
 }
 

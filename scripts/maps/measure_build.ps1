@@ -59,6 +59,11 @@ param(
     # builds an archive whose transit layer is empty — the lines come from GTFS, not the .pbf.
     # Same -ReuseStore rule as -Coastline.
     [string] $TransitRoutes,
+    # The v6 routing graph directory (nodes/edges/intermediate/metadata.bin from road_graph),
+    # passed through to mamaps_build as --graph so the `traffic` layer carries one line per
+    # drivable component segment. Omitting it builds an archive whose traffic layer is empty — its
+    # geometry comes from the graph, not the .pbf. Same -ReuseStore rule as -Coastline.
+    [string] $Graph,
     [string] $Exe,
     [string] $Dump
 )
@@ -170,6 +175,9 @@ if ($Coastline) {
 }
 if ($TransitRoutes) {
     $flags += @("--transit-routes", (Resolve-Path $TransitRoutes).Path)
+}
+if ($Graph) {
+    $flags += @("--graph", (Resolve-Path $Graph).Path)
 }
 
 Write-Output ("=== {0} -> {1}   z{2}..z{3}{4}{5}{6} ===" -f `

@@ -30,6 +30,7 @@ pub mod land;
 pub mod places;
 pub mod poi;
 pub mod roads;
+pub mod traffic;
 pub mod transit;
 pub mod water;
 
@@ -162,6 +163,7 @@ pub struct Layers {
     pub places: bool,
     pub poi: bool,
     pub transit: bool,
+    pub traffic: bool,
 }
 
 impl Layers {
@@ -179,6 +181,10 @@ impl Layers {
             // Reserved by v2; populated when transit lands (task 52). Selected by default so
             // the layer set — and therefore the build id — does not shift when it does.
             transit: true,
+            // v4's live traffic overlay. Selected by default like `transit`, and empty without
+            // its data source (`--graph`) rather than an error: an archive with no traffic layer
+            // is an obvious "no overlay", not the silent disaster an archive with no mainland is.
+            traffic: true,
         }
     }
 
@@ -194,6 +200,7 @@ impl Layers {
             places: false,
             poi: false,
             transit: false,
+            traffic: false,
         }
     }
 
@@ -212,10 +219,11 @@ impl Layers {
                 "places" => layers.places = true,
                 "poi" => layers.poi = true,
                 "transit" => layers.transit = true,
+                "traffic" => layers.traffic = true,
                 other => {
                     return Err(format!(
                         "unknown layer `{other}`; this generator produces earth, water, buildings, \
-                         roads, boundaries, landcover, landuse, places, poi and transit"
+                         roads, boundaries, landcover, landuse, places, poi, transit and traffic"
                     ))
                 }
             }
@@ -239,6 +247,7 @@ impl Layers {
             dict::LAYER_PLACES => self.places,
             dict::LAYER_POI => self.poi,
             dict::LAYER_TRANSIT => self.transit,
+            dict::LAYER_TRAFFIC => self.traffic,
             _ => false,
         }
     }
@@ -309,14 +318,30 @@ pub fn classify(
 
 /// A label's display name for a classified feature, or `None` when the layer carries none.
 ///
-/// Only `places` and `poi` name features (`name:en` → `name`, as the style coalesces). Called
-/// by extract at each classify site; the name travels beside the class into the spill.
+/// `places` and `poi` name points; `roads` and `water` name their lines (a street or a river) so
+/// the renderer can curve a label along the centreline. All four coalesce `name:en` then `name`,
+/// the same order the reference style does. Called by extract at each classify site; the name
+/// travels beside the class into the spill and is interned per tile with no format cost — the name
+/// table already exists.
 pub fn display_name(tags: &(impl TagSource + ?Sized), layer: u8) -> Option<String> {
     match layer {
         dict::LAYER_PLACES => places::display_name(tags),
         dict::LAYER_POI => poi::display_name(tags),
+        dict::LAYER_ROADS | dict::LAYER_WATER => line_name(tags),
         _ => None,
     }
+}
+
+/// The coalesced `name:en`/`name` of a line feature, trimmed, or `None` when it has neither.
+///
+/// The same rule [`places::display_name`] applies, spelled out here because a road or a river is
+/// not a `places` label and reusing that function would read as one.
+fn line_name(tags: &(impl TagSource + ?Sized)) -> Option<String> {
+    tags.get("name:en")
+        .or_else(|| tags.get("name"))
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+        .map(str::to_string)
 }
 
 /// The `osmium tags-filter` expressions that pre-screen each layer, as one list.
@@ -396,7 +421,7 @@ mod tests {
             Layers { water: true, ..Layers::none() },
         );
         assert_eq!(
-            Layers::parse("earth,water,buildings,roads,boundaries,landcover,landuse,places,poi,transit")
+            Layers::parse("earth,water,buildings,roads,boundaries,landcover,landuse,places,poi,transit,traffic")
                 .expect("all"),
             Layers::all(),
         );

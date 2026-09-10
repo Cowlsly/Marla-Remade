@@ -56,6 +56,8 @@ use rayon::prelude::*;
 
 use crate::schema::{self, Class, Layers};
 use crate::store::{Sink, Store, WayCounts, WayReader, WaySink};
+use tilecodec::mamaps::body::BuildingAttrs;
+use tilecodec::mamaps::dict::LAYER_BUILDINGS;
 
 /// One classified feature, in lon/lat, ready to tile.
 ///
@@ -78,6 +80,20 @@ pub struct Feature {
     pub transit_ordinal: u8,
     pub transit_lanes: u8,
     pub transit_taper: u8,
+    /// A `roads` feature's carriageway lane count, zero for every other layer and for a road with
+    /// no `lanes` tag. Baked into the body feature so the renderer can draw the carriageway as its
+    /// individual lanes at high zoom. See [`crate::schema::roads::lane_count`].
+    pub lane_count: u8,
+    /// A road's per-lane turn-indication masks, `(forward, backward)`, left to right — the
+    /// `LANE_*` bits of OSM `turn:lanes[:forward|:backward]`. Empty for every other layer and for
+    /// a road with no `turn:lanes`. Baked into the body's turn-lane side table so the renderer can
+    /// draw per-lane arrows at junctions. See [`crate::schema::roads::turn_masks`].
+    pub turn_fwd: Vec<u16>,
+    pub turn_bwd: Vec<u16>,
+    /// A building's OSM Simple 3D Buildings attributes (height, roof, colours), `None` for every
+    /// non-building feature. Baked into the body's building side table so the renderer can extrude
+    /// the footprint in 3D. See [`crate::schema::buildings::attrs`].
+    pub building: Option<BuildingAttrs>,
 }
 
 /// The id space an [`Feature::id`] came from, in the low two bits.
@@ -115,6 +131,8 @@ pub struct Stats {
     pub nodes_classified: u64,
     /// Coloured rail lines read from a prepared GTFS transit-routes export, if one was given.
     pub transit_routes: u64,
+    /// Drivable component segments emitted into the `traffic` layer from the v6 routing graph.
+    pub traffic_segments: u64,
     /// Road ways whose `min_zoom` was pulled shallower to match their corridor.
     pub corridor_promotions: u64,
     pub rings: RingStats,
@@ -126,6 +144,16 @@ struct Way {
     refs: Vec<i64>,
     /// The display label for `places`/`poi` ways, `None` for every other layer.
     name: Option<String>,
+    /// A road's carriageway lane count, zero for every other layer and for a road with no `lanes`
+    /// tag. See [`crate::schema::roads::lane_count`].
+    lane_count: u8,
+    /// A road's per-lane turn masks `(forward, backward)`; empty otherwise. See
+    /// [`crate::schema::roads::turn_masks`].
+    turn_fwd: Vec<u16>,
+    turn_bwd: Vec<u16>,
+    /// A building's S3DB attributes, `None` for every non-building. See
+    /// [`crate::schema::buildings::attrs`].
+    building: Option<BuildingAttrs>,
 }
 
 /// A classified relation, held between passes.
@@ -142,6 +170,8 @@ struct Relation {
     name: Option<String>,
     /// The relation's own OSM id, tagged — see [`tagged_id`]. Only read for label relations.
     id: i64,
+    /// A building relation's S3DB attributes (a multipolygon `building=*`), `None` otherwise.
+    building: Option<BuildingAttrs>,
 }
 
 /// Read `input` and spill every feature the schema classifies to `spill_path`.
@@ -154,6 +184,7 @@ pub fn extract(
     layers: Layers,
     coastline: Option<&Path>,
     transit_routes: Option<&Path>,
+    graph: Option<&Path>,
     spill_path: &Path,
 ) -> Result<(Store, Stats)> {
     // Stage A's boundaries are printed with their elapsed time so an external RSS sampler can say
@@ -227,7 +258,41 @@ pub fn extract(
                                 }
                             }
                             let name = schema::display_name(&way.tags, class.layer);
-                            state.0.push((way.id, Way { class, refs: way.refs.to_vec(), name }));
+                            // A road's carriageway lane count and per-lane turn masks, baked so the
+                            // renderer can draw the lanes individually and place turn arrows. Zero
+                            // and empty for every other layer.
+                            let is_road =
+                                class.layer == tilecodec::mamaps::dict::LAYER_ROADS;
+                            let lane_count = if is_road {
+                                schema::roads::lane_count(&way.tags)
+                            } else {
+                                0
+                            };
+                            let (turn_fwd, turn_bwd) = if is_road {
+                                schema::roads::turn_masks(&way.tags)
+                            } else {
+                                (Vec::new(), Vec::new())
+                            };
+                            // A building's S3DB attributes, parsed once here beside its class.
+                            // Zero-cost for the overwhelming majority of ways, which are not
+                            // buildings.
+                            let building = if class.layer == LAYER_BUILDINGS {
+                                Some(schema::buildings::attrs(&way.tags))
+                            } else {
+                                None
+                            };
+                            state.0.push((
+                                way.id,
+                                Way {
+                                    class,
+                                    refs: way.refs.to_vec(),
+                                    name,
+                                    lane_count,
+                                    turn_fwd,
+                                    turn_bwd,
+                                    building,
+                                },
+                            ));
                         }
                     }
                     Element::Relation(relation) => {
@@ -255,6 +320,13 @@ pub fn extract(
                             // distinction `Class::area` exists to make.
                             let area = class.area;
                             let name = schema::display_name(&relation.tags, class.layer);
+                            // A multipolygon building (a footprint with a courtyard) carries S3DB
+                            // attributes just as a building way does.
+                            let building = if class.layer == LAYER_BUILDINGS {
+                                Some(schema::buildings::attrs(&relation.tags))
+                            } else {
+                                None
+                            };
                             // An administrative relation yields *two* features: the border, which
                             // is a line and is what the basemap draws, and the region's shape,
                             // which nothing draws and the region mask reads. They cannot be one
@@ -270,10 +342,18 @@ pub fn extract(
                                         area: true,
                                         name: name.clone(),
                                         id: relation.id,
+                                        building: None,
                                     });
                                 }
                             }
-                            state.1.push(Relation { class, members, area, name, id: relation.id });
+                            state.1.push(Relation {
+                                class,
+                                members,
+                                area,
+                                name,
+                                id: relation.id,
+                                building,
+                            });
                         }
                     }
                     Element::Node(_) => {}
@@ -287,7 +367,16 @@ pub fn extract(
             // leaves the file in ascending id order. `WaySink::push` refuses an id that does not
             // advance rather than letting an unsorted file reorder the archive silently.
             for (id, way) in chunk_ways {
-                ways.push(id, &way.class, &way.refs, way.name.as_deref())?;
+                ways.push(
+                    id,
+                    &way.class,
+                    &way.refs,
+                    way.name.as_deref(),
+                    way.lane_count,
+                    &way.turn_fwd,
+                    &way.turn_bwd,
+                    way.building,
+                )?;
             }
             relations.extend(chunk_relations);
             corridors.extend(chunk_corridors);
@@ -467,12 +556,12 @@ pub fn extract(
     // 64 Ki ways at ~10 nodes each is a few tens of MB of geometry in flight, against a build that
     // peaks near 7 GB.
     const MATERIALISE_BATCH: usize = 64 * 1024;
-    let mut batch: Vec<(Class, Option<String>, Vec<i64>, u64)> =
+    let mut batch: Vec<(Class, Option<String>, Vec<i64>, u64, u8, Vec<u16>, Vec<u16>, Option<BuildingAttrs>)> =
         Vec::with_capacity(MATERIALISE_BATCH);
     let mut built: Vec<Option<Geometry<(f64, f64)>>> = Vec::with_capacity(MATERIALISE_BATCH);
     loop {
         let more = reader.next(&mut refs)?;
-        if let Some((id, class, name)) = more.as_ref() {
+        if let Some((id, class, name, lane_count, turn_fwd, turn_bwd, building)) = more.as_ref() {
             let mut class = *class;
             // The corridor's zoom, where it is shallower than this way's own.
             if let Ok(at) = promoted.binary_search_by_key(id, |(id, _)| *id) {
@@ -486,7 +575,16 @@ pub fn extract(
             } else {
                 tilecodec::mamaps::body::ID_NONE
             };
-            batch.push((class, name.clone(), std::mem::take(&mut refs), id));
+            batch.push((
+                class,
+                name.clone(),
+                std::mem::take(&mut refs),
+                id,
+                *lane_count,
+                turn_fwd.clone(),
+                turn_bwd.clone(),
+                *building,
+            ));
         }
         // Flushed when full, and once more at the end with whatever is left.
         if batch.len() >= MATERIALISE_BATCH || (more.is_none() && !batch.is_empty()) {
@@ -494,7 +592,7 @@ pub fn extract(
             par::install(|| {
                 batch
                     .par_iter()
-                    .map(|(class, _, refs, _)| {
+                    .map(|(class, _, refs, _, _, _, _, _)| {
                         let line = table.line(refs);
                         // A label layer's ways are centroided to points: a town mapped as an area
                         // is still one label, not a loop. Everything else keeps its geometry.
@@ -506,10 +604,27 @@ pub fn extract(
                     })
                     .collect_into_vec(&mut built);
             });
-            for ((class, name, _, id), geometry) in batch.iter().zip(built.drain(..)) {
+            for ((class, name, _, id, lane_count, turn_fwd, turn_bwd, building), geometry) in
+                batch.iter().zip(built.drain(..))
+            {
                 match geometry {
                     Some(geometry) => {
-                        sink.push_named(class, &geometry, name.as_deref(), *id)?;
+                        // A building carries its S3DB attributes; a road with lane data carries
+                        // those; everything else — and a plain road — goes the plain, named way.
+                        if let Some(b) = building {
+                            sink.push_building(class, &geometry, name.as_deref(), *b)?;
+                        } else if *lane_count > 0 || !turn_fwd.is_empty() || !turn_bwd.is_empty() {
+                            sink.push_road(
+                                class,
+                                &geometry,
+                                name.as_deref(),
+                                *lane_count,
+                                turn_fwd,
+                                turn_bwd,
+                            )?;
+                        } else {
+                            sink.push_named(class, &geometry, name.as_deref(), *id)?;
+                        }
                         stats.features += 1;
                     }
                     None => stats.geometry_failed += 1,
@@ -596,7 +711,13 @@ pub fn extract(
         } else {
             tilecodec::mamaps::body::ID_NONE
         };
-        sink.push_named(&relation.class, &Geometry::Polygons(polygons), None, id)?;
+        // A multipolygon building carries its S3DB attributes into the building side table, just
+        // as a building way does.
+        if let Some(building) = relation.building {
+            sink.push_building(&relation.class, &Geometry::Polygons(polygons), None, building)?;
+        } else {
+            sink.push_named(&relation.class, &Geometry::Polygons(polygons), None, id)?;
+        }
         stats.features += 1;
     }
     bar.finish("relation(s)");
@@ -638,6 +759,16 @@ pub fn extract(
                     .to_string())
             }
         }
+    }
+    // The `traffic` layer, last of the non-OSM sources: its geometry is the v6 routing graph
+    // (see [`schema::traffic`]), read straight off disk rather than classified from the `.pbf`.
+    // Not clipped to the bbox here — the graph is already the built region, and the tiler clips
+    // each component segment per tile like any other line.
+    if let Some(dir) = graph {
+        println!("reading the v6 routing graph at {} for the traffic layer", dir.display());
+        stats.traffic_segments = schema::traffic::stream_graph(dir, &mut sink)?;
+        stats.features += stats.traffic_segments;
+        println!("  {} drivable component segment(s)", stats.traffic_segments);
     }
     let store = sink.finish(spill_path)?;
     // The one phase that had no mark after it, and it turned out to be the largest single item in the
@@ -822,7 +953,9 @@ pub(crate) fn is_label(layer: u8) -> bool {
 /// position: every feature in such a layer needs an entry, `ID_NONE` included, or the table stops
 /// lining up with the features it describes.
 pub(crate) fn layer_tracks_ids(layer: u8) -> bool {
-    is_label(layer) || layer == tilecodec::mamaps::dict::LAYER_BOUNDARIES
+    is_label(layer)
+        || layer == tilecodec::mamaps::dict::LAYER_BOUNDARIES
+        || layer == tilecodec::mamaps::dict::LAYER_TRAFFIC
 }
 
 /// May this feature carry a non-zero id?
@@ -838,8 +971,10 @@ pub(crate) fn layer_tracks_ids(layer: u8) -> bool {
 /// line and must not. `coalesce` merges adjacent border lines, and the survivor's id would be
 /// whichever member happened to come first.
 pub(crate) fn tracks_ids(class: &crate::schema::Class) -> bool {
-    use tilecodec::mamaps::dict::LAYER_BOUNDARIES;
-    is_label(class.layer) || (class.layer == LAYER_BOUNDARIES && class.area)
+    use tilecodec::mamaps::dict::{LAYER_BOUNDARIES, LAYER_TRAFFIC};
+    is_label(class.layer)
+        || (class.layer == LAYER_BOUNDARIES && class.area)
+        || class.layer == LAYER_TRAFFIC
 }
 
 /// The centroid of a coordinate list: the arithmetic mean, or `None` when there is nothing.
@@ -954,7 +1089,7 @@ mod tests {
         // Ascending way ids, as pass 1 produces; overlapping refs, as real ways have.
         for way in 0..64i64 {
             let refs: Vec<i64> = (0..8).map(|i| way * 5 + i).collect();
-            sink.push(way + 1, &class, &refs, None).expect("push");
+            sink.push(way + 1, &class, &refs, None, 0, &[], &[], None).expect("push");
         }
         let counts = sink.finish().expect("finish");
 

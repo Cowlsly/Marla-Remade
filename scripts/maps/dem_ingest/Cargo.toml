@@ -1,0 +1,37 @@
+# The DEM-ingest sub-tool: AWS Terrain Tiles (terrarium PNG) in, a per-map-tile
+# `u16` heightmap grid dataset out — the build half of WS-G's 3D terrain relief.
+#
+# DETACHED from both workspaces (the empty `[workspace]` table below), like every
+# other host tool under `scripts/maps`: it is built for the host with the host
+# toolchain, and being a member of either workspace would drag that workspace's
+# toolchain, profiles and lockfile into the other's build.
+#
+# NETWORK I/O LIVES IN build_all.sh, not here — the same division of labour every
+# tool under scripts/maps keeps: the shell curls the terrarium tiles into a local
+# directory and this crate does the bytes-to-bytes work (PNG decode, terrarium
+# height decode, downsample). So the only dependency is `miniz_oxide`, pure Rust,
+# for the zlib INFLATE a PNG's IDAT needs — the same crate `tilecodec` already
+# builds with. `tilecodec` comes along for its slippy/pmtiles tile id math and the
+# `Heightmap` grid layout this dataset mirrors on the wire.
+
+[package]
+name = "dem_ingest"
+version = "0.1.0"
+edition = "2021"
+publish = false
+license = "GPL-2.0-only"
+description = "Decode AWS Terrain Tiles into per-tile u16 heightmap grids for the .mamaps terrain side table"
+
+[[bin]]
+name = "dem_ingest"
+path = "src/main.rs"
+
+[dependencies]
+tilecodec = { path = "../../../library/tilecodec/src/main/rust" }
+miniz_oxide = "0.8"
+
+[profile.release]
+opt-level = 3
+
+# Detach from both the repo-root Android workspace and the other host tools'.
+[workspace]

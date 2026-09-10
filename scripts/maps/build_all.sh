@@ -77,6 +77,15 @@ set -euo pipefail
 #   Stage control
 #     --skip-graph  --skip-pois  --skip-transit  --skip-tiles
 #     --only STAGE        run exactly one of graph|pois|transit|tiles
+#     --dem               extra terrain stage: fetch AWS Terrain Tiles (terrarium,
+#                         ~30 m) for --bbox and decode them into heightmaps.mdem, a
+#                         per-tile u16 grid dataset for the v6 heightmap side table.
+#                         Opt-in and bbox-scoped (the California test build first);
+#                         needs curl. See dem_ingest.
+#     --dem-zoom Z        terrarium zoom to fetch (default 12, ~30 m)
+#     --dem-out-zoom Z    map tile zoom to sample one grid per (default 14)
+#     --dem-dim N         grid side length, N x N samples per tile (default 17)
+#     --dem-source URL    terrarium z/x/y.png prefix (default AWS elevation-tiles-prod)
 #     --force             ignore stamps and redo every requested stage
 #     --jobs N            how many layer builds (tiles) and feed unzips (transit) run
 #                         at once. Default 3. Peak memory is roughly N x the largest
@@ -151,6 +160,15 @@ SKIP_TRANSIT=0
 SKIP_TILES=0
 ONLY=""
 FORCE=0
+# The DEM/terrain stage (WS-G): fetch AWS Terrain Tiles for the bbox and decode them into a
+# per-tile heightmap grid dataset. Opt-in, because it reaches a second network source and only
+# makes sense for a bounded region — the California test build first, per the plan.
+DEM=0
+DEM_ZOOM=12
+DEM_DIM=17
+DEM_OUT_ZOOM=14
+# AWS Terrain Tiles, terrarium encoding. z/x/y.png under this prefix.
+DEM_SOURCE="https://s3.amazonaws.com/elevation-tiles-prod/terrarium"
 # Fanned out to the tiles stage's layer builds and the transit stage's unzip loop.
 # Peak memory is roughly JOBS x the largest concurrent job, so this is a memory dial
 # as much as a speed one -- see build_v5_pmtiles.sh's own note.
@@ -199,6 +217,11 @@ while [[ $# -gt 0 ]]; do
         --skip-pois) SKIP_POIS=1; shift ;;
         --skip-transit) SKIP_TRANSIT=1; shift ;;
         --skip-tiles) SKIP_TILES=1; shift ;;
+        --dem) DEM=1; shift ;;
+        --dem-zoom) DEM_ZOOM="$2"; shift 2 ;;
+        --dem-dim) DEM_DIM="$2"; shift 2 ;;
+        --dem-out-zoom) DEM_OUT_ZOOM="$2"; shift 2 ;;
+        --dem-source) DEM_SOURCE="$2"; shift 2 ;;
         --only) ONLY="$2"; shift 2 ;;
         --force) FORCE=1; shift ;;
         --jobs) JOBS="$2"; shift 2 ;;
@@ -455,6 +478,60 @@ if want_stage tiles; then
         [[ "$DRY_RUN" == "1" ]] && V5_ARGS+=(--dry-run)
         "$HERE/build_v5_pmtiles.sh" "${V5_ARGS[@]}"
         mark_done tiles
+    fi
+fi
+
+# --- stage: dem (heightmaps.mdem) ---
+# Fetch AWS Terrain Tiles (terrarium PNG, ~30 m) covering the bbox and decode them into a
+# per-tile u16 heightmap grid dataset — the build half of WS-G's 3D terrain relief. Opt-in via
+# --dem, and it needs a --bbox: fetching terrarium tiles for a whole continent (let alone the
+# planet) is a different order of magnitude, so this is scoped to the California test region
+# first and turned on deliberately.
+#
+# Network I/O (the curl loop) lives here, as it does for every other source; dem_ingest itself
+# does only the bytes-to-bytes decode + downsample.
+if [[ "$DEM" == "1" ]]; then
+    if stage_done dem; then
+        echo "=== dem: stamp present, skipping (--force to redo) ==="
+    else
+        [[ -n "$BBOX" ]] || { echo "ERROR: --dem needs --bbox (the region to fetch terrain for)" >&2; exit 1; }
+        command -v curl >/dev/null || { echo "ERROR: --dem needs curl" >&2; exit 1; }
+        DEM_TILES="$WORK/dem/tiles"
+        DEM_OUT="$OUT_DIR/heightmaps.mdem"
+        echo "=== dem -> $DEM_OUT (terrarium z$DEM_ZOOM over $BBOX) ==="
+        # The terrarium tile x/y range the bbox covers at the DEM zoom. Web-mercator, in awk
+        # because it is four numbers and belongs beside the curl that uses them.
+        read -r DX0 DX1 DY0 DY1 < <(awk -v b="$BBOX" -v z="$DEM_ZOOM" 'BEGIN{
+            split(b, p, ",");
+            pi=3.141592653589793; n=2^z;
+            x0=int((p[1]+180)/360*n); x1=int((p[3]+180)/360*n);
+            latr=p[4]*pi/180; y0=int((1-log((sin(latr)+1)/cos(latr))/pi)/2*n);
+            latr=p[2]*pi/180; y1=int((1-log((sin(latr)+1)/cos(latr))/pi)/2*n);
+            if(x1<x0){t=x0;x0=x1;x1=t}; if(y1<y0){t=y0;y0=y1;y1=t};
+            print x0, x1, y0, y1;
+        }')
+        [[ -n "${DX0:-}" ]] || { echo "ERROR: could not compute terrarium tile range from $BBOX" >&2; exit 1; }
+        echo "[all] terrarium z$DEM_ZOOM tiles x $DX0..$DX1, y $DY0..$DY1"
+        if [[ "$DRY_RUN" == "1" ]]; then
+            echo "[dry-run] would fetch $(( (DX1-DX0+1)*(DY1-DY0+1) )) terrarium tile(s) and run dem_ingest"
+        else
+            for ((tx=DX0; tx<=DX1; tx++)); do
+                mkdir -p "$DEM_TILES/$DEM_ZOOM/$tx"
+                for ((ty=DY0; ty<=DY1; ty++)); do
+                    dest="$DEM_TILES/$DEM_ZOOM/$tx/$ty.png"
+                    [[ -f "$dest" ]] && continue
+                    curl -fsSL --retry 3 -o "$dest.partial" \
+                        "$DEM_SOURCE/$DEM_ZOOM/$tx/$ty.png" \
+                        && mv "$dest.partial" "$dest" \
+                        || { echo "[all] no terrarium tile at $DEM_ZOOM/$tx/$ty (ocean?), skipping"; rm -f "$dest.partial"; }
+                done
+            done
+            run cargo run --release --quiet --manifest-path "$HERE/dem_ingest/Cargo.toml" \
+                --bin dem_ingest -- \
+                --tiles-dir "$DEM_TILES" --bbox "$BBOX" --out "$DEM_OUT" \
+                --dem-zoom "$DEM_ZOOM" --out-zoom "$DEM_OUT_ZOOM" --dim "$DEM_DIM" --skip-flat
+            mark_done dem
+        fi
     fi
 fi
 
