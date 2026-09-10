@@ -20,14 +20,15 @@ import kotlin.math.log2
 /**
  * Where the camera is, and which way is up.
  *
- * [bearing] **defaults to zero**, so every existing call site, the saver, and the whole
- * Compose path are unchanged: a north-up camera composes the same axis-aligned matrices it
- * always did, and the overlays and image quad positioned against them stay correct.
+ * [bearing] and [pitch] both **default to zero**, so every existing call site, the saver, and
+ * the whole Compose path are unchanged until something tilts or rotates the camera: a north-up,
+ * level camera composes exactly the axis-aligned matrices it always did.
  *
- * Tilt is still deliberately unsupported. A bearing is a rotation, which composes into the
- * clip matrices as a 2x2 and leaves the projection orthographic; a tilt would make it
- * perspective, and every screen-space measurement downstream — label boxes, the image
- * quad, [Projection] itself — assumes it is not.
+ * [bearing] is a rotation, which composes into the clip matrices as a plain 2x2 and is still
+ * honoured only on the [SurfaceMapRenderer.camera] path, because the Compose overlays are laid
+ * out north-up. [pitch] is the perspective tilt; unlike bearing it *is* honoured on the Compose
+ * path, because [Projection] is now pitch-aware (ray/plane), so `MapMarker`s and pins follow the
+ * tilt instead of floating off the ground.
  */
 data class CameraPosition(
     val target: GeoPoint = GeoPoint(0.0, 0.0),
@@ -39,12 +40,21 @@ data class CameraPosition(
      * navigation is the one caller that sets it, through [SurfaceMapRenderer.camera].
      *
      * **Setting it on a [CameraState] does nothing.** The Compose path forces it to zero
-     * before the frame, because [Projection] is north-up and everything positioned through
-     * it — every `MapMarker`, pin and cluster — would stay put while the basemap turned
+     * before the frame, because [Projection]'s bearing is north-up and everything positioned
+     * through it — every `MapMarker`, pin and cluster — would stay put while the basemap turned
      * underneath. Ignoring it is a visible no-op; honouring it would be a silent wrong
      * render that nothing reports.
      */
     val bearing: Double = 0.0,
+    /**
+     * Camera tilt away from straight-down, in degrees, expected in `0.0..`[MAX_PITCH].
+     *
+     * Zero is the flat top-down map. Driven by the two-finger vertical-drag tilt gesture (see
+     * `MapGestures`) and honoured on both the Compose and [SurfaceMapRenderer.camera] paths:
+     * [Projection] intersects the eye ray with the ground plane, so overlays anchored through it
+     * stay glued to their ground point under tilt.
+     */
+    val pitch: Double = 0.0,
 )
 
 /**
@@ -66,6 +76,14 @@ class CameraState(initial: CameraPosition = CameraPosition()) {
      * answers [queryRenderedLabels][Projection.queryRenderedLabels] empty.
      */
     internal var labelQueryProvider: ((DpRect, Set<String>) -> List<PlacedLabel>)? by mutableStateOf(null)
+
+    /**
+     * Marker pick provider: registered by the rendered surface (see `VulkanMapSurface`),
+     * answering `(xDp, yDp) -> marker id` from the renderer's id buffer. Null until a surface
+     * registers — a projection without a live renderer answers [pickMarker][Projection.pickMarker]
+     * with `0` (nothing) rather than hitting a dead handle.
+     */
+    internal var markerPickProvider: ((Float, Float) -> Long)? by mutableStateOf(null)
 
     /**
      * Sets the measured viewport and enforces the minimum "fill" zoom so the map
@@ -94,7 +112,7 @@ class CameraState(initial: CameraPosition = CameraPosition()) {
      */
     val projection: Projection? by derivedStateOf {
         viewportDp?.let { vp ->
-            Projection(position.target, position.zoom, vp.width, vp.height, labelQueryProvider)
+            Projection(position.target, position.zoom, vp.width, vp.height, position.pitch, labelQueryProvider, markerPickProvider)
         }
     }
 
@@ -117,6 +135,7 @@ class CameraState(initial: CameraPosition = CameraPosition()) {
                 ),
                 zoom = lerp(start.zoom, target.zoom, t),
                 bearing = start.bearing + turn * t,
+                pitch = lerp(start.pitch, target.pitch, t),
             )
         }
     }
@@ -209,7 +228,23 @@ class CameraState(initial: CameraPosition = CameraPosition()) {
         // the position from scratch would silently reset the bearing to north.
         position = position.copy(target = center, zoom = zoom)
     }
+
+    /**
+     * Applies a two-finger vertical-drag tilt. [deltaDp] is the vertical movement since the last
+     * event (Compose's y, down positive); dragging **up** tilts into the map (raises the pitch),
+     * matching Google Maps. Clamped to `0.0..`[MAX_PITCH]; nothing else about the camera moves.
+     */
+    internal fun onTilt(deltaDp: Float) {
+        val next = (position.pitch - deltaDp * PITCH_DEG_PER_DP).coerceIn(0.0, MAX_PITCH)
+        if (next != position.pitch) position = position.copy(pitch = next)
+    }
 }
+
+/** Largest tilt the renderer supports, in degrees. Mirrors the native `PITCH_MAX_DEG` cap. */
+const val MAX_PITCH: Double = 60.0
+
+/** Degrees of tilt per Dp of two-finger vertical drag: a ~150 Dp drag sweeps the full range. */
+private const val PITCH_DEG_PER_DP = 0.4
 
 /** Zoom levels covered by a quick-zoom drag across the full viewport height. */
 private const val QUICK_ZOOM_LEVELS_PER_VIEWPORT = 4.0
@@ -234,7 +269,7 @@ private fun lerp(start: Double, end: Double, t: Double): Double = start + (end -
 /**
  * Saves the camera across configuration change and process death.
  *
- * Only `(lon, lat, zoom, bearing)`: [CameraState.viewportDp] is re-measured by the next
+ * Only `(lon, lat, zoom, bearing, pitch)`: [CameraState.viewportDp] is re-measured by the next
  * layout pass and [CameraState.labelQueryProvider] is re-registered by the surface, so
  * persisting either would restore a value that is immediately overwritten — and a stale
  * viewport would produce a wrong projection for one frame.
@@ -246,12 +281,20 @@ private val CameraStateSaver = listSaver<CameraState, Double>(
             it.position.target.latitude,
             it.position.zoom,
             it.position.bearing,
+            it.position.pitch,
         )
     },
-    // `getOrElse` rather than `it[3]`: a bundle written before the bearing existed is
-    // three long, and a restored camera is not worth an IndexOutOfBounds.
+    // `getOrElse` rather than `it[n]`: a bundle written before the bearing or pitch existed is
+    // three or four long, and a restored camera is not worth an IndexOutOfBounds.
     restore = {
-        CameraState(CameraPosition(GeoPoint(it[0], it[1]), it[2], it.getOrElse(3) { 0.0 }))
+        CameraState(
+            CameraPosition(
+                GeoPoint(it[0], it[1]),
+                it[2],
+                it.getOrElse(3) { 0.0 },
+                it.getOrElse(4) { 0.0 },
+            )
+        )
     },
 )
 

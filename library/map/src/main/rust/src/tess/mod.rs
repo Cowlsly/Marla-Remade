@@ -6,5 +6,7 @@
 
 pub mod earcut;
 pub mod fill;
+pub mod roof;
 pub mod stroke;
+pub mod terrain;
 pub mod text;

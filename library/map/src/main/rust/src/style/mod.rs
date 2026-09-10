@@ -64,21 +64,28 @@ pub enum Variant {
 
 /// An optional layer group the host app opts into at runtime.
 ///
-/// A layer with no toggle is basemap and always drawn. The two that have one carry data
+/// A layer with no toggle is basemap and always drawn. The others carry data
 /// every archive already ships but which most consumers do not want: POI icons clutter a
-/// map whose job is to show one pin, and transit lines are noise outside a transit app.
-/// Defaulting them **off** is what makes the five existing consumers cost nothing.
+/// map whose job is to show one pin, transit lines are noise outside a transit app, and
+/// live traffic is a per-component overlay only a navigation view wants. Defaulting them
+/// **off** is what makes the five existing consumers cost nothing.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Toggle {
     Poi,
     Transit,
+    /// The live traffic layer (`LAYER_TRAFFIC`, id 10). Gated at tessellation like the
+    /// others so an archive without it — or a consumer that never enables it — pays
+    /// nothing; the per-segment colours arrive separately as a pushed id→ARGB table
+    /// (see [`crate::vulkan::renderer::Renderer::set_traffic_speeds`]).
+    Traffic,
 }
 
-/// Which optional layers are on. Both off by default.
+/// Which optional layers are on. All off by default.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
 pub struct LayerToggles {
     pub poi: bool,
     pub transit: bool,
+    pub traffic: bool,
 }
 
 impl LayerToggles {
@@ -91,6 +98,7 @@ impl LayerToggles {
             None => true,
             Some(Toggle::Poi) => self.poi,
             Some(Toggle::Transit) => self.transit,
+            Some(Toggle::Traffic) => self.traffic,
         }
     }
 }
@@ -535,6 +543,20 @@ impl Layer {
         self.gap_width.peak() > 0.0
     }
 
+    /// Does this line layer fan its features into parallel lanes, rather than draw one stroke
+    /// down each centreline?
+    ///
+    /// True when the style gives the layer a [`spread`](Self::spread) — the sideways step between
+    /// adjacent lanes. Two layers set it: `transit-rail`, whose features fan by their colour
+    /// ordinal, and `roads-lanes`, whose road features fan into one divider line per interior lane
+    /// boundary from the feature's `lane_count`. The two never collide: a transit feature carries a
+    /// `transit_color` and takes the colour-split path before this is consulted, while a road
+    /// carries none. `lanes` defaults to 1 and so cannot be the discriminator; `spread` defaults to
+    /// 0 and is only ever set on purpose.
+    pub fn lane_fan(&self) -> bool {
+        self.spread.peak() > 0.0
+    }
+
     /// The stroke this layer draws at `zoom`, in Dp.
     pub fn stroke(&self, zoom: f64) -> Stroke {
         Stroke { width_dp: self.width.at(zoom), gap_width_dp: self.gap_width.at(zoom) }
@@ -656,6 +678,18 @@ pub fn layers() -> &'static [Layer] {
     &paint::style().layers
 }
 
+/// The road lane layer, whose `spread`/`lanes` ramps fan per-lane geometry across a road and
+/// whose zoom window gates it.
+///
+/// Matched on the roads source as well as the fan. [`Layer::lane_fan`] only asks "does this
+/// layer have a spread", and `transit-rail` has one for its corridor colours and is declared
+/// first, so matching on the fan alone silently answers with the rail layer — whose `minzoom`
+/// is 8 against the road lanes' 16. That is what drew turn arrows from z8, offset by the rail
+/// corridor's ramp instead of the road's.
+pub fn road_lane_layer(layers: &[Layer]) -> Option<&Layer> {
+    layers.iter().find(|l| l.lane_fan() && l.source_layer_id == dict::LAYER_ROADS)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -690,7 +724,7 @@ mod tests {
         let shared = SharedToggles::new(LayerToggles::default());
         let (_, _, first) = shared.get();
 
-        let on = LayerToggles { poi: true, transit: false };
+        let on = LayerToggles { poi: true, transit: false, traffic: false };
         assert!(shared.set(on, KindFilter::new(vec![cafe, bar])));
         let (toggles, kinds, second) = shared.get();
         assert!(toggles.poi);
@@ -783,6 +817,29 @@ mod tests {
         // Opacity is a per-frame ramp, not a baked alpha.
         assert_eq!(find("buildings").light, 0xFFCCCCCC);
         assert_eq!(find("landuse_urban_green").light, 0xFF9CD3B4);
+    }
+
+    /// Turn arrows are gated by the *road* lane layer, not by whichever layer happens to be the
+    /// first with a spread.
+    ///
+    /// `transit-rail` carries a spread for its corridor colours and is declared before
+    /// `roads-lanes`, so a `find(|l| l.lane_fan())` answers with the rail layer and its
+    /// `minzoom: 8`. That shipped: turn arrows drew from z8, four zoom levels of dense per-frame
+    /// CPU triangle building for geometry that belongs at z16. Pinned against the real style
+    /// because the bug was entirely in the interaction between the predicate and the declaration
+    /// order — a hand-built two-layer fixture would have passed.
+    #[test]
+    fn turn_arrows_are_gated_by_the_road_lane_layer() {
+        let gate = road_lane_layer(layers()).expect("the road lane layer");
+        assert_eq!(gate.id, "roads-lanes", "not `transit-rail`, which also has a spread");
+
+        let rail = find("transit-rail");
+        assert!(rail.lane_fan(), "the rail corridor fan is what made the naive predicate wrong");
+        assert!(rail.min_zoom < gate.min_zoom, "and it is the earlier of the two");
+
+        assert!(!gate.draws_at(12), "no turn arrows at z12");
+        assert!(!gate.draws_at(gate.min_zoom - 1), "nor one level below the lane floor");
+        assert!(gate.draws_at(16), "turn arrows from z16");
     }
 
     /// A kind the authored `case` gives its own colour has its own layer, and a kind that shares
@@ -1027,6 +1084,7 @@ mod tests {
             transit_ordinal: 0,
             transit_lanes: 0,
             transit_taper: 0,
+            lane_count: 0,
         }
     }
 

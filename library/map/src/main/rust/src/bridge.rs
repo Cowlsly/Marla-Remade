@@ -16,7 +16,8 @@
 //! critical path, and no JNI in the hot loop.
 
 use crate::camera::Camera;
-use crate::overlay::RouteStyle;
+use crate::marker::Marker;
+use crate::overlay::{RouteSegment, RouteStyle};
 use crate::style::{self, Layer, LayerToggles, Palette, SharedToggles};
 use crate::tile::cache::{RangeCache, DEFAULT_MAX_BYTES};
 use crate::tile::geometry::{self, TileMesh};
@@ -26,7 +27,7 @@ use crate::tile::source::{
 };
 use crate::vulkan::context::{ANativeWindow_acquire, ANativeWindow_fromSurface};
 use crate::vulkan::renderer::{Renderer, UserPuck};
-use jni::objects::{JClass, JFloatArray, JObject, JString};
+use jni::objects::{JClass, JFloatArray, JIntArray, JLongArray, JObject, JString};
 use jni::sys::{jboolean, jfloat, jint, jlong};
 use jni::JNIEnv;
 use std::collections::HashSet;
@@ -491,9 +492,11 @@ pub extern "system" fn Java_com_vayunmathur_library_map_MapNative_render<'l>(
     center_lat: jfloat,
     zoom: jfloat,
     bearing: jfloat,
+    pitch: jfloat,
     width_dp: jfloat,
     height_dp: jfloat,
     density: jfloat,
+    frame_time_nanos: jlong,
 ) -> jboolean {
     let Some(map) = handle_mut(handle) else { return 0 };
 
@@ -507,6 +510,13 @@ pub extern "system" fn Java_com_vayunmathur_library_map_MapNative_render<'l>(
     //
     // `bearing` is degrees clockwise from north for whatever points up the screen: 0 on
     // every phone frame, and the car's heading during heading-up navigation.
+    //
+    // `pitch` is the tilt away from straight-down, clamped to the renderer's supported band
+    // here so no matrix has to defend against a wild value. `frame_time_nanos` is the host's
+    // Choreographer clock, reduced modulo an hour before it becomes an `f32` so a long uptime
+    // does not blow past the ~7 significant digits an `f32` has and coarsen the animation clock
+    // to tens of milliseconds — a once-an-hour wrap is invisible to the periodic effects that
+    // read it.
     let camera = Camera {
         center_lon: center_lon as f64,
         center_lat: center_lat as f64,
@@ -515,6 +525,8 @@ pub extern "system" fn Java_com_vayunmathur_library_map_MapNative_render<'l>(
         height_dp,
         density,
         bearing_deg: bearing as f64,
+        pitch_deg: (pitch as f64).clamp(0.0, crate::camera::PITCH_MAX_DEG),
+        time_seconds: ((frame_time_nanos.rem_euclid(3_600_000_000_000)) as f64 / 1_000_000_000.0) as f32,
     };
     // Task-17 pick needs the frame's density for Dp→device-px; remember it.
     map.density = density;
@@ -694,27 +706,172 @@ pub extern "system" fn Java_com_vayunmathur_library_map_MapNative_clearUserPuck<
     }
 }
 
+/// Replace the app's pins with a marker set, drawn by the renderer as billboarded sprites.
+///
+/// Three parallel bulk arrays, the same convention as
+/// [`setRoute`](Java_com_vayunmathur_library_map_MapNative_setRoute) and
+/// [`setTrafficSpeeds`](Java_com_vayunmathur_library_map_MapNative_setTrafficSpeeds): `ids[i]` is
+/// the host's own stable id for marker `i` (echoed back by
+/// [`pickAt`](Java_com_vayunmathur_library_map_MapNative_pickAt)), `lonLat` holds
+/// `[lon0, lat0, lon1, lat1, …]`, and `icons[i]` is the icon id (see `crate::marker::icon`). Bulk
+/// arrays rather than a list of objects so a viewport's worth of pins crosses the boundary in a
+/// few `get_*_array_region` reads with no per-pin JNI traffic; `float` coordinates for the same
+/// reason the camera's are.
+///
+/// The whole set is replaced each call, not merged — a stale pin left behind would sit under the
+/// finger and pick wrong. Moving the pins into the renderer is what stops them trailing the basemap
+/// on a pan or tilt the way the Compose overlays did. Mismatched lengths are truncated to the
+/// shortest; an empty set is the same as
+/// [`clearMarkers`](Java_com_vayunmathur_library_map_MapNative_clearMarkers). Arrays that cannot be
+/// read leave the markers **unchanged** rather than blanking them.
+#[no_mangle]
+pub extern "system" fn Java_com_vayunmathur_library_map_MapNative_setMarkers<'l>(
+    env: JNIEnv<'l>,
+    _class: JClass<'l>,
+    handle: jlong,
+    ids: JLongArray<'l>,
+    lon_lat: JFloatArray<'l>,
+    icons: JIntArray<'l>,
+) {
+    let Some(map) = handle_mut(handle) else { return };
+    let id_len = env.get_array_length(&ids).unwrap_or(0).max(0) as usize;
+    let icon_len = env.get_array_length(&icons).unwrap_or(0).max(0) as usize;
+    let coord_len = env.get_array_length(&lon_lat).unwrap_or(0).max(0) as usize;
+    // Each marker consumes two floats (lon, lat), so the coordinate array bounds the count too.
+    let n = id_len.min(icon_len).min(coord_len / 2);
+    if n == 0 {
+        map.renderer.set_markers(Vec::new());
+        return;
+    }
+    let mut id_buf = vec![0i64; n];
+    let mut icon_buf = vec![0i32; n];
+    let mut coord_buf = vec![0f32; n * 2];
+    if env.get_long_array_region(&ids, 0, &mut id_buf).is_err()
+        || env.get_int_array_region(&icons, 0, &mut icon_buf).is_err()
+        || env.get_float_array_region(&lon_lat, 0, &mut coord_buf).is_err()
+    {
+        log("the marker arrays could not be read; leaving the markers unchanged");
+        return;
+    }
+    let markers: Vec<Marker> = (0..n)
+        .map(|i| Marker {
+            // A Kotlin id is a signed `long` and an icon a signed `int`; the bit pattern is what
+            // matters and the cast keeps it.
+            id: id_buf[i] as u64,
+            lon: coord_buf[i * 2] as f64,
+            lat: coord_buf[i * 2 + 1] as f64,
+            icon: icon_buf[i] as u32,
+        })
+        .collect();
+    map.renderer.set_markers(markers);
+}
+
+/// Take every marker away: the host cleared its pins.
+#[no_mangle]
+pub extern "system" fn Java_com_vayunmathur_library_map_MapNative_clearMarkers<'l>(
+    _env: JNIEnv<'l>,
+    _class: JClass<'l>,
+    handle: jlong,
+) {
+    if let Some(map) = handle_mut(handle) {
+        map.renderer.set_markers(Vec::new());
+    }
+}
+
+/// Replace the simulated transit vehicles with a set the renderer draws as billboarded sprites.
+///
+/// The same three parallel bulk arrays as
+/// [`setMarkers`](Java_com_vayunmathur_library_map_MapNative_setMarkers) — `ids[i]` the host's
+/// stable per-trip id, `lonLat` the flat `[lon0, lat0, lon1, lat1, …]`, and `icons[i]` the mode
+/// sprite id (a vehicle uses the `VEHICLE_*` ids in `crate::marker::icon`) — because a vehicle is
+/// just a [`Marker`] whose icon names a mode sprite, so it reuses the marker draw path verbatim.
+///
+/// Separate from [`setMarkers`](Java_com_vayunmathur_library_map_MapNative_setMarkers) so the app's
+/// ~1 Hz vehicle recompute replaces only the vehicles, leaving the pins (which change on a tap or
+/// search) untouched, and so the moving vehicle sprites stay out of the pin id-buffer pick. The
+/// whole set is replaced each call — a trip that ended, left the bbox, or was cancelled must drop
+/// out rather than linger. Mismatched lengths are truncated to the shortest; an empty set is the
+/// same as [`clearVehicles`](Java_com_vayunmathur_library_map_MapNative_clearVehicles). Arrays that
+/// cannot be read leave the vehicles **unchanged** rather than blanking them.
+#[no_mangle]
+pub extern "system" fn Java_com_vayunmathur_library_map_MapNative_setVehicles<'l>(
+    env: JNIEnv<'l>,
+    _class: JClass<'l>,
+    handle: jlong,
+    ids: JLongArray<'l>,
+    lon_lat: JFloatArray<'l>,
+    icons: JIntArray<'l>,
+) {
+    let Some(map) = handle_mut(handle) else { return };
+    let id_len = env.get_array_length(&ids).unwrap_or(0).max(0) as usize;
+    let icon_len = env.get_array_length(&icons).unwrap_or(0).max(0) as usize;
+    let coord_len = env.get_array_length(&lon_lat).unwrap_or(0).max(0) as usize;
+    // Each vehicle consumes two floats (lon, lat), so the coordinate array bounds the count too.
+    let n = id_len.min(icon_len).min(coord_len / 2);
+    if n == 0 {
+        map.renderer.set_vehicles(Vec::new());
+        return;
+    }
+    let mut id_buf = vec![0i64; n];
+    let mut icon_buf = vec![0i32; n];
+    let mut coord_buf = vec![0f32; n * 2];
+    if env.get_long_array_region(&ids, 0, &mut id_buf).is_err()
+        || env.get_int_array_region(&icons, 0, &mut icon_buf).is_err()
+        || env.get_float_array_region(&lon_lat, 0, &mut coord_buf).is_err()
+    {
+        log("the vehicle arrays could not be read; leaving the vehicles unchanged");
+        return;
+    }
+    let vehicles: Vec<Marker> = (0..n)
+        .map(|i| Marker {
+            id: id_buf[i] as u64,
+            lon: coord_buf[i * 2] as f64,
+            lat: coord_buf[i * 2 + 1] as f64,
+            icon: icon_buf[i] as u32,
+        })
+        .collect();
+    map.renderer.set_vehicles(vehicles);
+}
+
+/// Take every simulated vehicle away: the transit toggle went off, or the surface was hidden.
+#[no_mangle]
+pub extern "system" fn Java_com_vayunmathur_library_map_MapNative_clearVehicles<'l>(
+    _env: JNIEnv<'l>,
+    _class: JClass<'l>,
+    handle: jlong,
+) {
+    if let Some(map) = handle_mut(handle) {
+        map.renderer.set_vehicles(Vec::new());
+    }
+}
+
 /// Draw a navigation route line over the basemap and under the puck.
 ///
-/// `points` is a flat `[lon0, lat0, lon1, lat1, …]` array. One array rather than a list of
-/// objects because a route is thousands of points and a per-point JNI crossing is exactly
-/// what the rest of this boundary exists to avoid; `float` rather than `double` for the
-/// same reason the camera's coordinates are (see
+/// `points` is a flat `[lon0, lat0, lon1, lat1, …]` array holding every coloured run's
+/// points concatenated; `segment_lengths` is the point count of each run in order, and
+/// `segment_colors` the ARGB fill of each, index for index. Three bulk arrays rather than a
+/// list of objects because a route is thousands of points and a per-point JNI crossing is
+/// exactly what the rest of this boundary exists to avoid; `float` rather than `double` for
+/// the same reason the camera's coordinates are (see
 /// [`render`](Java_com_vayunmathur_library_map_MapNative_render)) — seven significant
 /// digits is about a centimetre at the equator, and a route is a shape to follow rather
-/// than a survey. A trailing odd element is ignored.
+/// than a survey.
 ///
-/// One polyline and one colour, which is what the consumer draws: the car renderer this
-/// replaces stroked a single `Path` over the whole route twice, a casing under a fill. The
-/// phone's per-step traffic colouring stays in Compose over `VectorMap` and is not
-/// migrating, so a per-segment API here would be surface with no caller.
+/// A **list of coloured runs**, one casing: the phone colours the route per navigation
+/// step (traffic bands, transit brand colours, a travelled grey behind the puck), and that
+/// colouring now lives in the renderer so the route pans in lock-step with the basemap. The
+/// casing is drawn once over the whole route and each run's fill over it in run colour. A
+/// single-colour route (Android Auto) is just a one-run list.
 ///
 /// Tessellated here, on the calling thread, and uploaded once. That is affordable because
 /// it happens when the route is set and never again: the mesh is zoom-independent, so no
 /// frame and no zoom step rebuilds it. See [`crate::overlay`].
 ///
-/// An empty array, a single point, or a run of identical points draws nothing, which is
-/// the same outcome as [`clearRoute`](Java_com_vayunmathur_library_map_MapNative_clearRoute).
+/// An empty array, a run of fewer than two distinct points, or lengths that sum past the
+/// points available all draw nothing for the affected run, and a route with no drawable run
+/// is the same outcome as
+/// [`clearRoute`](Java_com_vayunmathur_library_map_MapNative_clearRoute). Arrays that cannot
+/// be read leave the route **unchanged** rather than blanking a route being followed.
 #[no_mangle]
 #[allow(clippy::too_many_arguments)]
 pub extern "system" fn Java_com_vayunmathur_library_map_MapNative_setRoute<'l>(
@@ -722,13 +879,14 @@ pub extern "system" fn Java_com_vayunmathur_library_map_MapNative_setRoute<'l>(
     _class: JClass<'l>,
     handle: jlong,
     points: JFloatArray<'l>,
+    segment_lengths: JIntArray<'l>,
+    segment_colors: JIntArray<'l>,
     width_dp: jfloat,
     casing_dp: jfloat,
-    color: jint,
     casing_color: jint,
 ) {
     let Some(map) = handle_mut(handle) else { return };
-    let count = match env.get_array_length(&points) {
+    let point_floats = match env.get_array_length(&points) {
         Ok(length) => length.max(0) as usize,
         // Reading failed, so we know nothing about the intended route. Leaving the current
         // one alone beats blanking a route the driver is following.
@@ -737,22 +895,43 @@ pub extern "system" fn Java_com_vayunmathur_library_map_MapNative_setRoute<'l>(
             return;
         }
     };
-    let mut flat = vec![0f32; count];
+    let segment_count = env.get_array_length(&segment_lengths).unwrap_or(0).max(0) as usize;
+    let color_count = env.get_array_length(&segment_colors).unwrap_or(0).max(0) as usize;
+    let segment_count = segment_count.min(color_count);
+
+    let mut flat = vec![0f32; point_floats];
     if env.get_float_array_region(&points, 0, &mut flat).is_err() {
         log("the route array could not be read; leaving the route unchanged");
         return;
     }
-    let coords: Vec<(f64, f64)> =
-        flat.chunks_exact(2).map(|pair| (pair[0] as f64, pair[1] as f64)).collect();
-    let style = RouteStyle {
-        width_dp,
-        casing_dp,
+    let mut lengths = vec![0i32; segment_count];
+    let mut colors = vec![0i32; segment_count];
+    if segment_count > 0
+        && (env.get_int_array_region(&segment_lengths, 0, &mut lengths).is_err()
+            || env.get_int_array_region(&segment_colors, 0, &mut colors).is_err())
+    {
+        log("the route segment arrays could not be read; leaving the route unchanged");
+        return;
+    }
+
+    // Walk the flat point buffer run by run: each length is a point count, so it consumes
+    // twice that many floats. A length that would overrun the buffer is clamped, so a
+    // mismatched pair truncates rather than reading past the array.
+    let mut segments: Vec<RouteSegment> = Vec::with_capacity(segment_count);
+    let mut cursor = 0usize;
+    for (len, color) in lengths.into_iter().zip(colors) {
+        let count = len.max(0) as usize;
+        let end = (cursor + count * 2).min(flat.len());
+        let run: Vec<(f64, f64)> =
+            flat[cursor..end].chunks_exact(2).map(|pair| (pair[0] as f64, pair[1] as f64)).collect();
+        cursor = end;
         // ARGB arrives as a signed `int` because that is what a Kotlin colour is; the bit
         // pattern is what matters and the cast keeps it.
-        color: color as u32,
-        casing_color: casing_color as u32,
-    };
-    let mesh = crate::overlay::tessellate(&coords, style);
+        segments.push(RouteSegment { points: run, color: color as u32 });
+    }
+
+    let style = RouteStyle { width_dp, casing_dp, casing_color: casing_color as u32 };
+    let mesh = crate::overlay::tessellate(&segments, style);
     if let Err(e) = map.renderer.set_route(mesh.as_ref()) {
         log(&format!("uploading the route failed: {e}"));
     }
@@ -834,6 +1013,11 @@ pub extern "system" fn Java_com_vayunmathur_library_map_MapNative_clearRegionMas
 /// means every kind the style draws. A name the schema has no id for is skipped rather than
 /// refused: the chip list is app data and a typo there should narrow the map oddly, not blank it.
 ///
+/// Traffic is a third optional layer but rides its own entry point
+/// ([`setTrafficEnabled`](Java_com_vayunmathur_library_map_MapNative_setTrafficEnabled)) rather
+/// than a fourth argument here, so adding it did not change this call's shape for the five
+/// existing consumers.
+///
 /// A call that changes nothing bumps nothing, because the host is expected to call this
 /// from a Compose effect that may re-run for unrelated reasons.
 #[no_mangle]
@@ -855,13 +1039,113 @@ pub extern "system" fn Java_com_vayunmathur_library_map_MapNative_setLayers<'l>(
             .collect(),
     );
     if let Some(map) = handle_mut(handle) {
-        let wanted = LayerToggles { poi: poi != 0, transit: transit != 0 };
+        // Traffic is carried through its own setter, so preserve whatever it was set to.
+        let traffic = map.toggles.get().0.traffic;
+        let wanted =
+            LayerToggles { poi: poi != 0, transit: transit != 0, traffic };
         if map.toggles.set(wanted, filter) {
             log_info(&format!(
                 "layers changed: poi={} transit={} kinds=[{names}]",
                 wanted.poi, wanted.transit,
             ));
         }
+    }
+}
+
+/// Turn the live-traffic overlay on or off.
+///
+/// Gates the overlay at **tessellation** like [`setLayers`], so an archive without the layer —
+/// or a consumer that never enables traffic — pays nothing: flipping it on bumps the toggle
+/// generation and the resident tiles re-tessellate with the traffic layer through the existing
+/// worker pool (nothing refetched, nothing evicted). It also flips a per-frame draw guard so a
+/// toggle-off stops the overlay drawing immediately, before that re-tessellation lands.
+///
+/// The per-segment colours arrive separately through
+/// [`setTrafficSpeeds`](Java_com_vayunmathur_library_map_MapNative_setTrafficSpeeds); this call
+/// is only the geometry gate. Its own entry point rather than a fourth argument to [`setLayers`]
+/// so the existing layer call keeps its shape.
+#[no_mangle]
+pub extern "system" fn Java_com_vayunmathur_library_map_MapNative_setTrafficEnabled<'l>(
+    _env: JNIEnv<'l>,
+    _class: JClass<'l>,
+    handle: jlong,
+    enabled: jboolean,
+) {
+    if let Some(map) = handle_mut(handle) {
+        let on = enabled != 0;
+        // The renderer's per-frame draw guard, set every call so it tracks the toggle even
+        // when the tessellation state is otherwise unchanged.
+        map.renderer.set_traffic_enabled(on);
+        // Re-use the current POI/transit/kinds snapshot and flip only traffic, so this
+        // shares the one generation counter with setLayers rather than racing a second.
+        let (current, kinds, _) = map.toggles.get();
+        let wanted = LayerToggles { traffic: on, ..current };
+        if map.toggles.set(wanted, kinds) {
+            log_info(&format!("traffic layer {}", if on { "on" } else { "off" }));
+        }
+    }
+}
+
+/// Push the live-traffic colour table: `ids[i]` is a segment's `component_id` and
+/// `colors[i]` the fully-resolved ARGB the device wants drawn for it.
+///
+/// Two parallel arrays rather than a packed buffer, agreed with the device workstream: it is
+/// what a Kotlin caller already has in hand (a `LongArray` of ids and an `IntArray` of ARGB
+/// from its own palette), and it crosses the boundary in two bulk `get_*_array_region` reads
+/// with no per-element JNI traffic. The device owns the theme, so the colours are final here —
+/// the renderer only looks them up.
+///
+/// Replacing the whole table each call, not merging: a viewport's worth of readings arrives at
+/// once, and a stale id left behind would colour a road the latest data no longer covers.
+/// Ids absent from the table draw nothing (the basemap road shows through), which is the
+/// no-data behaviour. Mismatched lengths are truncated to the shorter. This is a pure
+/// state swap — no tessellation and no upload — so it is the recolour hot path and is cheap.
+#[no_mangle]
+pub extern "system" fn Java_com_vayunmathur_library_map_MapNative_setTrafficSpeeds<'l>(
+    env: JNIEnv<'l>,
+    _class: JClass<'l>,
+    handle: jlong,
+    ids: JLongArray<'l>,
+    colors: JIntArray<'l>,
+) {
+    let Some(map) = handle_mut(handle) else { return };
+    let id_len = env.get_array_length(&ids).unwrap_or(0).max(0) as usize;
+    let color_len = env.get_array_length(&colors).unwrap_or(0).max(0) as usize;
+    let n = id_len.min(color_len);
+    if n == 0 {
+        // An empty push is a clear: the host has no readings for the current viewport.
+        map.renderer.clear_traffic();
+        return;
+    }
+    let mut id_buf = vec![0i64; n];
+    let mut color_buf = vec![0i32; n];
+    if env.get_long_array_region(&ids, 0, &mut id_buf).is_err()
+        || env.get_int_array_region(&colors, 0, &mut color_buf).is_err()
+    {
+        log("the traffic arrays could not be read; leaving the colours unchanged");
+        return;
+    }
+    // The bit pattern is what matters: a Kotlin colour is a signed `int` and an id is a signed
+    // `long`, and both reinterpret to the unsigned the renderer keys and paints with.
+    let ids_u64: Vec<u64> = id_buf.into_iter().map(|v| v as u64).collect();
+    let colors_u32: Vec<u32> = color_buf.into_iter().map(|v| v as u32).collect();
+    map.renderer.set_traffic_speeds(&ids_u64, &colors_u32);
+}
+
+/// Take the live-traffic overlay away: the toggle went off, or the viewport moved off the
+/// squares the host has readings for.
+///
+/// Clears the pushed colours so the overlay stops drawing on the very next frame, without
+/// waiting for the toggle-driven re-tessellation to evict the geometry. Cheap and idempotent,
+/// like [`clearRegionMask`](Java_com_vayunmathur_library_map_MapNative_clearRegionMask).
+#[no_mangle]
+pub extern "system" fn Java_com_vayunmathur_library_map_MapNative_clearTraffic<'l>(
+    _env: JNIEnv<'l>,
+    _class: JClass<'l>,
+    handle: jlong,
+) {
+    if let Some(map) = handle_mut(handle) {
+        map.renderer.clear_traffic();
     }
 }
 
@@ -939,6 +1223,32 @@ pub extern "system" fn Java_com_vayunmathur_library_map_MapNative_pickLabels<'l>
         let _ = env.set_object_array_element(&out, i as i32, js);
     }
     out
+}
+
+/// Pick the renderer-drawn marker under a tap: the id-buffer readback path.
+///
+/// `x`/`y` are Dp from the viewport top-left, converted to device px with the last frame's
+/// density (the same conversion [`pickLabels`](Java_com_vayunmathur_library_map_MapNative_pickLabels)
+/// makes), because the id buffer is device-px. Returns the tapped marker's own id — the value the
+/// host set on it in [`setMarkers`](Java_com_vayunmathur_library_map_MapNative_setMarkers) — so the
+/// host rejoins the tap to its feature without matching on position, or `0` when the tap hit no
+/// marker. That replaces the Compose CPU hit-test, which trailed the basemap on a pan and could not
+/// place a pin's box under tilt at all.
+#[no_mangle]
+pub extern "system" fn Java_com_vayunmathur_library_map_MapNative_pickAt<'l>(
+    _env: JNIEnv<'l>,
+    _class: JClass<'l>,
+    handle: jlong,
+    x_dp: jfloat,
+    y_dp: jfloat,
+) -> jlong {
+    let Some(map) = handle_mut(handle) else { return 0 };
+    let density = map.density;
+    // Negative Dp is off the top-left of the viewport; clamp to zero before scaling so the cast to
+    // an unsigned device coordinate cannot wrap. The native side clamps the far edges to the extent.
+    let x = (x_dp.max(0.0) * density).round() as u32;
+    let y = (y_dp.max(0.0) * density).round() as u32;
+    map.renderer.pick_at(x, y) as jlong
 }
 
 fn handle_mut(handle: jlong) -> Option<&'static mut MapHandle> {

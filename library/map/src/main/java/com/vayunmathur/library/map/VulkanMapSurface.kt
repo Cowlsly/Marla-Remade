@@ -54,6 +54,27 @@ internal fun VulkanMapSurface(
     userPuck: UserPuck? = null,
     /** Dim everything outside the administrative region this names. `null` draws no mask. */
     regionMask: RegionMask? = null,
+    /**
+     * The live-traffic colour table. `null` or an empty table clears the overlay; otherwise its
+     * `component_id → ARGB` entries are pushed to the renderer. Has no visible effect unless
+     * [LayerOptions.traffic] is on.
+     */
+    trafficColors: TrafficColorTable? = null,
+    /**
+     * The navigation route to draw inside the renderer's frame. `null` or an all-empty
+     * overlay draws nothing. Pushed like [regionMask], out of band from the frame loop, so
+     * it pans in lock-step with the basemap.
+     */
+    route: RouteOverlay? = null,
+    /** App pins the renderer draws as billboarded sprites; empty draws none. */
+    markers: List<MapMarker> = emptyList(),
+    /**
+     * Simulated transit vehicles the renderer draws as billboarded sprites, on the same shared
+     * sprite path as [markers] but pushed on their own ~1 Hz cadence; empty draws none. Kept apart
+     * from [markers] so a vehicle recompute does not churn the pins and the moving sprites stay out
+     * of the pin tap-pick.
+     */
+    vehicles: List<MapMarker> = emptyList(),
     modifier: Modifier = Modifier,
     onFrame: () -> Unit = {},
     fallback: @Composable (MapRenderState.Unavailable) -> Unit = {},
@@ -71,7 +92,14 @@ internal fun VulkanMapSurface(
         cameraState.labelQueryProvider = { box: DpRect, layerIds: Set<String> ->
             renderer.pickLabels(box, layerIds)
         }
-        onDispose { cameraState.labelQueryProvider = null }
+        // The marker pick counterpart: taps resolve to a renderer-drawn pin's id through the id
+        // buffer. Cleared on dispose so a projection without a live renderer answers 0, not a dead
+        // handle.
+        cameraState.markerPickProvider = { xDp: Float, yDp: Float -> renderer.pickAt(xDp, yDp) }
+        onDispose {
+            cameraState.labelQueryProvider = null
+            cameraState.markerPickProvider = null
+        }
     }
 
     DisposableEffect(host) { onDispose { host.dispose() } }
@@ -114,6 +142,34 @@ internal fun VulkanMapSurface(
 
     // Same reasoning as the puck: a selection arrives from a tap, not from the frame loop.
     LaunchedEffect(regionMask, host) { renderer.setRegionMask(regionMask) }
+
+    // The traffic colour table: pushed like the region mask, out of band from the frame loop.
+    // Keyed on the table's *value* (content equality) so a host rebuilding an identical table
+    // on recomposition does not re-push. `null` or empty clears — a pure state swap either way,
+    // no tessellation. The layer-10 on/off gate rides `layerOptions` above, not this.
+    LaunchedEffect(trafficColors, host) {
+        val table = trafficColors
+        if (table == null || table.isEmpty()) {
+            renderer.clearTraffic()
+        } else {
+            renderer.setTrafficSpeeds(table.ids, table.argb)
+        }
+    }
+
+    // The route: pushed like the region mask, out of band from the frame loop. Keyed on the
+    // overlay's *value* (data-class equality) so the phone rebuilding an identical route on
+    // recomposition does not re-tessellate. `null` or an all-empty overlay clears it.
+    LaunchedEffect(route, host) { renderer.setRoute(route) }
+
+    // App pins: pushed like the puck, out of band from the frame loop, so they pan and tilt in
+    // lock-step with the basemap. Keyed on the list's value so an identical set rebuilt on
+    // recomposition does not re-push; an empty list clears them.
+    LaunchedEffect(markers, host) { renderer.setMarkers(markers) }
+
+    // Simulated transit vehicles: pushed like the pins but on their own ~1 Hz cadence, keyed on the
+    // list's value so an identical recompute does not re-push. An empty list clears them, which is
+    // how the ticker stops them when the transit toggle goes off or the surface is hidden.
+    LaunchedEffect(vehicles, host) { renderer.setVehicles(vehicles) }
 
     // Live connectivity, replacing a single sample taken in onSurfaceTextureAvailable.
     // Collected here rather than inside the renderer so every MapNative call stays on the

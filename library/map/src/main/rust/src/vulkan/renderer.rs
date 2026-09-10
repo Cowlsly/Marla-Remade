@@ -1,7 +1,8 @@
 //! The frame: tile residency, and one render pass per frame.
 
 use crate::camera::Camera;
-use crate::overlay::{RouteMesh, RoutePlacement};
+use crate::marker::{Marker, MARKER_SIZE_DP};
+use crate::overlay::{RouteMesh, RoutePlacement, RouteSegmentRange};
 use crate::style::paint::Stroke;
 use crate::style::{Anchor, Layer, LayerKind, Palette};
 use crate::tile::geometry::{self, TileMesh};
@@ -9,7 +10,8 @@ use crate::tile::select;
 use crate::vulkan::buffers::Buffer;
 use crate::vulkan::context::{ANativeWindow, Context};
 use crate::vulkan::images::{AtlasSet, SampledImage};
-use crate::vulkan::pipeline::{Pipelines, Push};
+use crate::vulkan::pick::Pick;
+use crate::vulkan::pipeline::{Pipelines, Push, MORPH_NONE};
 use crate::vulkan::swapchain::Swapchain;
 use ash::vk;
 use std::cell::Cell;
@@ -39,18 +41,74 @@ struct LayerBuffers {
 /// One tile's geometry, resident on the GPU.
 struct ResidentTile {
     layers: Vec<LayerBuffers>,
+    /// The tile's extruded 3D buildings, or `None` below z14 / where the tile has none. Drawn in
+    /// its own depth-tested pass ([`Renderer::record_buildings`]), not the flat layer loop.
+    buildings: Option<BuildingBuffers>,
+    /// The tile's DEM-displaced ground grid, or `None` where the tile carries no heightmap. Drawn
+    /// in its own depth-tested pass ([`Renderer::record_terrain`]) before the flat layer loop; a
+    /// tile with no terrain draws its flat `earth` fill in the layer loop as before.
+    terrain: Option<TerrainBuffers>,
     /// The region shapes in this tile, for the selection mask. Uploaded with the rest of the
     /// tile so selecting a region costs no tessellation and no allocation.
     regions: Vec<RegionBuffers>,
+    /// The live-traffic component segments in this tile, each keyed by its `component_id`.
+    /// Uploaded with the rest of the tile; coloured per frame from the pushed table so a new
+    /// speed reading never re-uploads or re-tessellates them.
+    traffic: Vec<TrafficBuffers>,
     /// Shaped symbol candidates (CPU-side): the renderer emits quads per frame
     /// at the frame's text size. Shaped once on the worker thread.
     labels: Vec<geometry::ShapedLabel>,
+    /// Per-lane turn arrows (CPU-side): placed once on the worker thread from the archive's
+    /// turn-lane table. The renderer builds their triangles per frame — rotated, scaled to a screen
+    /// size and offset into their lane — because all three follow the camera, exactly as the lane
+    /// dividers' offset does. Empty below the lane zoom gate and on any tile with no `turn:lanes`.
+    arrows: Vec<crate::tile::arrow::ArrowInstance>,
     z: u8,
     x: u32,
     y: u32,
+    /// The clock (`Camera::time_seconds`) when this tile's GPU buffers were created, in the
+    /// same epoch as `Push.misc.w`. WS-D ramps the tile's `Push.morph.x` opacity from 0 to 1
+    /// over [`LOD_FADE_SECONDS`] from this stamp so a finer LOD fades in over its coarse
+    /// ancestor instead of popping.
+    uploaded_at: f32,
     /// The toggle generation this was tessellated at — see
     /// [`crate::style::SharedToggles`].
     generation: u32,
+}
+
+/// One live-traffic component segment, on the GPU.
+///
+/// The line pipeline's own vertex format, so it draws exactly like a road — the only thing
+/// that differs is the colour, which is looked up from [`Renderer::traffic_colors`] by
+/// [`id`](Self::id) at draw time rather than coming from a style layer.
+struct TrafficBuffers {
+    /// The segment's `component_id`, the key into the pushed colour table.
+    id: u64,
+    vertices: Buffer,
+    indices: Buffer,
+    index_count: u32,
+}
+
+/// One tile's extruded 3D buildings, on the GPU.
+///
+/// One combined mesh per tile — every building in the tile, walls and roofs — in the 7-float
+/// `tess::roof` vertex format, drawn depth-tested through [`Pipelines::building`]. `None` on a tile
+/// with no buildings, which is every tile below z14.
+struct BuildingBuffers {
+    vertices: Buffer,
+    indices: Buffer,
+    index_count: u32,
+}
+
+/// One tile's DEM-displaced ground grid, on the GPU (WS-G, 3D terrain relief).
+///
+/// One combined mesh per tile in the 6-float `tess::terrain` vertex format (position + height +
+/// normal), drawn depth-tested through [`Pipelines::terrain`] before the flat layer loop. `None` on
+/// a tile with no heightmap, which then draws its flat `earth` fill instead.
+struct TerrainBuffers {
+    vertices: Buffer,
+    indices: Buffer,
+    index_count: u32,
 }
 
 /// One region's tessellated shape within one tile, on the GPU.
@@ -106,30 +164,50 @@ pub struct UserPuck {
 
 /// Something drawn on top of every tile, from the same camera value as the tiles.
 ///
-/// One variant today. It is an enum rather than an `Option<UserPuck>` field because the
-/// pins are the next thing to move in here, and the pass below is written as "draw the
-/// overlays this frame has" so they can arrive one at a time.
+/// Every variant draws from the shared unit quad and is pure `Copy`/owned state — no vertex
+/// buffers with a retirement rule — which is why the route line is deliberately *not* one of
+/// these (it lives in [`Renderer::route`] beside [`Renderer::selected_region`]).
 ///
-/// The route line is deliberately *not* one of these: every variant here draws from the
-/// shared unit quad and is pure `Copy` state, while a route owns vertex and index buffers
-/// with a retirement rule. It lives in [`Renderer::route`] beside
-/// [`Renderer::selected_region`] for the same reason that one does.
+/// Draw order is fixed in [`record_overlays`](Renderer::record_overlays), not by position in the
+/// vec: markers (and WS-F's vehicles) draw first, the puck last, so the user's own location stays
+/// on top of the pins around it.
+///
+/// # The shared sprite/billboard contract (WS-C owns; WS-F extends)
+///
+/// [`Markers`](Self::Markers) draws app pins as billboarded atlas sprites (see [`crate::marker`]).
+/// [`Vehicles`](Self::Vehicles) (WS-F) is a sibling arm for simulated transit vehicles that reuses
+/// the exact same [`draw_markers`](Renderer::draw_markers) path and sprite atlas — a vehicle is a
+/// [`Marker`] whose icon names a mode sprite (bus/tram/train/ferry) — so the bulk many-sprites case
+/// is one extra match arm and one bulk setter, with no new pipeline or atlas. Vehicles are pushed
+/// on their own ~1 Hz cadence, replaced as a set by [`set_vehicles`](Renderer::set_vehicles)
+/// independently of the app pins, and are deliberately *not* pickable (see
+/// [`pick_at`](Renderer::pick_at)) — a moving simulated sprite is not a tap target.
 enum Overlay {
     Puck(UserPuck),
+    /// App pins: parking, transit stops, search results, saved places, family members. Replaces
+    /// the Compose pin overlays so they pan and tilt in lock-step with the basemap.
+    Markers(Vec<Marker>),
+    /// WS-F simulated transit vehicles: a bus/tram/train/ferry sprite per in-service trip in the
+    /// visible bbox, pushed at ~1 Hz. Drawn through the same billboarded sprite path as
+    /// [`Markers`](Self::Markers), under the pins and the puck.
+    Vehicles(Vec<Marker>),
 }
 
 /// The navigation route, resident on the GPU.
 ///
 /// Uploaded once by [`Renderer::set_route`] and never touched again until the route
 /// changes: the mesh is zoom-independent by construction (see [`crate::overlay`]), so a
-/// frame does nothing but build one matrix and push two colour/width pairs. That is the
-/// difference between a route that costs nothing in a two-hour drive and one that
-/// re-tessellates on every zoom step.
+/// frame does nothing but build one matrix and push a casing plus one colour/width pair
+/// per coloured run. That is the difference between a route that costs nothing in a
+/// two-hour drive and one that re-tessellates on every zoom step.
 struct RouteBuffers {
     placement: RoutePlacement,
     vertices: Buffer,
     indices: Buffer,
     index_count: u32,
+    /// Each coloured run's slice of [`indices`](Self::indices) and its fill colour. The
+    /// casing draws the whole index buffer once; each fill draws one of these slices.
+    segments: Vec<RouteSegmentRange>,
 }
 
 /// Where `lon`/`lat` falls inside tile `z/x/y`, in tile-local 0..1, or `None` if it is outside.
@@ -202,6 +280,27 @@ const PUCK_CONE_HALF_STROKE_DP: f32 = 4.0;
 /// so a quad any tighter would clip the falloff.
 const PUCK_QUAD_DP: f32 = 28.0;
 
+/// The turn-arrow glyph: its screen size in Dp (the unit arrow spans roughly `-1..1`, so this is a
+/// touch under its half-extent), and its colour. A muted near-white so the arrows read on the dark
+/// carriageway without competing with the route line's saturated blue.
+const ARROW_DP: f32 = 9.0;
+const ARROW_COLOR: u32 = 0xE6EE_F1F5;
+
+/// Stroke width of a live-traffic segment, in Dp.
+///
+/// A single constant width rather than a style ramp: the overlay is one legible band drawn
+/// over the road casing, not a road class that has to grow and shrink with zoom. A shade
+/// wider than a minor road so the colour reads as an overlay on top of the network rather
+/// than as the road itself. Applied as a per-frame push constant (halved and density-scaled
+/// like every other stroke), so it re-tessellates nothing.
+const TRAFFIC_WIDTH_DP: f32 = 4.0;
+
+/// The shallowest camera zoom the 3D buildings draw at, matching the `buildings` style layer's
+/// `minzoom`. A tile may carry building geometry as a deeper-zoom ancestor stand-in, but the pass
+/// is gated on the camera's own zoom so buildings appear only once the map is zoomed in far enough
+/// for the extruded detail to read — below it the map is the flat basemap it always was.
+const BUILDINGS_DRAW_MIN_ZOOM: f64 = 14.0;
+
 pub struct Renderer {
     context: Context,
     swapchain: Swapchain,
@@ -258,6 +357,26 @@ pub struct Renderer {
     selected_region: Option<u64>,
     /// The navigation route line, or `None` when no route is set.
     route: Option<RouteBuffers>,
+    /// The live-traffic colour table: `component_id → ARGB`, pushed from the host each update.
+    ///
+    /// The device owns the theme and palette, so it sends fully-resolved colours; the renderer
+    /// only looks them up. A segment whose id is absent draws nothing (see [`record_traffic`]),
+    /// which keeps the overlay to the roads traffic actually covers rather than flooding the
+    /// whole network with a neutral tint. Replacing this map is the whole of a recolour — no
+    /// geometry is touched — so new speeds cost no tessellation.
+    ///
+    /// [`record_traffic`]: Self::record_traffic
+    traffic_colors: HashMap<u64, u32>,
+    /// Whether the traffic overlay is drawn this frame. Set from the host's layer toggle; the
+    /// geometry is also gated at tessellation, so this is the cheap per-frame guard that stops
+    /// resident traffic meshes drawing in the window before a toggle-off re-tessellation lands.
+    traffic_enabled: bool,
+    /// The offscreen id-buffer pass, for tap picking. Self-contained (its own render pass, pipeline
+    /// and target); invoked out of band by [`pick_at`](Self::pick_at), never in the frame loop.
+    pick: Pick,
+    /// The last camera a frame was recorded with, so [`pick_at`](Self::pick_at) can place markers
+    /// against the frame the user is actually looking at. `None` before the first frame.
+    last_camera: Option<Camera>,
 }
 
 /// One placed label as the pick path sees it: everything `pickLabels` needs
@@ -406,6 +525,10 @@ impl Renderer {
             )?,
         };
 
+        // The offscreen id-buffer pass for tap picking. Self-contained and format-stable, so it is
+        // built once here and survives swapchain rebuilds (only its target is resized).
+        let pick = Pick::new(&context)?;
+
         Ok(Renderer {
             context,
             swapchain,
@@ -431,6 +554,10 @@ impl Renderer {
             quad,
             selected_region: None,
             route: None,
+            traffic_colors: HashMap::new(),
+            traffic_enabled: false,
+            pick,
+            last_camera: None,
         })
     }
 
@@ -443,6 +570,47 @@ impl Renderer {
         self.overlays.retain(|overlay| !matches!(overlay, Overlay::Puck(_)));
         if let Some(puck) = puck {
             self.overlays.push(Overlay::Puck(puck));
+        }
+    }
+
+    /// Replace the app's pins with `markers`, or clear them with an empty slice.
+    ///
+    /// Pure state like [`set_user_puck`](Self::set_user_puck): the host pushes the whole visible
+    /// pin set out of band (from a tap, a search, a family fix), and whichever frame runs next
+    /// draws it. Replacing rather than merging, for the same reason [`set_traffic_speeds`] does —
+    /// a stale pin left behind would sit under the finger and pick wrong.
+    ///
+    /// Cheap: the geometry is the shared unit quad billboarded per marker in
+    /// [`record_overlays`](Self::record_overlays), so nothing is tessellated or uploaded here.
+    /// WS-F's `set_vehicles` is modelled on this exactly.
+    ///
+    /// [`set_traffic_speeds`]: Self::set_traffic_speeds
+    pub fn set_markers(&mut self, markers: Vec<Marker>) {
+        self.overlays.retain(|overlay| !matches!(overlay, Overlay::Markers(_)));
+        if !markers.is_empty() {
+            self.overlays.push(Overlay::Markers(markers));
+        }
+    }
+
+    /// Replace the simulated transit vehicles with `vehicles`, or clear them with an empty vec.
+    ///
+    /// Modelled exactly on [`set_markers`](Self::set_markers): the host's 1 Hz ticker recomputes the
+    /// in-service vehicles for the visible bbox and pushes the whole set out of band, and whichever
+    /// frame runs next draws it. Replacing rather than merging so a trip that has ended, left the
+    /// bbox, or been cancelled drops out cleanly rather than lingering at a stale position.
+    ///
+    /// A separate [`Overlay`] arm from the pins so the two are pushed on their own cadences — the
+    /// vehicles churn every second while the pins change only on a tap/search — and so the vehicles
+    /// stay out of the marker id-buffer pick (see [`pick_at`](Self::pick_at)).
+    ///
+    /// Cheap in the same sense as [`set_markers`](Self::set_markers): the geometry is the shared
+    /// unit quad billboarded per vehicle in [`record_overlays`](Self::record_overlays), so nothing
+    /// is tessellated or uploaded here. Between the 1 Hz recomputes the sprites hold their last
+    /// pushed position; the native side folds schedule + realtime delay into each recompute.
+    pub fn set_vehicles(&mut self, vehicles: Vec<Marker>) {
+        self.overlays.retain(|overlay| !matches!(overlay, Overlay::Vehicles(_)));
+        if !vehicles.is_empty() {
+            self.overlays.push(Overlay::Vehicles(vehicles));
         }
     }
 
@@ -497,6 +665,7 @@ impl Renderer {
                 vertices,
                 indices,
                 index_count: mesh.indices.len() as u32,
+                segments: mesh.segments.clone(),
             });
         }
         Ok(())
@@ -510,6 +679,43 @@ impl Renderer {
     /// from a tap, not from the frame loop.
     pub fn set_region_mask(&mut self, region: Option<u64>) {
         self.selected_region = region;
+    }
+
+    /// Replace the live-traffic colour table with a host-pushed `component_id → ARGB` set.
+    ///
+    /// `ids` and `colors` are parallel: `colors[i]` is the fully-resolved ARGB the device
+    /// (which owns the theme and palette) wants drawn for segment `ids[i]`. A mismatched pair
+    /// of lengths is truncated to the shorter, so a malformed push degrades to fewer coloured
+    /// segments rather than a panic.
+    ///
+    /// This is the entire cost of a recolour: the map is rebuilt and read at draw, and no
+    /// vertex buffer is touched — the geometry was tessellated once and stays. Ids not present
+    /// after this call draw nothing (see [`record_traffic`](Self::record_traffic)).
+    pub fn set_traffic_speeds(&mut self, ids: &[u64], colors: &[u32]) {
+        let n = ids.len().min(colors.len());
+        self.traffic_colors.clear();
+        self.traffic_colors.reserve(n);
+        for (&id, &color) in ids.iter().zip(colors).take(n) {
+            self.traffic_colors.insert(id, color);
+        }
+    }
+
+    /// Drop every pushed traffic colour, so the overlay draws nothing until the next push.
+    ///
+    /// What the host calls on toggle-off or when the viewport moves off the fetched squares:
+    /// it clears the visible overlay in the very next frame without waiting for the
+    /// toggle-driven re-tessellation to evict the geometry.
+    pub fn clear_traffic(&mut self) {
+        self.traffic_colors.clear();
+    }
+
+    /// Turn drawing of the traffic overlay on or off for subsequent frames.
+    ///
+    /// The geometry is gated at tessellation by the same toggle, so this is only the
+    /// per-frame guard that stops resident meshes drawing in the brief window between a
+    /// toggle-off and the re-tessellation that removes them.
+    pub fn set_traffic_enabled(&mut self, enabled: bool) {
+        self.traffic_enabled = enabled;
     }
 
     /// The region whose shape covers this point at the requested administrative level.
@@ -678,13 +884,120 @@ impl Renderer {
                 });
             }
         }
+        let mut traffic = Vec::with_capacity(mesh.traffic.len());
+        for segment in &mesh.traffic {
+            if segment.indices.is_empty() {
+                continue;
+            }
+            unsafe {
+                let vertices = Buffer::upload(
+                    &self.context.instance,
+                    self.context.physical_device,
+                    &self.context.device,
+                    vk::BufferUsageFlags::VERTEX_BUFFER,
+                    &segment.vertices,
+                )?;
+                let indices = match Buffer::upload(
+                    &self.context.instance,
+                    self.context.physical_device,
+                    &self.context.device,
+                    vk::BufferUsageFlags::INDEX_BUFFER,
+                    &segment.indices,
+                ) {
+                    Ok(buffer) => buffer,
+                    Err(e) => {
+                        vertices.destroy(&self.context.device);
+                        return Err(e);
+                    }
+                };
+                traffic.push(TrafficBuffers {
+                    id: segment.id,
+                    vertices,
+                    indices,
+                    index_count: segment.indices.len() as u32,
+                });
+            }
+        }
+        // The tile's 3D buildings, if any: one combined mesh, uploaded like the rest.
+        let buildings = if mesh.buildings.indices.is_empty() {
+            None
+        } else {
+            unsafe {
+                let vertices = Buffer::upload(
+                    &self.context.instance,
+                    self.context.physical_device,
+                    &self.context.device,
+                    vk::BufferUsageFlags::VERTEX_BUFFER,
+                    &mesh.buildings.vertices,
+                )?;
+                let indices = match Buffer::upload(
+                    &self.context.instance,
+                    self.context.physical_device,
+                    &self.context.device,
+                    vk::BufferUsageFlags::INDEX_BUFFER,
+                    &mesh.buildings.indices,
+                ) {
+                    Ok(buffer) => buffer,
+                    Err(e) => {
+                        vertices.destroy(&self.context.device);
+                        return Err(e);
+                    }
+                };
+                Some(BuildingBuffers {
+                    vertices,
+                    indices,
+                    index_count: mesh.buildings.indices.len() as u32,
+                })
+            }
+        };
+        // The tile's terrain grid, if any: one combined mesh, uploaded like the buildings above.
+        let terrain = if mesh.terrain.indices.is_empty() {
+            None
+        } else {
+            unsafe {
+                let vertices = Buffer::upload(
+                    &self.context.instance,
+                    self.context.physical_device,
+                    &self.context.device,
+                    vk::BufferUsageFlags::VERTEX_BUFFER,
+                    &mesh.terrain.vertices,
+                )?;
+                let indices = match Buffer::upload(
+                    &self.context.instance,
+                    self.context.physical_device,
+                    &self.context.device,
+                    vk::BufferUsageFlags::INDEX_BUFFER,
+                    &mesh.terrain.indices,
+                ) {
+                    Ok(buffer) => buffer,
+                    Err(e) => {
+                        vertices.destroy(&self.context.device);
+                        return Err(e);
+                    }
+                };
+                Some(TerrainBuffers {
+                    vertices,
+                    indices,
+                    index_count: mesh.terrain.indices.len() as u32,
+                })
+            }
+        };
         let tile = ResidentTile {
             layers,
+            buildings,
+            terrain,
             regions,
+            traffic,
             labels: mesh.labels.clone(),
+            arrows: mesh.arrows.clone(),
             z: mesh.z,
             x: mesh.x,
             y: mesh.y,
+            // Stamp the tile with the latest frame clock so the fade below measures from the
+            // moment its GPU buffers landed. Before the first frame there is no clock yet;
+            // 0.0 makes `now - uploaded_at` large, so a startup tile is fully opaque at once
+            // (nothing is under it to fade over anyway).
+            uploaded_at: self.last_camera.map(|c| c.time_seconds).unwrap_or(0.0),
             generation: mesh.generation,
         };
         if let Some(previous) = self.tiles.insert(key, tile) {
@@ -768,6 +1081,18 @@ impl Renderer {
                     region.vertices.destroy(device);
                     region.indices.destroy(device);
                 }
+                for segment in &tile.traffic {
+                    segment.vertices.destroy(device);
+                    segment.indices.destroy(device);
+                }
+                if let Some(buildings) = &tile.buildings {
+                    buildings.vertices.destroy(device);
+                    buildings.indices.destroy(device);
+                }
+                if let Some(terrain) = &tile.terrain {
+                    terrain.vertices.destroy(device);
+                    terrain.indices.destroy(device);
+                }
             }
             false
         });
@@ -803,6 +1128,7 @@ impl Renderer {
         clear: u32,
         filter: &crate::style::KindFilter,
     ) -> Result<bool, String> {
+        self.last_camera = Some(*camera);
         if self.width == 0 || self.height == 0 {
             return Ok(true);
         }
@@ -927,6 +1253,42 @@ impl Renderer {
     /// The body of [`record`](Self::record): split out so the borrow structure
     /// reads linearly. All Vulkan calls go through raw handles copied out of
     /// `self` at each step; `record_symbol` is the only `&mut self` callee.
+    ///
+    /// # Draw order (the contract A/C/D/E/G extend)
+    ///
+    /// Everything happens in one subpass, so order *is* correctness for the flat layers (they
+    /// blend, depth-off) and the depth attachment resolves it for the 3D ones. The sequence is:
+    ///
+    /// 0. **`record_terrain`** (WS-G) — the DEM-displaced ground, depth-tested, drawn first so it is
+    ///    the ground the flat layers sit over. A tile with no heightmap draws nothing here and keeps
+    ///    its flat `earth` fill in step 1; at pitch 0 the grid collapses to the flat footprint.
+    /// 1. **Basemap layers**, layer-major across tiles, coarsest tile first (fill/line, then
+    ///    symbols per layer). WS-D scales each tile draw's alpha through `Push.morph.x`.
+    /// 2. **`record_traffic`** — basemap detail, so it dims with the region scrim (WS-B animates
+    ///    it via `Push.misc.w`).
+    /// 3. **`record_arrows`** — lane turn arrows over the roads.
+    /// 4. **`record_region_mask`** — stencil + scrim; dims 1–3, not the route/puck.
+    /// 5. **`record_route`** — over the scrim (a followed route must not dim), under the puck.
+    /// 6. **`record_overlays`** — markers (app pins; WS-F vehicles) billboarded upright under tilt,
+    ///    then the puck on top; last.
+    ///
+    /// Where a new workstream slots in: **WS-A buildings** and **WS-G terrain** draw with the
+    /// depth-enabled pipeline; terrain goes *before* step 1 (it is the ground the flat layers
+    /// drape over / sit above) and buildings *after* step 1 at z14+ so they occlude the basemap
+    /// by depth. **WS-C markers + id pass** slot beside `record_overlays`. **WS-E curved labels**
+    /// ride the symbol path inside step 1. Each adds its own pass/branch; keep this list current
+    /// and serialise merges so the passes do not collide.
+    ///
+    /// # Flat layers over terrain: the drape-vs-offset choice (WS-G)
+    ///
+    /// The flat 2D layers (roads, water, landuse) **stay at z = 0** and draw depth-off, painting
+    /// over the terrain in draw order rather than draping onto it. WS0's `Push` z semantics already
+    /// say the vertex z is 0 for every flat 2D layer, and those layers pass `Depth::Off`, so terrain
+    /// writes depth for the 3D layers (buildings occlude against it) while the flat layers paint on
+    /// top with no z-fighting and need no polygon depth offset. Draping — sampling the same
+    /// heightmap for each flat layer's z — would lift roads and water onto the relief but change
+    /// every flat layer's vertex format and re-tessellation, so it is deliberately not done here;
+    /// under the 60° pitch cap and ~30 m DEM the painted-over approximation reads correctly.
     #[allow(clippy::too_many_arguments)]
     unsafe fn record_inner(
         &mut self,
@@ -951,16 +1313,18 @@ impl Renderer {
             .map_err(|e| format!("begin_command_buffer {e:?}"))?;
 
         // One per attachment, in render-pass order, and the layout differs: multisampled is
-        // [colour, resolve, stencil] while single-sampled is [colour, stencil]. The stencil is
-        // therefore at index 2 or index 1 depending on the device, so both carry the stencil
-        // clear — the resolve target is `DONT_CARE` and ignores its entry, and a trailing extra
-        // entry is allowed. Clearing to zero is what the scrim reads as "outside the region".
-        let stencil_clear =
+        // [colour, resolve, depth-stencil] while single-sampled is [colour, depth-stencil]. The
+        // depth-stencil is therefore at index 2 or index 1 depending on the device, so both
+        // trailing entries carry the same depth+stencil clear — the resolve target is `DONT_CARE`
+        // and ignores its entry, and a trailing extra entry is allowed. Depth clears to the far
+        // plane (1.0) for the 3D layers; stencil clears to zero, which the scrim reads as
+        // "outside the region".
+        let depth_stencil_clear =
             vk::ClearValue { depth_stencil: vk::ClearDepthStencilValue { depth: 1.0, stencil: 0 } };
         let clear_values = [
             vk::ClearValue { color: vk::ClearColorValue { float32: argb_to_rgba(clear) } },
-            stencil_clear,
-            stencil_clear,
+            depth_stencil_clear,
+            depth_stencil_clear,
         ];
         let pass = vk::RenderPassBeginInfo::default()
             .render_pass(render_pass)
@@ -1007,6 +1371,30 @@ impl Renderer {
         let mut ordered: Vec<u64> = self.tiles.keys().copied().collect();
         ordered.sort_by_key(|k| self.tiles.get(k).map(|t| t.z).unwrap_or(0));
 
+        // WS-D LOD cross-fade: one opacity per resident tile for this frame, written into each
+        // tile draw's `Push.morph.x` below. A finer tile ramps 0→1 over `LOD_FADE_SECONDS` from
+        // its `uploaded_at` stamp *while* a coarse ancestor is resident to stand in under the gap
+        // (see `tile_lod_alpha`); a tile with nothing beneath it stays fully opaque, so a freshly
+        // fetched area never fades up from the background. Computed once here, not per layer.
+        let now = camera.time_seconds;
+        let resident: HashSet<u64> = self.tiles.keys().copied().collect();
+        let tile_alpha: HashMap<u64, f32> = ordered
+            .iter()
+            .map(|&key| {
+                let uploaded_at = self.tiles.get(&key).map(|t| t.uploaded_at).unwrap_or(0.0);
+                (
+                    key,
+                    select::tile_lod_alpha(
+                        key,
+                        uploaded_at,
+                        now,
+                        select::LOD_FADE_SECONDS,
+                        &resident,
+                    ),
+                )
+            })
+            .collect();
+
         // Symbol pre-pass: collision runs GLOBALLY across tiles and layers, but
         // draws stay per (tile, layer) below. Build one candidate per shaped
         // label with its screen box at this frame's text size, run the greedy
@@ -1017,6 +1405,19 @@ impl Renderer {
         // names, kinds and anchor geo — refreshed every frame so pickLabels
         // answers the frame the user sees, not a stale one.
         self.refresh_placed(camera, layers, &accepted, extent);
+
+        // 3D terrain (WS-G): the DEM-displaced ground, drawn first (step 0) with depth on so it is
+        // the ground the flat layers below sit over. A tile with no heightmap draws nothing here and
+        // keeps its flat `earth` fill in the loop; at pitch 0 the grid collapses to the flat
+        // footprint, so the overhead map is unchanged.
+        self.record_terrain(command_buffer, camera, layers, palette, &mut submitted);
+
+        // Symbol layers are collected here and drawn after the buildings pass rather than inside
+        // the loop. Buildings have no depth interaction with symbols (the symbol pipelines are
+        // `Depth::Off`, so they can never *fail* a test) — whichever is issued last simply paints
+        // over the other, and issuing buildings last hid every tile-baked POI icon and label
+        // behind them. `(key, layer index)`, replayed in the same order the loop met them.
+        let mut deferred_symbols: Vec<(u64, usize)> = Vec::new();
 
         for (index, layer) in layers.iter().enumerate() {
             // `min_zoom`/`max_zoom` are a data-and-cost gate, not paint: they say which zooms
@@ -1066,20 +1467,11 @@ impl Renderer {
             };
             for key in &ordered {
                 // Symbol layers emit per frame at the frame's text size from the
-                // tile's shaped candidates (see above): fetch the tile by key so
-                // `record_symbol` can take `&mut self` for transient uploads.
+                // tile's shaped candidates (see above): deferred to after the buildings
+                // pass so labels are not painted over, then drawn with `&mut self` for
+                // their transient uploads.
                 if layer.kind == LayerKind::Symbol {
-                    self.record_symbol(
-                        command_buffer,
-                        *key,
-                        index,
-                        layer,
-                        camera,
-                        palette,
-                        &accepted,
-                        &mut submitted,
-                        &mut bound,
-                    );
+                    deferred_symbols.push((*key, index));
                     continue;
                 }
                 // Copy the draw's inputs out, then issue them through the owned `device`
@@ -1101,6 +1493,11 @@ impl Renderer {
                         ));
                     }
                 }
+                // This tile's LOD cross-fade opacity for the frame (WS-D), applied through
+                // `Push.morph.x`. The fill fragment multiplies output alpha by it; the line path
+                // (owned by WS-B's `line.frag`) ignores `morph.x`, so road casings stay crisp
+                // while the fill fades — the fade reads as the flat basemap ramping in.
+                let tile_fade = tile_alpha.get(key).copied().unwrap_or(1.0);
                 for &(tz, tx, ty, kind, vbuf, ibuf, count, color_override, lane) in &draws
                 {
                     if bound != Some(kind) {
@@ -1153,7 +1550,8 @@ impl Renderer {
                         tile_to_clip: camera.tile_to_clip(tz, tx, ty),
                         color: argb_to_rgba(scale_alpha(base, opacity)),
                         line: [half_width_px, half_gap_px, layer.dash.0, layer.dash.1],
-                        misc: [camera.tile_span_px(tz), edge_aa, lateral_px, 0.0],
+                        misc: [camera.tile_span_px(tz), edge_aa, lateral_px, camera.time_seconds],
+                        morph: [tile_fade, 0.0, 0.0, 0.0],
                     };
                     let layout = self.pipelines.layout;
                     device.cmd_push_constants(
@@ -1184,13 +1582,366 @@ impl Renderer {
         // dimmed by it — a route you are following must not fade because a details sheet
         // is open. The route then goes under the puck, because the puck is where you are
         // and it has to stay visible where it sits on top of the line it is following.
+        // Traffic sits on the roads it colours, so it draws after the basemap layer loop but
+        // before the region scrim — it is basemap detail and should dim with everything else
+        // when a region is selected, unlike the route.
+        // 3D buildings: after the flat basemap so they paint over it, depth-tested so they occlude
+        // one another. Gated to z14+; at pitch 0 the building matrix collapses height to the
+        // footprint, so the flat overhead map is unchanged. Before the deferred symbols, so POI
+        // icons and labels are not buried behind a tower.
+        self.record_buildings(command_buffer, camera, layers, palette, &mut submitted);
+        for (key, index) in deferred_symbols {
+            self.record_symbol(
+                command_buffer,
+                key,
+                index,
+                &layers[index],
+                camera,
+                palette,
+                &accepted,
+                &mut submitted,
+                &mut bound,
+            );
+        }
+        self.record_traffic(command_buffer, camera, &mut submitted);
+        self.record_arrows(command_buffer, camera, layers, &mut submitted);
         self.record_region_mask(command_buffer, camera, &mut submitted);
         self.record_route(command_buffer, camera, &mut submitted);
-        self.record_overlays(command_buffer, camera, &mut submitted);
+        self.record_overlays(command_buffer, camera, palette, &mut submitted);
 
         self.submitted_draws.set(submitted);
         device.cmd_end_render_pass(command_buffer);
         device.end_command_buffer(command_buffer).map_err(|e| format!("end_command_buffer {e:?}"))
+    }
+
+    /// Draw the per-lane turn arrows: one straight-arrow glyph per marked lane, rotated to point
+    /// where the lane leads and pushed into its lane by the same lateral fan the dividers use.
+    ///
+    /// Built per frame — rotation, screen size and lane offset all follow the camera, exactly as
+    /// the dividers' offset does — and drawn through the **fill** pipeline as plain coloured
+    /// triangles, so it needs no glyph atlas and no new pipeline. Gated to the lane layer's zoom
+    /// floor (z16), so below it nothing is built or drawn.
+    unsafe fn record_arrows(
+        &mut self,
+        command_buffer: vk::CommandBuffer,
+        camera: &Camera,
+        layers: &[Layer],
+        submitted: &mut usize,
+    ) {
+        // The lane layer whose `spread`/`lanes` ramps decide the sideways offset. Without it there
+        // is no fan and every lane's arrow would stack on the centreline. Resolved through
+        // [`crate::style::road_lane_layer`], which is careful to pick the *road* lane layer and
+        // not the first layer that happens to carry a spread — see its doc comment.
+        let Some(lane_layer) = crate::style::road_lane_layer(layers) else { return };
+        let floor = camera.zoom.floor().clamp(0.0, 22.0) as u8;
+        if !lane_layer.draws_at(floor) {
+            return;
+        }
+        let density = camera.density;
+        let unit = crate::tile::arrow::unit_arrow_triangles();
+        // Build each tile's triangles first — this borrows `self.tiles` — then upload and draw,
+        // which takes `&mut self`. One batch per tile carries its own tile-to-clip matrix.
+        let mut batches: Vec<([f32; 16], Vec<f32>)> = Vec::new();
+        for tile in self.tiles.values() {
+            if tile.arrows.is_empty() {
+                continue;
+            }
+            let span = camera.tile_span_px(tile.z);
+            if span <= 0.0 {
+                continue;
+            }
+            let scale = ARROW_DP * density / span; // tile-local 0..1 units per unit-arrow coord
+            let mut verts: Vec<f32> = Vec::with_capacity(tile.arrows.len() * unit.len() * 2);
+            for a in &tile.arrows {
+                // Sideways into the lane, perpendicular to the road heading (not the glyph's turn).
+                let lateral = lane_layer.lane_offset_px(camera.zoom, density, a.ordinal, a.count, 255);
+                crate::tile::arrow::arrow_verts(a, scale, lateral / span, &mut verts);
+            }
+            if !verts.is_empty() {
+                batches.push((camera.tile_to_clip(tile.z, tile.x, tile.y), verts));
+            }
+        }
+        if batches.is_empty() {
+            return;
+        }
+        let color = argb_to_rgba(ARROW_COLOR);
+        for (tile_to_clip, verts) in batches {
+            let indices: Vec<u32> = (0..(verts.len() / 2) as u32).collect();
+            let push = Push {
+                tile_to_clip,
+                color,
+                line: [0.0; 4],
+                misc: [0.0, 0.0, 0.0, camera.time_seconds],
+                morph: MORPH_NONE,
+            };
+            self.draw_fill_batch(command_buffer, &verts, &indices, &push, submitted);
+        }
+    }
+
+    /// Upload one transient vertex/index pair and draw it through the fill pipeline (colour from
+    /// the push constant, no descriptor set). The arrow twin of [`draw_symbol_batch`]; buffers
+    /// retire on the frames-in-flight grace count like every other transient.
+    unsafe fn draw_fill_batch(
+        &mut self,
+        command_buffer: vk::CommandBuffer,
+        vertices: &[f32],
+        indices: &[u32],
+        push: &Push,
+        submitted: &mut usize,
+    ) {
+        let device = &self.context.device;
+        let Ok(vbuf) = Buffer::upload(
+            &self.context.instance,
+            self.context.physical_device,
+            device,
+            vk::BufferUsageFlags::VERTEX_BUFFER,
+            vertices,
+        ) else {
+            return;
+        };
+        let ibuf = match Buffer::upload(
+            &self.context.instance,
+            self.context.physical_device,
+            device,
+            vk::BufferUsageFlags::INDEX_BUFFER,
+            indices,
+        ) {
+            Ok(b) => b,
+            Err(_) => {
+                vbuf.destroy(device);
+                return;
+            }
+        };
+        device.cmd_bind_pipeline(command_buffer, vk::PipelineBindPoint::GRAPHICS, self.pipelines.fill);
+        device.cmd_push_constants(
+            command_buffer,
+            self.pipelines.layout,
+            vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT,
+            0,
+            push.as_bytes(),
+        );
+        device.cmd_bind_vertex_buffers(command_buffer, 0, &[vbuf.buffer], &[0]);
+        device.cmd_bind_index_buffer(command_buffer, ibuf.buffer, 0, vk::IndexType::UINT32);
+        device.cmd_draw_indexed(command_buffer, indices.len() as u32, 1, 0, 0, 0);
+        *submitted += 1;
+        self.transients.push(TransientBuffers { vbuf, ibuf, frames: FRAMES_IN_FLIGHT });
+    }
+
+    /// Draw the DEM-displaced ground grid: each resident tile's terrain mesh, depth-tested so hills
+    /// occlude what is behind them and let buildings on the far side of a ridge be hidden by it.
+    /// Drawn before the flat layer loop, so the flat 2D layers paint over it (see the drape-vs-offset
+    /// note on [`record_inner`](Self::record_inner)). A tile with no heightmap has no terrain mesh
+    /// and draws its flat `earth` fill in the loop instead; at pitch 0 the terrain vertex shader
+    /// collapses the grid to the flat footprint, so the overhead map is unchanged.
+    ///
+    /// The ground colour is the `earth` style layer's, resolved for this palette and its fill
+    /// opacity for this zoom — the same colour the flat earth fill would have used — pushed once and
+    /// shared by every tile. `line.x` carries the tile's world-px span, the scale that turns the
+    /// mesh's tile-normalised heights into the world-px height the WS0 matrix's `z` input expects.
+    unsafe fn record_terrain(
+        &self,
+        command_buffer: vk::CommandBuffer,
+        camera: &Camera,
+        layers: &[Layer],
+        palette: Palette,
+        submitted: &mut usize,
+    ) {
+        let Some(earth) =
+            layers.iter().find(|l| l.source_layer_id == tilecodec::mamaps::dict::LAYER_EARTH)
+        else {
+            return;
+        };
+        let opacity = earth.opacity_at(camera.zoom);
+        if opacity <= 0.0 {
+            return;
+        }
+        let colour = argb_to_rgba(scale_alpha(earth.color(palette), opacity));
+        let device = &self.context.device;
+        let mut bound = false;
+        for tile in self.tiles.values() {
+            let Some(terrain) = &tile.terrain else { continue };
+            if !bound {
+                device.cmd_bind_pipeline(
+                    command_buffer,
+                    vk::PipelineBindPoint::GRAPHICS,
+                    self.pipelines.terrain,
+                );
+                bound = true;
+            }
+            let push = Push {
+                tile_to_clip: camera.tile_to_clip(tile.z, tile.x, tile.y),
+                color: colour,
+                // `line.x`: the tile's world-px span, the tile-norm-height -> world-px scale.
+                line: [camera.tile_span_dp(tile.z) as f32, 0.0, 0.0, 0.0],
+                misc: [0.0, 0.0, 0.0, camera.time_seconds],
+                morph: MORPH_NONE,
+            };
+            device.cmd_push_constants(
+                command_buffer,
+                self.pipelines.layout,
+                vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT,
+                0,
+                push.as_bytes(),
+            );
+            device.cmd_bind_vertex_buffers(command_buffer, 0, &[terrain.vertices.buffer], &[0]);
+            device.cmd_bind_index_buffer(
+                command_buffer,
+                terrain.indices.buffer,
+                0,
+                vk::IndexType::UINT32,
+            );
+            device.cmd_draw_indexed(command_buffer, terrain.index_count, 1, 0, 0, 0);
+            *submitted += 1;
+        }
+    }
+
+    /// Draw the extruded 3D buildings: each resident tile's combined building mesh, depth-tested so
+    /// buildings occlude one another and sit above the flat basemap drawn before them. Only at
+    /// z14+, where the extruded detail is legible; below that nothing is drawn and the map is the
+    /// flat basemap it always was. At pitch 0 the building vertex shader collapses height to the
+    /// footprint, so from directly overhead the buildings read as their 2D outline.
+    ///
+    /// The per-tile push carries the WS0 clip matrix and, in `line.x`, the tile's world-px span for
+    /// this frame — the scale that turns the mesh's tile-normalised heights into the world-px height
+    /// the matrix's `z` input expects. Colour is per-vertex, so there is no colour push and no
+    /// atlas: the pass binds one pipeline and issues one draw per resident tile that has buildings.
+    unsafe fn record_buildings(
+        &self,
+        command_buffer: vk::CommandBuffer,
+        camera: &Camera,
+        layers: &[Layer],
+        palette: Palette,
+        submitted: &mut usize,
+    ) {
+        if camera.zoom.floor() < BUILDINGS_DRAW_MIN_ZOOM {
+            return;
+        }
+        // The palette's building colour, for every wall and roof the archive did not colour
+        // itself. Vertex colour is baked at tessellation time, where the palette is not reachable,
+        // so the fallback rides in as a push instead and a light/dark switch recolours on the next
+        // frame with no re-tessellation. `extrude_building` marks a vertex as wanting it by writing
+        // alpha 0, which `building.frag` tests.
+        let default_color = layers
+            .iter()
+            .find(|l| l.source_layer_id == tilecodec::mamaps::dict::LAYER_BUILDINGS)
+            .map(|l| argb_to_rgba(l.color(palette)))
+            .unwrap_or([0.8, 0.8, 0.8, 1.0]);
+        let device = &self.context.device;
+        let mut bound = false;
+        for tile in self.tiles.values() {
+            let Some(buildings) = &tile.buildings else { continue };
+            if !bound {
+                device.cmd_bind_pipeline(
+                    command_buffer,
+                    vk::PipelineBindPoint::GRAPHICS,
+                    self.pipelines.building,
+                );
+                bound = true;
+            }
+            let push = Push {
+                tile_to_clip: camera.tile_to_clip(tile.z, tile.x, tile.y),
+                // The palette fallback for vertices that carry no archive colour (alpha 0).
+                color: default_color,
+                // `line.x`: the tile's world-px span, the tile-norm-height -> world-px scale.
+                line: [camera.tile_span_dp(tile.z) as f32, 0.0, 0.0, 0.0],
+                misc: [0.0, 0.0, 0.0, camera.time_seconds],
+                morph: MORPH_NONE,
+            };
+            device.cmd_push_constants(
+                command_buffer,
+                self.pipelines.layout,
+                vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT,
+                0,
+                push.as_bytes(),
+            );
+            device.cmd_bind_vertex_buffers(command_buffer, 0, &[buildings.vertices.buffer], &[0]);
+            device.cmd_bind_index_buffer(
+                command_buffer,
+                buildings.indices.buffer,
+                0,
+                vk::IndexType::UINT32,
+            );
+            device.cmd_draw_indexed(command_buffer, buildings.index_count, 1, 0, 0, 0);
+            *submitted += 1;
+        }
+    }
+
+    /// Draw the live-traffic overlay: each resident component segment, coloured from the
+    /// pushed table.
+    ///
+    /// The region-mask precedent, applied to lines: the geometry comes from the archive and is
+    /// resident, and the only per-frame input is a lightweight dynamic table — here
+    /// `component_id → ARGB` rather than one selected region id. A segment whose id is not in
+    /// the table draws **nothing**: pushing only the segments the server has a reading for keeps
+    /// the overlay to the roads traffic actually covers, rather than laying a neutral tint over
+    /// the whole network (which would merely repaint roads the basemap already drew). The
+    /// no-data look is therefore "unchanged basemap road", which is the cleaner of the two.
+    ///
+    /// Allocation-free and re-tessellation-free: colour is a push constant read from the map,
+    /// the width is one constant evaluated per frame, and the buffers were uploaded with the
+    /// tile. A new speed reading only replaces [`traffic_colors`](Self::traffic_colors), so this
+    /// path picks it up on the next frame with no geometry work at all.
+    unsafe fn record_traffic(
+        &self,
+        command_buffer: vk::CommandBuffer,
+        camera: &Camera,
+        submitted: &mut usize,
+    ) {
+        // Gated on the toggle and empty until the host pushes a reading, so the common case —
+        // traffic off, or no data yet — is one comparison and out.
+        if !self.traffic_enabled || self.traffic_colors.is_empty() {
+            return;
+        }
+        let device = &self.context.device;
+        let half_width_px = TRAFFIC_WIDTH_DP * camera.density / 2.0;
+        let edge_aa = f32::from(self.swapchain.samples == vk::SampleCountFlags::TYPE_1);
+
+        let mut bound = false;
+        for tile in self.tiles.values() {
+            if tile.traffic.is_empty() {
+                continue;
+            }
+            let tile_to_clip = camera.tile_to_clip(tile.z, tile.x, tile.y);
+            let tile_span_px = camera.tile_span_px(tile.z);
+            for segment in &tile.traffic {
+                // The dynamic half of the pass: a segment the host has no reading for is not
+                // drawn, so the table's size — not the archive's — bounds the draw calls.
+                let Some(&argb) = self.traffic_colors.get(&segment.id) else { continue };
+                if !bound {
+                    device.cmd_bind_pipeline(
+                        command_buffer,
+                        vk::PipelineBindPoint::GRAPHICS,
+                        self.pipelines.line,
+                    );
+                    bound = true;
+                }
+                let push = Push {
+                    tile_to_clip,
+                    color: argb_to_rgba(argb),
+                    // A solid band. `line.frag` short-circuits on a zero dash gap before it
+                    // touches the clock, so this reads no animation at all.
+                    line: [half_width_px, 0.0, 0.0, 0.0],
+                    misc: [tile_span_px, edge_aa, 0.0, camera.time_seconds],
+                    morph: [1.0, 0.0, 0.0, 0.0],
+                };
+                device.cmd_push_constants(
+                    command_buffer,
+                    self.pipelines.layout,
+                    vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT,
+                    0,
+                    push.as_bytes(),
+                );
+                device.cmd_bind_vertex_buffers(command_buffer, 0, &[segment.vertices.buffer], &[0]);
+                device.cmd_bind_index_buffer(
+                    command_buffer,
+                    segment.indices.buffer,
+                    0,
+                    vk::IndexType::UINT32,
+                );
+                device.cmd_draw_indexed(command_buffer, segment.index_count, 1, 0, 0, 0);
+                *submitted += 1;
+            }
+        }
     }
 
     /// Rasterise the selected region into the stencil, then dim everything it did not cover.
@@ -1225,6 +1976,7 @@ impl Renderer {
                     color: [0.0; 4],
                     line: [0.0; 4],
                     misc: [0.0; 4],
+                    morph: MORPH_NONE,
                 };
                 device.cmd_push_constants(
                     command_buffer,
@@ -1262,6 +2014,7 @@ impl Renderer {
             color: argb_to_rgba(SCRIM_COLOR),
             line: [0.0; 4],
             misc: [0.0; 4],
+            morph: MORPH_NONE,
         };
         device.cmd_bind_pipeline(
             command_buffer,
@@ -1288,15 +2041,16 @@ impl Renderer {
 
     /// Draw the navigation route, above the basemap and below the puck.
     ///
-    /// Two draws over one buffer: the casing at the wider half-width, then the route on
-    /// top of it. `stroke` bakes no width into a vertex, so the same geometry drawn wider
-    /// underneath *is* the outline — no second mesh and no `gapped` band.
+    /// The casing is one draw of the whole index buffer at the wider half-width in the
+    /// casing colour; the fills are then one draw per coloured run, each of its own index
+    /// slice in its own colour, over the casing. `stroke` bakes no width into a vertex, so
+    /// the same geometry drawn wider underneath *is* the outline — no second mesh — and one
+    /// casing over the lot keeps the outline continuous across the colour changes.
     ///
     /// Allocation-free, like every other per-frame path here: the buffers were uploaded
-    /// when the route was set, and everything that varies per frame is a matrix and two
-    /// push blocks built on the stack. The matrix is the overlay sibling of
-    /// `tile_to_clip`, so the route picks up the camera's bearing exactly as the tiles
-    /// under it do.
+    /// when the route was set, and everything that varies per frame is a matrix and the
+    /// push blocks built on the stack. The matrix is the overlay sibling of `tile_to_clip`,
+    /// so the route picks up the camera's bearing exactly as the tiles under it do.
     unsafe fn record_route(
         &self,
         command_buffer: vk::CommandBuffer,
@@ -1325,14 +2079,27 @@ impl Renderer {
             0,
             vk::IndexType::UINT32,
         );
-        for (color, half_width_px) in route.placement.passes(camera.density) {
+
+        // Casing first (the whole route at the wider width, one colour), then each run's
+        // fill over it (its own index slice, its own colour). A first entry with the whole
+        // buffer stands in for the casing when there is one. Both are solid: the fills used to
+        // carry a scrolling marching-ants, which was removed as unwanted motion. It carried no
+        // meaning — `RouteOverlay` has no per-segment dashed flag, so walking, transit and
+        // driving legs were all dashed alike and the mode is conveyed by colour.
+        let casing = route
+            .placement
+            .casing_half(camera.density)
+            .map(|half| (route.placement.style.casing_color, half, route.index_count, 0u32));
+        let fill_half = route.placement.fill_half(camera.density);
+        let fills =
+            route.segments.iter().map(|s| (s.color, fill_half, s.index_count, s.index_offset));
+        for (color, half_width_px, index_count, first_index) in casing.into_iter().chain(fills) {
             let push = Push {
                 tile_to_clip: matrix,
                 color: argb_to_rgba(color),
-                // No gap and no dash: a route is one solid band, and `line.frag`
-                // short-circuits a non-positive dash gap before it reaches the modulo.
                 line: [half_width_px, 0.0, 0.0, 0.0],
-                misc: [span_px, edge_aa, 0.0, 0.0],
+                misc: [span_px, edge_aa, 0.0, camera.time_seconds],
+                morph: [1.0, 0.0, 0.0, 0.0],
             };
             device.cmd_push_constants(
                 command_buffer,
@@ -1341,7 +2108,7 @@ impl Renderer {
                 0,
                 push.as_bytes(),
             );
-            device.cmd_draw_indexed(command_buffer, route.index_count, 1, 0, 0, 0);
+            device.cmd_draw_indexed(command_buffer, index_count, 1, first_index, 0, 0);
             *submitted += 1;
         }
     }
@@ -1350,75 +2117,183 @@ impl Renderer {
     ///
     /// Called with the render pass still open: the viewport and scissor are already set
     /// and blending is the same straight src-alpha-over the tile layers use, so an
-    /// overlay only has to bind its pipeline and push its own state. The geometry is the
-    /// shared unit quad, so nothing is allocated here.
+    /// overlay only has to bind its pipeline and push its own state.
+    ///
+    /// Draw order is fixed here rather than by vec position: markers (and WS-F's vehicles) first,
+    /// the puck last, so the user's location stays on top of the pins around it. `&mut self`
+    /// because the marker path uploads a transient buffer through
+    /// [`draw_symbol_batch`](Self::draw_symbol_batch), same as the symbol layers.
     unsafe fn record_overlays(
-        &self,
+        &mut self,
         command_buffer: vk::CommandBuffer,
         camera: &Camera,
+        palette: Palette,
         submitted: &mut usize,
     ) {
-        let device = &self.context.device;
+        // Copy the overlay state out so no borrow of `self.overlays` lives across the `&mut self`
+        // marker draw below (which uploads a transient buffer).
+        let mut markers: Vec<Marker> = Vec::new();
+        let mut vehicles: Vec<Marker> = Vec::new();
+        let mut puck: Option<UserPuck> = None;
         for overlay in &self.overlays {
             match overlay {
-                Overlay::Puck(puck) => {
-                    let density = camera.density;
-                    let push = Push {
-                        tile_to_clip: camera.screen_quad_to_clip(
-                            puck.lon,
-                            puck.lat,
-                            PUCK_QUAD_DP as f64,
-                        ),
-                        color: argb_to_rgba(PUCK_COLOR),
-                        line: [
-                            PUCK_RIM_DP * density,
-                            PUCK_DOT_DP * density,
-                            PUCK_CONE_DP * density,
-                            PUCK_CONE_HALF_STROKE_DP * density,
-                        ],
-                        misc: [
-                            puck.bearing.unwrap_or(0.0).to_radians(),
-                            f32::from(puck.bearing.is_some()),
-                            PUCK_QUAD_DP * density,
-                            0.0,
-                        ],
-                    };
-                    device.cmd_bind_pipeline(
-                        command_buffer,
-                        vk::PipelineBindPoint::GRAPHICS,
-                        self.pipelines.puck,
-                    );
-                    device.cmd_push_constants(
-                        command_buffer,
-                        self.pipelines.layout,
-                        vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT,
-                        0,
-                        push.as_bytes(),
-                    );
-                    device.cmd_bind_vertex_buffers(
-                        command_buffer,
-                        0,
-                        &[self.quad.vertices.buffer],
-                        &[0],
-                    );
-                    device.cmd_bind_index_buffer(
-                        command_buffer,
-                        self.quad.indices.buffer,
-                        0,
-                        vk::IndexType::UINT32,
-                    );
-                    device.cmd_draw_indexed(
-                        command_buffer,
-                        QUAD_INDICES.len() as u32,
-                        1,
-                        0,
-                        0,
-                        0,
-                    );
-                    *submitted += 1;
-                }
+                Overlay::Puck(p) => puck = Some(*p),
+                Overlay::Markers(m) => markers.extend_from_slice(m),
+                Overlay::Vehicles(v) => vehicles.extend_from_slice(v),
             }
         }
+
+        // Vehicles first (lowest), then the app pins over them, then the puck on top: a pin the
+        // user placed and can tap outranks a simulated vehicle sprite at the same spot, and the
+        // user's own location outranks both. Both go through the shared billboarded sprite path.
+        if !vehicles.is_empty() {
+            self.draw_markers(command_buffer, camera, palette, &vehicles, submitted);
+        }
+        if !markers.is_empty() {
+            self.draw_markers(command_buffer, camera, palette, &markers, submitted);
+        }
+
+        // The puck last, so it sits on top of any pin at the same spot. The shared unit quad, an
+        // analytic shader, and one push constant — nothing allocated.
+        let Some(puck) = puck else { return };
+        let device = &self.context.device;
+        let density = camera.density;
+        let push = Push {
+            tile_to_clip: camera.screen_quad_to_clip(puck.lon, puck.lat, PUCK_QUAD_DP as f64),
+            color: argb_to_rgba(PUCK_COLOR),
+            line: [
+                PUCK_RIM_DP * density,
+                PUCK_DOT_DP * density,
+                PUCK_CONE_DP * density,
+                PUCK_CONE_HALF_STROKE_DP * density,
+            ],
+            misc: [
+                puck.bearing.unwrap_or(0.0).to_radians(),
+                f32::from(puck.bearing.is_some()),
+                PUCK_QUAD_DP * density,
+                camera.time_seconds,
+            ],
+            morph: MORPH_NONE,
+        };
+        device.cmd_bind_pipeline(
+            command_buffer,
+            vk::PipelineBindPoint::GRAPHICS,
+            self.pipelines.puck,
+        );
+        device.cmd_push_constants(
+            command_buffer,
+            self.pipelines.layout,
+            vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT,
+            0,
+            push.as_bytes(),
+        );
+        device.cmd_bind_vertex_buffers(command_buffer, 0, &[self.quad.vertices.buffer], &[0]);
+        device.cmd_bind_index_buffer(
+            command_buffer,
+            self.quad.indices.buffer,
+            0,
+            vk::IndexType::UINT32,
+        );
+        device.cmd_draw_indexed(command_buffer, QUAD_INDICES.len() as u32, 1, 0, 0, 0);
+        *submitted += 1;
+    }
+
+    /// Draw the app's pins as billboarded atlas sprites, batched into one draw.
+    ///
+    /// The shared sprite/billboard path — WS-F's transit vehicles reuse it verbatim. Each marker
+    /// is glued to its `lon`/`lat` and kept upright and screen-constant under tilt by
+    /// [`Camera::screen_quad_to_clip`](crate::camera::Camera::screen_quad_to_clip), exactly as the
+    /// puck is. Because a marker is *screen-anchored* (a fixed Dp size), its billboard quad is
+    /// resolved to clip space on the CPU here — the per-marker perspective `w` is constant across
+    /// the quad's four corners, so the divide can be done once — and every marker is emitted into
+    /// one shared vertex/index buffer drawn with the identity matrix. That is what makes the bulk
+    /// many-sprites case (dozens of vehicles) one upload and one draw rather than one per sprite.
+    ///
+    /// A marker whose icon the sheet does not carry, or which the tilt puts behind the eye, is
+    /// skipped rather than drawn wrong. No `sprite_set` (a sheet that would not decode) draws no
+    /// markers, exactly as it draws no POI icons.
+    unsafe fn draw_markers(
+        &mut self,
+        command_buffer: vk::CommandBuffer,
+        camera: &Camera,
+        palette: Palette,
+        markers: &[Marker],
+        submitted: &mut usize,
+    ) {
+        let Some(sprite_set) = self.sprite_set else { return };
+        let atlas = crate::tile::sprite::atlas();
+        // The sheet is the light half over the dark one; dark mode adds this to every `v`, exactly
+        // as `emit_icon` does, so a palette switch stays a per-frame emit rather than a re-upload.
+        let dv = if palette.variant == crate::style::Variant::Dark { atlas.dark_v_offset() } else { 0.0 };
+
+        let mut vertices: Vec<f32> = Vec::with_capacity(markers.len() * 4 * 4);
+        let mut indices: Vec<u32> = Vec::with_capacity(markers.len() * 6);
+        for marker in markers {
+            let Some(sprite) = crate::marker::icon_sprite_name(marker.icon).and_then(|n| atlas.get(n))
+            else {
+                continue;
+            };
+            // The billboard matrix for this marker (upright + screen-constant under tilt). Its
+            // translation column is the quad centre in clip space; columns 0 and 1 are the local
+            // Dp axes. All four corners share the same `w` (the matrix's `w` columns for the two
+            // in-plane axes are zero on both the ortho and the tilted path), so the perspective
+            // divide is one number per marker.
+            let m = camera.screen_quad_to_clip(marker.lon, marker.lat, 1.0);
+            let w = m[15] as f64;
+            if w <= 0.0 {
+                continue; // behind the eye / above the horizon under tilt: nothing to draw.
+            }
+            let cx = m[12] as f64 / w;
+            let cy = m[13] as f64 / w;
+            // Draw the icon at `MARKER_SIZE_DP` on its larger side, keeping its aspect ratio. With
+            // `radius_dp = 1.0` above, a local coordinate is one Dp, so these half-extents are Dp.
+            let scale = MARKER_SIZE_DP / sprite.width_dp.max(sprite.height_dp).max(1e-3);
+            let hw = (sprite.width_dp * scale * 0.5) as f64;
+            let hh = (sprite.height_dp * scale * 0.5) as f64;
+            let (xu, yu) = (m[0] as f64, m[1] as f64); // local +u axis, clip space
+            let (xv, yv) = (m[4] as f64, m[5] as f64); // local +v axis, clip space
+            let uv = sprite.uv;
+            let (v0, v1) = (uv.v0 + dv, uv.v1 + dv);
+            let base = (vertices.len() / 4) as u32;
+            // Corners: (local_u, local_v, tex_u, tex_v). y-down in both clip and atlas, as
+            // `emit_icon` documents, so v0 goes with the top edge.
+            let corners = [
+                (-hw, -hh, uv.u0, v0),
+                (hw, -hh, uv.u1, v0),
+                (hw, hh, uv.u1, v1),
+                (-hw, hh, uv.u0, v1),
+            ];
+            for (lu, lv, tu, tv) in corners {
+                let ox = (lu * xu + lv * xv) / w;
+                let oy = (lu * yu + lv * yv) / w;
+                vertices.push((cx + ox) as f32);
+                vertices.push((cy + oy) as f32);
+                vertices.push(tu);
+                vertices.push(tv);
+            }
+            indices.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
+        }
+        if indices.is_empty() {
+            return;
+        }
+        // Vertices are already in clip space, so the shader must not transform them: identity. Only
+        // `color.a` is read by `sprite.frag` (an icon draws in its own colours), so full alpha.
+        let push = Push {
+            tile_to_clip: IDENTITY,
+            color: [1.0, 1.0, 1.0, 1.0],
+            line: [0.0; 4],
+            misc: [0.0, 0.0, 0.0, camera.time_seconds],
+            morph: MORPH_NONE,
+        };
+        self.draw_symbol_batch(
+            command_buffer,
+            self.pipelines.sprite,
+            sprite_set,
+            &vertices,
+            &indices,
+            &push,
+            submitted,
+        );
     }
 
     /// Draw one tile's one symbol layer: emit its shaped labels at the frame's
@@ -1454,12 +2329,22 @@ impl Renderer {
             return;
         }
         let Some(tile) = self.tiles.get(&key) else { return };
-        let tile_span_px = camera.tile_span_px(tile.z);
+        // The tile's coordinates, copied out so the `self.tiles` borrow below is held only by
+        // `tile.labels` and ends at the batch loop — the `&mut self` uploads come after it.
+        let (tz, tx, ty) = (tile.z, tile.x, tile.y);
+        let tile_span_px = camera.tile_span_px(tz);
         // Copy out what the draw needs before any `&mut self` call below: `tile`
         // borrows `self`, and buffer upload takes `&self.context` while retiring
         // takes `&mut self`.
-        let tile_clip = camera.tile_to_clip(tile.z, tile.x, tile.y);
-        let tile_labels = tile.labels.clone();
+        let tile_clip = camera.tile_to_clip(tz, tx, ty);
+        // Billboarding under tilt (point labels only): the shader projects each glyph's ground
+        // anchor through `tile_clip` (perspective) and hangs the glyph off it at a constant screen
+        // offset, reconstructed from the pitch-0 tile matrix's linear 2x2. At pitch 0 the flag is
+        // clear and the shader draws straight through `tile_clip`, byte-identical to before. Curved
+        // labels carry each vertex as its own anchor, so they stay on the ground regardless.
+        let flat_clip = Camera { pitch_deg: 0.0, ..*camera }.tile_to_clip(tz, tx, ty);
+        let ortho2x2 = [flat_clip[0], flat_clip[1], flat_clip[4], flat_clip[5]];
+        let billboard_flag = if camera.pitch_deg != 0.0 { 1.0 } else { 0.0 };
         let (primary, alternate) = anchors_for(layer);
         // Labels counter-rotate about their anchor so they stay upright under a
         // heading-up camera, which is what a driver needs and what keeps the placer's
@@ -1481,10 +2366,15 @@ impl Renderer {
         // Labels are enumerated in tile-list order — the same order (and the
         // same ids) the pre-pass used — and only accepted ones emit. A tile
         // whose every label collides emits nothing and skips its draw.
+        //
+        // Borrowed, not cloned. This used to deep-copy the whole label vector — every name
+        // `String`, every shaped line, every curved centreline — once per symbol layer per
+        // resident tile per frame, purely to release the `self.tiles` borrow before the uploads
+        // further down. Nothing in this loop needs `&mut self`, so the borrow simply ends here.
         for (label_idx, label) in
-            tile_labels.iter().enumerate().filter(|(_, l)| l.layer_index == layer_index)
+            tile.labels.iter().enumerate().filter(|(_, l)| l.layer_index == layer_index)
         {
-            let id = placement::candidate_id(tile.z, tile.x, tile.y, layer_index, label_idx);
+            let id = placement::candidate_id(tz, tx, ty, layer_index, label_idx);
             let Some(&(flipped, _)) = accepted.get(&id) else { continue };
             // Draw at whichever anchor the placer actually accepted, or the label lands
             // on the side its box was rejected for.
@@ -1541,6 +2431,7 @@ impl Renderer {
                 color,
                 line: [0.0, 0.0, 0.0, 0.0],
                 misc: [tile_span_px, 0.0, 0.0, 0.0],
+                morph: MORPH_NONE,
             };
             self.draw_symbol_batch(
                 command_buffer,
@@ -1564,8 +2455,12 @@ impl Renderer {
             let push = Push {
                 tile_to_clip: tile_clip,
                 color,
-                line: [*text_px, layer.halo_width * camera.density, sdf_per_em, 0.0],
+                line: [*text_px, layer.halo_width * camera.density, sdf_per_em, billboard_flag],
                 misc: [tile_span_px, halo[0], halo[1], halo[2]],
+                // Repurposed for the symbol billboard pipeline: the pitch-0 tile matrix's linear
+                // 2x2, so the shader can add a screen-constant glyph offset under tilt. The symbol
+                // fragment shader does not read `morph`, so this collides with nothing.
+                morph: [ortho2x2[0], ortho2x2[1], ortho2x2[2], ortho2x2[3]],
             };
             self.draw_symbol_batch(
                 command_buffer,
@@ -1658,7 +2553,7 @@ impl Renderer {
         filter: &crate::style::KindFilter,
     ) -> HashMap<u64, (bool, u32)> {
         use crate::tile::placement;
-        let mut candidates = Vec::new();
+        let mut candidates: Vec<placement::SegmentedCandidate> = Vec::new();
         for (index, layer) in layers.iter().enumerate() {
             if layer.kind != LayerKind::Symbol {
                 continue;
@@ -1677,6 +2572,8 @@ impl Renderer {
             for key in ordered {
                 let Some(tile) = self.tiles.get(key) else { continue };
                 let tile_clip = camera.tile_to_clip(tile.z, tile.x, tile.y);
+                let tile_span_px = camera.tile_span_px(tile.z);
+                let wh = (extent.width, extent.height);
                 // Task-9 rank gating: at low UI zoom only high-pop localities
                 // Rank gating BEFORE collision: a hamlet must not
                 // become a candidate at all - collision alone can't thin
@@ -1694,36 +2591,55 @@ impl Renderer {
                         continue;
                     }
                     let inputs = box_inputs(layer, label, camera);
-                    let wh = (extent.width, extent.height);
-                    candidates.push(placement::Candidate {
-                        id: placement::candidate_id(
-                            tile.z,
-                            tile.x,
-                            tile.y,
-                            index,
-                            label_idx,
-                        ),
-                        rank: label.rank,
-                        pop: label.pop,
-                        rect: placement::anchored_rect(
+                    let id = placement::candidate_id(tile.z, tile.x, tile.y, index, label_idx);
+                    // A curved label collides as the row of oriented per-glyph boxes it draws; a
+                    // point label as one axis-aligned box (plus its variable-anchor alternate). Both
+                    // go into one `place_segmented` pass so they collide with each other.
+                    let (boxes, alternate_boxes) = if let Some(centreline) = &label.centreline {
+                        let Some(line) = label.lines.first() else { continue };
+                        let ppfu =
+                            inputs.text_px / crate::tile::glyph::UP_EM as f32 / tile_span_px;
+                        let placed = crate::tess::text::layout_along_line(line, centreline, ppfu);
+                        let boxes =
+                            placement::curved_boxes(&placed, tile_clip, wh, inputs.text_px, inputs.pad_px);
+                        if boxes.is_empty() {
+                            continue; // does not fit its line this frame: nothing to place.
+                        }
+                        (boxes, None)
+                    } else {
+                        let primary_box = placement::Obb::from_rect(placement::anchored_rect(
                             label.anchor,
                             tile_clip,
                             wh,
                             &inputs,
                             primary,
-                        ),
-                        alternate: alternate.map(|second| {
-                            placement::anchored_rect(label.anchor, tile_clip, wh, &inputs, second)
-                        }),
+                        ));
+                        let alt = alternate.map(|second| {
+                            vec![placement::Obb::from_rect(placement::anchored_rect(
+                                label.anchor,
+                                tile_clip,
+                                wh,
+                                &inputs,
+                                second,
+                            ))]
+                        });
+                        (vec![primary_box], alt)
+                    };
+                    candidates.push(placement::SegmentedCandidate {
+                        id,
+                        rank: label.rank,
+                        pop: label.pop,
+                        boxes,
+                        alternate: alternate_boxes,
                     });
                 }
             }
         }
         // Keyed by candidate id, valued by the anchor the placer settled on and **where in
-        // acceptance order it landed**. `place` returns its winners in priority order and a
-        // `HashMap` would throw that away, which is what made `pick_labels`' "topmost first"
-        // a claim rather than a fact.
-        placement::place(&candidates)
+        // acceptance order it landed**. `place_segmented` returns its winners in priority order and
+        // a `HashMap` would throw that away, which is what made `pick_labels`' "topmost first" a
+        // claim rather than a fact.
+        placement::place_segmented(&candidates)
             .into_iter()
             .enumerate()
             .map(|(order, (id, flipped))| (id, (flipped, order as u32)))
@@ -1742,6 +2658,57 @@ impl Renderer {
             .filter(|h| h.rect.0 <= qx1 && h.rect.2 >= qx0 && h.rect.1 <= qy1 && h.rect.3 >= qy0)
             .cloned()
             .collect()
+    }
+
+    /// The marker id under the device-pixel `(x, y)`, or `0` when the tap hit no marker.
+    ///
+    /// The GPU-picking counterpart of [`pick_labels`](Self::pick_labels): where labels are picked
+    /// against the CPU snapshot of the last placed frame, markers are picked by rendering their
+    /// ids into an offscreen `R32_UINT` buffer with the last frame's camera and reading back the
+    /// tapped pixel (see [`crate::vulkan::pick`]). That is what keeps a pin tappable under tilt,
+    /// where its screen box is no longer a plain projection of its lon/lat.
+    ///
+    /// Returns the marker's own id (the value the host set on it), so the host maps the tap back to
+    /// its feature without matching on position. `0` covers "no marker here", "no frame drawn yet",
+    /// and a pick that could not run — all of which the host treats as "fall through to the next
+    /// probe", exactly as an empty [`pick_labels`](Self::pick_labels) result is treated.
+    pub fn pick_at(&mut self, x: u32, y: u32) -> u64 {
+        let Some(camera) = self.last_camera else { return 0 };
+        // The markers this frame would draw, in draw order, so the topmost pin wins the pixel.
+        let markers: Vec<Marker> = self
+            .overlays
+            .iter()
+            .filter_map(|overlay| match overlay {
+                Overlay::Markers(m) => Some(m.iter().copied()),
+                _ => None,
+            })
+            .flatten()
+            .collect();
+        if markers.is_empty() {
+            return 0;
+        }
+        let extent = self.swapchain.extent;
+        let quad_indices = QUAD_INDICES.len() as u32;
+        match unsafe {
+            self.pick.at(
+                &self.context,
+                self.command_pool,
+                self.quad.vertices.buffer,
+                self.quad.indices.buffer,
+                quad_indices,
+                extent,
+                &camera,
+                &markers,
+                x,
+                y,
+            )
+        } {
+            Ok(id) => id,
+            Err(e) => {
+                eprintln!("pick_at failed: {e}");
+                0
+            }
+        }
     }
 
     /// Task-17 pick snapshot: rebuild [`placed`](Self::placed) from the
@@ -1932,6 +2899,14 @@ impl Drop for Renderer {
                     region.vertices.destroy(&self.context.device);
                     region.indices.destroy(&self.context.device);
                 }
+                if let Some(buildings) = &tile.buildings {
+                    buildings.vertices.destroy(&self.context.device);
+                    buildings.indices.destroy(&self.context.device);
+                }
+                if let Some(terrain) = &tile.terrain {
+                    terrain.vertices.destroy(&self.context.device);
+                    terrain.indices.destroy(&self.context.device);
+                }
             }
             self.tiles.clear();
             for (_, tile) in &self.retiring {
@@ -1942,6 +2917,14 @@ impl Drop for Renderer {
                 for region in &tile.regions {
                     region.vertices.destroy(&self.context.device);
                     region.indices.destroy(&self.context.device);
+                }
+                if let Some(buildings) = &tile.buildings {
+                    buildings.vertices.destroy(&self.context.device);
+                    buildings.indices.destroy(&self.context.device);
+                }
+                if let Some(terrain) = &tile.terrain {
+                    terrain.vertices.destroy(&self.context.device);
+                    terrain.indices.destroy(&self.context.device);
                 }
             }
             self.retiring.clear();
@@ -1968,6 +2951,7 @@ impl Drop for Renderer {
             }
             self.quad.vertices.destroy(&self.context.device);
             self.quad.indices.destroy(&self.context.device);
+            self.pick.destroy(&self.context.device);
             self.atlas_set.destroy(&self.context.device);
             self.pipelines.destroy(&self.context.device);
             self.swapchain.destroy(&self.context.device);

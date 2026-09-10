@@ -11,10 +11,49 @@
 //! strokes 7, and the shaders never saw any of it.
 
 use crate::style::{KindFilter, Layer, LayerKind, LayerToggles};
-use crate::tess::{fill, stroke};
+use crate::tess::{fill, roof, stroke, terrain};
+use crate::tile::arrow::{self, ArrowInstance};
 use crate::tile::symbol;
 use crate::tile::select::ANCESTOR_DEPTH;
 use tilecodec::mamaps::body::{Body, GEOM_LINE, GEOM_POINT, GEOM_POLYGON};
+use tilecodec::mamaps::dict::{LAYER_BUILDINGS, LAYER_EARTH, LAYER_ROADS, LAYER_TRAFFIC};
+
+/// The shallowest zoom the traffic overlay is tessellated at.
+///
+/// Component segments are one line per graph vertex pair — roughly the whole drivable
+/// network duplicated — so they are only worth building where a traffic overlay is legible.
+/// WS2 zoom-gates emission in the archive too, so a coarser tile simply carries no traffic
+/// layer; this is the matching cost gate on the render side.
+pub const TRAFFIC_MIN_ZOOM: u8 = 12;
+
+/// The shallowest zoom the per-lane road detail (dividers and turn arrows) is built at.
+///
+/// Matches the `roads-lanes` style layer's `minzoom` in `basemap.flat.json`: the dense lane detail
+/// is only legible zoomed right in, so below this the road draws as one line and carries no arrows.
+pub const ROAD_LANE_MIN_ZOOM: u8 = 16;
+
+/// How many levels ahead of itself a tile builds per-lane road detail, in place of the general
+/// [`ANCESTOR_DEPTH`](crate::tile::select::ANCESTOR_DEPTH).
+///
+/// The lookahead exists because a tile stands in for the levels below it, and the archive stops at
+/// z14 while lanes are drawn from z16 — so the z14 tile *must* build lane geometry it will not draw
+/// itself. But the general depth of 4 makes every tile from z12 up build it, and lane detail is the
+/// most expensive thing in this file: each divider re-strokes the road's entire geometry, so a
+/// six-lane road builds five extra full copies of itself, per tile, three levels before any of it
+/// can be drawn.
+///
+/// Two is the smallest value that still lets the deepest archive tile serve [`ROAD_LANE_MIN_ZOOM`].
+/// The cost is that a z12 or z13 ancestor standing in while its z14 child loads shows no lanes or
+/// arrows until the child lands — transient, and only at z16+.
+const LANE_ANCESTOR_DEPTH: u8 = 2;
+
+/// The height a `buildings` feature with no `height` tag extrudes to, in metres — about three
+/// storeys, so an unattributed building still reads as a building rather than a flat patch.
+const DEFAULT_BUILDING_HEIGHT_M: f64 = 9.0;
+
+/// The Earth's equatorial circumference in metres, for turning a building's metric height into the
+/// tile-normalised height the 3D vertex format carries. Web Mercator, matching the archive.
+const EARTH_CIRCUMFERENCE_M: f64 = 40_075_016.686;
 
 /// Tessellated geometry for one layer of one tile.
 pub struct LayerMesh {
@@ -45,6 +84,36 @@ pub struct LayerMesh {
     /// property of the camera, and re-tessellating a tile whenever it changed is the cost
     /// this avoids.
     pub lane: (u8, u8, u8),
+}
+
+/// The 3D building geometry for one tile: every `buildings` feature extruded into walls and a roof
+/// cap, combined into one mesh in the 7-float [`crate::tess::roof`] vertex format so the whole
+/// tile's buildings draw in a single depth-tested pass.
+///
+/// Kept apart from [`LayerMesh`] because it is neither a flat 2D layer nor drawn through the fill
+/// pipeline: its vertices carry a height, a normal and a per-vertex colour, and it draws through
+/// the building pipeline WS-A added with depth on. Empty on every tile below z14 and on any tile
+/// with no `buildings` layer.
+#[derive(Default)]
+pub struct BuildingMesh {
+    /// Interleaved `x, y, z, nx, ny, nz, colour` per vertex — see [`crate::tess::roof`].
+    pub vertices: Vec<f32>,
+    pub indices: Vec<u32>,
+}
+
+/// The DEM-displaced ground grid for one tile (WS-G, 3D terrain relief): the tile's ground
+/// tessellated into a grid whose per-vertex `z` is sampled from the tile's heightmap, in the
+/// 6-float [`crate::tess::terrain`] vertex format so it draws in a single depth-tested pass.
+///
+/// Kept apart from [`LayerMesh`] for the same reason [`BuildingMesh`] is: it is not a flat 2D layer
+/// and does not draw through the fill pipeline — its vertices carry a height and a normal and it
+/// draws through the terrain pipeline with depth on. Empty on any tile with no heightmap (open
+/// ocean, off-DEM coverage), which then keeps its flat `earth` fill instead.
+#[derive(Default)]
+pub struct TerrainMesh {
+    /// Interleaved `x, y, z, nx, ny, nz` per vertex — see [`crate::tess::terrain`].
+    pub vertices: Vec<f32>,
+    pub indices: Vec<u32>,
 }
 
 /// One shaped label candidate for per-frame symbol emission.
@@ -86,6 +155,15 @@ pub struct ShapedLabel {
     /// [`ID_NONE`](tilecodec::mamaps::body::ID_NONE) when its layer carries no id table (every
     /// layer but `places` and `poi`) or the generator could not attribute it to an OSM element.
     pub feature_id: u64,
+    /// A line feature's centreline in tile-local 0..1, for a **curved** label laid along a road
+    /// or river; `None` for an ordinary point label.
+    ///
+    /// A point label anchors one shaped block at [`anchor`](Self::anchor) and billboards upright;
+    /// a curved label lays its single shaped line along this polyline at emit time, one glyph per
+    /// vertex rotated to the local tangent (see [`crate::tess::text::emit_curved`]). Kept as the
+    /// tile-local polyline rather than pre-placed glyphs because the along-line spacing depends on
+    /// the frame's `text_px`, so the walk happens per frame like the point path's quad emission.
+    pub centreline: Option<Vec<(f32, f32)>>,
 }
 
 /// One region's shape within one tile, for the selection mask.
@@ -115,20 +193,57 @@ pub struct RegionMesh {
     pub level: u16,
 }
 
+/// One component-segment of the live traffic layer within one tile.
+///
+/// Kept apart from [`LayerMesh`] for the same reason [`RegionMesh`] is: it is not styled in
+/// layer order and its colour is not the style's. The geometry is tessellated once from the
+/// archive; the colour arrives per update as a pushed `component_id → ARGB` table and is
+/// resolved at **draw** time, so a new speed reading recolours the map without re-tessellating
+/// anything. [`id`](Self::id) is the segment's `component_id` (`packed(big_edge_id, seg_index)`,
+/// the shared contract) and the key into that table.
+pub struct TrafficMesh {
+    /// The segment's `component_id` from the traffic layer's id side-table; the key the
+    /// pushed colour table is looked up by.
+    pub id: u64,
+    /// Stroke geometry in the same 7-float-per-vertex format every line layer uploads, so it
+    /// draws through the existing line pipeline with the width as a per-frame push constant.
+    pub vertices: Vec<f32>,
+    pub indices: Vec<u32>,
+}
+
 /// Every layer's geometry for one tile, ready to upload.
 pub struct TileMesh {
     pub z: u8,
     pub x: u32,
     pub y: u32,
     pub meshes: Vec<LayerMesh>,
+    /// The tile's extruded 3D buildings, or an empty mesh below z14 / where the tile has none.
+    /// Drawn depth-tested through the building pipeline, not in the flat layer loop.
+    pub buildings: BuildingMesh,
+    /// The tile's DEM-displaced ground grid (WS-G), or an empty mesh where the tile carries no
+    /// heightmap. Drawn depth-tested through the terrain pipeline *before* the flat layer loop, so
+    /// hills rise under tilt and the flat layers paint over it; empty on a no-heightmap tile, which
+    /// then draws its flat `earth` fill as before.
+    pub terrain: TerrainMesh,
     /// Region shapes for the selection mask, one per `region_area` feature in this tile.
     ///
     /// Tessellated unconditionally rather than on selection: which region is selected changes
     /// with a tap, and re-tessellating every resident tile at that moment would stall the frame.
     /// A tile holds a handful of these, so the cost is small and paid once.
     pub regions: Vec<RegionMesh>,
+    /// Live-traffic component segments, one per drivable component of the traffic layer, each
+    /// carrying its `component_id`. Empty unless the traffic toggle is on and the tile is at or
+    /// below [`TRAFFIC_MIN_ZOOM`]. Colour is resolved at draw time from a pushed table, so this
+    /// is built once and survives every recolour.
+    pub traffic: Vec<TrafficMesh>,
     /// Symbol candidates: shaped once at tessellation time, sized per frame.
     pub labels: Vec<ShapedLabel>,
+    /// Per-lane turn arrows at road junctions, from the archive's turn-lane table. One per marked
+    /// lane, placed on the centreline near the junction and pushed into its lane by the same
+    /// lateral fan the dividers use. Empty below the lane zoom gate and on any tile with no
+    /// `turn:lanes`. The renderer draws these as glyphs; the anchors and directions are computed
+    /// here so the placement is testable off-device.
+    pub arrows: Vec<ArrowInstance>,
     /// The [`crate::style::SharedToggles`] generation this was built at.
     ///
     /// Optional layers are gated here, not at draw time, so a mesh is only valid for the
@@ -198,6 +313,11 @@ pub fn build_toggled(
 ) -> TileMesh {
     let mut meshes = Vec::with_capacity(layers.len());
     let mut labels = Vec::new();
+    // The tile's 3D buildings, accumulated across the buildings layer's features into one mesh.
+    // Tile-wide (not per layer) because it draws in its own depth-tested pass, not the layer loop.
+    let mut building_vertices: Vec<f32> = Vec::new();
+    let mut building_indices: Vec<u32> = Vec::new();
+    let ground_width_m = tile_ground_width_m(z, y);
     let deepest = z.saturating_add(ANCESTOR_DEPTH);
     let extent = tile.extent as u32;
 
@@ -208,7 +328,15 @@ pub fn build_toggled(
         if !toggles.enabled(layer.toggle) {
             continue;
         }
-        if layer.min_zoom > deepest || layer.max_zoom < z {
+        // Per-lane road detail gets its own, much shallower lookahead: see
+        // [`LANE_ANCESTOR_DEPTH`]. Scoped to the *roads* fan — `transit-rail` carries a spread
+        // too, and narrowing its window would stop coarse ancestors carrying rail corridors.
+        let layer_deepest = if layer.lane_fan() && layer.source_layer_id == LAYER_ROADS {
+            z.saturating_add(LANE_ANCESTOR_DEPTH)
+        } else {
+            deepest
+        };
+        if layer.min_zoom > layer_deepest || layer.max_zoom < z {
             continue;
         }
         let Some(source) = tile.layer(layer.source_layer_id) else { continue };
@@ -221,6 +349,13 @@ pub fn build_toggled(
         // path below keeps it off the hot road path entirely.
         #[allow(clippy::type_complexity)]
         let mut coloured: Vec<((u32, u8, u8, u8), Vec<f32>, Vec<u32>)> = Vec::new();
+
+        // Sub-meshes for a road drawn as its individual lanes: one per (divider ordinal, divider
+        // count), so a four-lane and a six-lane road in one tile fan by different amounts and each
+        // mesh carries the one lane tuple its offset needs. Stays empty for every layer but a
+        // lane-fan road layer, and the `lane_fan()` gate below keeps it off the hot road path.
+        #[allow(clippy::type_complexity)]
+        let mut lane_fans: Vec<((u8, u8), Vec<f32>, Vec<u32>)> = Vec::new();
 
         for (feature_index, feature) in source.features.iter().enumerate() {
             // Kind, then the road flag/detail filters: one call, so a surface layer never
@@ -247,7 +382,31 @@ pub fn build_toggled(
                     // ring group rather than making every consumer regroup them.
                     let rings: Vec<Vec<(i32, i32)>> =
                         parts.iter().map(|part| widen(source.points(part))).collect();
-                    fill::tessellate(&rings, extent, rings_validated, &mut vertices, &mut indices);
+                    if layer.source_layer_id == LAYER_BUILDINGS {
+                        // Buildings extrude into 3D instead of drawing a flat footprint: the
+                        // side-table attrs (height, roof shape, colours) plus this tile's ground
+                        // scale become walls and a roof cap. At pitch 0 the mesh still reads as the
+                        // footprint, so the flat map is unchanged; the flat fill is skipped so the
+                        // two do not double up.
+                        extrude_building(
+                            tile,
+                            feature_index,
+                            &rings,
+                            extent,
+                            rings_validated,
+                            ground_width_m,
+                            &mut building_vertices,
+                            &mut building_indices,
+                        );
+                    } else if layer.source_layer_id == LAYER_EARTH && tile.heightmap.is_some() {
+                        // The ground of a tile that carries a heightmap is drawn by the terrain
+                        // pass (built once below), not as a flat fill — otherwise the flat fill,
+                        // drawn depth-off in the layer loop, would paint over the relief. A tile
+                        // with no heightmap falls through and keeps its flat `earth` fill.
+                        continue;
+                    } else {
+                        fill::tessellate(&rings, extent, rings_validated, &mut vertices, &mut indices);
+                    }
                 }
                 LayerKind::Line => {
                     // Polygons contribute their outlines too: a lake's shoreline and an
@@ -256,16 +415,11 @@ pub fn build_toggled(
                         continue;
                     }
                     let gapped = layer.gapped();
-                    // A feature with no colour of its own goes in the layer's single mesh,
-                    // which is every road ever tessellated; only a transit line takes the
-                    // scan. A tile holds a handful of distinct route colours, so the
-                    // linear search is shorter than hashing would be.
-                    let (vertices, indices) = if feature.transit_color == 0 {
-                        (&mut vertices, &mut indices)
-                    } else {
-                        // The lane inputs as well as the colour: two routes of one colour on
-                        // different ordinals draw as two parallel lines, and one mesh can
-                        // only take one lateral offset.
+                    if feature.transit_color != 0 {
+                        // A transit line carries its own colour: split into one sub-mesh per
+                        // distinct (colour, ordinal, lanes, taper), because two routes of one
+                        // colour on different ordinals draw as two parallel lines and one mesh
+                        // can only take one lateral offset.
                         let key = (
                             feature.transit_color,
                             feature.transit_ordinal,
@@ -280,34 +434,92 @@ pub fn build_toggled(
                             }
                         };
                         let Some((_, v, i)) = coloured.get_mut(at) else { continue };
-                        (v, i)
-                    };
-                    for part in parts {
-                        let flat = flatten(source.points(part));
-                        stroke::stroke(&flat, extent, gapped, vertices, indices);
+                        for part in parts {
+                            let flat = flatten(source.points(part));
+                            stroke::stroke(&flat, extent, gapped, v, i);
+                        }
+                    } else if layer.lane_fan() {
+                        // A road drawn as its individual lanes: one divider line between each
+                        // adjacent pair, fanned across the carriageway by `lane_offset_px` at draw
+                        // time. A road with fewer than two lanes has no interior divider and so
+                        // contributes nothing here — its casing and fill are the ordinary road
+                        // layers' job. The geometry is stroked once per divider into a mesh keyed
+                        // by (ordinal, divider count), so the offset the shader applies is this
+                        // divider's alone.
+                        if feature.lane_count < 2 {
+                            continue;
+                        }
+                        let dividers = feature.lane_count - 1;
+                        for ordinal in 0..dividers {
+                            let key = (ordinal, dividers);
+                            let at = match lane_fans.iter().position(|(k, _, _)| *k == key) {
+                                Some(at) => at,
+                                None => {
+                                    lane_fans.push((key, Vec::new(), Vec::new()));
+                                    lane_fans.len() - 1
+                                }
+                            };
+                            let Some((_, v, i)) = lane_fans.get_mut(at) else { continue };
+                            for part in parts {
+                                let flat = flatten(source.points(part));
+                                stroke::stroke(&flat, extent, gapped, v, i);
+                            }
+                        }
+                    } else {
+                        // Every ordinary road and boundary: one mesh for the whole layer.
+                        for part in parts {
+                            let flat = flatten(source.points(part));
+                            stroke::stroke(&flat, extent, gapped, &mut vertices, &mut indices);
+                        }
                     }
                 }
                 LayerKind::Symbol => {
-                    // Points only: a place is one labelled point even when mapped as an
-                    // area (extract centroids it). Shape here (zoom-independent);
-                    // the renderer emits quads per frame at the frame's text size.
-                    if feature.geom_type != GEOM_POINT {
-                        continue;
-                    }
+                    // A named point shapes one billboarded block; a named line (road/river)
+                    // shapes a curved label laid along its centreline. Both shape here,
+                    // zoom-independently — the renderer emits quads per frame at the frame's
+                    // text size, straight from the anchor or along the polyline.
                     let Some(name) = tile.name(feature.name_idx) else { continue };
                     if name.is_empty() {
                         continue;
                     }
-                    if let Some(label) = symbol::shape_label(
-                        layer,
-                        tile,
-                        feature,
-                        name,
-                        extent,
-                        index,
-                        feature_index,
-                    ) {
-                        labels.push(label);
+                    match feature.geom_type {
+                        GEOM_POINT => {
+                            if let Some(label) = symbol::shape_label(
+                                layer,
+                                tile,
+                                feature,
+                                name,
+                                extent,
+                                index,
+                                feature_index,
+                            ) {
+                                labels.push(label);
+                            }
+                        }
+                        GEOM_LINE => {
+                            // The feature's whole centreline in tile-local 0..1 (its parts joined
+                            // in order; a coalesced road is usually one part) — the same
+                            // extraction `arrow_meshes` uses to place turn arrows.
+                            let scale = extent.max(1) as f32;
+                            let mut centreline: Vec<(f32, f32)> = Vec::new();
+                            for part in parts {
+                                for &(px, py) in source.points(part) {
+                                    centreline.push((px as f32 / scale, py as f32 / scale));
+                                }
+                            }
+                            if let Some(label) = symbol::shape_line_label(
+                                layer,
+                                tile,
+                                feature,
+                                name,
+                                index,
+                                feature_index,
+                                centreline,
+                            ) {
+                                labels.push(label);
+                            }
+                        }
+                        _ => continue,
                     }
                 }
             }
@@ -338,9 +550,141 @@ pub fn build_toggled(
                 lane: (ordinal, lanes, taper),
             });
         }
+        // The road lane dividers: each sub-mesh is one divider drawn the width of the whole road,
+        // shifted to its lane boundary by `lane_offset_px` from the (ordinal, count) it carries.
+        // The layer's own colour paints them, so no `color_override`; `taper` is full (255) because
+        // a lane boundary does not ease in at a corridor end the way a transit route does.
+        for ((ordinal, count), vertices, indices) in lane_fans {
+            if indices.is_empty() {
+                continue;
+            }
+            meshes.push(LayerMesh {
+                layer_index: index,
+                kind: layer.kind,
+                vertices,
+                indices,
+                color_override: None,
+                lane: (ordinal, count, 255),
+            });
+        }
     }
 
-    TileMesh { z, x, y, meshes, labels, regions: region_meshes(tile, extent, rings_validated), generation }
+    TileMesh {
+        z,
+        x,
+        y,
+        meshes,
+        buildings: BuildingMesh { vertices: building_vertices, indices: building_indices },
+        terrain: terrain_mesh(tile, ground_width_m),
+        labels,
+        regions: region_meshes(tile, extent, rings_validated),
+        traffic: traffic_meshes(tile, extent, z, toggles),
+        arrows: arrow_meshes(tile, z),
+        generation,
+    }
+}
+
+/// The DEM-displaced ground grid for this tile, or an empty mesh when the tile carries no
+/// heightmap.
+///
+/// Driven off the archive's per-tile heightmap rather than the style: the ground is one grid for
+/// the whole tile, sampled at the DEM's own resolution, and normalised against `ground_width_m` so
+/// a metre of relief reads the same on screen as a metre across — the same tile-local unit the
+/// building heights use. A tile with no heightmap (open ocean, off-DEM coverage) returns an empty
+/// mesh and keeps drawing its flat `earth` fill instead.
+fn terrain_mesh(tile: &Body, ground_width_m: f64) -> TerrainMesh {
+    let Some(heightmap) = &tile.heightmap else { return TerrainMesh::default() };
+    let mut vertices = Vec::new();
+    let mut indices = Vec::new();
+    terrain::tessellate(heightmap, ground_width_m, &mut vertices, &mut indices);
+    TerrainMesh { vertices, indices }
+}
+
+/// The per-lane turn arrows for this tile, from the archive's turn-lane side table.
+///
+/// One arrow per marked lane, at each turn-tagged road's junction end (and start, for backward
+/// lanes). Gated to [`ROAD_LANE_MIN_ZOOM`] like the lane dividers — and by the same
+/// [`LANE_ANCESTOR_DEPTH`] window the layer loop gives them, so a tile standing in for deeper
+/// levels builds them once and coarse ancestors do not build them at all.
+/// Empty on any tile with no `turn:lanes` (no turn-lane table), which is nearly all.
+fn arrow_meshes(tile: &Body, z: u8) -> Vec<ArrowInstance> {
+    if z.saturating_add(LANE_ANCESTOR_DEPTH) < ROAD_LANE_MIN_ZOOM {
+        return Vec::new();
+    }
+    let Some(source) = tile.layer(LAYER_ROADS) else { return Vec::new() };
+    let mut out = Vec::new();
+    for (index, feature) in source.features.iter().enumerate() {
+        if feature.geom_type != GEOM_LINE {
+            continue;
+        }
+        let Some(turns) = tile.feature_turns(LAYER_ROADS, index) else { continue };
+        if turns.is_empty() {
+            continue;
+        }
+        // The feature's whole centreline in tile-local 0..1 (its parts joined in order; a
+        // coalesced road is usually one part). Normalised here so the renderer places arrows with
+        // the tile's `tileToClip` alone, needing no extent — arrows sit at the ends, so the
+        // concatenation is what puts forward at the junction and backward at the start.
+        let extent = tile.extent.max(1) as f32;
+        let mut line: Vec<(f32, f32)> = Vec::new();
+        for part in source.parts_of(feature) {
+            for &(x, y) in source.points(part) {
+                line.push((x as f32 / extent, y as f32 / extent));
+            }
+        }
+        out.extend(arrow::place_arrows(&line, turns));
+    }
+    out
+}
+
+/// Tessellate this tile's live-traffic component segments, one mesh per feature.
+///
+/// Gated on the traffic toggle so leaving it off costs nothing — the same tessellation-time
+/// gate the optional style layers use, so toggling traffic re-tessellates the resident set
+/// once (through the generation counter) and then costs nothing per frame.
+///
+/// Each feature of the traffic layer is one component segment carrying its `component_id` in
+/// the layer's id side-table ([`Body::feature_id`]). Every segment becomes its own
+/// [`TrafficMesh`]: colour is keyed by id and resolved at draw, so a per-feature mesh is what
+/// lets a new speed reading recolour without re-tessellating. There is no per-colour sub-mesh
+/// split (as transit does) because the colour is not known here — only the id is.
+///
+/// A feature with no id (`None`, meaning the layer carries no id table, or [`ID_NONE`]) is
+/// skipped: without a stable id nothing could ever colour it, so drawing it would only ever
+/// paint the neutral no-data look over a road that is already drawn by the basemap.
+fn traffic_meshes(tile: &Body, extent: u32, z: u8, toggles: LayerToggles) -> Vec<TrafficMesh> {
+    if !toggles.traffic {
+        return Vec::new();
+    }
+    // A tile stands in for up to ANCESTOR_DEPTH levels below it, so build the overlay whenever
+    // any of those levels reaches the traffic floor — matching how the layer loop widens its
+    // zoom window. A tile too coarse for traffic simply carries no traffic layer anyway.
+    if z.saturating_add(ANCESTOR_DEPTH) < TRAFFIC_MIN_ZOOM {
+        return Vec::new();
+    }
+    let Some(source) = tile.layer(LAYER_TRAFFIC) else { return Vec::new() };
+    let mut out = Vec::new();
+    for (feature_index, feature) in source.features.iter().enumerate() {
+        if feature.geom_type != GEOM_LINE {
+            continue;
+        }
+        let Some(id) = tile.feature_id(LAYER_TRAFFIC, feature_index) else { continue };
+        if id == tilecodec::mamaps::body::ID_NONE {
+            continue;
+        }
+        let mut vertices = Vec::new();
+        let mut indices = Vec::new();
+        for part in source.parts_of(feature) {
+            let flat = flatten(source.points(part));
+            // Never gapped: a traffic segment is one solid band, not a road casing.
+            stroke::stroke(&flat, extent, false, &mut vertices, &mut indices);
+        }
+        if indices.is_empty() {
+            continue;
+        }
+        out.push(TrafficMesh { id, vertices, indices });
+    }
+    out
 }
 
 /// Tessellate this tile's `region_area` shapes, one mesh per feature.
@@ -412,6 +756,78 @@ fn ring_area(ring: &[(f32, f32)]) -> f32 {
 /// `[(i16, i16)]` to the `[(i32, i32)]` the fill tessellator takes.
 fn widen(points: &[(i16, i16)]) -> Vec<(i32, i32)> {
     points.iter().map(|&(x, y)| (x as i32, y as i32)).collect()
+}
+
+/// Extrude one `buildings` feature into walls and a roof, appending to the tile's building mesh.
+///
+/// The metric heights in the side table are normalised against `ground_width_m` — the tile's own
+/// ground width — so the extruded height rides in the same tile-local unit the footprint does and
+/// the mesh stays zoom-independent (see [`crate::tess::roof`]). A feature with no attrs (or a layer
+/// with no building table) reads back a default [`BuildingAttrs`], which extrudes as a flat box at
+/// [`DEFAULT_BUILDING_HEIGHT_M`].
+///
+/// A wall or roof the archive gives no colour keeps **0** — a transparent black that no real colour
+/// can collide with, since the side table already spells "absent" that way. `building.frag` reads
+/// the zero alpha as "use the palette's building colour", which arrives as a push constant. The
+/// style colour is deliberately *not* baked in here: vertex colour is fixed at tessellation time
+/// and the palette is not reachable from this path, so baking it would mean re-tessellating every
+/// building in the resident set on a light/dark switch.
+#[allow(clippy::too_many_arguments)]
+fn extrude_building(
+    tile: &Body,
+    feature_index: usize,
+    rings: &[Vec<(i32, i32)>],
+    extent: u32,
+    validated: bool,
+    ground_width_m: f64,
+    out_v: &mut Vec<f32>,
+    out_i: &mut Vec<u32>,
+) {
+    let attrs = tile.building_attrs(LAYER_BUILDINGS, feature_index).unwrap_or_default();
+    // Tile-normalised height per metre; a degenerate (polar) tile with zero width flattens rather
+    // than dividing by zero.
+    let factor = if ground_width_m > 0.0 { 1.0 / ground_width_m } else { 0.0 };
+    // Decimetres on the wire, metres here. An absent height (0) extrudes to the default so an
+    // untagged building is still a box.
+    let height_m =
+        if attrs.height != 0 { attrs.height as f64 / 10.0 } else { DEFAULT_BUILDING_HEIGHT_M };
+    let min_m = attrs.min_height as f64 / 10.0;
+    // The roof lives inside the total height, so it can never be taller than the building.
+    let roof_m = (attrs.roof_height as f64 / 10.0).min(height_m);
+    let base = (min_m * factor) as f32;
+    let apex = (height_m * factor) as f32;
+    let wall_top = ((height_m - roof_m) * factor) as f32;
+    // `roof_direction` is quantised over a full turn: `v * 360 / 256` degrees, i.e. `v / 256` of a
+    // turn in radians.
+    let roof_dir = attrs.roof_direction as f64 / 256.0 * std::f64::consts::TAU;
+    let wall_colour = attrs.building_colour;
+    let roof_colour =
+        if attrs.roof_colour != 0 { attrs.roof_colour } else { attrs.building_colour };
+    roof::extrude(
+        rings,
+        extent,
+        validated,
+        base,
+        wall_top,
+        apex,
+        attrs.roof_shape,
+        roof_dir as f32,
+        attrs.roof_orientation,
+        wall_colour,
+        roof_colour,
+        out_v,
+        out_i,
+    );
+}
+
+/// Metres of ground the tile spans east–west at its centre latitude — the horizontal unit the
+/// building heights are normalised against, so a metre up reads the same on screen as a metre
+/// across. Web Mercator, matching the projection the archive was cut with.
+fn tile_ground_width_m(z: u8, y: u32) -> f64 {
+    let scale = 2f64.powi(z as i32);
+    let n = std::f64::consts::PI - 2.0 * std::f64::consts::PI * (y as f64 + 0.5) / scale;
+    let lat = n.sinh().atan();
+    EARTH_CIRCUMFERENCE_M * lat.cos() / scale
 }
 
 /// `[(i16, i16)]` to the flat `[x, y, ...]` the stroke tessellator takes.
@@ -715,6 +1131,7 @@ mod tests {
                 transit_ordinal: 0,
                 transit_lanes: 0,
                 transit_taper: 0,
+                lane_count: 0,
             });
         }
         body.layers.push(source);
@@ -729,7 +1146,7 @@ mod tests {
             "an optional layer that is off must tessellate nothing",
         );
 
-        let on = LayerToggles { poi: false, transit: true };
+        let on = LayerToggles { poi: false, transit: true, traffic: false };
         let mesh = build_toggled(&body, only, 14, 0, 0, false, on, &KindFilter::all(), 7);
         assert_eq!(mesh.generation, 7, "the mesh records the generation it was built at");
         let colours: Vec<Option<u32>> = mesh.meshes.iter().map(|m| m.color_override).collect();
@@ -747,9 +1164,114 @@ mod tests {
         }
     }
 
-    /// Two routes of one colour on different corridor ordinals are two parallel lines, and a
-    /// mesh can only carry one lateral offset — so the split is on the lane inputs too, not
-    /// the colour alone.
+    /// A multi-lane road fans into one divider line per interior lane boundary, each in its own
+    /// mesh carrying the (ordinal, divider-count) the shader offsets it by; a road with a single
+    /// lane draws no divider at all. This is the road half of the lateral-fan the transit tests
+    /// above pin — driven by `lane_count` and the layer's own colour rather than a per-route one.
+    #[test]
+    fn a_multi_lane_road_fans_into_one_divider_per_interior_boundary() {
+        use tilecodec::mamaps::body::{Feature, Layer as BodyLayer, Part, NAME_NONE, WINDING_OUTER};
+        use tilecodec::mamaps::dict;
+        let mut body = Body::new(4096);
+        let mut source = BodyLayer::new(dict::LAYER_ROADS);
+        // A four-lane road (three interior dividers) and a single-lane road (none).
+        for (lane_count, y) in [(4u8, 100i16), (1, 300)] {
+            let parts_offset = source.parts.len() as u32;
+            source.parts.push(Part {
+                coord_start: source.coords.len() as u32,
+                point_count: 2,
+                winding: WINDING_OUTER,
+            });
+            source.coords.extend_from_slice(&[(0, y), (1000, y)]);
+            source.features.push(Feature {
+                kind: crate::style::kind_id_for_test("major_road"),
+                kind_detail: 0,
+                geom_type: GEOM_LINE,
+                flags: 0,
+                name_idx: NAME_NONE,
+                parts_offset,
+                part_count: 1,
+                transit_color: 0,
+                transit_ordinal: 0,
+                transit_lanes: 0,
+                transit_taper: 0,
+                lane_count,
+            });
+        }
+        body.layers.push(source);
+
+        let all = style::layers();
+        let at = all.iter().position(|l| l.id == "roads-lanes").expect("the road lanes layer");
+        let Some(only) = all.get(at..=at) else { panic!("a one-layer slice") };
+
+        // Gated to high zoom: nothing while the deepest tile this stands in for is still below
+        // the floor (min_zoom 16 against z + ANCESTOR_DEPTH), the whole point of the dense layer.
+        assert!(
+            build(&body, only, 11, 0, 0, false).meshes.is_empty(),
+            "the lane layer is not tessellated below its floor",
+        );
+
+        let mesh = build(&body, only, 16, 0, 0, false);
+        // Three dividers for the four-lane road, none for the one-lane road, and the layer's own
+        // colour (no per-feature override).
+        assert_eq!(
+            mesh.meshes.iter().map(|m| m.lane).collect::<Vec<(u8, u8, u8)>>(),
+            vec![(0, 3, 255), (1, 3, 255), (2, 3, 255)],
+            "one mesh per interior divider of the four-lane road, in ordinal order",
+        );
+        assert!(
+            mesh.meshes.iter().all(|m| m.color_override.is_none()),
+            "a lane divider takes the layer's colour, not a per-feature one",
+        );
+        assert!(mesh.meshes.iter().all(|m| m.kind == LayerKind::Line && !m.indices.is_empty()));
+    }
+
+    /// Turn arrows are produced from the archive's turn-lane table at high zoom and gated off
+    /// below it: a road with `turn:lanes` yields one arrow per marked lane, pointing along the
+    /// road, and none when the tile is too coarse.
+    #[test]
+    fn turn_arrows_come_from_the_turn_table_at_high_zoom() {
+        use tilecodec::mamaps::body::{
+            Feature, LaneTurns, Layer as BodyLayer, Part, LANE_LEFT, LANE_THROUGH, NAME_NONE,
+            WINDING_OUTER,
+        };
+        use tilecodec::mamaps::dict;
+        let mut body = Body::new(4096);
+        let mut source = BodyLayer::new(dict::LAYER_ROADS);
+        // A straight eastbound road spanning the tile, ending at the east edge.
+        source.parts.push(Part { coord_start: 0, point_count: 2, winding: WINDING_OUTER });
+        source.coords.extend_from_slice(&[(100, 2000), (3000, 2000)]);
+        source.features.push(Feature {
+            kind: crate::style::kind_id_for_test("major_road"),
+            kind_detail: 0,
+            geom_type: GEOM_LINE,
+            flags: 0,
+            name_idx: NAME_NONE,
+            parts_offset: 0,
+            part_count: 1,
+            transit_color: 0,
+            transit_ordinal: 0,
+            transit_lanes: 0,
+            transit_taper: 0,
+            lane_count: 2,
+        });
+        body.layers.push(source);
+        body.turn_lanes = vec![(
+            dict::LAYER_ROADS,
+            vec![LaneTurns { forward: vec![LANE_LEFT, LANE_THROUGH], backward: vec![] }],
+        )];
+
+        // Below the gate: no arrows built.
+        assert!(build(&body, &style::layers(), 11, 0, 0, false).arrows.is_empty());
+
+        let mesh = build(&body, &style::layers(), 16, 0, 0, false);
+        assert_eq!(mesh.arrows.len(), 2, "one arrow per marked forward lane");
+        assert!(mesh.arrows.iter().all(|a| a.angle.abs() < 1e-4), "eastbound heading is ~0");
+        assert_eq!(mesh.arrows[0].arrow, crate::tile::arrow::TurnArrow::Left);
+        assert_eq!(mesh.arrows[1].arrow, crate::tile::arrow::TurnArrow::Through);
+        assert!(mesh.arrows.iter().all(|a| a.count == 2));
+    }
+
     #[test]
     fn transit_lines_of_one_colour_split_again_on_their_corridor_ordinal() {
         use tilecodec::mamaps::body::{Feature, Layer as BodyLayer, Part, NAME_NONE, WINDING_OUTER};
@@ -776,13 +1298,14 @@ mod tests {
                 transit_ordinal: ordinal,
                 transit_lanes: 2,
                 transit_taper: 255,
+                lane_count: 0,
             });
         }
         body.layers.push(source);
         let all = style::layers();
         let at = all.iter().position(|l| l.id == "transit-rail").expect("the transit layer");
         let Some(only) = all.get(at..=at) else { panic!("a one-layer slice") };
-        let on = LayerToggles { poi: false, transit: true };
+        let on = LayerToggles { poi: false, transit: true, traffic: false };
         let mesh = build_toggled(&body, only, 14, 0, 0, false, on, &KindFilter::all(), 0);
         assert_eq!(
             mesh.meshes.iter().map(|m| m.lane).collect::<Vec<(u8, u8, u8)>>(),
@@ -903,5 +1426,461 @@ mod tests {
             assert!(mesh_for(&mesh, layers, id).is_some(), "{id} should draw");
         }
         assert!(mesh_for(&mesh, layers, "buildings").is_none(), "the tile has no buildings");
+    }
+
+    // --- the live-traffic overlay (WS3) ------------------------------------
+
+    /// A body carrying `count` traffic component segments, ids from `ids` (one per feature,
+    /// `None` for a feature the id table attributes to nothing → [`ID_NONE`]). When `id_table`
+    /// is false the layer carries no id table at all, which is the other "no id" case.
+    fn traffic_body(ids: &[Option<u64>], id_table: bool) -> Body {
+        use tilecodec::mamaps::body::{
+            Feature, Layer as BodyLayer, Part, DEFAULT_EXTENT, NAME_NONE, WINDING_OUTER,
+        };
+        let mut source = BodyLayer::new(LAYER_TRAFFIC);
+        for (i, _) in ids.iter().enumerate() {
+            let parts_offset = source.parts.len() as u32;
+            source.parts.push(Part {
+                coord_start: source.coords.len() as u32,
+                point_count: 2,
+                winding: WINDING_OUTER,
+            });
+            let y = 100 + i as i16 * 10;
+            source.coords.extend_from_slice(&[(0, y), (1000, y)]);
+            source.features.push(Feature {
+                kind: 0,
+                kind_detail: 0,
+                geom_type: GEOM_LINE,
+                flags: 0,
+                name_idx: NAME_NONE,
+                parts_offset,
+                part_count: 1,
+                transit_color: 0,
+                transit_ordinal: 0,
+                transit_lanes: 0,
+                transit_taper: 0,
+                lane_count: 0,
+            });
+        }
+        let table = if id_table {
+            let vec: Vec<u64> = ids
+                .iter()
+                .map(|o| o.unwrap_or(tilecodec::mamaps::body::ID_NONE))
+                .collect();
+            vec![(LAYER_TRAFFIC, vec)]
+        } else {
+            Vec::new()
+        };
+        Body { extent: DEFAULT_EXTENT, layers: vec![source], names: Vec::new(), ids: table, turn_lanes: Vec::new(), buildings: Vec::new(), heightmap: None, carriageways: Vec::new(), convention: None }
+    }
+
+    fn traffic_on() -> LayerToggles {
+        LayerToggles { poi: false, transit: false, traffic: true }
+    }
+
+    /// One mesh per component segment, each carrying the segment's `component_id` from the id
+    /// side-table, in feature order. This is what lets the renderer key its pushed colour
+    /// table by id.
+    #[test]
+    fn traffic_is_one_mesh_per_component_carrying_its_id() {
+        let ids = [Some(0x1234_0000_u64 | 5), Some(0x1234_0000 | 6)];
+        let body = traffic_body(&ids, true);
+        let mesh = build_toggled(&body, &[], 14, 0, 0, false, traffic_on(), &KindFilter::all(), 1);
+        assert_eq!(
+            mesh.traffic.iter().map(|t| t.id).collect::<Vec<_>>(),
+            vec![0x1234_0000 | 5, 0x1234_0000 | 6],
+            "one mesh per segment, id from the side-table, in feature order",
+        );
+        assert!(mesh.traffic.iter().all(|t| !t.indices.is_empty()), "every segment tessellates");
+    }
+
+    /// The overlay is gated at tessellation like the other optional layers: off means nothing
+    /// is built, so leaving it off costs nothing per frame.
+    #[test]
+    fn traffic_is_gated_off_unless_the_toggle_is_on() {
+        let body = traffic_body(&[Some(1), Some(2)], true);
+        let off = build(&body, &[], 14, 0, 0, false);
+        assert!(off.traffic.is_empty(), "traffic off tessellates no segments");
+        let on = build_toggled(&body, &[], 14, 0, 0, false, traffic_on(), &KindFilter::all(), 1);
+        assert_eq!(on.traffic.len(), 2, "traffic on tessellates the segments");
+    }
+
+    /// Component lines are dense, so they are only built at or below the traffic floor even
+    /// when the toggle is on — the render-side half of WS2's archive zoom gate.
+    #[test]
+    fn traffic_is_gated_below_its_min_zoom() {
+        let body = traffic_body(&[Some(1)], true);
+        // deepest = z + ANCESTOR_DEPTH(4); at z0 that is 4, well below the floor.
+        let coarse = build_toggled(&body, &[], 0, 0, 0, false, traffic_on(), &KindFilter::all(), 1);
+        assert!(coarse.traffic.is_empty(), "a coarse tile builds no traffic");
+        let deep = build_toggled(
+            &body,
+            &[],
+            TRAFFIC_MIN_ZOOM,
+            0,
+            0,
+            false,
+            traffic_on(),
+            &KindFilter::all(),
+            1,
+        );
+        assert_eq!(deep.traffic.len(), 1, "a tile at the floor builds it");
+    }
+
+    /// A segment with no stable id — either the layer carries no id table, or its entry is
+    /// [`ID_NONE`] — is skipped: nothing could ever colour it, so drawing it would only repaint
+    /// a road the basemap already drew.
+    #[test]
+    fn a_traffic_segment_with_no_id_is_skipped() {
+        let none_in_table = traffic_body(&[Some(7), None, Some(9)], true);
+        let mesh =
+            build_toggled(&none_in_table, &[], 14, 0, 0, false, traffic_on(), &KindFilter::all(), 1);
+        assert_eq!(
+            mesh.traffic.iter().map(|t| t.id).collect::<Vec<_>>(),
+            vec![7, 9],
+            "the ID_NONE segment is dropped, the others keep their ids",
+        );
+
+        let no_table = traffic_body(&[Some(7), Some(9)], false);
+        let mesh =
+            build_toggled(&no_table, &[], 14, 0, 0, false, traffic_on(), &KindFilter::all(), 1);
+        assert!(mesh.traffic.is_empty(), "a layer with no id table colours nothing, so draws nothing");
+    }
+
+    /// Colour is never an input to traffic tessellation — the builder takes no colour at all —
+    /// so a new speed reading (which only replaces the renderer's id→colour table) can never
+    /// re-tessellate. Two builds of the same body produce byte-identical geometry, which is the
+    /// property the "recolour without re-tessellation" guarantee rests on: the geometry a
+    /// recolour would have to change simply does not depend on anything a recolour touches.
+    #[test]
+    fn recolouring_cannot_retessellate_because_colour_is_not_a_tessellation_input() {
+        let body = traffic_body(&[Some(11), Some(22)], true);
+        let a = build_toggled(&body, &[], 14, 0, 0, false, traffic_on(), &KindFilter::all(), 1);
+        let b = build_toggled(&body, &[], 14, 0, 0, false, traffic_on(), &KindFilter::all(), 1);
+        assert_eq!(a.traffic.len(), b.traffic.len());
+        for (x, y) in a.traffic.iter().zip(&b.traffic) {
+            assert_eq!(x.id, y.id);
+            assert_eq!(x.vertices, y.vertices, "geometry is deterministic and colour-independent");
+            assert_eq!(x.indices, y.indices);
+        }
+    }
+
+    // --- 3D buildings (WS-A) -----------------------------------------------
+
+    /// A `buildings` body with one square footprint and the given attrs. `attrs` of `None` gives a
+    /// layer with no building side table at all — the "no attrs" case the reader handles.
+    fn building_body(attrs: Option<tilecodec::mamaps::body::BuildingAttrs>) -> Body {
+        use tilecodec::mamaps::body::{
+            Feature, Layer as BodyLayer, Part, DEFAULT_EXTENT, NAME_NONE, WINDING_OUTER,
+        };
+        use tilecodec::mamaps::dict;
+        let mut source = BodyLayer::new(dict::LAYER_BUILDINGS);
+        source.parts.push(Part { coord_start: 0, point_count: 5, winding: WINDING_OUTER });
+        // A closed square footprint, roughly a quarter of the tile.
+        source.coords.extend_from_slice(&[(0, 0), (1000, 0), (1000, 1000), (0, 1000), (0, 0)]);
+        source.features.push(Feature {
+            kind: crate::style::kind_id_for_test("building"),
+            kind_detail: 0,
+            geom_type: GEOM_POLYGON,
+            flags: 0,
+            name_idx: NAME_NONE,
+            parts_offset: 0,
+            part_count: 1,
+            transit_color: 0,
+            transit_ordinal: 0,
+            transit_lanes: 0,
+            transit_taper: 0,
+            lane_count: 0,
+        });
+        let buildings = match attrs {
+            Some(a) => vec![(dict::LAYER_BUILDINGS, vec![a])],
+            None => Vec::new(),
+        };
+        Body {
+            extent: DEFAULT_EXTENT,
+            layers: vec![source],
+            names: Vec::new(),
+            ids: Vec::new(),
+            turn_lanes: Vec::new(),
+            buildings,
+            heightmap: None, carriageways: Vec::new(), convention: None,
+        }
+    }
+
+    /// The height of the tallest building vertex, in tile-normalised units.
+    fn max_building_z(mesh: &TileMesh) -> f32 {
+        mesh.buildings
+            .vertices
+            .chunks(roof::FLOATS_PER_VERTEX)
+            .map(|c| c[2])
+            .fold(0.0f32, f32::max)
+    }
+
+    #[test]
+    fn a_building_extrudes_into_a_3d_mesh_not_a_flat_fill() {
+        use tilecodec::mamaps::body::BuildingAttrs;
+        // A 30 m box (300 dm) at a mid-latitude tile (y = 8192 is the equator at z14).
+        let body = building_body(Some(BuildingAttrs { height: 300, ..Default::default() }));
+        let layers = style::layers();
+        let mesh = build(&body, &layers, 14, 0, 8192, false);
+
+        assert!(!mesh.buildings.indices.is_empty(), "the building must extrude");
+        assert_eq!(mesh.buildings.indices.len() % 3, 0, "indices come in threes");
+        assert_eq!(mesh.buildings.vertices.len() % roof::FLOATS_PER_VERTEX, 0, "vertices are whole");
+        // Buildings draw in their own depth pass, so they must NOT also appear as a flat fill mesh.
+        assert!(
+            mesh_for(&mesh, &layers, "buildings").is_none(),
+            "a building must not double up as a flat fill",
+        );
+
+        let zs: Vec<f32> =
+            mesh.buildings.vertices.chunks(roof::FLOATS_PER_VERTEX).map(|c| c[2]).collect();
+        assert!(zs.iter().any(|&z| z.abs() < 1e-6), "walls must start at the base");
+        assert!(zs.iter().any(|&z| z > 0.0), "the box must extrude upward");
+    }
+
+    #[test]
+    fn a_taller_building_reaches_higher() {
+        use tilecodec::mamaps::body::BuildingAttrs;
+        let layers = style::layers();
+        let short = build(
+            &building_body(Some(BuildingAttrs { height: 200, ..Default::default() })),
+            &layers,
+            14,
+            0,
+            8192,
+            false,
+        );
+        let tall = build(
+            &building_body(Some(BuildingAttrs { height: 600, ..Default::default() })),
+            &layers,
+            14,
+            0,
+            8192,
+            false,
+        );
+        // Triple the metric height, so the tile-normalised apex is ~3x — the heights really do come
+        // from the side table rather than a constant.
+        assert!(
+            max_building_z(&tall) > max_building_z(&short) * 2.5,
+            "a 3x taller building must extrude far higher: {} vs {}",
+            max_building_z(&tall),
+            max_building_z(&short),
+        );
+    }
+
+    #[test]
+    fn a_building_with_no_side_table_still_extrudes_a_default_box() {
+        // A layer with no building table reads back default attrs, which extrude at the default
+        // height rather than nothing — an unattributed building is still a building.
+        let mesh = build(&building_body(None), &style::layers(), 14, 0, 8192, false);
+        assert!(!mesh.buildings.indices.is_empty(), "a default building still extrudes");
+        assert!(max_building_z(&mesh) > 0.0, "the default box has a real height");
+    }
+
+    #[test]
+    fn buildings_are_not_extruded_far_below_their_zoom() {
+        use tilecodec::mamaps::body::BuildingAttrs;
+        // A coarse tile outside the z14 ancestor window carries no buildings at all, the same gate
+        // every zoomed-in layer uses.
+        let coarse = build(
+            &building_body(Some(BuildingAttrs { height: 300, ..Default::default() })),
+            &style::layers(),
+            5,
+            0,
+            8192,
+            false,
+        );
+        assert!(coarse.buildings.indices.is_empty(), "a z5 tile is far below the buildings zoom");
+    }
+
+    // --- 3D terrain relief (WS-G) ------------------------------------------
+
+    /// A `dim x dim` heightmap from a metres-above-sea closure, applying the +32768 bias the format
+    /// stores.
+    fn heightmap(dim: u16, metres: impl Fn(u16, u16) -> i32) -> tilecodec::mamaps::body::Heightmap {
+        let mut samples = Vec::with_capacity((dim as usize).pow(2));
+        for row in 0..dim {
+            for col in 0..dim {
+                samples.push((metres(col, row) + 32768) as u16);
+            }
+        }
+        tilecodec::mamaps::body::Heightmap { dim, samples }
+    }
+
+    #[test]
+    fn a_heightmap_tile_builds_terrain_and_drops_the_flat_earth_fill() {
+        // A tile carrying a heightmap draws its ground as the displaced terrain grid, and its flat
+        // `earth` fill is suppressed so the two do not double up — while the other flat layers
+        // (water) still tessellate as before.
+        let layers = style::layers();
+        let mut body = real();
+        body.heightmap = Some(heightmap(9, |c, r| (c as i32 + r as i32) * 20));
+        let mesh = build(&body, &layers, 11, 339, 770, false);
+
+        assert!(!mesh.terrain.indices.is_empty(), "the heightmap tile builds a terrain grid");
+        assert_eq!(mesh.terrain.indices.len() % 3, 0, "terrain indices come in threes");
+        assert_eq!(
+            mesh.terrain.vertices.len() % terrain::FLOATS_PER_VERTEX,
+            0,
+            "terrain vertices are whole",
+        );
+        assert!(
+            mesh_for(&mesh, &layers, "earth").is_none(),
+            "the flat earth fill is replaced by the terrain grid",
+        );
+        assert!(mesh_for(&mesh, &layers, "water").is_some(), "water still draws flat over terrain");
+    }
+
+    #[test]
+    fn a_tile_without_a_heightmap_stays_flat() {
+        // The no-DEM case (ocean, off-coverage): no terrain grid, and the flat earth fill remains
+        // exactly as it always was.
+        let layers = style::layers();
+        let mesh = build(&real(), &layers, 11, 339, 770, false);
+        assert!(mesh.terrain.indices.is_empty(), "a tile with no heightmap builds no terrain");
+        assert!(mesh_for(&mesh, &layers, "earth").is_some(), "and keeps its flat earth fill");
+    }
+
+    #[test]
+    fn terrain_height_is_normalised_from_the_dem() {
+        // The displaced z is metres / the tile's ground width — the same tile-local unit buildings
+        // use — so the grid is zoom-independent and a hill of a known height lands where expected.
+        let layers = style::layers();
+        let (z, y) = (11u8, 770u32);
+        let peak_m = 500;
+        let mut body = real();
+        // Flat except one central sample, so the peak vertex is unambiguous.
+        body.heightmap = Some(heightmap(5, |c, r| if c == 2 && r == 2 { peak_m } else { 0 }));
+        let mesh = build(&body, &layers, z, 339, y, false);
+
+        let ground = tile_ground_width_m(z, y);
+        let max_z = mesh
+            .terrain
+            .vertices
+            .chunks(terrain::FLOATS_PER_VERTEX)
+            .map(|c| c[2])
+            .fold(f32::MIN, f32::max);
+        assert!(
+            (max_z - peak_m as f32 / ground as f32).abs() < 1e-4,
+            "the peak rises to metres/ground_width: {} vs {}",
+            max_z,
+            peak_m as f32 / ground as f32,
+        );
+    }
+
+    // --- curved labels along roads / rivers (WS-E) -------------------------
+
+    /// A symbol layer over the `roads` source with no kind filter, so it labels any named road
+    /// line — the render-side shape of the `roads-label` style layer the build carries names for.
+    fn roads_label_layer() -> Layer {
+        Layer {
+            id: "roads-label".to_string(),
+            source_layer: "roads".to_string(),
+            source_layer_id: tilecodec::mamaps::dict::LAYER_ROADS,
+            kind: LayerKind::Symbol,
+            kinds: Vec::new(),
+            kind_ids: Vec::new(),
+            require_flags: 0,
+            forbid_flags: 0,
+            detail_ids: Vec::new(),
+            forbid_details: Vec::new(),
+            light: 0xFF3B3B3B,
+            dark: 0xFFEDEDED,
+            opacity: Ramp::constant(1.0),
+            width: Ramp::constant(0.0),
+            gap_width: Ramp::constant(0.0),
+            spread: Ramp::constant(0.0),
+            lanes: Ramp::constant(1.0),
+            dash: (0.0, 0.0),
+            text_size: Ramp::constant(12.0),
+            text_size_large: None,
+            rank_threshold: None,
+            uppercase: false,
+            medium: false,
+            toggle: None,
+            icon: false,
+            text_offset: (0.0, 0.0),
+            text_max_width: 0.0,
+            variable_anchor: Vec::new(),
+            halo_light: 0xFFFFFFFF,
+            halo_dark: 0xFF0D1B2A,
+            halo_width: 1.0,
+            min_zoom: 0,
+            browse_min_zoom: 0,
+            max_zoom: 22,
+            authored: "roads_label".to_string(),
+        }
+    }
+
+    /// A body with one named road line running along `pts` (extent units).
+    fn named_road_body(name: &str, pts: &[(i16, i16)]) -> Body {
+        use tilecodec::mamaps::body::{
+            Feature, Layer as BodyLayer, Part, DEFAULT_EXTENT, WINDING_OUTER,
+        };
+        use tilecodec::mamaps::dict;
+        let mut source = BodyLayer::new(dict::LAYER_ROADS);
+        source.parts.push(Part {
+            coord_start: 0,
+            point_count: pts.len() as u32,
+            winding: WINDING_OUTER,
+        });
+        source.coords.extend_from_slice(pts);
+        source.features.push(Feature {
+            kind: crate::style::kind_id_for_test("major_road"),
+            kind_detail: 0,
+            geom_type: GEOM_LINE,
+            flags: 0,
+            name_idx: 1,
+            parts_offset: 0,
+            part_count: 1,
+            transit_color: 0,
+            transit_ordinal: 0,
+            transit_lanes: 0,
+            transit_taper: 0,
+            lane_count: 0,
+        });
+        Body {
+            extent: DEFAULT_EXTENT,
+            layers: vec![source],
+            names: vec![name.to_string()],
+            ids: Vec::new(),
+            turn_lanes: Vec::new(),
+            buildings: Vec::new(),
+            heightmap: None, carriageways: Vec::new(), convention: None,
+        }
+    }
+
+    #[test]
+    fn a_named_road_line_shapes_a_curved_label_along_its_centreline() {
+        if !crate::tile::glyph::fonts_staged() {
+            eprintln!("SKIP: staged TTFs are not fonts");
+            return;
+        }
+        // A straight eastbound road spanning the tile.
+        let body = named_road_body("Market Street", &[(200, 2048), (3800, 2048)]);
+        let layers = vec![roads_label_layer()];
+        let mesh = build(&body, &layers, 14, 0, 8192, false);
+
+        assert_eq!(mesh.labels.len(), 1, "the named road shapes exactly one label");
+        let label = &mesh.labels[0];
+        assert_eq!(label.name, "Market Street");
+        assert_eq!(label.layer_index, 0);
+        let centreline = label.centreline.as_ref().expect("a road label is curved, not point");
+        assert_eq!(centreline.len(), 2, "the whole feature centreline rides on the label");
+        // Normalised into tile-local 0..1 from extent units, along the tile's mid-line.
+        assert!(centreline.iter().all(|&(x, y)| (0.0..=1.0).contains(&x) && (y - 0.5).abs() < 1e-3));
+        assert!(centreline[1].0 > centreline[0].0, "eastbound: x increases along the line");
+    }
+
+    #[test]
+    fn an_unnamed_road_line_shapes_no_label() {
+        // Without a name there is nothing to lay along the line, so no curved label is produced —
+        // the same silent skip the point path makes for an unnamed place.
+        use tilecodec::mamaps::body::NAME_NONE;
+        let mut body = named_road_body("ignored", &[(200, 2048), (3800, 2048)]);
+        body.layers[0].features[0].name_idx = NAME_NONE;
+        let mesh = build(&body, &vec![roads_label_layer()], 14, 0, 8192, false);
+        assert!(mesh.labels.is_empty(), "an unnamed road line shapes nothing");
     }
 }

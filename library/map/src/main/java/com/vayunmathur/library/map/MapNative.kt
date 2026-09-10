@@ -63,6 +63,12 @@ internal object MapNative {
      * [bearing] is degrees clockwise from north for whatever points up the screen. Zero
      * is north-up, which is every frame the Compose path draws; the native side
      * short-circuits it, so a north-up frame composes exactly the matrices it always did.
+     *
+     * [pitch] is the tilt away from straight-down in degrees; the native side clamps it to the
+     * supported band and short-circuits zero, so a level camera is byte-for-byte unchanged.
+     * [frameTimeNanos] is the Choreographer frame clock, forwarded to shaders (dash phase, LOD
+     * morph, vehicle interpolation) through a push-constant slot; the native side reduces it
+     * modulo an hour before it becomes a float.
      */
     external fun render(
         handle: Long,
@@ -70,9 +76,11 @@ internal object MapNative {
         centerLat: Float,
         zoom: Float,
         bearing: Float,
+        pitch: Float,
         widthDp: Float,
         heightDp: Float,
         density: Float,
+        frameTimeNanos: Long,
     ): Boolean
 
     external fun resize(handle: Long, width: Int, height: Int)
@@ -103,6 +111,41 @@ internal object MapNative {
      * empty draws them all. A name the schema does not know is ignored.
      */
     external fun setLayers(handle: Long, poi: Boolean, transit: Boolean, kinds: String)
+
+    /**
+     * Turn the live-traffic overlay on or off.
+     *
+     * Gated at tessellation like [setLayers], so an archive without the traffic layer — or a
+     * consumer that never enables it — costs nothing: turning it on invalidates the resident
+     * meshes and they re-tessellate on the worker pool with the traffic layer, and turning it
+     * off stops drawing at once and drops the geometry on the next re-tessellation. The
+     * per-segment colours arrive separately through [setTrafficSpeeds].
+     *
+     * Its own entry point rather than a fourth argument to [setLayers] so the existing layer
+     * call keeps its shape for the five consumers that never draw traffic.
+     */
+    external fun setTrafficEnabled(handle: Long, enabled: Boolean)
+
+    /**
+     * Push the live-traffic colour table. [ids] holds each drawn segment's `component_id` and
+     * [argbColors] the fully-resolved ARGB the host wants drawn for it, index for index. The
+     * host owns the theme, so the colours are final; the renderer only looks them up per frame.
+     *
+     * Two parallel arrays rather than a packed buffer: it is what the caller already has (a
+     * `LongArray` of ids and an `IntArray` of colours), and it crosses the boundary in two bulk
+     * reads with no per-element JNI traffic. The whole table is replaced each call — a stale id
+     * left behind would colour a road the latest data no longer covers. A segment whose id is
+     * absent draws nothing, so the basemap road shows through as the no-data look. Mismatched
+     * lengths are truncated to the shorter. This is a pure recolour: no tessellation, no upload.
+     */
+    external fun setTrafficSpeeds(handle: Long, ids: LongArray, argbColors: IntArray)
+
+    /**
+     * Drop every pushed traffic colour so the overlay stops drawing on the next frame, without
+     * waiting for a toggle-off re-tessellation to evict the geometry. What the host calls when
+     * the viewport moves off the squares it has readings for, or the toggle goes off.
+     */
+    external fun clearTraffic(handle: Long)
 
     /**
      * Tell the renderer whether the device is online. When offline it serves stale cached
@@ -136,34 +179,83 @@ internal object MapNative {
     external fun clearUserPuck(handle: Long)
 
     /**
+     * Replace the app's pins with a marker set the renderer draws as billboarded sprites.
+     *
+     * [ids] holds each marker's stable host id (echoed back by [pickAt]), [lonLat] is a flat
+     * `[lon0, lat0, lon1, lat1, …]`, and [icons] is each marker's icon id (see the native
+     * `crate::marker::icon` table: parking/transit/search/saved/family, plus the transit-vehicle
+     * ids WS-F reuses). Three parallel bulk arrays, the same convention as [setRoute] and
+     * [setTrafficSpeeds]: a viewport of pins crosses the boundary in a few reads with no per-pin
+     * traffic. `Float` coordinates for the same reason [render]'s are.
+     *
+     * Free in the [setPalette] sense: the geometry is the shared unit quad billboarded per marker,
+     * so nothing is tessellated or uploaded. The whole set is replaced each call — a stale pin left
+     * behind would pick wrong. Moving the pins into the renderer is what stops them trailing the
+     * basemap on a pan or tilt. Mismatched array lengths are truncated to the shortest; an empty set
+     * is the same as [clearMarkers].
+     */
+    external fun setMarkers(handle: Long, ids: LongArray, lonLat: FloatArray, icons: IntArray)
+
+    /** Take every marker away: the host cleared its pins. */
+    external fun clearMarkers(handle: Long)
+
+    /**
+     * Replace the simulated transit vehicles with a set the renderer draws as billboarded sprites.
+     *
+     * The same three parallel bulk arrays as [setMarkers] — [ids] each vehicle's stable per-trip id,
+     * [lonLat] a flat `[lon0, lat0, lon1, lat1, …]`, and [icons] each vehicle's mode sprite id (the
+     * `VEHICLE_*` entries in [MarkerIcon]) — because a vehicle is a marker whose icon names a mode
+     * sprite, so it reuses the marker draw path verbatim.
+     *
+     * Separate from [setMarkers] so the app's ~1 Hz vehicle recompute replaces only the vehicles and
+     * leaves the pins untouched, and so the moving vehicle sprites stay out of the pin id-buffer pick
+     * (they are not tap targets). Free in the [setPalette] sense: the geometry is the shared unit
+     * quad billboarded per vehicle, so nothing is tessellated or uploaded. The whole set is replaced
+     * each call — a trip that ended, left the bbox, or was cancelled must drop out rather than
+     * linger. Mismatched array lengths are truncated to the shortest; an empty set is the same as
+     * [clearVehicles].
+     */
+    external fun setVehicles(handle: Long, ids: LongArray, lonLat: FloatArray, icons: IntArray)
+
+    /** Take every simulated vehicle away: the transit toggle went off, or the surface was hidden. */
+    external fun clearVehicles(handle: Long)
+
+    /**
      * Draw a navigation route line over the basemap and under the puck.
      *
-     * [points] is a flat `[lon0, lat0, lon1, lat1, …]` array — one array rather than a
-     * list of objects because a route is thousands of points and a per-point crossing is
-     * exactly what this boundary exists to avoid. `Float` for the same reason [render]'s
-     * coordinates are. A trailing odd element is ignored, and fewer than two distinct
-     * points draws nothing.
+     * [points] is a flat `[lon0, lat0, lon1, lat1, …]` array holding every coloured
+     * segment's points concatenated; [segmentLengths] is the point count of each segment
+     * in order, and [segmentColors] the ARGB fill of each, index for index. Three bulk
+     * arrays rather than a list of objects because a route is thousands of points and a
+     * per-point crossing is exactly what this boundary exists to avoid. `Float` for the
+     * coordinates for the same reason [render]'s are.
      *
-     * One polyline and one colour, which is what the consumer draws — see [RouteStyle].
+     * A **list of coloured segments** with one shared casing — the phone's per-step
+     * colouring (traffic bands, transit brand colours, the travelled grey during nav) is
+     * produced on the device and pushed here, so the route pans in lock-step with the
+     * basemap. A single-colour route (Android Auto) is a one-segment list. See [RouteStyle].
      *
-     * Not free, but paid **once**: the native side tessellates the polyline on the calling
-     * thread and uploads it. It never rebuilds it after that — the mesh is normalised into
+     * Not free, but paid **once**: the native side tessellates the segments on the calling
+     * thread and uploads them. It never rebuilds after that — the mesh is normalised into
      * the route's own bounding square, and Web Mercator is a pure scale in zoom, so the
      * same vertices are correct at every zoom and only the matrix changes per frame. A
-     * navigation session therefore costs one tessellation, not one per zoom step, which is
-     * the difference that matters on a car's power budget.
+     * navigation session therefore costs one tessellation per push, not one per zoom step.
      *
-     * An array that cannot be read leaves the route **unchanged** rather than clearing it:
-     * a bad frame of route data must not blank a route being followed.
+     * Arrays that cannot be read leave the route **unchanged** rather than clearing it:
+     * a bad frame of route data must not blank a route being followed. A segment of fewer
+     * than two distinct points draws nothing, and a route with no drawable segment is the
+     * same as [clearRoute]. Mismatched [segmentLengths]/[segmentColors] lengths are
+     * truncated to the shorter.
      *
      * Widths are Dp and colours are ARGB, like everything else here.
      */
     external fun setRoute(
         handle: Long,
         points: FloatArray,
+        segmentLengths: IntArray,
+        segmentColors: IntArray,
         widthDp: Float,
         casingDp: Float,
-        color: Int,
         casingColor: Int,
     )
 
@@ -214,6 +306,17 @@ internal object MapNative {
         x1Dp: Float,
         y1Dp: Float,
     ): Array<String>
+
+    /**
+     * Pick the renderer-drawn marker under a tap via the GPU id buffer.
+     *
+     * [xDp]/[yDp] are Dp from the viewport top-left. Returns the tapped marker's own id — the value
+     * set on it in [setMarkers] — so the caller rejoins the tap to its feature without matching on
+     * position, or `0` when no marker was hit. Unlike a Compose CPU hit-test this stays correct
+     * under tilt and never trails the basemap on a pan, because it reads back the same id the
+     * renderer drew for the frame under the finger.
+     */
+    external fun pickAt(handle: Long, xDp: Float, yDp: Float): Long
 
     /**
      * Destroy the renderer, wait for the GPU to go idle, and release the window.

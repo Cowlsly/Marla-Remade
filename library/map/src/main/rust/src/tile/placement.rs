@@ -233,6 +233,184 @@ pub fn anchored_rect(
     (x0 - inputs.pad_px, y0 - inputs.pad_px, x1 + inputs.pad_px, y1 + inputs.pad_px)
 }
 
+// --- oriented / segmented collision (curved labels) -------------------------
+
+/// An oriented bounding box in screen px: a centre, half-extents along its own axes, and the
+/// unit orientation `(cos, sin)` of its local x-axis.
+///
+/// A point label's box is one of these with `sin == 0` (axis-aligned), so a single collision
+/// primitive serves both the straight point labels and the per-glyph boxes of a curved one — a
+/// curved street name is a *row* of these, each rotated to its glyph's tangent, which is what
+/// lets it collide tightly instead of as one loose AABB across the whole bend.
+#[derive(Clone, Copy, Debug)]
+pub struct Obb {
+    pub cx: f32,
+    pub cy: f32,
+    pub hx: f32,
+    pub hy: f32,
+    pub cos: f32,
+    pub sin: f32,
+}
+
+impl Obb {
+    /// An axis-aligned box from a screen rect — how a point label enters the segmented placer.
+    pub fn from_rect(rect: (f32, f32, f32, f32)) -> Obb {
+        Obb {
+            cx: (rect.0 + rect.2) * 0.5,
+            cy: (rect.1 + rect.3) * 0.5,
+            hx: (rect.2 - rect.0).abs() * 0.5,
+            hy: (rect.3 - rect.1).abs() * 0.5,
+            cos: 1.0,
+            sin: 0.0,
+        }
+    }
+
+    /// The box's two unit axes.
+    fn axes(&self) -> [(f32, f32); 2] {
+        [(self.cos, self.sin), (-self.sin, self.cos)]
+    }
+}
+
+/// Whether two oriented boxes overlap, by the separating-axis theorem.
+///
+/// Four candidate axes (each box's two), which is all a 2D OBB pair needs: if the boxes' shadows
+/// are disjoint on any one axis they cannot intersect. Touching exactly (a gap of zero) counts as
+/// separated, matching the half-open [`overlaps`] the axis-aligned path uses so a label may sit
+/// flush against its neighbour.
+pub fn obb_overlap(a: &Obb, b: &Obb) -> bool {
+    let dx = b.cx - a.cx;
+    let dy = b.cy - a.cy;
+    for axis in a.axes().iter().chain(b.axes().iter()) {
+        let (ax, ay) = *axis;
+        let centre_gap = (dx * ax + dy * ay).abs();
+        let ra = project_radius(a, ax, ay);
+        let rb = project_radius(b, ax, ay);
+        if centre_gap >= ra + rb {
+            return false;
+        }
+    }
+    true
+}
+
+/// The half-width of `box`'s shadow on unit axis `(ax, ay)`.
+fn project_radius(b: &Obb, ax: f32, ay: f32) -> f32 {
+    let [u, v] = b.axes();
+    b.hx * (u.0 * ax + u.1 * ay).abs() + b.hy * (v.0 * ax + v.1 * ay).abs()
+}
+
+/// A label candidate whose collision footprint is one or more oriented boxes.
+///
+/// The superset of [`Candidate`]: a point label is a single [`Obb`], a curved label is the row of
+/// per-glyph boxes [`curved_boxes`] builds. [`alternate`](Self::alternate) is the second
+/// variable-anchor footprint (POI only), tried when the primary collides — the same fallback
+/// [`Candidate`] carries, generalised to a set of boxes.
+pub struct SegmentedCandidate {
+    pub id: u64,
+    pub rank: u8,
+    pub pop: u16,
+    pub boxes: Vec<Obb>,
+    pub alternate: Option<Vec<Obb>>,
+}
+
+impl SegmentedCandidate {
+    /// The bounding half-area of the primary footprint, for the size tie-break — a curved label's
+    /// summed glyph areas, a point label's box area.
+    fn area(&self) -> f32 {
+        self.boxes.iter().map(|b| b.hx * b.hy).sum::<f32>() * 4.0
+    }
+}
+
+/// Greedily place candidates whose footprints are oriented-box sets: the segmented counterpart of
+/// [`place`], and the one the curved labels use so a street name collides with a point label
+/// box-for-box rather than as one loose rectangle.
+///
+/// Ordering, rank-0-never-collides and the variable-anchor fallback are identical to [`place`];
+/// only the geometry test changes (any box against any accepted box, by [`obb_overlap`]). A point
+/// label enters as a one-box candidate, so point and curved labels place in the **same** pass and
+/// therefore collide with each other, which is the whole point of the exercise.
+pub fn place_segmented(candidates: &[SegmentedCandidate]) -> Vec<Placed> {
+    let mut ordered: Vec<&SegmentedCandidate> = candidates.iter().collect();
+    ordered.sort_by(|a, b| {
+        a.rank
+            .cmp(&b.rank)
+            .then_with(|| b.pop.cmp(&a.pop))
+            .then_with(|| b.area().partial_cmp(&a.area()).unwrap_or(std::cmp::Ordering::Equal))
+            .then_with(|| a.id.cmp(&b.id))
+    });
+    let mut accepted: Vec<Obb> = Vec::new();
+    let mut out = Vec::new();
+    for c in ordered {
+        let free = |boxes: &[Obb], accepted: &[Obb]| {
+            c.rank == 0 || !boxes.iter().any(|b| accepted.iter().any(|a| obb_overlap(a, b)))
+        };
+        let taken = if free(&c.boxes, &accepted) {
+            (&c.boxes, false)
+        } else if let Some(alternate) = c.alternate.as_ref().filter(|a| free(a, &accepted)) {
+            (alternate, true)
+        } else {
+            continue;
+        };
+        accepted.extend_from_slice(taken.0);
+        out.push((c.id, taken.1));
+    }
+    out
+}
+
+/// Build a curved label's per-glyph screen collision boxes from its tile-local layout.
+///
+/// The segmented analogue of [`anchored_rect`]: each [`CurvedGlyph`](crate::tess::text::CurvedGlyph)
+/// pen point is projected to screen px through `tile_clip` (the same linear projection the point
+/// box uses, so the two agree at pitch 0), and the glyph becomes an [`Obb`] oriented to the
+/// screen-space tangent, sized by its own advance and the cap height at `text_px`, and inflated by
+/// `pad_px`. The result feeds [`place_segmented`] as a [`SegmentedCandidate`]'s `boxes`.
+pub fn curved_boxes(
+    placements: &[crate::tess::text::CurvedGlyph],
+    tile_clip: [f32; 16],
+    extent_wh: (u32, u32),
+    text_px: f32,
+    pad_px: f32,
+) -> Vec<Obb> {
+    let (w, h) = (extent_wh.0 as f32, extent_wh.1 as f32);
+    let to_screen = |p: (f32, f32)| {
+        let cx = tile_clip[0] * p.0 + tile_clip[4] * p.1 + tile_clip[12];
+        let cy = tile_clip[1] * p.0 + tile_clip[5] * p.1 + tile_clip[13];
+        ((cx * 0.5 + 0.5) * w, (cy * 0.5 + 0.5) * h)
+    };
+    let em = crate::tile::glyph::UP_EM as f32;
+    let cap_px = crate::tess::text::CAP_HEIGHT_EM * text_px;
+    let mut out = Vec::with_capacity(placements.len());
+    for cg in placements {
+        let advance_px = cg.glyph.advance / em * text_px;
+        if advance_px <= 0.0 {
+            continue;
+        }
+        // Screen-space tangent: the tile-local tangent through the clip matrix's linear part, then
+        // clip → px scaling, normalised. Falls back to axis-aligned if it degenerates.
+        let dcx = tile_clip[0] * cg.tangent.0 + tile_clip[4] * cg.tangent.1;
+        let dcy = tile_clip[1] * cg.tangent.0 + tile_clip[5] * cg.tangent.1;
+        let (mut tx, mut ty) = (dcx * w, dcy * h);
+        let len = (tx * tx + ty * ty).sqrt();
+        if len > 1e-6 {
+            tx /= len;
+            ty /= len;
+        } else {
+            tx = 1.0;
+            ty = 0.0;
+        }
+        // Box centre is half an advance along the tangent from the pen origin.
+        let (sx, sy) = to_screen(cg.pen);
+        out.push(Obb {
+            cx: sx + tx * advance_px * 0.5,
+            cy: sy + ty * advance_px * 0.5,
+            hx: advance_px * 0.5 + pad_px,
+            hy: cap_px * 0.5 + pad_px,
+            cos: tx,
+            sin: ty,
+        });
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -542,5 +720,137 @@ mod tests {
         assert!((height(2) - 22.0).abs() < 1e-3, "{}", height(2));
         assert!((height(3) - 34.0).abs() < 1e-3, "{}", height(3));
         assert!((height(0) - height(1)).abs() < 1e-6, "a zero line count is one line");
+    }
+
+    // --- oriented / segmented collision (curved labels) ---------------------
+
+    /// An OBB centred at `(cx, cy)`, `half` on each side, rotated `deg` degrees.
+    fn obb(cx: f32, cy: f32, half: f32, deg: f32) -> Obb {
+        let r = deg.to_radians();
+        Obb { cx, cy, hx: half, hy: half, cos: r.cos(), sin: r.sin() }
+    }
+
+    #[test]
+    fn axis_aligned_overlap_agrees_with_the_rect_test() {
+        // An OBB with sin == 0 is a plain AABB, so `obb_overlap` must match `overlaps` on the
+        // same boxes — including the flush-edge case counting as separated.
+        let a = Obb::from_rect((0.0, 0.0, 10.0, 10.0));
+        let b = Obb::from_rect((5.0, 5.0, 15.0, 15.0));
+        assert!(obb_overlap(&a, &b));
+        let flush = Obb::from_rect((10.0, 0.0, 20.0, 10.0));
+        assert!(!obb_overlap(&a, &flush), "edge-touching boxes do not collide");
+        let apart = Obb::from_rect((10.1, 0.0, 20.0, 10.0));
+        assert!(!obb_overlap(&a, &apart));
+    }
+
+    #[test]
+    fn rotation_can_separate_or_join_two_boxes() {
+        // Two unit boxes whose centres are 1.3 apart on x: axis-aligned they miss (each reaches
+        // 0.5), but rotate one 45 degrees and its corner reaches ~0.707 along x, so they touch.
+        let a = obb(0.0, 0.0, 0.5, 0.0);
+        let straight = obb(1.3, 0.0, 0.5, 0.0);
+        assert!(!obb_overlap(&a, &straight), "axis-aligned they are clear");
+        let turned = obb(1.3, 0.0, 0.5, 45.0);
+        let turned_a = obb(0.0, 0.0, 0.5, 45.0);
+        assert!(obb_overlap(&turned_a, &turned), "rotated corners now reach across the gap");
+    }
+
+    /// **The task's collision guarantee.** A curved street label and a point label placed in one
+    /// pass collide with each other: the higher-priority point label (lower rank) takes the
+    /// space, and the curved label — whose glyph boxes overlap it — is dropped.
+    #[test]
+    fn a_curved_label_collides_with_an_overlapping_point_label() {
+        let point = SegmentedCandidate {
+            id: 0,
+            rank: 2,
+            pop: 0,
+            boxes: vec![Obb::from_rect((100.0, 100.0, 160.0, 120.0))],
+            alternate: None,
+        };
+        let curved = SegmentedCandidate {
+            id: 1,
+            rank: 5,
+            pop: 0,
+            // A row of rotated glyph boxes; the first sits on the point label's box.
+            boxes: vec![obb(130.0, 110.0, 9.0, 20.0), obb(300.0, 300.0, 9.0, 0.0)],
+            alternate: None,
+        };
+        assert_eq!(place_segmented(&[point, curved]), vec![(0, false)], "the point label wins");
+    }
+
+    #[test]
+    fn a_curved_label_clear_of_every_point_draws_alongside_them() {
+        // The counterpart: when its glyph boxes miss every placed point box, the curved label is
+        // accepted too — collision culls only what actually overlaps.
+        let point = SegmentedCandidate {
+            id: 0,
+            rank: 2,
+            pop: 0,
+            boxes: vec![Obb::from_rect((0.0, 0.0, 50.0, 20.0))],
+            alternate: None,
+        };
+        let curved = SegmentedCandidate {
+            id: 1,
+            rank: 5,
+            pop: 0,
+            boxes: vec![obb(300.0, 300.0, 9.0, 30.0), obb(320.0, 305.0, 9.0, 35.0)],
+            alternate: None,
+        };
+        assert_eq!(place_segmented(&[point, curved]), vec![(0, false), (1, false)]);
+    }
+
+    #[test]
+    fn a_curved_label_flips_to_its_alternate_footprint() {
+        // The variable-anchor fallback generalises to box sets: a blocked primary footprint tries
+        // the alternate before dropping, and reports the flip.
+        let blocker = SegmentedCandidate {
+            id: 0,
+            rank: 2,
+            pop: 0,
+            boxes: vec![Obb::from_rect((0.0, 0.0, 100.0, 40.0))],
+            alternate: None,
+        };
+        let curved = SegmentedCandidate {
+            id: 1,
+            rank: 5,
+            pop: 0,
+            boxes: vec![obb(50.0, 20.0, 9.0, 15.0)],           // on the blocker
+            alternate: Some(vec![obb(300.0, 300.0, 9.0, 15.0)]), // clear
+        };
+        assert_eq!(place_segmented(&[blocker, curved]), vec![(0, false), (1, true)]);
+    }
+
+    #[test]
+    fn curved_boxes_project_and_orient_from_the_layout() {
+        use crate::tess::text::{CurvedGlyph, ShapedGlyph};
+        // A full-viewport tile maps 0..1 to -1..1 (y down), so a glyph at (0.5, 0.5) with a
+        // 45-degree tile-local tangent lands mid-screen with a box oriented down-right.
+        let tile_clip = [
+            2.0, 0.0, 0.0, 0.0, //
+            0.0, 2.0, 0.0, 0.0, //
+            0.0, 0.0, 1.0, 0.0, //
+            -1.0, -1.0, 0.0, 1.0,
+        ];
+        let g = ShapedGlyph {
+            pen_x: 0.0,
+            ch: 'M',
+            advance: crate::tile::glyph::UP_EM as f32, // one em of advance
+            bearing_x: 0.0,
+            top: 0.0,
+            w: 0.0,
+            h: 0.0,
+        };
+        let inv = 1.0 / 2f32.sqrt();
+        let placed = [CurvedGlyph { glyph: g, pen: (0.5, 0.5), tangent: (inv, inv) }];
+        let boxes = curved_boxes(&placed, tile_clip, (200, 200), 20.0, 0.0);
+        assert_eq!(boxes.len(), 1);
+        let b = boxes[0];
+        // The 45-degree tangent survives to screen (square viewport, uniform scale).
+        assert!((b.cos - inv).abs() < 1e-3 && (b.sin - inv).abs() < 1e-3, "{} {}", b.cos, b.sin);
+        // Half-width is half the advance in px: one em at 20px text is 20px, so hx ~ 10.
+        assert!((b.hx - 10.0).abs() < 1e-3, "hx {}", b.hx);
+        // Centre is half an advance down-right of the pen's screen point (100, 100).
+        assert!((b.cx - (100.0 + inv * 10.0)).abs() < 1e-2, "cx {}", b.cx);
+        assert!((b.cy - (100.0 + inv * 10.0)).abs() < 1e-2, "cy {}", b.cy);
     }
 }

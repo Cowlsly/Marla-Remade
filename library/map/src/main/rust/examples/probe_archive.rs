@@ -184,6 +184,8 @@ fn main() {
         height_dp: 867.0,
         density: 3.0,
         bearing_deg: 0.0,
+        pitch_deg: 0.0,
+        time_seconds: 0.0,
     };
     let layers = style::layers();
     let wanted = select::resident_set(&camera, min_zoom, max_zoom);

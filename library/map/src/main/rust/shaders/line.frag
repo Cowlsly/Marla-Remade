@@ -30,8 +30,11 @@ layout(push_constant) uniform Push {
     vec4 color;
     vec4 line;
     // x: tile span in px, y: 1 when the pass is single-sampled and this shader owns
-    // edge antialiasing, 0 when MSAA is resolving it.
+    // edge antialiasing, 0 when MSAA is resolving it. w: the per-frame clock in seconds.
     vec4 misc;
+    // y: dash phase speed in px/s (WS-B). 0 for every static line, so the dash pattern
+    // is byte-identical; only the traffic and route draws set it.
+    vec4 morph;
 } push;
 
 // Mirrors `style::paint::MIN_HALF_WIDTH_PX`; must match `line.vert`.
@@ -57,7 +60,14 @@ void main() {
         float on = dashOn * width;
         float off = dashOff * width;
         float period = on + off;
-        if (period > 0.0 && mod(inDistancePx, period) > on) discard;
+        // Scroll the dash by a clock-driven phase: `morph.y` is a per-draw phase speed
+        // in px/s and `misc.w` is the per-frame clock in seconds. Both are 0 for every
+        // static line (morph.y defaults to 0; the clock starts at 0), so `phase` is 0
+        // and `mod(inDistancePx - phase, period)` collapses to the un-phased test —
+        // static roads, rail and borders are byte-identical. Traffic and route set
+        // morph.y to make their dashes travel.
+        float phase = push.misc.w * push.morph.y;
+        if (period > 0.0 && mod(inDistancePx - phase, period) > on) discard;
     }
     outColor = vec4(push.color.rgb, push.color.a * coverage);
 }

@@ -554,11 +554,14 @@ mod tests {
         // that says what it is, instead of nudging a basemap total that then no longer
         // states what the basemap is.
         //
-        // Basemap: 24 fills, 22 lines and 4 symbols. The 22 lines are the 12
-        // surface/link layers plus 10 bridge layers (5 casings + 5 fills): the authored
+        // Basemap: 24 fills, 23 lines and 7 symbols. The 23 lines are the 12
+        // surface/link layers, 10 bridge layers (5 casings + 5 fills), and the app-only
+        // `roads-lanes` divider layer (task WS-D) that draws a multi-lane carriageway's
+        // individual lanes at z16+: the authored
         // `is_bridge` pass the flat file used to drop entirely, which is what hid the Bay
-        // Bridge and the Golden Gate (task 8). The 4 symbols are the places hierarchy
-        // (country/region/locality/subplace).
+        // Bridge and the Golden Gate (task 8). The 7 symbols are the 4-deep places hierarchy
+        // (country/region/locality/subplace) plus the 3 curved line labels WS-E added
+        // (roads-label-major, roads-label-minor, waterway-label).
         //
         // Optional: 1 transit line, and 6 POI symbols — one per colour group of the
         // reference `pois` layer's `text-color` `case` on `kind`. Six and not seven: the
@@ -577,7 +580,7 @@ mod tests {
         };
         assert_eq!(
             (count(LayerKind::Fill, false), count(LayerKind::Line, false), count(LayerKind::Symbol, false)),
-            (24, 22, 4),
+            (24, 23, 7),
             "the basemap layer set",
         );
         assert_eq!(
@@ -906,6 +909,78 @@ mod tests {
     #[test]
     fn a_sub_pixel_gap_is_left_alone() {
         assert_eq!(Stroke { width_dp: 2.0, gap_width_dp: 0.1 }.half_px(3.0).1, 0.15);
+    }
+
+    /// Mirror of `line.frag`'s dash test so WS-B's clock-driven phase can be checked without a
+    /// GPU. `phase_px` is `misc.w * morph.y` — the per-frame clock times the per-draw phase
+    /// speed — which is 0 for every static line (`morph.y` defaults to 0) and for a stopped
+    /// clock. GLSL `mod` matches Rust's `rem_euclid` for a positive period, and the shader
+    /// draws (does not `discard`) when the result is `<= on`.
+    fn dash_drawn(distance_px: f32, on: f32, off: f32, phase_px: f32) -> bool {
+        let period = on + off;
+        if off <= 0.0 || period <= 0.0 {
+            return true;
+        }
+        (distance_px - phase_px).rem_euclid(period) <= on
+    }
+
+    /// The no-regression guarantee: a static road (`morph.y = 0`) or a stopped clock makes the
+    /// phase 0, and the dash then has to be exactly what the pre-WS-B shader drew.
+    #[test]
+    fn a_static_dash_is_byte_identical_with_a_zero_phase() {
+        // The un-phased test the shader ran before WS-B.
+        let unphased = |d: f32, on: f32, off: f32| d.rem_euclid(on + off) <= on;
+        let (on, off) = (6.0, 6.0);
+        for i in 0..480 {
+            let d = i as f32 * 0.25;
+            assert_eq!(
+                dash_drawn(d, on, off, 0.0),
+                unphased(d, on, off),
+                "a zero phase must reproduce the old dash at distance {d}",
+            );
+        }
+        // A solid line (non-positive gap) is untouched too.
+        for i in 0..480 {
+            let d = i as f32 * 0.25;
+            assert!(dash_drawn(d, 2.0, 0.0, 12.0), "a [2, 0] line stays solid under any phase");
+        }
+    }
+
+    /// And the animation actually moves: a whole-period phase is a no-op, a half-period phase
+    /// inverts the pattern. If this ever stops differing the dash has frozen.
+    #[test]
+    fn a_travelling_dash_shifts_with_the_phase() {
+        let (on, off) = (6.0, 6.0);
+        let period = on + off;
+        let mut differed = false;
+        for i in 0..480 {
+            let d = i as f32 * 0.25;
+            assert_eq!(
+                dash_drawn(d, on, off, period),
+                dash_drawn(d, on, off, 0.0),
+                "a whole-period phase lands back on the same pattern",
+            );
+            if dash_drawn(d, on, off, period / 2.0) != dash_drawn(d, on, off, 0.0) {
+                differed = true;
+            }
+        }
+        assert!(differed, "a half-period phase must move the dash");
+    }
+
+    /// The phase is gated on both the clock and the per-draw speed slot, so a future edit
+    /// cannot animate static lines by accident. `line.frag` hardcodes the expression because
+    /// GLSL cannot include the Rust push layout.
+    #[test]
+    fn the_dash_phase_is_gated_on_the_clock_and_the_speed_slot() {
+        let frag = include_str!("../../shaders/line.frag");
+        assert!(
+            frag.contains("push.misc.w * push.morph.y"),
+            "line.frag must derive the phase from the clock times the per-draw speed slot",
+        );
+        assert!(
+            frag.contains("mod(inDistancePx - phase, period)"),
+            "line.frag must subtract the phase inside the dash modulo",
+        );
     }
 
     /// What should actually appear on a density-3 phone at the zooms the defect was measured at.
@@ -1290,6 +1365,13 @@ mod tests {
     fn the_flat_style_agrees_with_basemap_json() {
         let root = basemap();
         for layer in layers() {
+            // `roads-lanes` is an app-only layer: it draws a multi-lane carriageway's individual
+            // lane dividers, which the authored `basemap.json` has no concept of. Its width, colour
+            // and spread are all deliberately its own, so — like transit's width — it is pinned by
+            // its own test (`road_lanes_fan_is_gated_and_spread`) rather than cross-checked here.
+            if layer.id == "roads-lanes" {
+                continue;
+            }
             let authored = authored_layer(&root, &layer.authored);
             // The source layer has to match, with two structural exceptions that are not
             // transcription slips:
@@ -1508,11 +1590,32 @@ mod tests {
         assert_eq!(layer.lanes.at(11.0).floor(), 3.0, "three from z11");
         assert_eq!(layer.lanes.at(13.0).floor(), 4.0, "four from z13");
         assert_eq!(layer.lanes.at(20.0).floor(), 4.0, "and it stays there");
-        // Nothing else moves sideways, or every road in the style would.
-        for other in layers().iter().filter(|l| l.id != "transit-rail") {
+        // Nothing else moves sideways, or every road in the style would — except `roads-lanes`,
+        // which fans a multi-lane carriageway into its individual lane dividers by the same
+        // mechanism. Its own configuration is pinned by `road_lanes_fan_is_gated_and_spread`.
+        for other in layers().iter().filter(|l| l.id != "transit-rail" && l.id != "roads-lanes") {
             assert_eq!(other.spread.peak(), 0.0, "{} must not spread", other.id);
             assert_eq!(other.lanes.peak(), 1.0, "{} must not fan out", other.id);
         }
+    }
+
+    /// The road lane fan: `roads-lanes` is the one road layer that spreads, it only appears once
+    /// the camera is close enough to make lanes legible, and its lane ramp is high enough to draw
+    /// every interior divider of the widest roads. Every other layer is held to no-spread by
+    /// `transit_lanes_step_with_zoom_over_a_constant_spacing`.
+    #[test]
+    fn road_lanes_fan_is_gated_and_spread() {
+        let layer = find("roads-lanes");
+        assert!(layer.lane_fan(), "roads-lanes must fan into lanes");
+        assert_eq!(layer.min_zoom, 16, "the dense lane layer is gated to high zoom");
+        assert!(!layer.draws_at(15), "no lanes at z15");
+        assert!(layer.draws_at(16), "lanes from z16");
+        // The spacing grows with zoom (a lane is a ground distance, unlike a transit corridor's
+        // constant screen spacing), and is zero below the gate's reach.
+        assert!(layer.spread.at(16.0) > 0.0, "a lane has width at z16");
+        assert!(layer.spread.at(20.0) > layer.spread.at(16.0), "and it widens zooming in");
+        // High enough that `min(style.lanes, dividers)` never caps a real road's divider count.
+        assert!(layer.lanes.at(16.0).floor() >= 7.0, "up to an eight-lane road's dividers");
     }
 
     /// The `kind` values an authored filter admits, or empty for "any of them".

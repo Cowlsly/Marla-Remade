@@ -13,6 +13,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.input.pointer.AwaitPointerEventScope
+import androidx.compose.ui.input.pointer.PointerId
 import androidx.compose.ui.input.pointer.PointerInputChange
 import androidx.compose.ui.input.pointer.PointerInputScope
 import androidx.compose.ui.input.pointer.pointerInput
@@ -102,6 +103,16 @@ internal fun Modifier.mapGestures(
                 )
             }
         }
+        // Declared after the transform detector so it sees pointer events first and can consume
+        // a two-finger vertical drag out from under it, turning that gesture into a tilt instead
+        // of a pan. A pinch (fingers moving apart / opposite) or a twist is left untouched, so
+        // zoom still works.
+        .pointerInput(cameraState, gestures, density) {
+            if (!gestures.isScrollEnabled && !gestures.isZoomEnabled) {
+                return@pointerInput
+            }
+            detectVerticalTiltGestures { dyPx -> cameraState.onTilt(dyPx / density) }
+        }
         // Declared after the transform detector so it sees pointer events first and
         // can consume a quick-zoom drag out from under it.
         .pointerInput(cameraState, gestures, zoomRange, density) {
@@ -142,7 +153,67 @@ internal fun Modifier.mapGestures(
 }
 
 /**
- * Single-pointer tap gestures: [onTap], [onDoubleTap], and the "quick zoom" that
+ * Two-finger vertical-drag tilt, reported to [onTilt] as the signed vertical movement in **px**
+ * since the last event (down is positive). Mirrors Google Maps: both fingers dragged up together
+ * tilts into the map, down flattens it.
+ *
+ * Claims the gesture only while both fingers move the same way vertically and vertically more
+ * than horizontally — a parallel drag. A pinch (opposite vertical directions) or a mostly-
+ * horizontal move is left unconsumed, so [detectTransformGestures] still gets its pinch-zoom and
+ * single-finger pan. Sits alongside the transform detector; consuming the moves it claims is what
+ * stops that detector from also panning on them.
+ */
+private suspend fun PointerInputScope.detectVerticalTiltGestures(onTilt: (Float) -> Unit) =
+    awaitEachGesture {
+        awaitFirstDown(requireUnconsumed = false)
+        val previous = mutableMapOf<PointerId, Offset>()
+        val slop = viewConfiguration.touchSlop
+        var tilting = false
+        var accumulated = 0f
+        while (true) {
+            val event = awaitPointerEvent()
+            val pressed = event.changes.filter { it.pressed }
+            if (pressed.isEmpty()) break
+            // Only a two-finger gesture tilts. Any other count resets so a finger added or lifted
+            // mid-gesture cannot leave a stale baseline that jumps the pitch.
+            if (pressed.size != 2) {
+                previous.clear()
+                tilting = false
+                accumulated = 0f
+                continue
+            }
+            val a = pressed[0]
+            val b = pressed[1]
+            val pa = previous[a.id]
+            val pb = previous[b.id]
+            previous[a.id] = a.position
+            previous[b.id] = b.position
+            if (pa == null || pb == null) continue
+            val dyA = a.position.y - pa.y
+            val dyB = b.position.y - pb.y
+            val dxA = a.position.x - pa.x
+            val dxB = b.position.x - pb.x
+            // Parallel and vertical: same vertical direction, each finger moving more up/down than
+            // sideways. Rejects the pinch (dyA*dyB < 0) and the mostly-horizontal two-finger pan.
+            val parallelVertical =
+                dyA * dyB > 0f && abs(dyA) >= abs(dxA) && abs(dyB) >= abs(dxB)
+            if (!parallelVertical) {
+                tilting = false
+                continue
+            }
+            val dy = (dyA + dyB) / 2f
+            if (!tilting) {
+                accumulated += dy
+                if (abs(accumulated) < slop) continue
+                tilting = true
+            }
+            a.consume()
+            b.consume()
+            onTilt(dy)
+        }
+    }
+
+/** Single-pointer tap gestures: [onTap], [onDoubleTap], and the "quick zoom" that
  * follows a double-tap the user holds and swipes — [onQuickZoomStart] then
  * [onQuickZoom] with the tapped anchor and the signed vertical drag in px (down is
  * positive). A gesture reports either a double-tap or a quick zoom, never both.

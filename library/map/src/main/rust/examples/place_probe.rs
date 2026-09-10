@@ -54,6 +54,8 @@ fn main() {
         height_dp: h,
         density: 3.0,
         bearing_deg: 0.0,
+        pitch_deg: 0.0,
+        time_seconds: 0.0,
     };
     let extent = ((camera.width_dp * camera.density) as u32, (camera.height_dp * camera.density) as u32);
     println!("camera    z6 SF viewport {extent:?} device px");

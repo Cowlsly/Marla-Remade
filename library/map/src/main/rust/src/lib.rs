@@ -33,6 +33,7 @@
 //! with no device attached.
 
 pub mod camera;
+pub mod marker;
 pub mod overlay;
 pub mod style;
 pub mod tess;

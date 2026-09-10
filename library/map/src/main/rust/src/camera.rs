@@ -23,6 +23,15 @@
 /// floor of the camera zoom and every ramp is evaluated at the zoom the style means.
 pub const TILE_SIZE: f64 = 512.0;
 
+/// Largest camera tilt we allow, in degrees.
+///
+/// Not cosmetic: at this cap the horizon still sits above the top of the screen (the
+/// perspective's far edge is a finite ground distance), so [`Camera::screen_to_world`]
+/// always meets the ground plane and tile selection never has to cover an infinite
+/// trapezoid. `fy = d/half_h = 3` and the horizon enters the screen only past
+/// `atan(fy) ≈ 71°`, so 60 leaves a margin. See [`Camera::pitch_deg`].
+pub const PITCH_MAX_DEG: f64 = 60.0;
+
 /// The camera as Kotlin measured it.
 #[derive(Clone, Copy, Debug)]
 pub struct Camera {
@@ -37,10 +46,25 @@ pub struct Camera {
     /// Which compass direction points **up** the screen, in degrees clockwise from
     /// north. Zero is north-up, which is every path but heading-up car navigation.
     ///
-    /// A rotation, not a tilt: the projection stays orthographic, so this composes
-    /// into the clip matrices as a plain 2x2 and nothing downstream needs a
-    /// perspective divide. Tilt would be a different and much larger change.
+    /// A rotation, not a tilt: it composes into the clip matrices as a plain 2x2. Tilt is
+    /// [`pitch_deg`](Self::pitch_deg), which is the perspective term and composes separately.
     pub bearing_deg: f64,
+    /// Camera tilt away from straight-down, in degrees, expected in `0..=`[`PITCH_MAX_DEG`]
+    /// (the JNI boundary clamps it; the matrices below assume nothing).
+    ///
+    /// Zero is the classic top-down orthographic map — every path but the tilt gesture — and
+    /// is short-circuited in every matrix builder so the ortho fast-path is byte-for-byte what
+    /// it always was. Above zero [`world_quad_to_clip`](Self::world_quad_to_clip) produces a
+    /// true perspective (real z, w-divide) and [`screen_quad_to_clip`](Self::screen_quad_to_clip)
+    /// billboards its quad upright.
+    pub pitch_deg: f64,
+    /// Seconds since an arbitrary epoch, forwarded from the host's per-frame `frameTimeNanos`.
+    ///
+    /// Not part of the projection — it never enters a matrix, so it changes no camera test —
+    /// but it rides on the camera because it is the other thing that arrives exactly once per
+    /// frame. The renderer forwards it to shaders through the `Push.misc.w` slot; the animated
+    /// workstreams (dash phase, LOD morph, vehicles) read it there.
+    pub time_seconds: f32,
 }
 
 /// A point in Web Mercator world pixels at some zoom.
@@ -48,6 +72,21 @@ pub struct Camera {
 pub struct WorldPx {
     pub x: f64,
     pub y: f64,
+}
+
+/// The tilt-dependent constants of the perspective projection, computed once per matrix.
+///
+/// Only built on the pitched path; the ortho fast-path never touches it. `d` is the
+/// camera-to-centre distance and cancels at pitch 0, so its only job is setting how strong
+/// the foreshortening is; `fx`/`fy` are focal terms; `depth_a`/`depth_b` map view distance to
+/// Vulkan's `[0, 1]` clip depth (`ndc_z = depth_a - depth_b/w`).
+#[derive(Clone, Copy)]
+struct Perspective {
+    fx: f64,
+    fy: f64,
+    d: f64,
+    depth_a: f64,
+    depth_b: f64,
 }
 
 /// Total map width and height in logical px at `zoom`.
@@ -187,15 +226,23 @@ impl Camera {
         // the rotation.
         let dx = origin.x - center.x;
         let dy = origin.y - center.y;
-        let kx = 2.0 / self.width_dp as f64;
-        let ky = 2.0 / self.height_dp as f64;
+        if self.pitch_deg == 0.0 {
+            let kx = 2.0 / self.width_dp as f64;
+            let ky = 2.0 / self.height_dp as f64;
 
-        [
-            (kx * cos * span) as f32, (ky * -sin * span) as f32, 0.0, 0.0, //
-            (kx * sin * span) as f32, (ky * cos * span) as f32, 0.0, 0.0, //
-            0.0, 0.0, 1.0, 0.0, //
-            (kx * (cos * dx + sin * dy)) as f32, (ky * (-sin * dx + cos * dy)) as f32, 0.0, 1.0,
-        ]
+            return [
+                (kx * cos * span) as f32, (ky * -sin * span) as f32, 0.0, 0.0, //
+                (kx * sin * span) as f32, (ky * cos * span) as f32, 0.0, 0.0, //
+                0.0, 0.0, 1.0, 0.0, //
+                (kx * (cos * dx + sin * dy)) as f32, (ky * (-sin * dx + cos * dy)) as f32, 0.0, 1.0,
+            ];
+        }
+        // Tilted: the same bearing-rotated screen offset as above, but kept as world px (Dp)
+        // rather than pre-scaled to clip, and fed through the perspective divide. `a`/`b` are
+        // the `u`/`v`/constant terms of a tile-local point's screen offset `sx`/`sy`.
+        let a = [cos * span, sin * span, cos * dx + sin * dy];
+        let b = [-sin * span, cos * span, -sin * dx + cos * dy];
+        self.perspective_plane(a, b)
     }
 
     /// Column-major 4x4 taking a quad's local −1..1 coordinates to Vulkan clip space,
@@ -226,15 +273,241 @@ impl Camera {
         let (cos, sin) = self.rotation();
         let dx = anchor.x - center.x;
         let dy = anchor.y - center.y;
-        let kx = 2.0 / self.width_dp as f64;
-        let ky = 2.0 / self.height_dp as f64;
+        if self.pitch_deg == 0.0 {
+            let kx = 2.0 / self.width_dp as f64;
+            let ky = 2.0 / self.height_dp as f64;
 
+            return [
+                (kx * cos * radius_dp) as f32, (ky * -sin * radius_dp) as f32, 0.0, 0.0, //
+                (kx * sin * radius_dp) as f32, (ky * cos * radius_dp) as f32, 0.0, 0.0, //
+                0.0, 0.0, 1.0, 0.0, //
+                (kx * (cos * dx + sin * dy)) as f32, (ky * (-sin * dx + cos * dy)) as f32, 0.0, 1.0,
+            ];
+        }
+        // Tilted: project the anchor's ground point through the same perspective, then hang a
+        // screen-aligned quad of fixed Dp size off it. The corners offset in clip by the
+        // anchor's own `w`, so the perspective divide leaves a constant *screen* size — the quad
+        // stays upright and keeps its radius rather than being smeared along the ground. Its
+        // local axes still turn with the bearing, so the puck's cone points the right way.
+        let (psin, pcos) = self.pitch_deg.to_radians().sin_cos();
+        let p = self.perspective();
+        let sx = cos * dx + sin * dy;
+        let sy = -sin * dx + cos * dy;
+        let aw = p.d - psin * sy;
+        let ax = p.fx * sx;
+        let ay = p.fy * pcos * sy;
+        let az = p.depth_a * aw - p.depth_b;
+        let rx = radius_dp / (self.width_dp as f64 / 2.0) * aw;
+        let ry = radius_dp / (self.height_dp as f64 / 2.0) * aw;
         [
-            (kx * cos * radius_dp) as f32, (ky * -sin * radius_dp) as f32, 0.0, 0.0, //
-            (kx * sin * radius_dp) as f32, (ky * cos * radius_dp) as f32, 0.0, 0.0, //
-            0.0, 0.0, 1.0, 0.0, //
-            (kx * (cos * dx + sin * dy)) as f32, (ky * (-sin * dx + cos * dy)) as f32, 0.0, 1.0,
+            (cos * rx) as f32, (-sin * ry) as f32, 0.0, 0.0, //
+            (sin * rx) as f32, (cos * ry) as f32, 0.0, 0.0, //
+            0.0, 0.0, 0.0, 0.0, //
+            ax as f32, ay as f32, az as f32, aw as f32,
         ]
+    }
+
+    /// The tilt-dependent perspective constants for this camera. See [`Perspective`].
+    fn perspective(&self) -> Perspective {
+        let half_w = self.width_dp as f64 / 2.0;
+        let half_h = self.height_dp as f64 / 2.0;
+        // MapLibre-like: the centre sits 1.5 viewport-heights from the eye. `d` cancels at
+        // pitch 0, so this only sets the foreshortening strength.
+        let d = 1.5 * self.height_dp as f64;
+        let n = 0.1 * d;
+        let f = 10.0 * d;
+        Perspective { fx: d / half_w, fy: d / half_h, d, depth_a: f / (f - n), depth_b: f * n / (f - n) }
+    }
+
+    /// Build the perspective clip matrix from the screen-flat plane coefficients.
+    ///
+    /// `a = [a_u, a_v, a_0]` and `b = [b_u, b_v, b_0]` give the bearing-rotated screen offset of
+    /// a tile-local point `(u, v)` from the camera centre, in world px (Dp): `sx = a_u*u + a_v*v
+    /// + a_0`, `sy = b_u*u + b_v*v + b_0`. The matrix maps `(u, v, height, 1)`; the third input
+    /// is a world-px height above the ground plane (0 for every flat 2D layer, a real height for
+    /// buildings/terrain).
+    ///
+    /// # Camera model (the seam WS-G extends to a heightfield)
+    ///
+    /// The ground is a plane at camera-to-centre distance `d`, tilted back by `pitch`. A point at
+    /// screen-flat offset `(sx, sy)` and height `hh` sits in camera space at
+    /// ```text
+    /// Xc = sx
+    /// Yc = -sy*cos + hh*sin
+    /// Zc = -d + sy*sin + hh*cos      (w = -Zc, the perspective divisor)
+    /// ```
+    /// with `sy > 0` (lower on screen) nearer the eye. With `fx = d/half_w`, `fy = d/half_h` the
+    /// projection reduces, at `pitch == 0` and `hh == 0`, term-for-term to the ortho matrix — the
+    /// reason pitch 0 takes the fast path and this is only ever built when tilted. WS-G replaces
+    /// the flat `hh` here (and the single plane solve in [`screen_to_world`](Self::screen_to_world))
+    /// with a DEM sample; keep the forward and inverse in step.
+    fn perspective_plane(&self, a: [f64; 3], b: [f64; 3]) -> [f32; 16] {
+        let (sin, cos) = self.pitch_deg.to_radians().sin_cos();
+        let Perspective { fx, fy, d, depth_a, depth_b } = self.perspective();
+        let [au, av, a0] = a;
+        let [bu, bv, b0] = b;
+        // Column-major: the u, v, height and constant columns of (Xclip, Yclip, Zclip, Wclip).
+        [
+            (fx * au) as f32, (fy * cos * bu) as f32, (depth_a * (-sin * bu)) as f32, (-sin * bu) as f32, //
+            (fx * av) as f32, (fy * cos * bv) as f32, (depth_a * (-sin * bv)) as f32, (-sin * bv) as f32, //
+            0.0, (fy * -sin) as f32, (depth_a * -cos) as f32, (-cos) as f32, //
+            (fx * a0) as f32, (fy * cos * b0) as f32, (depth_a * (d - sin * b0) - depth_b) as f32, (d - sin * b0) as f32,
+        ]
+    }
+
+    /// The ground world-px under a screen point (Dp from the viewport top-left), by intersecting
+    /// the eye ray with the flat ground plane.
+    ///
+    /// `None` when the point is at or above the horizon — impossible on-screen while
+    /// `pitch_deg <= `[`PITCH_MAX_DEG`], which is the cap's whole purpose. This is the flat-plane
+    /// seam WS-G extends to ray/heightfield: swap the single plane solve for a march against the
+    /// DEM. It is the exact inverse of [`perspective_plane`](Self::perspective_plane)'s forward
+    /// projection; keep the two in step.
+    pub fn screen_to_world(&self, screen_x_dp: f64, screen_y_dp: f64) -> Option<WorldPx> {
+        let center = project(self.center_lon, self.center_lat, self.zoom);
+        let (cos, sin) = self.rotation();
+        let half_w = self.width_dp as f64 / 2.0;
+        let half_h = self.height_dp as f64 / 2.0;
+        let sx;
+        let sy;
+        if self.pitch_deg == 0.0 {
+            sx = screen_x_dp - half_w;
+            sy = screen_y_dp - half_h;
+        } else {
+            let p = self.perspective();
+            let (psin, pcos) = self.pitch_deg.to_radians().sin_cos();
+            let ndc_x = (screen_x_dp - half_w) / half_w;
+            let ndc_y = (screen_y_dp - half_h) / half_h;
+            // Invert clip.y = fy*cos*sy / (d - sin*sy) for sy, then clip.x for sx.
+            let denom = p.fy * pcos + ndc_y * psin;
+            if denom <= 0.0 {
+                return None; // at or above the horizon: the ray never meets the ground.
+            }
+            sy = ndc_y * p.d / denom;
+            let w = p.d - psin * sy;
+            sx = ndc_x * w / p.fx;
+        }
+        // Inverse bearing rotation: screen-flat offset back to a world-px offset from centre.
+        Some(WorldPx { x: center.x + cos * sx - sin * sy, y: center.y + sin * sx + cos * sy })
+    }
+
+    /// The ground world-px under a screen point, intersecting the eye ray with the **displaced
+    /// terrain** rather than the flat plane — the ray/heightfield extension of
+    /// [`screen_to_world`](Self::screen_to_world) that WS-G's seam in
+    /// [`perspective_plane`](Self::perspective_plane) anticipates.
+    ///
+    /// `height_at` returns the terrain height at a world-px ground position, in **world px** — the
+    /// same unit the perspective matrix's `z` input uses (metres scaled by the tile's
+    /// world-px-per-metre; see [`crate::tess::terrain`]). It is a closure rather than a field so
+    /// this stays a pure function of the camera: the renderer passes a sampler over its resident
+    /// heightmaps, tests pass a synthetic surface.
+    ///
+    /// At `pitch_deg == 0` the projection ignores height for x/y, so a tap lands on exactly the
+    /// flat-plane point regardless of relief and this returns
+    /// [`screen_to_world`](Self::screen_to_world) unchanged. Above zero it walks the eye ray from
+    /// the eye toward the flat-plane hit, sampling `height_at`, and returns the first crossing of
+    /// the terrain surface, refined by bisection.
+    ///
+    /// The march exploits that the map from screen-flat `(sx, sy, height)` to camera space is
+    /// affine, so the eye ray is a straight line there: the eye is `(0, d·sin, d·cos)` (solving the
+    /// camera model in [`perspective_plane`](Self::perspective_plane) for the origin) and the
+    /// flat-plane hit is the ray's `height == 0` point, so the segment between them — extended a
+    /// little past the plane for below-sea terrain — is the ray. `None` above the horizon
+    /// (impossible on-screen under [`PITCH_MAX_DEG`]) or when the ray never meets the terrain, in
+    /// which case the flat-plane hit is the best answer.
+    pub fn screen_to_world_over_terrain(
+        &self,
+        screen_x_dp: f64,
+        screen_y_dp: f64,
+        height_at: impl Fn(WorldPx) -> f64,
+    ) -> Option<WorldPx> {
+        if self.pitch_deg == 0.0 {
+            return self.screen_to_world(screen_x_dp, screen_y_dp);
+        }
+        // The flat-plane hit is the ray's height-0 point and, with the eye, fixes its direction.
+        let plane = self.screen_to_world(screen_x_dp, screen_y_dp)?;
+        let center = project(self.center_lon, self.center_lat, self.zoom);
+        let (cos, sin) = self.rotation();
+        // The plane hit as a screen-flat offset from the centre: the inverse of the final rotation
+        // `screen_to_world` applies.
+        let dxw = plane.x - center.x;
+        let dyw = plane.y - center.y;
+        let sx1 = cos * dxw + sin * dyw;
+        let sy1 = -sin * dxw + cos * dyw;
+        // The eye in the same (sx, sy, height) frame, and the ray toward the plane hit.
+        let p = self.perspective();
+        let (psin, pcos) = self.pitch_deg.to_radians().sin_cos();
+        let eye = (0.0f64, p.d * psin, p.d * pcos);
+        let dir = (sx1 - eye.0, sy1 - eye.1, 0.0 - eye.2);
+
+        let world_at = |t: f64| {
+            let sx = eye.0 + t * dir.0;
+            let sy = eye.1 + t * dir.1;
+            WorldPx { x: center.x + cos * sx - sin * sy, y: center.y + sin * sx + cos * sy }
+        };
+        let ray_height = |t: f64| eye.2 + t * dir.2;
+        // Positive while the ray is above the terrain, non-positive once it has crossed below.
+        let gap = |t: f64| ray_height(t) - height_at(world_at(t));
+
+        // March from the eye toward (and a little past) the plane hit. Terrain above sea rises
+        // toward the ray, so its crossing is at t <= 1; below-sea terrain can push it past 1, so the
+        // march overshoots before giving up. The pitch cap keeps the whole thing bounded.
+        const STEPS: usize = 96;
+        const T_MAX: f64 = 1.5;
+        if gap(0.0) <= 0.0 {
+            // The eye is at or under the terrain: degenerate, fall back to the plane hit.
+            return Some(plane);
+        }
+        let mut prev_t = 0.0;
+        for i in 1..=STEPS {
+            let t = T_MAX * i as f64 / STEPS as f64;
+            if gap(t) <= 0.0 {
+                // A crossing is bracketed in (prev_t, t]; bisect to refine it.
+                let (mut lo, mut hi) = (prev_t, t);
+                for _ in 0..40 {
+                    let mid = 0.5 * (lo + hi);
+                    if gap(mid) > 0.0 {
+                        lo = mid;
+                    } else {
+                        hi = mid;
+                    }
+                }
+                return Some(world_at(0.5 * (lo + hi)));
+            }
+            prev_t = t;
+        }
+        // The ray grazed above every sample: the flat-plane hit is the best available answer.
+        Some(plane)
+    }
+
+    /// The screen point (Dp from the viewport top-left) a ground world-px projects to, or `None`
+    /// when it falls behind the eye. The forward twin of [`screen_to_world`](Self::screen_to_world);
+    /// exists mainly so the round-trip is testable and the Kotlin `Projection` can mirror it.
+    pub fn world_to_screen(&self, world: WorldPx) -> Option<(f64, f64)> {
+        let center = project(self.center_lon, self.center_lat, self.zoom);
+        let (cos, sin) = self.rotation();
+        let half_w = self.width_dp as f64 / 2.0;
+        let half_h = self.height_dp as f64 / 2.0;
+        let dxw = world.x - center.x;
+        let dyw = world.y - center.y;
+        let sx = cos * dxw + sin * dyw;
+        let sy = -sin * dxw + cos * dyw;
+        if self.pitch_deg == 0.0 {
+            return Some((half_w + sx, half_h + sy));
+        }
+        let p = self.perspective();
+        let (psin, pcos) = self.pitch_deg.to_radians().sin_cos();
+        let w = p.d - psin * sy;
+        if w <= 0.0 {
+            return None;
+        }
+        Some((half_w + (p.fx * sx / w) * half_w, half_h + (p.fy * pcos * sy / w) * half_h))
+    }
+
+    /// Lon/lat under a screen point (Dp from the viewport top-left), tilt-aware. See
+    /// [`screen_to_world`](Self::screen_to_world).
+    pub fn screen_to_lonlat(&self, screen_x_dp: f64, screen_y_dp: f64) -> Option<(f64, f64)> {
+        self.screen_to_world(screen_x_dp, screen_y_dp).map(|w| unproject(w.x, w.y, self.zoom))
     }
 }
 
@@ -251,12 +524,25 @@ mod tests {
             height_dp: 512.0,
             density: 1.0,
             bearing_deg: 0.0,
+            pitch_deg: 0.0,
+            time_seconds: 0.0,
         }
     }
 
     /// Apply a column-major 4x4 to a 2D point, as the vertex shader does.
     fn transform(m: &[f32; 16], u: f32, v: f32) -> (f32, f32) {
         (m[0] * u + m[4] * v + m[12], m[1] * u + m[5] * v + m[13])
+    }
+
+    /// Full 4-vector transform of `(x, y, z, 1)` — needed on the pitched path, where the
+    /// perspective divide by `w` is not the identity `transform` assumes.
+    fn transform4(m: &[f32; 16], x: f32, y: f32, z: f32) -> (f32, f32, f32, f32) {
+        (
+            m[0] * x + m[4] * y + m[8] * z + m[12],
+            m[1] * x + m[5] * y + m[9] * z + m[13],
+            m[2] * x + m[6] * y + m[10] * z + m[14],
+            m[3] * x + m[7] * y + m[11] * z + m[15],
+        )
     }
 
     #[test]
@@ -315,6 +601,8 @@ mod tests {
             height_dp: 512.0,
             density: 1.0,
             bearing_deg: 0.0,
+            pitch_deg: 0.0,
+            time_seconds: 0.0,
         };
         // The tile containing SF at z10, and SF's tile-local position in it.
         let world = project(-122.4194, 37.7749, 10.0);
@@ -554,6 +842,214 @@ mod tests {
             assert!(wx >= min.x - 1e-6 && wx <= max.x + 1e-6, "corner x {wx} outside the box");
             assert!(wy >= min.y - 1e-6 && wy <= max.y + 1e-6, "corner y {wy} outside the box");
         }
+    }
+
+    // --- pitch / perspective ------------------------------------------------
+
+    #[test]
+    fn an_explicit_zero_pitch_is_the_untilted_matrix_byte_for_byte() {
+        // The regression guard for the whole flat/phone path: adding the pitch and time fields
+        // must not perturb a single bit of the matrix a north-up, level camera produces.
+        let level = Camera { center_lon: -122.4194, center_lat: 37.7749, ..camera(12.0) };
+        let untilted = level.tile_to_clip(12, 654, 1583);
+        assert_eq!(untilted, Camera { pitch_deg: 0.0, ..level }.tile_to_clip(12, 654, 1583));
+        // And the clock never reaches the matrix.
+        assert_eq!(untilted, Camera { time_seconds: 98765.0, ..level }.tile_to_clip(12, 654, 1583));
+        let quad = level.screen_quad_to_clip(-122.4194, 37.7749, 28.0);
+        assert_eq!(quad, Camera { pitch_deg: 0.0, ..level }.screen_quad_to_clip(-122.4194, 37.7749, 28.0));
+    }
+
+    #[test]
+    fn a_pitched_matrix_actually_tilts() {
+        // Sanity that the pitched path is a *different* matrix, and a real perspective one:
+        // its bottom row is no longer the ortho `(_, _, 0, 1)`, so a w-divide happens.
+        let tilted = Camera { pitch_deg: 45.0, ..camera(12.0) }.tile_to_clip(12, 2048, 2048);
+        assert!(tilted[15] != 1.0 || tilted[3] != 0.0 || tilted[7] != 0.0, "no perspective term");
+    }
+
+    #[test]
+    fn the_pitched_centre_stays_on_the_clip_origin() {
+        // The fixed point of the tilt: whatever the pitch, the camera centre projects to clip 0
+        // and sits in front of the eye.
+        for pitch in [15.0, 30.0, 45.0, 60.0] {
+            let cam = Camera { center_lon: -122.4194, center_lat: 37.7749, pitch_deg: pitch, ..camera(12.0) };
+            let m = cam.screen_quad_to_clip(-122.4194, 37.7749, 28.0);
+            let (x, y, _, w) = transform4(&m, 0.0, 0.0, 0.0);
+            assert!(w > 0.0, "pitch {pitch}: centre behind the eye (w {w})");
+            assert!((x / w).abs() < 1e-5 && (y / w).abs() < 1e-5, "pitch {pitch}: centre at {},{}", x / w, y / w);
+        }
+    }
+
+    #[test]
+    fn screen_to_world_at_pitch_zero_is_the_plain_inverse() {
+        let cam = Camera { center_lon: 10.0, center_lat: 20.0, ..camera(8.0) };
+        let center = project(10.0, 20.0, 8.0);
+        let w = cam.screen_to_world(256.0 + 30.0, 256.0 - 10.0).unwrap();
+        assert!((w.x - (center.x + 30.0)).abs() < 1e-9, "x {}", w.x);
+        assert!((w.y - (center.y - 10.0)).abs() < 1e-9, "y {}", w.y);
+    }
+
+    #[test]
+    fn the_screen_centre_unprojects_to_the_camera_centre_at_any_pitch() {
+        for pitch in [0.0, 20.0, 45.0, 60.0] {
+            let cam = Camera { center_lon: -122.4, center_lat: 37.7, pitch_deg: pitch, ..camera(12.0) };
+            let center = project(-122.4, 37.7, 12.0);
+            let w = cam.screen_to_world(256.0, 256.0).unwrap();
+            assert!((w.x - center.x).abs() < 1e-6 && (w.y - center.y).abs() < 1e-6, "pitch {pitch}");
+        }
+    }
+
+    #[test]
+    fn tilt_foreshortens_the_top_of_the_screen() {
+        // The same screen distance above and below centre maps to *more* ground above, because
+        // the top of a tilted view recedes toward the horizon. At pitch 0 the two are equal.
+        let cam = Camera { pitch_deg: 45.0, ..camera(12.0) };
+        let center = project(cam.center_lon, cam.center_lat, 12.0);
+        let above = cam.screen_to_world(256.0, 256.0 - 100.0).unwrap();
+        let below = cam.screen_to_world(256.0, 256.0 + 100.0).unwrap();
+        let up = (center.y - above.y).abs();
+        let down = (below.y - center.y).abs();
+        assert!(up > down * 1.2, "top should recede: up {up} vs down {down}");
+    }
+
+    // --- ray/heightfield unproject (WS-G) -----------------------------------
+
+    #[test]
+    fn over_terrain_at_pitch_zero_is_the_flat_unproject() {
+        // Overhead, height never touches x/y, so a tap lands on exactly the flat-plane point
+        // whatever the relief — the pitch-0 map is unchanged.
+        let cam = Camera { center_lon: 10.0, center_lat: 20.0, ..camera(12.0) };
+        for &(x, y) in &[(256.0, 256.0), (120.0, 40.0), (400.0, 500.0)] {
+            let flat = cam.screen_to_world(x, y).unwrap();
+            let over = cam.screen_to_world_over_terrain(x, y, |_| 5000.0).unwrap();
+            assert!((flat.x - over.x).abs() < 1e-9 && (flat.y - over.y).abs() < 1e-9);
+        }
+    }
+
+    #[test]
+    fn flat_zero_terrain_matches_the_plane() {
+        // A terrain everywhere at sea level is the flat plane, so the heightfield hit must equal
+        // the plane hit under tilt too.
+        let cam = Camera { center_lon: -122.4, center_lat: 37.7, pitch_deg: 50.0, ..camera(13.0) };
+        for &(x, y) in &[(256.0, 120.0), (256.0, 256.0), (300.0, 400.0)] {
+            let flat = cam.screen_to_world(x, y).unwrap();
+            let over = cam.screen_to_world_over_terrain(x, y, |_| 0.0).unwrap();
+            assert!(
+                (flat.x - over.x).abs() < 1e-4 && (flat.y - over.y).abs() < 1e-4,
+                "zero terrain must match the plane: {flat:?} vs {over:?}",
+            );
+        }
+    }
+
+    #[test]
+    fn higher_ground_is_hit_nearer_the_camera() {
+        // A tap toward the top of a tilted screen looks up-map toward the horizon. Raising the
+        // terrain makes the ray strike the hillside sooner, so the hit moves back toward the
+        // camera centre (a smaller up-map distance) — the essence of hitting the displaced surface.
+        let cam = Camera { center_lon: 0.0, center_lat: 0.0, pitch_deg: 55.0, ..camera(14.0) };
+        let pixel = (256.0, 80.0); // above the centre: up-map, toward the horizon
+        let flat = cam.screen_to_world(pixel.0, pixel.1).unwrap();
+        // World-px heights well under the eye height (~d·cos = 766 px here), as real ~30 m terrain
+        // at z14 is (about 0.2 world-px per metre).
+        let low = cam.screen_to_world_over_terrain(pixel.0, pixel.1, |_| 30.0).unwrap();
+        let high = cam.screen_to_world_over_terrain(pixel.0, pixel.1, |_| 90.0).unwrap();
+        // Up-map is toward smaller world y here (north), so a nearer hit has a larger y.
+        assert!(low.y > flat.y, "raised terrain is hit nearer the camera than the flat plane");
+        assert!(high.y > low.y, "higher terrain is hit nearer still");
+    }
+
+    #[test]
+    fn the_hit_lies_on_the_eye_ray_and_on_the_surface() {
+        // The full guarantee for constant-height terrain: the returned point is (a) on the terrain
+        // surface — its height is the sampled one — and (b) on the pixel's eye ray, i.e. collinear
+        // with the eye and the flat-plane hit in the screen-flat (sx, sy, height) frame. Both are
+        // checked against the documented camera model rather than the implementation.
+        let height_dp = 891.0;
+        let cam = Camera {
+            center_lon: 2.35,
+            center_lat: 48.85,
+            pitch_deg: 45.0,
+            width_dp: 411.0,
+            height_dp,
+            ..camera(13.0)
+        };
+        let center = project(2.35, 48.85, 13.0);
+        let (cos, sin) = cam.rotation();
+        // The eye in the (sx, sy, height) frame: (0, d·sin, d·cos), d = 1.5 viewport heights.
+        let d = 1.5 * height_dp as f64;
+        let (psin, pcos) = cam.pitch_deg.to_radians().sin_cos();
+        let eye = (0.0, d * psin, d * pcos);
+
+        let h0 = 300.0; // world-px, constant
+        let pixel = (256.0, 150.0);
+        let plane = cam.screen_to_world(pixel.0, pixel.1).unwrap();
+        let hit = cam.screen_to_world_over_terrain(pixel.0, pixel.1, |_| h0).unwrap();
+
+        // Screen-flat offsets of the plane hit and the terrain hit.
+        let sflat = |w: WorldPx| {
+            let dx = w.x - center.x;
+            let dy = w.y - center.y;
+            (cos * dx + sin * dy, -sin * dx + cos * dy)
+        };
+        let (px, py) = sflat(plane); // height 0
+        let (hx, hy) = sflat(hit); // height h0
+
+        // Collinearity: hit = eye + t·(plane − eye) for one t across all three coordinates. Solve
+        // t from height, then confirm x and y agree.
+        let t = (h0 - eye.2) / (0.0 - eye.2);
+        let want_x = eye.0 + t * (px - eye.0);
+        let want_y = eye.1 + t * (py - eye.1);
+        assert!((hx - want_x).abs() < 1e-3, "hit off the ray in sx: {hx} vs {want_x}");
+        assert!((hy - want_y).abs() < 1e-3, "hit off the ray in sy: {hy} vs {want_y}");
+    }
+
+    #[test]
+    fn a_ramp_surface_is_hit_where_the_ray_meets_it() {
+        // A sloped terrain (height rising with world y): the returned hit's own sampled height must
+        // match the ray height there, so the point really sits on the surface rather than the plane.
+        let height_dp = 891.0;
+        let cam = Camera {
+            center_lon: 0.0,
+            center_lat: 0.0,
+            pitch_deg: 50.0,
+            width_dp: 411.0,
+            height_dp,
+            ..camera(14.0)
+        };
+        let center = project(0.0, 0.0, 14.0);
+        let (cos, sin) = cam.rotation();
+        let d = 1.5 * height_dp as f64;
+        let (psin, pcos) = cam.pitch_deg.to_radians().sin_cos();
+        let eye = (0.0, d * psin, d * pcos);
+
+        // Height rises 0.2 world-px per world-px north of the centre (a gentle ramp).
+        let ramp = |w: WorldPx| (center.y - w.y).max(0.0) * 0.2;
+        let pixel = (256.0, 100.0);
+        let hit = cam.screen_to_world_over_terrain(pixel.0, pixel.1, ramp).unwrap();
+
+        // The ray height at the hit (from collinearity in the screen-flat frame) must equal the
+        // terrain height sampled there.
+        let dx = hit.x - center.x;
+        let dy = hit.y - center.y;
+        let (hsx, hsy) = (cos * dx + sin * dy, -sin * dx + cos * dy);
+        // Recover t from whichever ray component moves most, then the ray height.
+        let plane = cam.screen_to_world(pixel.0, pixel.1).unwrap();
+        let pdx = plane.x - center.x;
+        let pdy = plane.y - center.y;
+        let (psx, psy) = (cos * pdx + sin * pdy, -sin * pdx + cos * pdy);
+        let t = if (psy - eye.1).abs() > (psx - eye.0).abs() {
+            (hsy - eye.1) / (psy - eye.1)
+        } else {
+            (hsx - eye.0) / (psx - eye.0)
+        };
+        let ray_h = eye.2 + t * (0.0 - eye.2);
+        assert!(
+            (ray_h - ramp(hit)).abs() < 1.0,
+            "the hit must sit on the ramp: ray height {ray_h} vs terrain {}",
+            ramp(hit),
+        );
+        // And it is not merely the flat answer: the ramp pushes the hit off the plane.
+        assert!((hit.y - plane.y).abs() > 1e-3, "the ramp must move the hit off the flat plane");
     }
 }
 

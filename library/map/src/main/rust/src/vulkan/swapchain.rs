@@ -1,12 +1,19 @@
 //! The swapchain, its render pass and framebuffers.
 //!
-//! # No depth buffer
+//! # Depth: transient, and shared with the stencil
 //!
-//! A 2D map has nothing to occlude: correctness comes from **draw order** — layer-major
-//! across tiles — and from alpha blending, not from depth testing. Leaving the depth
-//! attachment out saves a full-screen image, its allocation, and the bandwidth of
-//! clearing and storing it every frame. On a tile-based mobile GPU that bandwidth is the
-//! scarce resource.
+//! The flat 2D basemap has nothing to occlude — correctness there comes from **draw order**
+//! (layer-major across tiles) and alpha blending, so those layers run with depth test and
+//! write off and are unaffected by the attachment below. Tilt and the 3D layers (buildings,
+//! terrain) change that: extruded geometry must occlude itself under a perspective camera, so
+//! the pass now carries a depth buffer that the depth-enabled pipeline variant tests against.
+//!
+//! It costs almost nothing on the target hardware. The attachment is the **same combined
+//! depth-stencil image** the region mask already needed for its stencil, so depth adds no new
+//! image — only a `CLEAR`/`DONT_CARE` on the depth aspect. Like the MSAA and stencil targets
+//! it is `TRANSIENT_ATTACHMENT` + `LAZILY_ALLOCATED`: on a tile-based mobile GPU the depth
+//! samples live and die inside tile memory and never reach main memory, so there is no real
+//! backing store and no store-out bandwidth (`store_op` is `DONT_CARE`).
 //!
 //! # Multisampling
 //!
@@ -54,16 +61,22 @@ pub struct Swapchain {
     pub samples: vk::SampleCountFlags,
     /// The multisampled colour target, absent when `samples` is 1.
     msaa: Option<MsaaTarget>,
-    /// The stencil the region mask is rasterised into, and the attachment index it sits at.
+    /// The combined depth-stencil target: depth for the 3D layers, stencil for the region mask,
+    /// and the attachment index it sits at.
     stencil: StencilTarget,
 }
 
-/// The stencil buffer, for punching the selected region out of the mask scrim.
+/// The combined depth-stencil buffer.
 ///
-/// Transient and lazily allocated for the same reason as [`MsaaTarget`]: it is written and read
-/// within a single subpass and never afterwards, so on a tile-based GPU it lives in tile memory
-/// and needs no backing store. That is what keeps the "# No depth buffer" bandwidth argument above
-/// true even though there is now an attachment here.
+/// The **stencil** aspect punches the selected region out of the mask scrim; the **depth**
+/// aspect (added by WS0) lets the perspective 3D layers occlude one another. One image serves
+/// both because every device offers a combined depth-stencil format even where standalone
+/// `S8_UINT` is missing.
+///
+/// Transient and lazily allocated for the same reason as [`MsaaTarget`]: both aspects are
+/// written and read within the single subpass and never afterwards, so on a tile-based GPU it
+/// lives in tile memory and needs no backing store. That is what keeps the transient-attachment
+/// bandwidth argument in the module docs true even though this attachment now carries depth too.
 struct StencilTarget {
     image: vk::Image,
     memory: vk::DeviceMemory,
@@ -203,17 +216,21 @@ impl Swapchain {
             .stencil_store_op(vk::AttachmentStoreOp::DONT_CARE)
             .initial_layout(vk::ImageLayout::UNDEFINED)
             .final_layout(vk::ImageLayout::PRESENT_SRC_KHR);
-        // Chosen before the render pass because the attachment has to name the format, and
-        // `S8_UINT` is optional in Vulkan while a combined depth-stencil is universally
-        // available. The depth half goes unused when the fallback is taken.
+        // Chosen before the render pass because the attachment has to name the format. A combined
+        // depth-stencil format is required now that the depth aspect is used, and one is
+        // universally available even where standalone `S8_UINT` is not.
         let stencil_format = stencil_format(context)?;
         let stencil = vk::AttachmentDescription::default()
             .format(stencil_format)
             .samples(samples)
-            // Cleared to zero every frame: zero means "outside the selected region", which is
-            // what the scrim tests for, and is also the right answer when nothing is selected.
-            .load_op(vk::AttachmentLoadOp::DONT_CARE)
+            // Depth is cleared to the far plane (1.0) each frame and discarded after the subpass:
+            // the 3D layers test/write it within the pass, nothing reads it afterwards, and on a
+            // tile-based GPU a transient depth buffer never leaves tile memory.
+            .load_op(vk::AttachmentLoadOp::CLEAR)
             .store_op(vk::AttachmentStoreOp::DONT_CARE)
+            // Stencil is cleared to zero every frame: zero means "outside the selected region",
+            // which is what the scrim tests for, and is also the right answer when nothing is
+            // selected.
             .stencil_load_op(vk::AttachmentLoadOp::CLEAR)
             .stencil_store_op(vk::AttachmentStoreOp::DONT_CARE)
             .initial_layout(vk::ImageLayout::UNDEFINED)
@@ -339,17 +356,14 @@ impl Swapchain {
     }
 }
 
-/// A stencil-capable attachment format the device supports, cheapest first.
+/// A combined depth+stencil attachment format the device supports, cheapest first.
 ///
-/// `S8_UINT` is what this actually wants — eight bits, no depth — but it is optional in Vulkan
-/// and plenty of drivers omit it, so the combined formats are the fallback. Every Vulkan
-/// implementation must support at least one of `D24_UNORM_S8_UINT` or `D32_SFLOAT_S8_UINT`.
+/// Both aspects are used now — depth by the 3D layers, stencil by the region mask — so a
+/// standalone `S8_UINT` (which several drivers offer but which carries no depth) is no longer a
+/// candidate. Every Vulkan implementation must support at least one of `D24_UNORM_S8_UINT` or
+/// `D32_SFLOAT_S8_UINT`, so this never fails on real hardware.
 unsafe fn stencil_format(context: &Context) -> Result<vk::Format, String> {
-    for candidate in [
-        vk::Format::S8_UINT,
-        vk::Format::D24_UNORM_S8_UINT,
-        vk::Format::D32_SFLOAT_S8_UINT,
-    ] {
+    for candidate in [vk::Format::D24_UNORM_S8_UINT, vk::Format::D32_SFLOAT_S8_UINT] {
         let properties = context
             .instance
             .get_physical_device_format_properties(context.physical_device, candidate);
@@ -360,7 +374,7 @@ unsafe fn stencil_format(context: &Context) -> Result<vk::Format, String> {
             return Ok(candidate);
         }
     }
-    Err("no stencil-capable attachment format".into())
+    Err("no combined depth-stencil attachment format".into())
 }
 
 impl MsaaTarget {

@@ -4,6 +4,7 @@
 //! cache in [`cache`] and, on device, out through Kotlin's HTTP stack), and
 //! [`geometry`] turns them into triangles.
 
+pub mod arrow;
 pub mod cache;
 pub mod geometry;
 pub mod glyph;

@@ -55,6 +55,16 @@ impl TileId {
         let shift = self.z - other.z;
         self.x >> shift == other.x && self.y >> shift == other.y
     }
+
+    /// The tile `levels` levels *above* this one (its coarser ancestor), or `None` past the
+    /// root. `levels == 0` is the tile itself. WS-D uses this to ask whether a coarser
+    /// stand-in is resident under a fading finer tile.
+    pub fn ancestor(&self, levels: u8) -> Option<TileId> {
+        if self.z < levels {
+            return None;
+        }
+        Some(TileId { z: self.z - levels, x: self.x >> levels, y: self.y >> levels })
+    }
 }
 
 /// How many levels of descendant to *keep* when they are already resident.
@@ -80,11 +90,43 @@ pub fn stands_in_for_visible(key: u64, visible: &[TileId], depth: u8) -> bool {
     visible.iter().any(|v| tile.descends_from(v, depth))
 }
 
+/// The world-px axis-aligned box the viewport covers on the ground, accounting for **both**
+/// bearing and tilt.
+///
+/// At pitch 0 this is exactly [`Camera::viewport_bounds`] — the bounding box of the rotated
+/// viewport. Under tilt the top of the screen recedes toward the horizon, so the ground the
+/// viewport actually covers is a trapezoid reaching far past that box; a selection derived from
+/// the untilted box leaves the top of the display blank exactly where the distance the driver is
+/// looking toward is. So the four screen corners are unprojected through the tilt-aware ray/plane
+/// ([`Camera::screen_to_world`]) and the box is grown to hold them. The [`PITCH_MAX_DEG`] cap keeps
+/// every corner below the horizon, so each resolves and the trapezoid stays finite.
+fn coverage(camera: &Camera) -> (crate::camera::WorldPx, crate::camera::WorldPx) {
+    let (mut min, mut max) = camera.viewport_bounds();
+    if camera.pitch_deg == 0.0 {
+        return (min, max);
+    }
+    let w = camera.width_dp as f64;
+    let h = camera.height_dp as f64;
+    // The top edge recedes furthest, so its two corners are the far edge of the trapezoid; the
+    // bottom corners are the near edge. Their AABB bounds the whole trapezoid because a screen line
+    // maps to a straight line on the ground plane.
+    for &(sx, sy) in &[(0.0, 0.0), (w, 0.0), (w, h), (0.0, h)] {
+        if let Some(p) = camera.screen_to_world(sx, sy) {
+            min.x = min.x.min(p.x);
+            min.y = min.y.min(p.y);
+            max.x = max.x.max(p.x);
+            max.y = max.y.max(p.y);
+        }
+    }
+    (min, max)
+}
+
 /// The tiles covering `camera`'s viewport, clamped to the archive's zoom range.
 ///
-/// Coverage is the bounding box of the viewport **as the camera actually orients it**, so
-/// a bearing pulls in the extra ring of tiles the rotated corners reach into. At bearing
-/// zero the box is the viewport and this is what it always was.
+/// Coverage is the bounding box of the viewport **as the camera actually orients it** — bearing
+/// *and* tilt — so a rotation pulls in the extra ring of tiles the rotated corners reach and a tilt
+/// pulls in the trapezoid of ground the receding top of the screen covers. At bearing zero and
+/// pitch zero the box is the viewport and this is what it always was.
 pub fn visible(camera: &Camera, min_zoom: u8, max_zoom: u8) -> Vec<TileId> {
     if camera.width_dp <= 0.0 || camera.height_dp <= 0.0 {
         return Vec::new();
@@ -92,7 +134,7 @@ pub fn visible(camera: &Camera, min_zoom: u8, max_zoom: u8) -> Vec<TileId> {
     let z = (camera.zoom.floor().max(0.0) as u32).clamp(min_zoom as u32, max_zoom as u32) as u8;
     let n = 1i64 << z;
     let span = camera.tile_span_dp(z);
-    let (min, max) = camera.viewport_bounds();
+    let (min, max) = coverage(camera);
 
     let min_tx = (min.x / span).floor() as i64;
     let max_tx = (max.x / span).floor() as i64;
@@ -118,6 +160,53 @@ pub fn visible(camera: &Camera, min_zoom: u8, max_zoom: u8) -> Vec<TileId> {
 ///
 /// Four covers a 16x zoom jump, which is more than a pinch produces in one gesture.
 pub const ANCESTOR_DEPTH: u8 = 4;
+
+/// How long a finer LOD tile takes to cross-fade in over its coarse ancestor, in seconds (WS-D).
+///
+/// Short enough to read as an anti-pop rather than an animation; measured against the shared
+/// clock (`Camera::time_seconds` / `Push.misc.w`) from the tile's `uploaded_at` stamp.
+pub const LOD_FADE_SECONDS: f32 = 0.3;
+
+/// The per-tile opacity of a tile `now - uploaded_at` seconds after its GPU buffers landed: 0 at
+/// upload, ramping linearly to 1 over `duration` (WS-D LOD cross-fade). Both times share the
+/// `Camera::time_seconds` epoch. A non-positive `duration` disables the fade (opaque at once).
+pub fn lod_fade_alpha(now: f32, uploaded_at: f32, duration: f32) -> f32 {
+    if duration <= 0.0 {
+        return 1.0;
+    }
+    ((now - uploaded_at) / duration).clamp(0.0, 1.0)
+}
+
+/// Whether a coarser ancestor of `key` (up to [`ANCESTOR_DEPTH`] levels up) is currently
+/// resident, and so is drawn underneath as an opaque stand-in.
+///
+/// This gates the fade: a finer tile may fade in only when there is an ancestor to show through
+/// the gap. A tile with no resident ancestor draws fully opaque immediately, so a freshly
+/// fetched area never fades up from the background.
+pub fn has_resident_ancestor(key: u64, resident: &std::collections::HashSet<u64>) -> bool {
+    let tile = TileId::from_key(key);
+    (1..=ANCESTOR_DEPTH)
+        .any(|levels| tile.ancestor(levels).is_some_and(|a| resident.contains(&a.key())))
+}
+
+/// The per-tile LOD cross-fade opacity the renderer writes into `Push.morph.x` for tile `key`.
+///
+/// Ramps 0→1 over `duration` from `uploaded_at` when a coarse ancestor is resident to stand in
+/// under the gap; otherwise fully opaque, so a tile with nothing beneath it never fades up from
+/// the background. `resident` is the set of currently resident tile keys.
+pub fn tile_lod_alpha(
+    key: u64,
+    uploaded_at: f32,
+    now: f32,
+    duration: f32,
+    resident: &std::collections::HashSet<u64>,
+) -> f32 {
+    if has_resident_ancestor(key, resident) {
+        lod_fade_alpha(now, uploaded_at, duration)
+    } else {
+        1.0
+    }
+}
 
 /// The tiles worth **keeping resident**: the visible ones, plus any ancestor of a visible
 /// tile.
@@ -167,10 +256,10 @@ pub fn resident_set(camera: &Camera, min_zoom: u8, max_zoom: u8) -> Vec<TileId> 
 
 /// A rough bound on how many tiles a viewport can want, for capacity hints.
 ///
-/// Measured off the same rotated box [`visible`] selects from, so it stays a bound rather
-/// than becoming a lie the moment the camera turns.
+/// Measured off the same tilt-and-rotation coverage box [`visible`] selects from, so it stays a
+/// bound rather than becoming a lie the moment the camera turns or tilts.
 pub fn bound(camera: &Camera) -> usize {
-    let (min, max) = camera.viewport_bounds();
+    let (min, max) = coverage(camera);
     let across = (max.x - min.x) / TILE_SIZE + 2.0;
     let down = (max.y - min.y) / TILE_SIZE + 2.0;
     (across * down).ceil() as usize
@@ -189,7 +278,86 @@ mod tests {
             height_dp: h,
             density: 1.0,
             bearing_deg: 0.0,
+            pitch_deg: 0.0,
+            time_seconds: 0.0,
         }
+    }
+
+    /// A freshly-resident tile ramps its opacity 0→1 across `LOD_FADE_SECONDS`, so a finer LOD
+    /// fades in rather than popping. Clamped at both ends.
+    #[test]
+    fn a_fresh_tile_ramps_zero_to_one_over_the_duration() {
+        let uploaded_at = 10.0;
+        let d = LOD_FADE_SECONDS;
+        assert_eq!(lod_fade_alpha(uploaded_at, uploaded_at, d), 0.0, "0 at upload");
+        assert!(
+            (lod_fade_alpha(uploaded_at + d * 0.5, uploaded_at, d) - 0.5).abs() < 1e-4,
+            "halfway through the fade",
+        );
+        assert_eq!(lod_fade_alpha(uploaded_at + d, uploaded_at, d), 1.0, "opaque at the end");
+        // Before upload (clock races the stamp) and long after both clamp.
+        assert_eq!(lod_fade_alpha(uploaded_at - 1.0, uploaded_at, d), 0.0);
+        assert_eq!(lod_fade_alpha(uploaded_at + 10.0, uploaded_at, d), 1.0);
+    }
+
+    /// A tile resident long enough for the fade to complete is fully opaque.
+    #[test]
+    fn a_long_resident_tile_is_fully_opaque() {
+        let now = 5000.0;
+        let uploaded_at = now - 100.0;
+        assert_eq!(lod_fade_alpha(now, uploaded_at, LOD_FADE_SECONDS), 1.0);
+    }
+
+    /// The coarse ancestor stays fully opaque underneath a fading finer child: the child ramps
+    /// (an ancestor is resident to cover the gap) while the ancestor, having nothing resident
+    /// above it, draws at full opacity.
+    #[test]
+    fn coarse_ancestor_is_opaque_under_a_fading_child() {
+        use std::collections::HashSet;
+        let coarse = TileId { z: 10, x: 5, y: 5 };
+        let fine = TileId { z: 11, x: 10, y: 10 };
+        assert_eq!(fine.ancestor(1), Some(coarse), "fine descends from coarse");
+
+        let resident: HashSet<u64> = [coarse.key(), fine.key()].into_iter().collect();
+        let now = 20.0;
+        let uploaded_at = now; // both just landed this frame
+
+        // The child fades because its ancestor is resident underneath.
+        let child_alpha = tile_lod_alpha(fine.key(), uploaded_at, now, LOD_FADE_SECONDS, &resident);
+        assert_eq!(child_alpha, 0.0, "the child starts transparent and ramps in");
+
+        // The ancestor has no coarser tile resident above it, so it never fades — it is the
+        // opaque stand-in the child fades over.
+        let ancestor_alpha =
+            tile_lod_alpha(coarse.key(), uploaded_at, now, LOD_FADE_SECONDS, &resident);
+        assert_eq!(ancestor_alpha, 1.0, "the coarse ancestor stays fully opaque");
+
+        // Partway through, the child is partly there and the ancestor is still solid.
+        let mid = now + LOD_FADE_SECONDS * 0.5;
+        assert!(
+            (tile_lod_alpha(fine.key(), uploaded_at, mid, LOD_FADE_SECONDS, &resident) - 0.5)
+                .abs()
+                < 1e-4,
+        );
+        assert_eq!(
+            tile_lod_alpha(coarse.key(), uploaded_at, mid, LOD_FADE_SECONDS, &resident),
+            1.0,
+        );
+    }
+
+    /// With no coarse ancestor resident there is nothing to show through a gap, so a freshly
+    /// fetched tile draws fully opaque immediately instead of fading up from the background.
+    #[test]
+    fn a_lone_fresh_tile_does_not_fade() {
+        use std::collections::HashSet;
+        let lone = TileId { z: 11, x: 10, y: 10 };
+        let resident: HashSet<u64> = [lone.key()].into_iter().collect();
+        let now = 3000.0;
+        assert_eq!(
+            tile_lod_alpha(lone.key(), now, now, LOD_FADE_SECONDS, &resident),
+            1.0,
+            "no ancestor underneath — draw opaque, never fade over the background",
+        );
     }
 
     #[test]
@@ -425,6 +593,60 @@ mod tests {
                 assert_eq!(TileId::from_key(tile.key()), tile);
             }
         }
+    }
+
+    #[test]
+    fn a_tilted_viewport_pulls_in_the_trapezoid_toward_the_horizon() {
+        // Under tilt the top of the screen recedes toward the horizon, so the covered ground is a
+        // trapezoid larger than the flat viewport box. A pitched camera must ask for strictly more
+        // tiles than the same level camera, and every level-camera tile must still be present.
+        let level = camera(-122.4194, 37.7749, 14.0, 411.0, 891.0);
+        let tilted = Camera { pitch_deg: 55.0, ..level };
+        let flat = visible(&level, 0, 16);
+        let pitched = visible(&tilted, 0, 16);
+        assert!(
+            pitched.len() > flat.len(),
+            "a tilted camera covers the receding trapezoid: {} vs {}",
+            pitched.len(),
+            flat.len(),
+        );
+        for tile in &flat {
+            assert!(pitched.contains(tile), "{tile:?} was dropped by the tilt");
+        }
+        assert!(pitched.len() <= bound(&tilted), "the bound must grow with the tilt too");
+    }
+
+    #[test]
+    fn every_on_screen_ground_point_of_a_tilted_view_lands_in_a_selected_tile() {
+        // The property that matters: whatever the tilt (and bearing), the ground under each screen
+        // corner belongs to a tile that was asked for. Uses the same tilt-aware unproject the
+        // renderer draws with, so selection and drawing agree.
+        let c = Camera {
+            pitch_deg: 50.0,
+            bearing_deg: 30.0,
+            ..camera(2.3522, 48.8566, 13.0, 411.0, 891.0)
+        };
+        let tiles = visible(&c, 0, 16);
+        let span = c.tile_span_dp(13);
+        for &(sx, sy) in &[(0.0, 0.0), (411.0, 0.0), (411.0, 891.0), (0.0, 891.0), (205.0, 20.0)] {
+            let ground = c.screen_to_world(sx, sy).expect("below the horizon under the cap");
+            let tx = (ground.x / span).floor() as i64;
+            let ty = (ground.y / span).floor() as i64;
+            assert!(
+                tiles.iter().any(|t| t.x as i64 == tx && t.y as i64 == ty),
+                "nothing covers the on-screen point at ({sx},{sy}) -> tile 13/{tx}/{ty}",
+            );
+        }
+    }
+
+    #[test]
+    fn a_zero_pitch_selection_is_unchanged() {
+        // The regression guard: adding tilt coverage must not perturb the flat/phone path. At pitch
+        // 0 the coverage box is exactly the viewport bounds, so the selection is what it always was.
+        let c = camera(-122.4194, 37.7749, 14.0, 411.0, 891.0);
+        let turned = Camera { bearing_deg: 37.0, ..c };
+        assert_eq!(visible(&c, 0, 16), visible(&Camera { pitch_deg: 0.0, ..c }, 0, 16));
+        assert_eq!(visible(&turned, 0, 16), visible(&Camera { pitch_deg: 0.0, ..turned }, 0, 16));
     }
 
     #[test]

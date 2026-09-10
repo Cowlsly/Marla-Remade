@@ -59,6 +59,17 @@ data class LayerOptions(
      * a line that is red on the network map stays red on a dark basemap.
      */
     val transit: Boolean = false,
+    /**
+     * Live traffic: a per-component overlay coloured red/amber/green by live speeds.
+     *
+     * The geometry is a line layer baked into the archive (one segment per graph component
+     * edge); the colours are not authored but pushed at runtime through
+     * [SurfaceMapRenderer.setTrafficSpeeds] as a `component_id → ARGB` table. Gated at
+     * tessellation like [poi]/[transit], so leaving it off costs nothing — only a navigation
+     * view wants the whole drivable network drawn a second time. A segment with no pushed
+     * colour draws nothing, so the basemap road shows through as the no-data look.
+     */
+    val traffic: Boolean = false,
 ) {
     companion object {
         /** The default: basemap only. */

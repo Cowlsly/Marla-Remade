@@ -7,6 +7,7 @@ import android.view.Surface
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.unit.DpRect
 import java.io.File
@@ -161,14 +162,37 @@ class SurfaceMapRenderer(
     private var userPuck: UserPuck? = null
 
     /**
+     * The app pins to draw, remembered so a set pushed before the surface existed — or one that
+     * outlives a surface being recreated — is still there in the first frame, the same way
+     * [userPuck] and [routeSegments] are.
+     */
+    private var markers: List<MapMarker> = emptyList()
+
+    /**
+     * The simulated transit vehicles to draw, remembered on the same terms as [markers] so a set
+     * pushed before the surface existed — or one that outlives a surface being recreated — is still
+     * there in the first frame. Kept apart from [markers] because the host pushes the two on
+     * different cadences (vehicles at ~1 Hz, pins on a tap/search).
+     */
+    private var vehicles: List<MapMarker> = emptyList()
+
+    /**
      * The route to draw, and how, remembered so a route set before the surface existed —
      * or one that outlives a surface being recreated — is still there in the first frame.
      *
-     * Kept as the points rather than as anything native, because the native mesh dies with
-     * the renderer and this has to be able to rebuild it.
+     * Kept as the coloured segments rather than as anything native, because the native mesh
+     * dies with the renderer and this has to be able to rebuild it.
      */
-    private var route: List<GeoPoint>? = null
+    private var routeSegments: List<RouteSegment>? = null
     private var routeStyle = RouteStyle()
+
+    /**
+     * The last-pushed live-traffic colour table (`component_id`s and their ARGB), remembered so
+     * a push that arrived before the surface existed — or that has to outlive the surface being
+     * recreated — is re-applied in the first frame, the same way [route] is. `null` means the
+     * overlay has nothing to draw (never pushed, or cleared).
+     */
+    private var trafficSpeeds: Pair<LongArray, IntArray>? = null
 
     /** The region to mask and which rung of the admin stack it is, or `null` for no mask. */
     private var regionProbe: RegionMask? = null
@@ -221,9 +245,13 @@ class SurfaceMapRenderer(
         // Before the first frame, so the very first resident set is tessellated with
         // the layers the host asked for instead of being built and then invalidated.
         MapNative.setLayers(handle, layers.poi, layers.transit, layers.poiKinds.joinToString(","))
+        MapNative.setTrafficEnabled(handle, layers.traffic)
         applyUserPuck()
         applyRoute()
         applyRegionMask()
+        applyTraffic()
+        applyMarkers()
+        applyVehicles()
         renderState = MapRenderState.Rendering
         syncFrameLoop()
     }
@@ -282,17 +310,27 @@ class SurfaceMapRenderer(
      * Draw exactly one frame, for a host driving its own loop instead of using
      * [start]/[stop]. Returns whether a frame was actually presented — false when there is
      * no renderer, no measured viewport, or the swapchain needed rebuilding.
+     *
+     * Uses `System.nanoTime()` as the animation clock; the Choreographer loop passes its own
+     * `frameTimeNanos` through the [renderFrame]`(Long)` overload instead.
      */
-    fun renderFrame(): Boolean {
+    fun renderFrame(): Boolean = renderFrame(System.nanoTime())
+
+    /**
+     * As [renderFrame], but with the frame clock supplied by the caller — the Choreographer's
+     * `frameTimeNanos`, which the renderer forwards to shaders so animation is tied to the
+     * presented frame rather than to wall-clock jitter.
+     */
+    fun renderFrame(frameTimeNanos: Long): Boolean {
         if (handle == 0L) return false
         val position: CameraPosition
         val widthDp: Float
         val heightDp: Float
         // Forced to zero on the Compose path. `Projection` — and therefore every
-        // `MapMarker`, pin and cluster positioned through it — is north-up only, so
+        // `MapMarker`, pin and cluster positioned through it — is north-up only for bearing, so
         // honouring a bearing there would rotate the basemap out from under overlays that
-        // did not rotate with it. That is a silent wrong render, not an error: the map
-        // turns, the pins stay put, and nothing anywhere reports it. Bearing is reachable
+        // did not rotate with it. Tilt is different: `Projection` is now pitch-aware (ray/plane),
+        // so pitch *is* honoured on both paths and overlays follow it. Bearing is reachable
         // only through [camera], on a surface with no Compose overlays above it.
         val bearing: Float
         val state = composeCamera
@@ -315,9 +353,11 @@ class SurfaceMapRenderer(
             position.target.latitude.toFloat(),
             position.zoom.toFloat(),
             bearing,
+            position.pitch.toFloat(),
             widthDp,
             heightDp,
             density,
+            frameTimeNanos,
         )
         if (drawn) onFrame()
         if (!regionResolved) applyRegionMask()
@@ -334,7 +374,7 @@ class SurfaceMapRenderer(
                         if (frameCallback === this) frameCallback = null
                         return
                     }
-                    renderFrame()
+                    renderFrame(frameTimeNanos)
                     // Re-post only while still the installed callback: detachSurface() and
                     // stop() null this out, and a callback already dispatched for this frame
                     // cannot be un-posted by removeFrameCallback.
@@ -357,14 +397,36 @@ class SurfaceMapRenderer(
     }
 
     /**
-     * Turn the optional POI and transit layers on or off. Not free — see [LayerOptions].
-     * A call that changes nothing does nothing.
+     * Turn the optional POI, transit and traffic layers on or off. Not free — see
+     * [LayerOptions]. A call that changes nothing does nothing.
      */
     fun setLayers(options: LayerOptions) {
         this.layers = options
         if (handle != 0L) {
             MapNative.setLayers(handle, options.poi, options.transit, options.poiKinds.joinToString(","))
+            MapNative.setTrafficEnabled(handle, options.traffic)
         }
+    }
+
+    /**
+     * Push the live-traffic colour table: [ids] holds each segment's `component_id` and
+     * [argbColors] the fully-resolved ARGB to draw it, index for index. The host owns the
+     * theme, so the colours are final. Replaces the whole table each call; a segment whose id
+     * is absent draws nothing (the basemap road shows through). Cheap — a pure recolour, no
+     * tessellation — so it is safe to drive from a camera-idle callback.
+     *
+     * Remembered so it survives the surface being recreated. Has no visible effect unless the
+     * traffic layer is enabled through [setLayers]/[LayerOptions.traffic].
+     */
+    fun setTrafficSpeeds(ids: LongArray, argbColors: IntArray) {
+        this.trafficSpeeds = ids to argbColors
+        applyTraffic()
+    }
+
+    /** Clear the live-traffic overlay so it draws nothing until the next [setTrafficSpeeds]. */
+    fun clearTraffic() {
+        this.trafficSpeeds = null
+        applyTraffic()
     }
 
     /**
@@ -385,6 +447,50 @@ class SurfaceMapRenderer(
         applyUserPuck()
     }
 
+    /**
+     * Replace the app's pins with [markers], drawn by the renderer as billboarded sprites so they
+     * pan and tilt in lock-step with the basemap instead of trailing it the way a Compose overlay
+     * does. An empty list clears them. Cheap: the geometry is the shared unit quad, so this is a
+     * pure state push, no tessellation.
+     */
+    fun setMarkers(markers: List<MapMarker>) {
+        this.markers = markers
+        applyMarkers()
+    }
+
+    /**
+     * Replace the simulated transit vehicles with [vehicles], drawn by the renderer as billboarded
+     * sprites through the same path as [setMarkers]. An empty list clears them. Cheap: the geometry
+     * is the shared unit quad, so this is a pure state push, no tessellation.
+     *
+     * Separate from [setMarkers] so the host's ~1 Hz vehicle recompute replaces only the vehicles
+     * and leaves the app pins untouched; drive it from the vehicle ticker rather than merging it
+     * into the pin set.
+     */
+    fun setVehicles(vehicles: List<MapMarker>) {
+        this.vehicles = vehicles
+        applyVehicles()
+    }
+
+    /**
+     * The id of the pin under a tap, or `0` when the tap hit no pin. [xDp]/[yDp] are Dp from the
+     * viewport top-left. Reads the renderer's id buffer (see the native `pickAt`), so it stays
+     * correct under tilt and never trails the basemap on a pan, unlike a Compose CPU hit-test.
+     *
+     * The returned value is whatever [MapMarker.id] the host set, so it maps the tap back to its
+     * own feature. `internal` because it is wired through [Projection.pickMarker] like the label
+     * pick, so a caller without a live renderer gets `0` rather than a dead handle.
+     */
+    internal fun pickAt(xDp: Float, yDp: Float): Long {
+        val h = handle
+        if (h == 0L) return 0L
+        return try {
+            MapNative.pickAt(h, xDp, yDp)
+        } catch (_: Throwable) {
+            0L
+        }
+    }
+
     /** Dim everything outside the region [mask] names, or clear the mask with `null`. */
     fun setRegionMask(mask: RegionMask?) {
         this.regionProbe = mask
@@ -393,8 +499,10 @@ class SurfaceMapRenderer(
     }
 
     /**
-     * Draw [points] as the navigation route, over the basemap and under the puck. `null`
-     * or fewer than two distinct points draws nothing, which is how a route is cleared.
+     * Draw [points] as a single-colour navigation route, over the basemap and under the
+     * puck. `null` or fewer than two distinct points draws nothing, which is how a route is
+     * cleared. The convenience path for a host that wants one line in one colour — Android
+     * Auto, which has no view hierarchy to hang a Compose overlay in.
      *
      * Main thread, like everything else here. Not free, but paid once per route rather
      * than once per frame: the native side tessellates the polyline and uploads it here,
@@ -402,15 +510,25 @@ class SurfaceMapRenderer(
      * one tessellation however long the drive or however much the driver zooms. Setting
      * the same route again does re-tessellate, so drive this from a state change rather
      * than from a per-frame callback.
-     *
-     * This exists because Android Auto hands the app a bare `Surface` with no view
-     * hierarchy, so the Compose route overlay the phone draws above the map has nowhere to
-     * live. The phone path is unaffected: a renderer with no route set draws exactly what
-     * it drew before.
      */
     fun setRoute(points: List<GeoPoint>?, style: RouteStyle = RouteStyle()) {
-        this.route = points
+        this.routeSegments = points?.let { listOf(RouteSegment(it, DEFAULT_ROUTE_COLOR)) }
         this.routeStyle = style
+        applyRoute()
+    }
+
+    /**
+     * Draw a multi-segment, per-segment-coloured route (see [RouteOverlay]), over the
+     * basemap and under the puck. `null` or an all-empty overlay draws nothing, which is
+     * how a route is cleared. This is what the phone pushes: the traffic-band / transit /
+     * travelled-grey colouring resolved on the device into one coloured segment per run.
+     *
+     * Same cost model as the single-colour [setRoute]: one tessellation per push, never
+     * per frame or per zoom step.
+     */
+    fun setRoute(overlay: RouteOverlay?) {
+        this.routeSegments = overlay?.segments
+        this.routeStyle = overlay?.style ?: RouteStyle()
         applyRoute()
     }
 
@@ -481,33 +599,106 @@ class SurfaceMapRenderer(
         }
     }
 
+    private fun applyMarkers() {
+        if (handle == 0L) return
+        val pins = markers
+        if (pins.isEmpty()) {
+            MapNative.clearMarkers(handle)
+            return
+        }
+        // Three parallel bulk arrays, the convention the native side reads: ids, then interleaved
+        // lon/lat, then icon ids. Packed once here rather than crossing the boundary per pin.
+        val ids = LongArray(pins.size)
+        val lonLat = FloatArray(pins.size * 2)
+        val icons = IntArray(pins.size)
+        for (i in pins.indices) {
+            val pin = pins[i]
+            ids[i] = pin.id
+            lonLat[i * 2] = pin.position.longitude.toFloat()
+            lonLat[i * 2 + 1] = pin.position.latitude.toFloat()
+            icons[i] = pin.icon
+        }
+        MapNative.setMarkers(handle, ids, lonLat, icons)
+    }
+
+    private fun applyVehicles() {
+        if (handle == 0L) return
+        val vs = vehicles
+        if (vs.isEmpty()) {
+            MapNative.clearVehicles(handle)
+            return
+        }
+        // Three parallel bulk arrays, the convention the native side reads: ids, then interleaved
+        // lon/lat, then icon ids. Packed once here rather than crossing the boundary per vehicle.
+        val ids = LongArray(vs.size)
+        val lonLat = FloatArray(vs.size * 2)
+        val icons = IntArray(vs.size)
+        for (i in vs.indices) {
+            val v = vs[i]
+            ids[i] = v.id
+            lonLat[i * 2] = v.position.longitude.toFloat()
+            lonLat[i * 2 + 1] = v.position.latitude.toFloat()
+            icons[i] = v.icon
+        }
+        MapNative.setVehicles(handle, ids, lonLat, icons)
+    }
+
     private fun applyRoute() {
         if (handle == 0L) return
-        val points = route
-        if (points == null || points.size < 2) {
+        // Drawable segments only: fewer than two points strokes nothing, and dropping them
+        // here keeps the native side's per-segment ranges aligned with the colours.
+        val drawable = routeSegments?.filter { it.points.size >= 2 }
+        if (drawable.isNullOrEmpty()) {
             MapNative.clearRoute(handle)
             return
         }
-        // Flat lon/lat pairs: one array crosses JNI instead of one call per point, which
-        // for a cross-city route is thousands of crossings saved. Built here rather than
-        // held, because a route is set once and this is not a per-frame path.
-        val flat = FloatArray(points.size * 2)
-        points.forEachIndexed { at, point ->
-            flat[at * 2] = point.longitude.toFloat()
-            flat[at * 2 + 1] = point.latitude.toFloat()
+        // Flat lon/lat pairs across every segment, plus a point count and colour per
+        // segment: three bulk arrays cross JNI instead of one call per point, which for a
+        // cross-city route is thousands of crossings saved. Built here rather than held,
+        // because a route is set once and this is not a per-frame path.
+        val flat = FloatArray(drawable.sumOf { it.points.size } * 2)
+        val lengths = IntArray(drawable.size)
+        val colors = IntArray(drawable.size)
+        var at = 0
+        drawable.forEachIndexed { i, segment ->
+            lengths[i] = segment.points.size
+            colors[i] = segment.color.toArgb()
+            for (point in segment.points) {
+                flat[at * 2] = point.longitude.toFloat()
+                flat[at * 2 + 1] = point.latitude.toFloat()
+                at++
+            }
         }
         MapNative.setRoute(
             handle,
             flat,
+            lengths,
+            colors,
             routeStyle.width.value,
             routeStyle.casingWidth.value,
-            routeStyle.color.toArgb(),
             routeStyle.casingColor.toArgb(),
         )
+    }
+
+    private fun applyTraffic() {
+        if (handle == 0L) return
+        val speeds = trafficSpeeds
+        if (speeds == null) {
+            MapNative.clearTraffic(handle)
+        } else {
+            MapNative.setTrafficSpeeds(handle, speeds.first, speeds.second)
+        }
     }
 
     private companion object {
         const val TAG = "SurfaceMapRenderer"
         const val CACHE_DIR_NAME = "vectortilecache"
+
+        /**
+         * The fill the single-colour [setRoute] convenience paints: the car's `#1A73E8`,
+         * the one route colour in this app authored against a real rendering (see
+         * [RouteStyle]). A per-segment route carries its own colours instead.
+         */
+        val DEFAULT_ROUTE_COLOR = Color(0xFF1A73E8)
     }
 }

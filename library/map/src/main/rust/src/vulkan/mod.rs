@@ -11,6 +11,7 @@
 pub mod buffers;
 pub mod context;
 pub mod images;
+pub mod pick;
 pub mod pipeline;
 pub mod renderer;
 pub mod swapchain;

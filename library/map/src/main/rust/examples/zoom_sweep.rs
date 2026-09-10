@@ -146,6 +146,8 @@ fn main() {
                 height_dp: 867.0,
                 density: 3.0,
                 bearing_deg: 0.0,
+                pitch_deg: 0.0,
+                time_seconds: 0.0,
             };
             let tiles = select::visible(&camera, min_zoom, max_zoom);
             let mut absent = 0;

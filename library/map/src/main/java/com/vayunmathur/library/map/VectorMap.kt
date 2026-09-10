@@ -62,6 +62,16 @@ import kotlin.math.roundToInt
  *   which city or country a details sheet is about. Drawn inside the renderer's frame for the
  *   same reason as [userPuck]: an overlay composed on top would lag the map by a frame while
  *   panning. `null` draws no mask.
+ * @param trafficColors the live-traffic overlay's `component_id → ARGB` table. The baked
+ *   traffic geometry is gated by [LayerOptions.traffic]; this supplies the colours the host
+ *   resolved from its own palette. `null` (or an empty table) clears the overlay, which is
+ *   what a host passes when the traffic toggle is off. Pushed into the renderer's frame like
+ *   [regionMask] rather than composed on top, for the same reason.
+ * @param route the navigation route, drawn inside the renderer's frame so it pans in
+ *   lock-step with the basemap instead of trailing it by a frame the way a Compose overlay
+ *   does. A list of per-segment-coloured runs (see [RouteOverlay]) — traffic bands, transit
+ *   brand colours, the travelled grey during navigation — resolved by the host. `null` (or
+ *   an all-empty overlay) draws nothing.
  * @param onFrame called after each presented frame.
  *
  *   Kept for `library/map/src/androidTest/.../BasemapScreenshotTest.kt`, which counts frames
@@ -85,6 +95,20 @@ fun VectorMap(
     imageOverlay: ImageOverlay? = null,
     userPuck: UserPuck? = null,
     regionMask: RegionMask? = null,
+    trafficColors: TrafficColorTable? = null,
+    route: RouteOverlay? = null,
+    /**
+     * App pins the renderer draws inside its own frame, glued to the ground so they pan and tilt
+     * in lock-step with the basemap instead of trailing it the way a Compose overlay does (see
+     * [MapMarker]). A tap resolves back to one through [Projection.pickMarker]. Empty draws none.
+     */
+    markers: List<MapMarker> = emptyList(),
+    /**
+     * Simulated transit vehicles the renderer draws inside its own frame, glued to the ground like
+     * [markers] but pushed on their own ~1 Hz cadence and not tap-pickable (see [MapMarker]). Empty
+     * draws none — which is how a host stops them when the transit layer is off.
+     */
+    vehicles: List<MapMarker> = emptyList(),
     onMapClick: (GeoPoint) -> Unit = {},
     /**
      * Tap with the screen point attached (see [MapClick]): what
@@ -162,6 +186,10 @@ fun VectorMap(
             archivePath = archivePath,
             userPuck = userPuck,
             regionMask = regionMask,
+            trafficColors = trafficColors,
+            route = route,
+            markers = markers,
+            vehicles = vehicles,
             modifier = Modifier.fillMaxSize(),
             onFrame = onFrame,
             fallback = fallback,

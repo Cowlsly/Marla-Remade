@@ -24,23 +24,24 @@ import androidx.compose.ui.unit.dp
  * 1.0, `6.dp` at density 2.0, and nobody knows which unit it was tuned on. Any Dp value
  * picked from it silently chooses one density to be correct at.
  *
- * So it is not picked from it. `8.dp` is `maps/src/main/java/com/vayunmathur/maps/ui/
- * RouteLayer.kt:52`, the phone's route width — the only density-correct route width in
- * this app, chosen by someone looking at the result. The casing keeps the reference's
- * proportion, which had the casing half again as wide as the line.
+ * So it is not picked from it. `8.dp` is the phone's route width — set in
+ * `maps/src/main/java/com/vayunmathur/maps/ui/map/RouteOverlayBuilder.kt`, the only
+ * density-correct route width in this app, chosen by someone looking at the result. The
+ * casing keeps the reference's proportion, which had the casing half again as wide as the
+ * line.
  *
  * A head unit is read at about 70 cm against a phone's 30 cm, so there is a real argument
  * for going wider than the phone here. Nobody has seen this on a head unit yet, so that
  * argument has not been acted on: this is the grounded number, and widening it is a
  * deliberate change someone should make while looking at one.
  *
- * # One colour, deliberately
+ * # Colour is per-segment
  *
- * The phone's route is coloured per navigation step — traffic bands, transit brand
- * colours, a travelled grey behind the puck — but it is drawn in Compose over `VectorMap`
- * and is not migrating to the renderer. Nothing that consumes this API needs per-segment
- * colour, so it does not have one; if `RouteLayer` is ever migrated, that is when the
- * shape should be revisited against a real caller.
+ * The fill colour is not here: it rides on each [RouteSegment], because the whole point of
+ * the route overlay is to colour each run differently — traffic bands, transit brand colours,
+ * a travelled grey behind the puck during navigation. What stays shared, and lives here, is
+ * the geometry of the stroke: the line width and the casing that outlines the lot. The car
+ * (Android Auto) passes a single segment and one colour through the same path.
  *
  * # Why there is a casing at all
  *
@@ -55,8 +56,6 @@ data class RouteStyle(
     val width: Dp = 8.dp,
     /** How far the casing stands out past the route line **on each side**. */
     val casingWidth: Dp = 2.dp,
-    /** The route line's colour. */
-    val color: Color = Color(0xFF1A73E8),
     /** The casing's colour. Unused when [casingWidth] is zero. */
     val casingColor: Color = Color.White,
 )

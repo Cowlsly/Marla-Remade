@@ -286,12 +286,16 @@ fn main() {
                     transit_ordinal: 0,
                     transit_lanes: 0,
                     transit_taper: 0,
+                    lane_count: 0,
                 }],
                 parts: vec![Part { coord_start: 0, point_count: 1, winding: WINDING_OUTER }],
                 coords: vec![(2048, 2048)],
             }],
             names: vec!["Testland".to_string()],
             ids: Vec::new(),
+            turn_lanes: Vec::new(),
+            buildings: Vec::new(),
+            heightmap: None, carriageways: Vec::new(), convention: None,
         };
         let mesh = geometry::build(&body, layers, 6, 32, 40, false);
         println!(

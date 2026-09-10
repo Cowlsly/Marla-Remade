@@ -21,8 +21,16 @@
 use crate::style::Anchor;
 use crate::tile::glyph::{GlyphAtlas, Weight, UP_EM};
 
-/// Floats per vertex: `x, y, u, v`.
-pub const FLOATS_PER_VERTEX: usize = 4;
+/// Floats per vertex: `x, y, u, v, ax, ay` — the quad position and atlas UV, plus the label's
+/// **ground anchor** in tile-local 0..1.
+///
+/// The anchor rides on every vertex so the billboard vertex shader (`symbol_billboard.vert`) can,
+/// under tilt, project the anchor through the perspective matrix and hang the glyph off it at a
+/// constant screen offset — keeping point labels upright and pinned to the ground. At pitch 0 the
+/// anchor is ignored and the position is drawn as-is, so the flat map is byte-identical. A curved
+/// (line) label writes each glyph's own position as its anchor, which collapses the billboard to a
+/// plain on-ground projection — curved labels stay map-aligned, as they must.
+pub const FLOATS_PER_VERTEX: usize = 6;
 
 /// One codepoint after shaping: pen position plus atlas lookup.
 ///
@@ -376,10 +384,10 @@ pub fn emit(
             let y0 = baseline_y - g.top * px_per_font_unit;
             let y1 = y0 + g.h * px_per_font_unit;
             let base = (vertices.len() / FLOATS_PER_VERTEX) as u32;
-            vertices.extend_from_slice(&[x0, y0, uv.u0, uv.v0]);
-            vertices.extend_from_slice(&[x1, y0, uv.u1, uv.v0]);
-            vertices.extend_from_slice(&[x1, y1, uv.u1, uv.v1]);
-            vertices.extend_from_slice(&[x0, y1, uv.u0, uv.v1]);
+            vertices.extend_from_slice(&[x0, y0, uv.u0, uv.v0, point.0, point.1]);
+            vertices.extend_from_slice(&[x1, y0, uv.u1, uv.v0, point.0, point.1]);
+            vertices.extend_from_slice(&[x1, y1, uv.u1, uv.v1, point.0, point.1]);
+            vertices.extend_from_slice(&[x0, y1, uv.u0, uv.v1, point.0, point.1]);
             indices.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
         }
     }
@@ -404,15 +412,190 @@ pub fn emit(
 /// [`crate::camera::Camera::world_quad_to_clip`]), so a rotation here is a rotation there
 /// — no shear to correct for.
 pub fn upright(vertices: &mut [f32], pivot: (f32, f32), rotation: (f32, f32)) {
+    upright_stride(vertices, pivot, rotation, FLOATS_PER_VERTEX);
+}
+
+/// [`upright`] for a vertex layout of `stride` floats whose first two are the position.
+///
+/// The point-label text path uses [`FLOATS_PER_VERTEX`]; the POI-icon path keeps its own
+/// 4-float `x, y, u, v` quad (it stays on the on-ground sprite pipeline, not the billboard one),
+/// so it rotates through here with `stride == 4`. Only the leading `x, y` of each vertex moves;
+/// any trailing fields (uv, anchor) are copied through untouched.
+pub fn upright_stride(vertices: &mut [f32], pivot: (f32, f32), rotation: (f32, f32), stride: usize) {
     let (cos, sin) = rotation;
     if sin == 0.0 && cos == 1.0 {
         return;
     }
-    for vertex in vertices.chunks_exact_mut(FLOATS_PER_VERTEX) {
+    for vertex in vertices.chunks_exact_mut(stride) {
         let dx = vertex[0] - pivot.0;
         let dy = vertex[1] - pivot.1;
         vertex[0] = pivot.0 + cos * dx - sin * dy;
         vertex[1] = pivot.1 + sin * dx + cos * dy;
+    }
+}
+
+/// One glyph positioned along a curved baseline: the source glyph, where its pen origin sits
+/// in tile-local 0..1, and the unit tangent of the baseline there.
+///
+/// The single source of truth shared by [`emit_curved`] (which builds the quads) and the
+/// placer (which builds the oriented collision boxes) so the box a label occupies is the box
+/// the GPU draws — the curved analogue of what [`crate::tile::placement::anchored_rect`] does
+/// for a point label.
+#[derive(Clone, Copy, Debug)]
+pub struct CurvedGlyph {
+    /// The source glyph: char, atlas metrics and advance, all in font units.
+    pub glyph: ShapedGlyph,
+    /// Pen origin on the baseline, tile-local 0..1.
+    pub pen: (f32, f32),
+    /// Unit tangent `(cos, sin)` of the baseline at the pen, tile-local. The glyph is rotated
+    /// to this, so the run curves with the road/river.
+    pub tangent: (f32, f32),
+}
+
+/// The arc length of a tile-local polyline.
+fn polyline_length(pts: &[(f32, f32)]) -> f32 {
+    let mut sum = 0.0;
+    for w in pts.windows(2) {
+        let dx = w[1].0 - w[0].0;
+        let dy = w[1].1 - w[0].1;
+        sum += (dx * dx + dy * dy).sqrt();
+    }
+    sum
+}
+
+/// The point and unit tangent at arc length `d` along `pts`, clamped to the ends. Degenerate
+/// (zero-length) segments are skipped so a repeated vertex cannot produce a NaN tangent.
+fn sample_polyline(pts: &[(f32, f32)], d: f32) -> ((f32, f32), (f32, f32)) {
+    let d = d.max(0.0);
+    let mut acc = 0.0f32;
+    for w in pts.windows(2) {
+        let dx = w[1].0 - w[0].0;
+        let dy = w[1].1 - w[0].1;
+        let seg = (dx * dx + dy * dy).sqrt();
+        if seg <= 0.0 {
+            continue;
+        }
+        if acc + seg >= d {
+            let t = ((d - acc) / seg).clamp(0.0, 1.0);
+            return ((w[0].0 + dx * t, w[0].1 + dy * t), (dx / seg, dy / seg));
+        }
+        acc += seg;
+    }
+    // Past the end (or an all-degenerate line): the last vertex, with the last real tangent.
+    let last = *pts.last().unwrap_or(&(0.0, 0.0));
+    for w in pts.windows(2).rev() {
+        let dx = w[1].0 - w[0].0;
+        let dy = w[1].1 - w[0].1;
+        let seg = (dx * dx + dy * dy).sqrt();
+        if seg > 0.0 {
+            return (last, (dx / seg, dy / seg));
+        }
+    }
+    (last, (1.0, 0.0))
+}
+
+/// Lay a single shaped line's glyphs along a tile-local `centreline`, centred on the line's
+/// length.
+///
+/// `px_per_font_unit` converts a font-unit advance into the tile-local unit the centreline is
+/// measured in (`text_px / UP_EM / tile_span_px`), so the along-line spacing tracks the frame's
+/// text size exactly as [`emit`]'s does. Returns one [`CurvedGlyph`] per glyph, or an empty vec
+/// when the run is longer than the centreline — it does not fit and the label should not be
+/// placed at all, which is what stops a long name spilling off a short road.
+pub fn layout_along_line(
+    line: &ShapedLine,
+    centreline: &[(f32, f32)],
+    px_per_font_unit: f32,
+) -> Vec<CurvedGlyph> {
+    if centreline.len() < 2 || line.glyphs.is_empty() || px_per_font_unit <= 0.0 {
+        return Vec::new();
+    }
+    let total_len = polyline_length(centreline);
+    let run_len = line.advance * px_per_font_unit;
+    if run_len <= 0.0 || run_len > total_len {
+        return Vec::new();
+    }
+    // Read the line in whichever direction keeps it upright: a polyline whose net heading points
+    // leftwards would otherwise draw every glyph upside down. Reverse the *walk*, not the glyph
+    // order, so the run still spells left-to-right on screen.
+    let net_dx = centreline[centreline.len() - 1].0 - centreline[0].0;
+    let reversed: Vec<(f32, f32)>;
+    let path: &[(f32, f32)] = if net_dx < 0.0 {
+        reversed = centreline.iter().rev().copied().collect();
+        &reversed
+    } else {
+        centreline
+    };
+    let start = (total_len - run_len) * 0.5;
+    let mut out = Vec::with_capacity(line.glyphs.len());
+    for g in &line.glyphs {
+        let d = start + g.pen_x * px_per_font_unit;
+        let (pen, tangent) = sample_polyline(path, d);
+        out.push(CurvedGlyph { glyph: *g, pen, tangent });
+    }
+    out
+}
+
+/// Emit two triangles per glyph of a single shaped line laid along a tile-local `centreline`.
+///
+/// The baseline follows the polyline and every glyph is rotated to its local tangent, so a
+/// street or river name curves with its line. This is the counterpart of [`emit`] for a
+/// **line** label, and it differs in two deliberate ways:
+///
+/// * There is no anchor, offset or justification — the run is centred on the polyline's length
+///   by [`layout_along_line`].
+/// * The caller must **not** pass the result through [`upright`]. A curved label is map-aligned
+///   (MapLibre's `text-rotation-alignment: map`): its orientation is the geometry's tangent, not
+///   the camera's bearing, so counter-rotating it would fight the curve it is meant to follow.
+///
+/// Vertical placement mirrors [`emit`]: the baseline sits half a cap-height below the centreline
+/// (screen-down), so the cap box straddles the line. Each quad still covers the glyph ink plus
+/// the SDF spread and addresses the same atlas cell, so the fragment shader is unchanged.
+pub fn emit_curved(
+    atlas: &GlyphAtlas,
+    weight: Weight,
+    line: &ShapedLine,
+    centreline: &[(f32, f32)],
+    text_px: f32,
+    tile_span_px: f32,
+    vertices: &mut Vec<f32>,
+    indices: &mut Vec<u32>,
+) {
+    if tile_span_px <= 0.0 {
+        return;
+    }
+    let px_per_font_unit = text_px / UP_EM as f32 / tile_span_px;
+    let placed = layout_along_line(line, centreline, px_per_font_unit);
+    // The baseline is half a cap-height below the centreline, so the cap box centres on the line.
+    let cap_half = 0.5 * CAP_HEIGHT_EM * UP_EM as f32 * px_per_font_unit;
+    for cg in &placed {
+        let Some(uv) = atlas.uv(weight, cg.glyph.ch) else { continue };
+        let (cos, sin) = cg.tangent;
+        // "Up" (toward glyph tops) in y-down tile space is the tangent rotated by -90 degrees.
+        let up = (sin, -cos);
+        let g = cg.glyph;
+        // Local coordinates from the pen origin: `a` along the baseline, `u` up (font units → tile
+        // local via px_per_font_unit).
+        let a0 = g.bearing_x * px_per_font_unit;
+        let a1 = a0 + g.w * px_per_font_unit;
+        let u_top = -cap_half + g.top * px_per_font_unit;
+        let u_bot = u_top - g.h * px_per_font_unit;
+        let corner = |a: f32, u: f32| {
+            (cg.pen.0 + cos * a + up.0 * u, cg.pen.1 + sin * a + up.1 * u)
+        };
+        let (x0, y0) = corner(a0, u_top);
+        let (x1, y1) = corner(a1, u_top);
+        let (x2, y2) = corner(a1, u_bot);
+        let (x3, y3) = corner(a0, u_bot);
+        let base = (vertices.len() / FLOATS_PER_VERTEX) as u32;
+        // A curved label is map-aligned: each glyph vertex is its own anchor, so the billboard
+        // shader collapses to a plain on-ground projection (offset zero) and the run foreshortens
+        // with the ground under tilt instead of standing up.
+        vertices.extend_from_slice(&[x0, y0, uv.u0, uv.v0, x0, y0]);
+        vertices.extend_from_slice(&[x1, y1, uv.u1, uv.v0, x1, y1]);
+        vertices.extend_from_slice(&[x2, y2, uv.u1, uv.v1, x2, y2]);
+        vertices.extend_from_slice(&[x3, y3, uv.u0, uv.v1, x3, y3]);
+        indices.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
     }
 }
 
@@ -714,10 +897,10 @@ mod tests {
                     let x1 = x0 + g.w * px_per_font_unit;
                     let y0 = baseline_y - g.top * px_per_font_unit;
                     let y1 = y0 + g.h * px_per_font_unit;
-                    expected.extend_from_slice(&[x0, y0, uv.u0, uv.v0]);
-                    expected.extend_from_slice(&[x1, y0, uv.u1, uv.v0]);
-                    expected.extend_from_slice(&[x1, y1, uv.u1, uv.v1]);
-                    expected.extend_from_slice(&[x0, y1, uv.u0, uv.v1]);
+                    expected.extend_from_slice(&[x0, y0, uv.u0, uv.v0, 0.5, 0.5]);
+                    expected.extend_from_slice(&[x1, y0, uv.u1, uv.v0, 0.5, 0.5]);
+                    expected.extend_from_slice(&[x1, y1, uv.u1, uv.v1, 0.5, 0.5]);
+                    expected.extend_from_slice(&[x0, y1, uv.u0, uv.v1, 0.5, 0.5]);
                 }
 
                 let (mut v, mut idx) = (Vec::new(), Vec::new());
@@ -946,12 +1129,13 @@ mod tests {
             let radians = degrees.to_radians();
             let rotation = (radians.cos(), radians.sin());
             let pivot = (0.5f32, 0.5f32);
-            // One quad, offset a known amount right of and above the anchor.
+            // One quad (6 floats/vertex: x, y, u, v, anchor.x, anchor.y), offset a known
+            // amount right of and above the anchor. `upright` moves only x, y.
             let mut quad = vec![
-                0.6, 0.45, 0.0, 0.0, //
-                0.7, 0.45, 1.0, 0.0, //
-                0.7, 0.55, 1.0, 1.0, //
-                0.6, 0.55, 0.0, 1.0,
+                0.6, 0.45, 0.0, 0.0, 0.5, 0.5, //
+                0.7, 0.45, 1.0, 0.0, 0.5, 0.5, //
+                0.7, 0.55, 1.0, 1.0, 0.5, 0.5, //
+                0.6, 0.55, 0.0, 1.0, 0.5, 0.5,
             ];
             let before: Vec<(f32, f32)> = quad
                 .chunks_exact(FLOATS_PER_VERTEX)
@@ -972,7 +1156,7 @@ mod tests {
     fn a_north_up_camera_leaves_the_quad_byte_identical() {
         // The whole phone path runs at bearing zero, so this must be a no-op there rather
         // than a rotation by an angle that happens to round to nothing.
-        let mut quad = vec![0.6, 0.45, 0.0, 0.0, 0.7, 0.55, 1.0, 1.0];
+        let mut quad = vec![0.6, 0.45, 0.0, 0.0, 0.5, 0.5, 0.7, 0.55, 1.0, 1.0, 0.5, 0.5];
         let original = quad.clone();
         upright(&mut quad, (0.5, 0.5), (1.0, 0.0));
         assert_eq!(quad, original);
@@ -982,9 +1166,104 @@ mod tests {
     fn the_anchor_itself_never_moves() {
         // The pivot is where the label is glued to the ground; if it drifted, every label
         // would slide off its own feature as the camera turned.
-        let mut at_pivot = vec![0.25, 0.75, 0.0, 0.0];
+        let mut at_pivot = vec![0.25, 0.75, 0.0, 0.0, 0.25, 0.75];
         upright(&mut at_pivot, (0.25, 0.75), (0.5, 3f32.sqrt() / 2.0));
         assert!((at_pivot[0] - 0.25).abs() < 1e-6);
         assert!((at_pivot[1] - 0.75).abs() < 1e-6);
+    }
+
+    // --- curved labels along a line -----------------------------------------
+
+    /// One shaped line from a string, for the curved-layout tests.
+    fn one_line(atlas: &GlyphAtlas, text: &str) -> ShapedLine {
+        let (glyphs, advance) = shape(atlas, Weight::Regular, text, false);
+        ShapedLine { glyphs, advance }
+    }
+
+    /// A tangent's heading in radians, for comparing how far the run turned.
+    fn heading(t: (f32, f32)) -> f32 {
+        t.1.atan2(t.0)
+    }
+
+    #[test]
+    fn a_straight_line_lays_glyphs_left_to_right_and_upright() {
+        // The core straight-line guarantee: on a horizontal centreline every glyph faces the
+        // same way (tangent ~ (1, 0), i.e. upright) and the pens march left to right, so the run
+        // reads exactly as a point label would — just anchored to the road instead of a point.
+        let Some(atlas) = atlas() else { return };
+        let line = one_line(&atlas, "Main Street");
+        // px_per_font_unit small enough that the run fits inside the 0.8-long centreline.
+        let ppfu = 16.0 / UP_EM as f32 / 512.0;
+        let centreline = [(0.1f32, 0.5f32), (0.9, 0.5)];
+        let placed = layout_along_line(&line, &centreline, ppfu);
+        assert_eq!(placed.len(), line.glyphs.len(), "every glyph is placed on a line that fits");
+        for cg in &placed {
+            assert!((cg.tangent.0 - 1.0).abs() < 1e-4, "cos {}", cg.tangent.0);
+            assert!(cg.tangent.1.abs() < 1e-4, "a straight run is upright, sin {}", cg.tangent.1);
+            assert!((cg.pen.1 - 0.5).abs() < 1e-4, "the baseline follows the centreline");
+        }
+        for pair in placed.windows(2) {
+            assert!(pair[1].pen.0 > pair[0].pen.0, "pens advance left to right");
+        }
+    }
+
+    #[test]
+    fn a_curved_line_rotates_glyphs_along_it() {
+        // The whole point of curved labels: on a bending line the glyphs turn to follow it, so
+        // the run's tangent is not constant. An arc guarantees a continuously varying tangent, so
+        // whichever centred slice the run occupies still spans a range of headings.
+        let Some(atlas) = atlas() else { return };
+        let line = one_line(&atlas, "River Road");
+        // A quarter-circle arc, radius 0.35 about the tile centre, sampled finely.
+        let mut centreline = Vec::new();
+        for i in 0..=48 {
+            let theta = std::f32::consts::FRAC_PI_2 * i as f32 / 48.0;
+            centreline.push((0.5 + 0.35 * theta.cos(), 0.5 + 0.35 * theta.sin()));
+        }
+        let ppfu = 16.0 / UP_EM as f32 / 512.0;
+        let placed = layout_along_line(&line, &centreline, ppfu);
+        assert!(placed.len() >= 2, "the arc is long enough to place the run");
+        let headings: Vec<f32> = placed.iter().map(|c| heading(c.tangent)).collect();
+        let lo = headings.iter().cloned().fold(f32::INFINITY, f32::min);
+        let hi = headings.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
+        assert!(hi - lo > 0.1, "glyphs must rotate along the curve: heading spread {}", hi - lo);
+        // And the tangents are unit length — a bad normalisation would smear the glyphs.
+        for cg in &placed {
+            let len = (cg.tangent.0 * cg.tangent.0 + cg.tangent.1 * cg.tangent.1).sqrt();
+            assert!((len - 1.0).abs() < 1e-4, "tangent not unit: {len}");
+        }
+    }
+
+    #[test]
+    fn a_run_longer_than_its_line_is_not_placed() {
+        // A long name on a short road does not fit, so it drops entirely rather than spilling off
+        // the ends — the caller then places no label for it.
+        let Some(atlas) = atlas() else { return };
+        let line = one_line(&atlas, "A Very Long Street Name Indeed");
+        let ppfu = 64.0 / UP_EM as f32 / 256.0; // big text
+        let centreline = [(0.48f32, 0.5f32), (0.52, 0.5)]; // a stub 0.04 long
+        assert!(layout_along_line(&line, &centreline, ppfu).is_empty());
+    }
+
+    #[test]
+    fn emit_curved_makes_two_finite_triangles_per_placed_glyph() {
+        let Some(atlas) = atlas() else { return };
+        let line = one_line(&atlas, "Bay");
+        let centreline = [(0.1f32, 0.5f32), (0.9, 0.5)];
+        let ppfu = 24.0 / UP_EM as f32 / 512.0;
+        let placed = layout_along_line(&line, &centreline, ppfu);
+        let (mut v, mut idx) = (Vec::new(), Vec::new());
+        emit_curved(&atlas, Weight::Regular, &line, &centreline, 24.0, 512.0, &mut v, &mut idx);
+        // A glyph with no ink (a space) draws no quad, so bound by placed glyphs that have UVs.
+        let drawable = placed.iter().filter(|c| atlas.uv(Weight::Regular, c.glyph.ch).is_some()).count();
+        assert_eq!(idx.len(), drawable * 6, "six indices per drawable glyph");
+        assert_eq!(v.len(), drawable * 4 * FLOATS_PER_VERTEX);
+        for f in &v {
+            assert!(f.is_finite(), "curved emission produced a non-finite vertex");
+        }
+        // UVs still address the atlas.
+        for chunk in v.chunks(FLOATS_PER_VERTEX) {
+            assert!((0.0..=1.0).contains(&chunk[2]) && (0.0..=1.0).contains(&chunk[3]));
+        }
     }
 }

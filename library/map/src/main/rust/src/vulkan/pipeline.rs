@@ -2,11 +2,11 @@
 //!
 //! # Push constants, and no descriptor sets at all
 //!
-//! Everything per-draw — the tile's clip matrix, the layer's colour, width, gap and dash
-//! — is 112 bytes, inside the 128 the Vulkan spec guarantees for push constants. So there
-//! are no uniform buffers, no descriptor set layouts, no descriptor pool and nothing to
-//! keep in sync with the camera. `vkCmdPushConstants` before each draw is the whole
-//! per-draw state.
+//! Everything per-draw — the tile's clip matrix, the layer's colour, width, gap and dash,
+//! the per-frame clock and the per-tile morph factor — is 128 bytes, exactly the minimum
+//! the Vulkan spec guarantees for push constants. So there are no uniform buffers, no
+//! descriptor set layouts, no descriptor pool and nothing to keep in sync with the camera.
+//! `vkCmdPushConstants` before each draw is the whole per-draw state.
 //!
 //! This is a deliberate departure from the WebGPU design that preceded it, which used a
 //! uniform buffer per tile plus a bind group per (tile, layer) so that pre-recorded
@@ -22,24 +22,47 @@ use crate::tile::symbol;
 use ash::vk;
 use std::ffi::CStr;
 
-/// Bytes of push constant: `mat4` + three `vec4`.
-pub const PUSH_CONSTANT_BYTES: u32 = 64 + 16 + 16 + 16;
+/// Bytes of push constant: `mat4` + four `vec4`. Exactly 128, the guaranteed minimum.
+pub const PUSH_CONSTANT_BYTES: u32 = 64 + 16 + 16 + 16 + 16;
+
+/// The default `Push::morph`: fully present, no LOD cross-fade. Every draw but WS-D's uses it.
+pub const MORPH_NONE: [f32; 4] = [1.0, 0.0, 0.0, 0.0];
 
 /// The push constant block, matching the `Push` block the shaders declare.
 ///
 /// `repr(C)` so the field order is the declaration order, which is what the SPIR-V
 /// offsets assume.
+///
+/// # Field map (the shared contract A/B/C/D/E/G build on)
+///
+/// | field          | bytes   | meaning                                                        |
+/// |----------------|---------|---------------------------------------------------------------|
+/// | `tile_to_clip` | 0..64   | column-major tile-local `(u, v, height, 1)` → clip            |
+/// | `color`        | 64..80  | linear RGBA, 0..1                                              |
+/// | `line`         | 80..96  | `half_width_px, gap_half_px, dash_on, dash_off`               |
+/// | `misc`         | 96..112 | `tile_px, edge_aa, lateral_px, clock_seconds`                 |
+/// | `morph`        | 112..128| `opacity(WS-D), reserved, reserved, reserved`                 |
+///
+/// `misc.w` is the per-frame clock (seconds); `morph.x` is the per-tile opacity/morph factor
+/// (1.0 = fully present) reserved for WS-D. Both default to a value that leaves the flat 2D
+/// output byte-identical (`clock` is ignored by the current shaders, `morph.x` is 1.0).
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct Push {
-    /// Column-major tile-local 0..1 to clip space.
+    /// Column-major tile-local `(u, v, height, 1)` to clip space. `height` (the vertex z) is 0
+    /// for every flat 2D layer and a real world-px height for buildings/terrain.
     pub tile_to_clip: [f32; 16],
     /// Linear RGBA, 0..1.
     pub color: [f32; 4],
     /// `half_width_px, gap_half_px, dash_on, dash_off`.
     pub line: [f32; 4],
-    /// `tile_px, 0, 0, 0`.
+    /// `tile_px, edge_aa, lateral_px, clock_seconds`. `misc.w` is the per-frame clock forwarded
+    /// from the host's `frameTimeNanos` (see `camera::Camera::time_seconds`).
     pub misc: [f32; 4],
+    /// Per-draw animation slot. `morph.x` is the per-tile opacity/morph factor (1.0 = fully
+    /// present) reserved for WS-D's LOD cross-fade; `y`/`z`/`w` are reserved. Appended past
+    /// `misc`, so a shader that never declares it keeps its existing offsets and behaviour.
+    pub morph: [f32; 4],
 }
 
 impl Push {
@@ -60,10 +83,16 @@ const FILL_FRAG: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/fill.frag.spv
 const LINE_VERT: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/line.vert.spv"));
 const LINE_FRAG: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/line.frag.spv"));
 const SYMBOL_VERT: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/symbol.vert.spv"));
+const SYMBOL_BILLBOARD_VERT: &[u8] =
+    include_bytes!(concat!(env!("OUT_DIR"), "/symbol_billboard.vert.spv"));
 const SYMBOL_FRAG: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/symbol.frag.spv"));
 const SPRITE_FRAG: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/sprite.frag.spv"));
 const PUCK_VERT: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/puck.vert.spv"));
 const PUCK_FRAG: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/puck.frag.spv"));
+const BUILDING_VERT: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/building.vert.spv"));
+const BUILDING_FRAG: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/building.frag.spv"));
+const TERRAIN_VERT: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/terrain.vert.spv"));
+const TERRAIN_FRAG: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/terrain.frag.spv"));
 
 pub struct Pipelines {
     pub layout: vk::PipelineLayout,
@@ -71,6 +100,28 @@ pub struct Pipelines {
     pub symbol_layout: vk::PipelineLayout,
     pub fill: vk::Pipeline,
     pub line: vk::Pipeline,
+    /// Depth-tested (test + write, `LESS`) variant of [`fill`](Self::fill), for the 3D layers
+    /// WS-A (buildings) and WS-G (terrain) add. It reuses the position-only fill shaders so the
+    /// render-pass depth path is exercised today; the 3D workstreams build their own pipelines
+    /// with the same [`Depth::TestWrite`] against the depth attachment WS0 added to the pass.
+    /// The flat 2D layers stay on [`fill`](Self::fill)/[`line`](Self::line) with depth off, so
+    /// their output is unchanged.
+    pub depth: vk::Pipeline,
+    /// The 3D building pipeline (WS-A): the extruded walls and roof caps of the `buildings` layer.
+    /// Its own vertex format — position + height + normal + per-vertex ARGB colour — and its own
+    /// `building.vert`/`building.frag`, depth-tested ([`Depth::TestWrite`]) so buildings occlude
+    /// one another and the basemap at z14+. Takes the push-only [`layout`](Self::layout): it samples
+    /// no atlas, its colour is per-vertex. At pitch 0 its vertex shader collapses to the footprint,
+    /// so the flat map is unchanged.
+    pub building: vk::Pipeline,
+    /// The 3D terrain pipeline (WS-G): the DEM-displaced ground grid of a tile that carries a
+    /// heightmap. Its own vertex format — position + height + surface normal (no per-vertex colour;
+    /// the ground colour is the pushed `earth` colour) — and its own `terrain.vert`/`terrain.frag`,
+    /// depth-tested ([`Depth::TestWrite`]) so hills occlude one another and let buildings on the far
+    /// side of a ridge be hidden by it. Takes the push-only [`layout`](Self::layout): it samples no
+    /// atlas. Drawn *before* the flat layer loop, so the flat layers paint over it; at pitch 0 its
+    /// vertex shader collapses the grid to the flat footprint, so the overhead map is unchanged.
+    pub terrain: vk::Pipeline,
     pub symbol: vk::Pipeline,
     /// POI icons. Same vertex format, same push block and the same
     /// [`symbol_layout`](Self::symbol_layout) as [`symbol`](Self::symbol) — only the
@@ -126,10 +177,15 @@ impl Pipelines {
         let line_vert = shader_module(device, LINE_VERT)?;
         let line_frag = shader_module(device, LINE_FRAG)?;
         let symbol_vert = shader_module(device, SYMBOL_VERT)?;
+        let symbol_billboard_vert = shader_module(device, SYMBOL_BILLBOARD_VERT)?;
         let symbol_frag = shader_module(device, SYMBOL_FRAG)?;
         let sprite_frag = shader_module(device, SPRITE_FRAG)?;
         let puck_vert = shader_module(device, PUCK_VERT)?;
         let puck_frag = shader_module(device, PUCK_FRAG)?;
+        let building_vert = shader_module(device, BUILDING_VERT)?;
+        let building_frag = shader_module(device, BUILDING_FRAG)?;
+        let terrain_vert = shader_module(device, TERRAIN_VERT)?;
+        let terrain_frag = shader_module(device, TERRAIN_FRAG)?;
 
         let fill_attributes = [vk::VertexInputAttributeDescription::default()
             .location(0)
@@ -158,7 +214,9 @@ impl Pipelines {
                 .format(vk::Format::R32_SFLOAT)
                 .offset(24),
         ];
-        // Symbol: position (tile-local) + uv (atlas), 4 floats.
+        // Sprite (POI icons + app markers): position (tile-local / clip) + uv (atlas), 4 floats.
+        // The on-ground path — not billboarded — so no per-vertex anchor. Shared with the marker
+        // path, which pushes 4-float clip-space quads, which is why this format must not grow.
         let symbol_attributes = [
             vk::VertexInputAttributeDescription::default()
                 .location(0)
@@ -171,6 +229,60 @@ impl Pipelines {
                 .format(vk::Format::R32G32_SFLOAT)
                 .offset(8),
         ];
+        // Symbol text (billboarded): position (tile-local) + uv (atlas) + ground anchor
+        // (tile-local), 6 floats. The anchor lets `symbol_billboard.vert` keep point labels upright
+        // and pinned to the ground under tilt; at pitch 0 it is ignored and output is unchanged.
+        let symbol_billboard_attributes = [
+            vk::VertexInputAttributeDescription::default()
+                .location(0)
+                .binding(0)
+                .format(vk::Format::R32G32_SFLOAT)
+                .offset(0),
+            vk::VertexInputAttributeDescription::default()
+                .location(1)
+                .binding(0)
+                .format(vk::Format::R32G32_SFLOAT)
+                .offset(8),
+            vk::VertexInputAttributeDescription::default()
+                .location(2)
+                .binding(0)
+                .format(vk::Format::R32G32_SFLOAT)
+                .offset(16),
+        ];
+        // Building (WS-A): position+height (3 floats), face normal (3 floats), then the per-vertex
+        // ARGB colour as one `R8G8B8A8_UNORM` word the shader reads as a 0..1 vec4. 28-byte stride.
+        let building_attributes = [
+            vk::VertexInputAttributeDescription::default()
+                .location(0)
+                .binding(0)
+                .format(vk::Format::R32G32B32_SFLOAT)
+                .offset(0),
+            vk::VertexInputAttributeDescription::default()
+                .location(1)
+                .binding(0)
+                .format(vk::Format::R32G32B32_SFLOAT)
+                .offset(12),
+            vk::VertexInputAttributeDescription::default()
+                .location(2)
+                .binding(0)
+                .format(vk::Format::R8G8B8A8_UNORM)
+                .offset(24),
+        ];
+
+        // Terrain (WS-G): position+height (3 floats) then the surface normal (3 floats). 24-byte
+        // stride, no colour — the ground colour is the pushed `earth` colour, not per-vertex.
+        let terrain_attributes = [
+            vk::VertexInputAttributeDescription::default()
+                .location(0)
+                .binding(0)
+                .format(vk::Format::R32G32B32_SFLOAT)
+                .offset(0),
+            vk::VertexInputAttributeDescription::default()
+                .location(1)
+                .binding(0)
+                .format(vk::Format::R32G32B32_SFLOAT)
+                .offset(12),
+        ];
 
         let fill = build(
             device,
@@ -182,6 +294,7 @@ impl Pipelines {
             (fill::FLOATS_PER_VERTEX * 4) as u32,
             &fill_attributes,
             Stencil::Ignore,
+            Depth::Off,
         );
         let line = build(
             device,
@@ -193,6 +306,52 @@ impl Pipelines {
             (stroke::FLOATS_PER_VERTEX * 4) as u32,
             &line_attributes,
             Stencil::Ignore,
+            Depth::Off,
+        );
+        // The depth-tested variant of `fill`: same shaders and vertex format, depth test + write
+        // on. WS-A/WS-G draw their extruded/relief geometry through pipelines built like this so
+        // the 3D layers occlude correctly; the flat 2D layers never bind it.
+        let depth = build(
+            device,
+            layout,
+            render_pass,
+            samples,
+            fill_vert,
+            fill_frag,
+            (fill::FLOATS_PER_VERTEX * 4) as u32,
+            &fill_attributes,
+            Stencil::Ignore,
+            Depth::TestWrite,
+        );
+        // The 3D building pipeline: its own shaders and 7-float vertex, depth test + write on so
+        // buildings occlude correctly. Push-only layout — colour is per-vertex, not a uniform.
+        let building = build(
+            device,
+            layout,
+            render_pass,
+            samples,
+            building_vert,
+            building_frag,
+            (crate::tess::roof::FLOATS_PER_VERTEX * 4) as u32,
+            &building_attributes,
+            Stencil::Ignore,
+            Depth::TestWrite,
+        );
+        // The 3D terrain pipeline: its own shaders and 6-float vertex, depth test + write on so the
+        // relief occludes correctly. Push-only layout — the ground colour is the pushed `earth`
+        // colour. At pitch 0 its vertex shader collapses to the flat footprint, so the map is
+        // unchanged.
+        let terrain = build(
+            device,
+            layout,
+            render_pass,
+            samples,
+            terrain_vert,
+            terrain_frag,
+            (crate::tess::terrain::FLOATS_PER_VERTEX * 4) as u32,
+            &terrain_attributes,
+            Stencil::Ignore,
+            Depth::TestWrite,
         );
 
         // The symbol pipeline needs the atlas descriptor set, so it gets its own
@@ -213,10 +372,15 @@ impl Pipelines {
                 device.destroy_shader_module(line_vert, None);
                 device.destroy_shader_module(line_frag, None);
                 device.destroy_shader_module(symbol_vert, None);
+                device.destroy_shader_module(symbol_billboard_vert, None);
                 device.destroy_shader_module(symbol_frag, None);
                 device.destroy_shader_module(sprite_frag, None);
                 device.destroy_shader_module(puck_vert, None);
                 device.destroy_shader_module(puck_frag, None);
+                device.destroy_shader_module(building_vert, None);
+                device.destroy_shader_module(building_frag, None);
+                device.destroy_shader_module(terrain_vert, None);
+                device.destroy_shader_module(terrain_frag, None);
                 device.destroy_pipeline_layout(layout, None);
                 return Err("symbol pipeline needs an atlas descriptor set layout".into());
             }
@@ -226,11 +390,12 @@ impl Pipelines {
             symbol_layout,
             render_pass,
             samples,
-            symbol_vert,
+            symbol_billboard_vert,
             symbol_frag,
             (symbol::FLOATS_PER_VERTEX * 4) as u32,
-            &symbol_attributes,
+            &symbol_billboard_attributes,
             Stencil::Ignore,
+            Depth::Off,
         );
         let sprite = build(
             device,
@@ -239,9 +404,10 @@ impl Pipelines {
             samples,
             symbol_vert,
             sprite_frag,
-            (symbol::FLOATS_PER_VERTEX * 4) as u32,
+            (symbol::ICON_FLOATS_PER_VERTEX * 4) as u32,
             &symbol_attributes,
             Stencil::Ignore,
+            Depth::Off,
         );
 
         // The overlay quad is position-only in -1..1, so it shares the fill vertex
@@ -256,6 +422,7 @@ impl Pipelines {
             (fill::FLOATS_PER_VERTEX * 4) as u32,
             &fill_attributes,
             Stencil::Ignore,
+            Depth::Off,
         );
 
         // The region mask and its scrim. Both are position-only quads/triangles in the same
@@ -271,6 +438,7 @@ impl Pipelines {
             (fill::FLOATS_PER_VERTEX * 4) as u32,
             &fill_attributes,
             Stencil::Write,
+            Depth::Off,
         );
         let scrim = build(
             device,
@@ -282,6 +450,7 @@ impl Pipelines {
             (fill::FLOATS_PER_VERTEX * 4) as u32,
             &fill_attributes,
             Stencil::TestOutside,
+            Depth::Off,
         );
 
         // The modules are only needed while the pipelines are being created.
@@ -290,28 +459,47 @@ impl Pipelines {
         device.destroy_shader_module(line_vert, None);
         device.destroy_shader_module(line_frag, None);
         device.destroy_shader_module(symbol_vert, None);
+        device.destroy_shader_module(symbol_billboard_vert, None);
         device.destroy_shader_module(symbol_frag, None);
         device.destroy_shader_module(sprite_frag, None);
         device.destroy_shader_module(puck_vert, None);
         device.destroy_shader_module(puck_frag, None);
+        device.destroy_shader_module(building_vert, None);
+        device.destroy_shader_module(building_frag, None);
+        device.destroy_shader_module(terrain_vert, None);
+        device.destroy_shader_module(terrain_frag, None);
 
-        match (fill, line, symbol, sprite, puck, mask, scrim) {
-            (Ok(fill), Ok(line), Ok(symbol), Ok(sprite), Ok(puck), Ok(mask), Ok(scrim)) => Ok(
-                Pipelines {
-                    layout,
-                    symbol_layout,
-                    fill,
-                    line,
-                    symbol,
-                    sprite,
-                    puck,
-                    mask,
-                    scrim,
-                },
-            ),
-            (fill, line, symbol, sprite, puck, mask, scrim) => {
+        match (fill, line, depth, building, terrain, symbol, sprite, puck, mask, scrim) {
+            (
+                Ok(fill),
+                Ok(line),
+                Ok(depth),
+                Ok(building),
+                Ok(terrain),
+                Ok(symbol),
+                Ok(sprite),
+                Ok(puck),
+                Ok(mask),
+                Ok(scrim),
+            ) => Ok(Pipelines {
+                layout,
+                symbol_layout,
+                fill,
+                line,
+                depth,
+                building,
+                terrain,
+                symbol,
+                sprite,
+                puck,
+                mask,
+                scrim,
+            }),
+            (fill, line, depth, building, terrain, symbol, sprite, puck, mask, scrim) => {
                 for created in
-                    [fill, line, symbol, sprite, puck, mask, scrim].into_iter().flatten()
+                    [fill, line, depth, building, terrain, symbol, sprite, puck, mask, scrim]
+                        .into_iter()
+                        .flatten()
                 {
                     device.destroy_pipeline(created, None);
                 }
@@ -328,6 +516,9 @@ impl Pipelines {
     pub unsafe fn destroy(&self, device: &ash::Device) {
         device.destroy_pipeline(self.fill, None);
         device.destroy_pipeline(self.line, None);
+        device.destroy_pipeline(self.depth, None);
+        device.destroy_pipeline(self.building, None);
+        device.destroy_pipeline(self.terrain, None);
         device.destroy_pipeline(self.symbol, None);
         device.destroy_pipeline(self.sprite, None);
         device.destroy_pipeline(self.puck, None);
@@ -349,6 +540,18 @@ pub enum Stencil {
     TestOutside,
 }
 
+/// How a pipeline uses the depth attachment WS0 added to the render pass.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum Depth {
+    /// Neither tests nor writes depth: every flat 2D layer. Its output is exactly what it was
+    /// before the depth attachment existed, which is what keeps pitch-0 rendering byte-identical.
+    Off,
+    /// Tests and writes depth with `LESS`: the 3D layers (buildings, terrain) that must occlude
+    /// one another. Only meaningful under a perspective camera, where the clip matrix produces a
+    /// real per-vertex depth.
+    TestWrite,
+}
+
 unsafe fn build(
     device: &ash::Device,
     layout: vk::PipelineLayout,
@@ -359,6 +562,7 @@ unsafe fn build(
     stride: u32,
     attributes: &[vk::VertexInputAttributeDescription],
     stencil: Stencil,
+    depth: Depth,
 ) -> Result<vk::Pipeline, String> {
     let entry = c"main";
     let stages = [
@@ -420,8 +624,9 @@ unsafe fn build(
     let blend = vk::PipelineColorBlendStateCreateInfo::default()
         .attachments(std::slice::from_ref(&blend_attachment));
 
-    // A subpass with a depth-stencil attachment requires this state on every pipeline, even the
-    // ones that ignore it. Depth is off throughout — see `swapchain`'s "# No depth buffer".
+    // A subpass with a depth-stencil attachment requires this state on every pipeline. The flat
+    // 2D layers pass `Depth::Off` (test + write disabled), so the attachment WS0 added is present
+    // but inert for them — their colour output is unchanged. The 3D layers pass `Depth::TestWrite`.
     let stencil_op = match stencil {
         Stencil::Ignore => vk::StencilOpState::default(),
         // `REPLACE` with reference 1 rather than increment: the region's tile pieces overlap at
@@ -443,9 +648,14 @@ unsafe fn build(
             .write_mask(0)
             .reference(1),
     };
+    let (depth_test, depth_write) = match depth {
+        Depth::Off => (false, false),
+        Depth::TestWrite => (true, true),
+    };
     let depth_stencil = vk::PipelineDepthStencilStateCreateInfo::default()
-        .depth_test_enable(false)
-        .depth_write_enable(false)
+        .depth_test_enable(depth_test)
+        .depth_write_enable(depth_write)
+        .depth_compare_op(vk::CompareOp::LESS)
         .stencil_test_enable(stencil != Stencil::Ignore)
         .front(stencil_op)
         .back(stencil_op);
@@ -495,7 +705,7 @@ mod tests {
     #[test]
     fn the_push_block_is_inside_the_guaranteed_limit() {
         // 128 bytes is the minimum `maxPushConstantsSize` the spec requires, so staying
-        // under it means no device can reject this.
+        // at or under it means no device can reject this.
         assert_eq!(std::mem::size_of::<Push>() as u32, PUSH_CONSTANT_BYTES);
         assert!(PUSH_CONSTANT_BYTES <= 128, "{PUSH_CONSTANT_BYTES} exceeds the guaranteed 128");
     }
@@ -504,7 +714,7 @@ mod tests {
     fn the_push_block_has_no_padding() {
         // The shader reads it at fixed offsets, so a gap Rust inserted would silently
         // shift the colour and the widths.
-        assert_eq!(std::mem::size_of::<Push>(), 64 + 16 + 16 + 16);
+        assert_eq!(std::mem::size_of::<Push>(), 64 + 16 + 16 + 16 + 16);
         assert_eq!(std::mem::align_of::<Push>(), 4);
     }
 }

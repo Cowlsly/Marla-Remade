@@ -22,8 +22,17 @@ use crate::tile::glyph::{fonts_staged, Weight};
 use crate::tile::sprite::Sprite;
 use tilecodec::mamaps::body::{Body, Feature};
 
-/// Floats per vertex: `x, y, u, v` in tile-local 0..1, scaled for this frame.
+/// Floats per vertex for a **text** label quad: `x, y, u, v, ax, ay` — see
+/// [`text::FLOATS_PER_VERTEX`]. The text draws through the billboard symbol pipeline, which
+/// reads the per-vertex ground anchor to stay upright under tilt.
 pub const FLOATS_PER_VERTEX: usize = text::FLOATS_PER_VERTEX;
+
+/// Floats per vertex for a POI **icon** quad: `x, y, u, v`.
+///
+/// Icons keep the original 4-float layout and draw through the on-ground sprite pipeline (shared
+/// with the app markers, which also push 4-float quads), so they are not billboarded under tilt —
+/// only the text is. Keeping the icon format unchanged is what lets the marker path stay untouched.
+pub const ICON_FLOATS_PER_VERTEX: usize = 4;
 
 /// Shape one place label into a [`ShapedLabel`] candidate. `weight` follows the
 /// layer's `medium` flag (country and big-city labels); the authored
@@ -83,7 +92,89 @@ pub fn shape_label(
         feature_id: tile
             .feature_id(layer.source_layer_id, feature_index)
             .unwrap_or(tilecodec::mamaps::body::ID_NONE),
+        // A point label anchors one block; it does not follow a line.
+        centreline: None,
     })
+}
+
+/// Shape one road/river line label into a curved [`ShapedLabel`] candidate.
+///
+/// The line half of [`shape_label`]: the name shapes into a single line (no wrapping — a curved
+/// label is one run laid along the road), and the whole feature `centreline` in tile-local 0..1
+/// rides on the label so the renderer can walk it per frame at the frame's text size (see
+/// [`crate::tess::text::emit_curved`]). The [`anchor`](ShapedLabel::anchor) is the polyline's
+/// midpoint, used only by the point-label collision/pick fallbacks until the segmented placer is
+/// wired; the curved footprint proper comes from the per-glyph tangents.
+///
+/// Returns `None` when fonts are not staged, the name is unshapable, or the centreline has fewer
+/// than two points — the renderer skips those silently, exactly as it does an empty point shape.
+pub fn shape_line_label(
+    layer: &Layer,
+    tile: &Body,
+    feature: &Feature,
+    name: &str,
+    layer_index: usize,
+    feature_index: usize,
+    centreline: Vec<(f32, f32)>,
+) -> Option<ShapedLabel> {
+    if !fonts_staged() {
+        return None;
+    }
+    if centreline.len() < 2 {
+        return None;
+    }
+    let atlas = crate::tile::glyph::atlas();
+    let weight = if layer.medium { Weight::Medium } else { Weight::Regular };
+    // A curved label is a single run — never wrapped — so `text_max_width` is ignored here.
+    let lines = text::shape_wrapped(atlas, weight, name, layer.uppercase, 0.0);
+    if lines.is_empty() {
+        return None;
+    }
+    let total_advance = lines.iter().fold(0.0f32, |wide, line| wide.max(line.advance));
+    let anchor = polyline_midpoint(&centreline);
+    Some(ShapedLabel {
+        layer_index,
+        anchor,
+        name: name.to_string(),
+        lines,
+        total_advance,
+        weight,
+        rank: rank_for_layer(&layer.id),
+        // A line label carries no population rank and no icon.
+        pop: 0,
+        sprite: None,
+        kind: feature.kind,
+        feature_id: tile
+            .feature_id(layer.source_layer_id, feature_index)
+            .unwrap_or(tilecodec::mamaps::body::ID_NONE),
+        centreline: Some(centreline),
+    })
+}
+
+/// The point half-way along a tile-local polyline by arc length — the curved label's nominal
+/// anchor. Falls back to the first point on a degenerate (zero-length) line.
+fn polyline_midpoint(pts: &[(f32, f32)]) -> (f32, f32) {
+    let mut total = 0.0f32;
+    for w in pts.windows(2) {
+        total += ((w[1].0 - w[0].0).powi(2) + (w[1].1 - w[0].1).powi(2)).sqrt();
+    }
+    if total <= 0.0 {
+        return *pts.first().unwrap_or(&(0.0, 0.0));
+    }
+    let half = total * 0.5;
+    let mut acc = 0.0f32;
+    for w in pts.windows(2) {
+        let seg = ((w[1].0 - w[0].0).powi(2) + (w[1].1 - w[0].1).powi(2)).sqrt();
+        if seg <= 0.0 {
+            continue;
+        }
+        if acc + seg >= half {
+            let t = (half - acc) / seg;
+            return (w[0].0 + (w[1].0 - w[0].0) * t, w[0].1 + (w[1].1 - w[0].1) * t);
+        }
+        acc += seg;
+    }
+    *pts.last().unwrap_or(&(0.0, 0.0))
 }
 
 /// Placement rank from the symbol layer id: country first, POI last.
@@ -102,6 +193,13 @@ fn rank_for_layer(id: &str) -> u8 {
         // z17, where places are sparse, would look almost right and be wrong.
         "poi-outdoor" | "poi-transport" | "poi-civic" | "poi-shop" | "poi-food"
         | "poi-culture" => 4,
+        // Line labels below the point labels: a road or river name yields to a place or POI at a
+        // collision, matching MapLibre's default `symbol-z-order`. Major roads above minor above
+        // rivers, so a highway name wins over a side street and both over the waterway they cross.
+        // The ids are the render-side symbol layers the build carries road/water names for (WS-E).
+        "roads-label-major" => 5,
+        "roads-label-minor" => 6,
+        "waterway-label" => 7,
         _ => u8::MAX,
     }
 }
@@ -138,6 +236,13 @@ fn sprite_for(kind: u16) -> Option<Sprite> {
 /// `rotation` is the camera's `(cos, sin)` (see [`crate::camera::Camera::rotation`]): the
 /// emitted quads are counter-rotated about the anchor so the label stays **upright**
 /// under a heading-up camera. `(1.0, 0.0)` is north-up and costs nothing.
+///
+/// A **curved** label — one carrying a [`centreline`](ShapedLabel::centreline) — takes a
+/// different path: its single line is laid along the polyline by
+/// [`text::emit_curved`](crate::tess::text::emit_curved), one glyph per vertex rotated to the
+/// local tangent, and it is **not** counter-rotated. A curved label is map-aligned, so its
+/// orientation is the road's, not the camera's; `anchor`, `offset_em` and `rotation` are unused
+/// on that path.
 #[allow(clippy::too_many_arguments)]
 pub fn emit_label(
     label: &ShapedLabel,
@@ -150,6 +255,22 @@ pub fn emit_label(
     indices: &mut Vec<u32>,
 ) {
     let atlas = crate::tile::glyph::atlas();
+    // A curved (line) label lays its single shaped run along the centreline; the tangent gives
+    // each glyph its rotation, so no `upright` counter-rotation and no anchor/offset apply.
+    if let Some(centreline) = &label.centreline {
+        let Some(line) = label.lines.first() else { return };
+        text::emit_curved(
+            atlas,
+            label.weight,
+            line,
+            centreline,
+            text_px,
+            tile_span_px,
+            vertices,
+            indices,
+        );
+        return;
+    }
     let start = vertices.len();
     text::emit(
         atlas,
@@ -204,14 +325,58 @@ pub fn emit_icon(
     // runs every frame — so switching palette stays free of re-tessellation.
     let dv = if dark { crate::tile::sprite::atlas().dark_v_offset() } else { 0.0 };
     let (v0, v1) = (uv.v0 + dv, uv.v1 + dv);
-    let base = (vertices.len() / FLOATS_PER_VERTEX) as u32;
+    let base = (vertices.len() / ICON_FLOATS_PER_VERTEX) as u32;
     let start = vertices.len();
     vertices.extend_from_slice(&[x0, y0, uv.u0, v0]);
     vertices.extend_from_slice(&[x1, y0, uv.u1, v0]);
     vertices.extend_from_slice(&[x1, y1, uv.u1, v1]);
     vertices.extend_from_slice(&[x0, y1, uv.u0, v1]);
     indices.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
-    text::upright(&mut vertices[start..], label.anchor, rotation);
+    text::upright_stride(&mut vertices[start..], label.anchor, rotation, ICON_FLOATS_PER_VERTEX);
+}
+
+/// The clip-space position the billboard vertex shader (`symbol_billboard.vert`) computes for one
+/// text glyph vertex, mirrored on the CPU so the billboard math is testable without a GPU.
+///
+/// `tile_to_clip` is the per-tile matrix — perspective when the camera is pitched. `ortho2x2` is
+/// the **pitch-0** tile matrix's linear part `[m0, m1, m4, m5]` (column-major), which the renderer
+/// passes to the shader in the push `morph` slot. `billboard` is the per-draw flag (`Push::line.w`):
+/// off when the camera is level, where the vertex is drawn straight through `tile_to_clip` — so the
+/// flat map is byte-identical to the pre-billboard path.
+///
+/// When on, the label's ground `anchor` is projected through the perspective matrix and the glyph's
+/// tile-local offset from it is added as a screen-constant clip offset (scaled by the anchor's `w`),
+/// so the glyph stays pinned to the ground point but faces the screen upright at any pitch. A curved
+/// label passes `position == anchor` (offset zero), which collapses this to the plain on-ground
+/// projection — curved labels stay map-aligned.
+pub fn billboard_clip(
+    tile_to_clip: &[f32; 16],
+    ortho2x2: [f32; 4],
+    position: (f32, f32),
+    anchor: (f32, f32),
+    billboard: bool,
+) -> [f32; 4] {
+    let m = tile_to_clip;
+    // `tile_to_clip * vec4(p, 0, 1)`: the same projection the flat symbol path uses (height 0).
+    let project = |p: (f32, f32)| {
+        [
+            m[0] * p.0 + m[4] * p.1 + m[12],
+            m[1] * p.0 + m[5] * p.1 + m[13],
+            m[2] * p.0 + m[6] * p.1 + m[14],
+            m[3] * p.0 + m[7] * p.1 + m[15],
+        ]
+    };
+    if !billboard {
+        return project(position);
+    }
+    let a = project(anchor);
+    let off = (position.0 - anchor.0, position.1 - anchor.1);
+    // Column-major 2x2 (pitch-0 linear part) times the tile-local offset → screen-constant clip.
+    let off_clip = (
+        ortho2x2[0] * off.0 + ortho2x2[2] * off.1,
+        ortho2x2[1] * off.0 + ortho2x2[3] * off.1,
+    );
+    [a[0] + off_clip.0 * a[3], a[1] + off_clip.1 * a[3], a[2], a[3]]
 }
 
 /// The feature's point in tile-local 0..1. Places are single-point features; the
@@ -253,6 +418,17 @@ mod tests {
         assert!(rank_for_layer("places-region") < rank_for_layer("places-locality"));
         assert!(rank_for_layer("places-locality") < rank_for_layer("places-subplace"));
         assert_eq!(rank_for_layer("something-else"), u8::MAX, "unknown ids sink");
+    }
+
+    /// Line labels rank below every point label but above the unknown sink, and major roads
+    /// outrank minor roads outrank rivers so the more important line wins a crossing collision.
+    #[test]
+    fn line_labels_rank_below_points_roads_above_rivers() {
+        assert!(rank_for_layer("roads-label-major") > rank_for_layer("places-subplace"));
+        assert!(rank_for_layer("roads-label-major") > rank_for_layer("poi-food"));
+        assert!(rank_for_layer("roads-label-major") < rank_for_layer("roads-label-minor"));
+        assert!(rank_for_layer("roads-label-minor") < rank_for_layer("waterway-label"));
+        assert!(rank_for_layer("waterway-label") < u8::MAX, "line labels must not sink");
     }
 
     /// Every POI layer sits at one rank, below every place label.
@@ -357,6 +533,7 @@ mod tests {
             transit_ordinal: 0,
             transit_lanes: 0,
             transit_taper: 0,
+            lane_count: 0,
         };
         let label = shape_label(&layer, &body, &feature, "Test", 4096, 7, 0);
         assert!(label.is_none(), "no point, no anchor, no label");
@@ -384,6 +561,7 @@ mod tests {
             transit_ordinal: 0,
             transit_lanes: 0,
             transit_taper: 0,
+            lane_count: 0,
         });
         poi.parts.push(tilecodec::mamaps::body::Part {
             coord_start: 0,
@@ -396,6 +574,9 @@ mod tests {
             layers: vec![poi],
             names: vec!["Blue Bottle".to_string()],
             ids: vec![(tilecodec::mamaps::dict::LAYER_POI, vec![987_654_321])],
+            turn_lanes: Vec::new(),
+            buildings: Vec::new(),
+            heightmap: None, carriageways: Vec::new(), convention: None,
         };
         // A layer whose whitelist lists `restaurant` first, exactly as `poi-food` does.
         let layer = food_layer();
@@ -452,5 +633,98 @@ mod tests {
             max_zoom: 22,
             authored: "pois".to_string(),
         }
+    }
+
+    // --- point-label billboarding under tilt --------------------------------
+
+    use crate::camera::Camera;
+
+    fn camera(pitch_deg: f64) -> Camera {
+        Camera {
+            center_lon: -122.4194,
+            center_lat: 37.7749,
+            zoom: 14.0,
+            width_dp: 800.0,
+            height_dp: 1000.0,
+            density: 1.0,
+            bearing_deg: 0.0,
+            pitch_deg,
+            time_seconds: 0.0,
+        }
+    }
+
+    /// The pitch-0 tile matrix's linear 2x2 `[m0, m1, m4, m5]`, as the renderer passes it.
+    fn ortho2x2(cam: &Camera, z: u8, x: u32, y: u32) -> [f32; 4] {
+        let flat = Camera { pitch_deg: 0.0, ..*cam }.tile_to_clip(z, x, y);
+        [flat[0], flat[1], flat[4], flat[5]]
+    }
+
+    #[test]
+    fn billboard_off_is_the_plain_projection_byte_for_byte() {
+        // At pitch 0 the renderer passes `billboard = false`, and the glyph must be drawn straight
+        // through `tile_to_clip` — bit-identical to the pre-billboard path, whatever the anchor is.
+        let cam = camera(0.0);
+        let (z, x, y) = (14u8, 2617, 6335);
+        let m = cam.tile_to_clip(z, x, y);
+        let o = ortho2x2(&cam, z, x, y);
+        let pos = (0.62f32, 0.48f32);
+        let got = billboard_clip(&m, o, pos, (0.5, 0.5), false);
+        let want =
+            [m[0] * pos.0 + m[4] * pos.1 + m[12], m[1] * pos.0 + m[5] * pos.1 + m[13], m[14], m[15]];
+        assert_eq!(got.map(f32::to_bits), want.map(f32::to_bits), "billboard-off moved a vertex");
+    }
+
+    #[test]
+    fn a_pitched_anchor_projects_to_the_same_ground_clip_as_unbillboarded() {
+        // The anchor vertex (offset zero) must land exactly where the plain projection would put
+        // the ground point, so a billboarded label stays glued to its feature under tilt.
+        let cam = camera(50.0);
+        let (z, x, y) = (14u8, 2617, 6335);
+        let m = cam.tile_to_clip(z, x, y);
+        let o = ortho2x2(&cam, z, x, y);
+        let anchor = (0.4f32, 0.55f32);
+        let billed = billboard_clip(&m, o, anchor, anchor, true);
+        let plain = billboard_clip(&m, o, anchor, anchor, false);
+        for (a, b) in billed.iter().zip(plain.iter()) {
+            assert!((a - b).abs() < 1e-6, "anchor drifted off the ground: {a} vs {b}");
+        }
+    }
+
+    #[test]
+    fn a_curved_glyph_vertex_is_never_billboarded() {
+        // A curved label writes each vertex as its own anchor (offset zero), so even with the
+        // billboard flag on it projects straight onto the ground — map-aligned, as it must be.
+        let cam = camera(45.0);
+        let (z, x, y) = (14u8, 2617, 6335);
+        let m = cam.tile_to_clip(z, x, y);
+        let o = ortho2x2(&cam, z, x, y);
+        let v = (0.63f32, 0.47f32);
+        let curved = billboard_clip(&m, o, v, v, true);
+        let ground = billboard_clip(&m, o, v, v, false);
+        assert_eq!(curved.map(f32::to_bits), ground.map(f32::to_bits));
+    }
+
+    #[test]
+    fn a_billboarded_glyph_offset_is_screen_constant_regardless_of_depth() {
+        // The whole point of scaling the offset by the anchor's `w`: the same tile-local glyph
+        // offset must produce the same *screen* (NDC) offset whether the anchor is near the camera
+        // or far up-map toward the horizon — otherwise text would shrink into the distance.
+        let cam = camera(55.0);
+        let (z, x, y) = (14u8, 2617, 6335);
+        let m = cam.tile_to_clip(z, x, y);
+        let o = ortho2x2(&cam, z, x, y);
+        let off = (0.02f32, -0.015f32);
+        let ndc_offset = |anchor: (f32, f32)| {
+            let a = billboard_clip(&m, o, anchor, anchor, true);
+            let g = billboard_clip(&m, o, (anchor.0 + off.0, anchor.1 + off.1), anchor, true);
+            ((g[0] / g[3]) - (a[0] / a[3]), (g[1] / g[3]) - (a[1] / a[3]))
+        };
+        // Two anchors at very different ground depths under the tilt (near vs far up-map). The NDC
+        // offset is mathematically `ortho2x2 * off` — independent of the anchor's depth — so the
+        // only difference is floating-point noise from the `* w / w` round trip.
+        let near = ndc_offset((0.5, 0.72));
+        let far = ndc_offset((0.5, 0.30));
+        assert!((near.0 - far.0).abs() < 1e-5 && (near.1 - far.1).abs() < 1e-5,
+            "screen offset changed with depth: {near:?} vs {far:?}");
     }
 }
