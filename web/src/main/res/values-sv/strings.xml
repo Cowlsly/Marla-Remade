@@ -1,3 +1,7 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
+    <string name="bookmarks">Bokmärken</string>
+    <string name="new_folder">Ny mapp</string>
+    <string name="create">Skapa</string>
+    <string name="history">Historik</string>
 </resources>
