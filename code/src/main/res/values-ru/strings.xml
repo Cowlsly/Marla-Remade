@@ -13,4 +13,6 @@
     <string name="go">Перейти</string>
     <string name="close">Закрыть</string>
     <string name="search">Поиск</string>
+    <string name="reload">Перезагрузить</string>
+    <string name="new_folder">Новая папка</string>
 </resources>
