@@ -46,6 +46,45 @@ pub const MORPH_NONE: [f32; 4] = [1.0, 0.0, 0.0, 0.0];
 /// `misc.w` is the per-frame clock (seconds); `morph.x` is the per-tile opacity/morph factor
 /// (1.0 = fully present) reserved for WS-D. Both default to a value that leaves the flat 2D
 /// output byte-identical (`clock` is ignored by the current shaders, `morph.x` is 1.0).
+///
+/// # The ribbon draw reads three of these slots differently
+///
+/// [`ribbon`](Pipelines::ribbon) is a road carriageway rather than a stroke, so `gap_half_px`,
+/// `dash_on`, `dash_off` and `lateral_px` are all meaningless to it: it has no casing bands, its
+/// dash pattern is derived from the lane width, and a carriageway is never fanned sideways. Those
+/// dead slots carry the markings contract instead, which is why the block does not have to grow
+/// past the guaranteed 128 bytes to gain a whole new layer.
+///
+/// | slot     | line pipeline | ribbon pipeline                                                |
+/// |----------|---------------|-----------------------------------------------------------------|
+/// | `line.x` | half width px | carriageway half-width px — unchanged meaning                    |
+/// | `line.y` | gap half px   | lane count, both directions together                             |
+/// | `line.z` | dash on       | `t` of the forward/backward split, the centre line's position     |
+/// | `line.w` | dash off      | 1.0 on a one-way, which suppresses the centre line entirely      |
+/// | `misc.z` | lateral px    | 1.0 for a yellow centre line, 0.0 for a white one                |
+///
+/// `line.z` is an across-road coordinate in `[-1, +1]`, not a lane index, so an odd split needs no
+/// special case: the shader takes the lane boundary nearest to it. `t` runs -1 at the left kerb to
+/// +1 at the right, so with `n` of the `line.y` lanes lying on the -1 side the split is
+///
+/// ```text
+/// line.z = 2.0 * n / lane_count - 1.0
+/// ```
+///
+/// It is ignored when `line.w` is set, so a one-way may push anything there.
+///
+/// `misc.z` is the driving convention, resolved per tile at archive build time — the Americas paint
+/// the line between opposing traffic yellow and most of the rest of the world paints it white. It
+/// is a flag rather than a colour because the marking palette belongs to the shader alongside the
+/// white it has to match, not to a per-draw push.
+///
+/// The remaining slots keep their usual meaning and must still be filled: `color` is the asphalt
+/// (the markings are the shader's own), `misc.x` the tile's pixel span, `misc.y` the edge-AA flag,
+/// and `morph` [`MORPH_NONE`]. `misc.w` is unread by the ribbon — its markings are static, so there
+/// is deliberately no dash phase the way the traffic draw has one.
+///
+/// Both flags are compared against 0.5, so any nonzero-ish float reads as set; push exactly 0.0 or
+/// 1.0 rather than relying on that.
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct Push {
@@ -54,10 +93,12 @@ pub struct Push {
     pub tile_to_clip: [f32; 16],
     /// Linear RGBA, 0..1.
     pub color: [f32; 4],
-    /// `half_width_px, gap_half_px, dash_on, dash_off`.
+    /// `half_width_px, gap_half_px, dash_on, dash_off`. The ribbon pipeline reads
+    /// `half_width_px, lane_count, centre_t, oneway` instead; see the type doc.
     pub line: [f32; 4],
     /// `tile_px, edge_aa, lateral_px, clock_seconds`. `misc.w` is the per-frame clock forwarded
-    /// from the host's `frameTimeNanos` (see `camera::Camera::time_seconds`).
+    /// from the host's `frameTimeNanos` (see `camera::Camera::time_seconds`). The ribbon pipeline
+    /// reads `misc.z` as the centre-line colour flag rather than a lateral shift.
     pub misc: [f32; 4],
     /// Per-draw animation slot. `morph.x` is the per-tile opacity/morph factor (1.0 = fully
     /// present) reserved for WS-D's LOD cross-fade; `y`/`z`/`w` are reserved. Appended past
@@ -82,6 +123,8 @@ const FILL_VERT: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/fill.vert.spv
 const FILL_FRAG: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/fill.frag.spv"));
 const LINE_VERT: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/line.vert.spv"));
 const LINE_FRAG: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/line.frag.spv"));
+const RIBBON_VERT: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/road_surface.vert.spv"));
+const RIBBON_FRAG: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/road_surface.frag.spv"));
 const SYMBOL_VERT: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/symbol.vert.spv"));
 const SYMBOL_BILLBOARD_VERT: &[u8] =
     include_bytes!(concat!(env!("OUT_DIR"), "/symbol_billboard.vert.spv"));
@@ -100,6 +143,18 @@ pub struct Pipelines {
     pub symbol_layout: vk::PipelineLayout,
     pub fill: vk::Pipeline,
     pub line: vk::Pipeline,
+    /// Road carriageways: a filled surface with the lane markings painted onto it, from
+    /// `road_surface.vert`/`.frag` over the 6-float `tess::ribbon` vertex.
+    ///
+    /// Deliberately a second pipeline rather than a wider [`line`](Self::line). `TrafficMesh` and
+    /// the route overlay both ride the 7-float stroke format and the line pipeline, so widening it
+    /// to carry an across-road coordinate would charge every one of them for a layer they do not
+    /// draw — the tradeoff `tile/geometry.rs` already states about the lane fans this replaces.
+    ///
+    /// Same fixed-function state as [`line`](Self::line) — [`Depth::Off`], no culling, straight
+    /// src-alpha — because a carriageway is flat basemap drawn in layer order like every other
+    /// flat 2D layer. Only the vertex format and the shaders differ.
+    pub ribbon: vk::Pipeline,
     /// Depth-tested (test + write, `LESS`) variant of [`fill`](Self::fill), for the 3D layers
     /// WS-A (buildings) and WS-G (terrain) add. It reuses the position-only fill shaders so the
     /// render-pass depth path is exercised today; the 3D workstreams build their own pipelines
@@ -176,6 +231,8 @@ impl Pipelines {
         let fill_frag = shader_module(device, FILL_FRAG)?;
         let line_vert = shader_module(device, LINE_VERT)?;
         let line_frag = shader_module(device, LINE_FRAG)?;
+        let ribbon_vert = shader_module(device, RIBBON_VERT)?;
+        let ribbon_frag = shader_module(device, RIBBON_FRAG)?;
         let symbol_vert = shader_module(device, SYMBOL_VERT)?;
         let symbol_billboard_vert = shader_module(device, SYMBOL_BILLBOARD_VERT)?;
         let symbol_frag = shader_module(device, SYMBOL_FRAG)?;
@@ -213,6 +270,32 @@ impl Pipelines {
                 .binding(0)
                 .format(vk::Format::R32_SFLOAT)
                 .offset(24),
+        ];
+        // Ribbon (road carriageways): position (2 floats), join normal (2 floats), the normalised
+        // across-road coordinate `t`, and tile-local distance-along. 24-byte stride. `t` is both the
+        // vertex shader's extrusion multiplier and the fragment shader's marking coordinate, which
+        // is what keeps this to six floats rather than seven.
+        let ribbon_attributes = [
+            vk::VertexInputAttributeDescription::default()
+                .location(0)
+                .binding(0)
+                .format(vk::Format::R32G32_SFLOAT)
+                .offset(0),
+            vk::VertexInputAttributeDescription::default()
+                .location(1)
+                .binding(0)
+                .format(vk::Format::R32G32_SFLOAT)
+                .offset(8),
+            vk::VertexInputAttributeDescription::default()
+                .location(2)
+                .binding(0)
+                .format(vk::Format::R32_SFLOAT)
+                .offset(16),
+            vk::VertexInputAttributeDescription::default()
+                .location(3)
+                .binding(0)
+                .format(vk::Format::R32_SFLOAT)
+                .offset(20),
         ];
         // Sprite (POI icons + app markers): position (tile-local / clip) + uv (atlas), 4 floats.
         // The on-ground path — not billboarded — so no per-vertex anchor. Shared with the marker
@@ -308,6 +391,22 @@ impl Pipelines {
             Stencil::Ignore,
             Depth::Off,
         );
+        // Road carriageways. Same fixed-function state as `line` — a carriageway is flat basemap,
+        // so depth stays off and layer order does the compositing exactly as it does for a stroke.
+        // Only the vertex format and the shaders differ, which is the whole point of splitting it
+        // off rather than widening the format every stroked layer shares.
+        let ribbon = build(
+            device,
+            layout,
+            render_pass,
+            samples,
+            ribbon_vert,
+            ribbon_frag,
+            (crate::tess::ribbon::FLOATS_PER_VERTEX * 4) as u32,
+            &ribbon_attributes,
+            Stencil::Ignore,
+            Depth::Off,
+        );
         // The depth-tested variant of `fill`: same shaders and vertex format, depth test + write
         // on. WS-A/WS-G draw their extruded/relief geometry through pipelines built like this so
         // the 3D layers occlude correctly; the flat 2D layers never bind it.
@@ -371,6 +470,8 @@ impl Pipelines {
                 device.destroy_shader_module(fill_frag, None);
                 device.destroy_shader_module(line_vert, None);
                 device.destroy_shader_module(line_frag, None);
+                device.destroy_shader_module(ribbon_vert, None);
+                device.destroy_shader_module(ribbon_frag, None);
                 device.destroy_shader_module(symbol_vert, None);
                 device.destroy_shader_module(symbol_billboard_vert, None);
                 device.destroy_shader_module(symbol_frag, None);
@@ -458,6 +559,8 @@ impl Pipelines {
         device.destroy_shader_module(fill_frag, None);
         device.destroy_shader_module(line_vert, None);
         device.destroy_shader_module(line_frag, None);
+        device.destroy_shader_module(ribbon_vert, None);
+        device.destroy_shader_module(ribbon_frag, None);
         device.destroy_shader_module(symbol_vert, None);
         device.destroy_shader_module(symbol_billboard_vert, None);
         device.destroy_shader_module(symbol_frag, None);
@@ -469,10 +572,11 @@ impl Pipelines {
         device.destroy_shader_module(terrain_vert, None);
         device.destroy_shader_module(terrain_frag, None);
 
-        match (fill, line, depth, building, terrain, symbol, sprite, puck, mask, scrim) {
+        match (fill, line, ribbon, depth, building, terrain, symbol, sprite, puck, mask, scrim) {
             (
                 Ok(fill),
                 Ok(line),
+                Ok(ribbon),
                 Ok(depth),
                 Ok(building),
                 Ok(terrain),
@@ -486,6 +590,7 @@ impl Pipelines {
                 symbol_layout,
                 fill,
                 line,
+                ribbon,
                 depth,
                 building,
                 terrain,
@@ -495,11 +600,12 @@ impl Pipelines {
                 mask,
                 scrim,
             }),
-            (fill, line, depth, building, terrain, symbol, sprite, puck, mask, scrim) => {
-                for created in
-                    [fill, line, depth, building, terrain, symbol, sprite, puck, mask, scrim]
-                        .into_iter()
-                        .flatten()
+            (fill, line, ribbon, depth, building, terrain, symbol, sprite, puck, mask, scrim) => {
+                for created in [
+                    fill, line, ribbon, depth, building, terrain, symbol, sprite, puck, mask, scrim,
+                ]
+                .into_iter()
+                .flatten()
                 {
                     device.destroy_pipeline(created, None);
                 }
@@ -516,6 +622,7 @@ impl Pipelines {
     pub unsafe fn destroy(&self, device: &ash::Device) {
         device.destroy_pipeline(self.fill, None);
         device.destroy_pipeline(self.line, None);
+        device.destroy_pipeline(self.ribbon, None);
         device.destroy_pipeline(self.depth, None);
         device.destroy_pipeline(self.building, None);
         device.destroy_pipeline(self.terrain, None);

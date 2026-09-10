@@ -331,6 +331,11 @@ pub struct Layer {
     /// z6 where the ramp asks for half.
     pub opacity: Ramp,
     /// Stroke width in Dp. Zero for a fill.
+    ///
+    /// On a [`carriageway`](Self::carriageway) layer it is one **lane's** width instead, and the
+    /// road's own width is that times the lanes the feature carries. A single number cannot serve
+    /// both a two-lane street and an eight-lane motorway, and the lane count is the feature's,
+    /// not the style's.
     pub width: Ramp,
     /// Gap between the two halves of a casing, in Dp.
     ///
@@ -352,6 +357,17 @@ pub struct Layer {
     /// ([`tilecodec::mamaps::body::Feature::transit_ordinal`]) and
     /// [`Layer::lane_offset_px`] turns the three into a lateral offset per frame.
     pub lanes: Ramp,
+    /// Draw this line layer's features as carriageway surfaces rather than strokes.
+    ///
+    /// A stroke is a band of one colour, so nothing can be painted *within* it — which is why the
+    /// divider fan this replaces had to re-stroke a road once per lane boundary. A carriageway
+    /// ribbon ([`crate::tess::ribbon`]) carries an across-road coordinate, so every marking is
+    /// arithmetic in `road_surface.frag` over one mesh.
+    ///
+    /// A flag on a line layer rather than a fourth [`LayerKind`], because the kind is what decides
+    /// a [`crate::tile::geometry::LayerMesh`]'s stride and pipeline and a carriageway is not one:
+    /// it has its own mesh list and its own render pass.
+    pub carriageway: bool,
     /// Dash and gap lengths in line widths, as `line-dasharray` defines them.
     pub dash: (f32, f32),
     /// Halo color (ARGB), light and dark. The authored `text-halo-color` per layer;
@@ -547,12 +563,9 @@ impl Layer {
     /// down each centreline?
     ///
     /// True when the style gives the layer a [`spread`](Self::spread) — the sideways step between
-    /// adjacent lanes. Two layers set it: `transit-rail`, whose features fan by their colour
-    /// ordinal, and `roads-lanes`, whose road features fan into one divider line per interior lane
-    /// boundary from the feature's `lane_count`. The two never collide: a transit feature carries a
-    /// `transit_color` and takes the colour-split path before this is consulted, while a road
-    /// carries none. `lanes` defaults to 1 and so cannot be the discriminator; `spread` defaults to
-    /// 0 and is only ever set on purpose.
+    /// adjacent lanes. Only `transit-rail` sets it, fanning its features by their colour ordinal.
+    /// `lanes` defaults to 1 and so cannot be the discriminator; `spread` defaults to 0 and is only
+    /// ever set on purpose.
     pub fn lane_fan(&self) -> bool {
         self.spread.peak() > 0.0
     }
@@ -678,16 +691,18 @@ pub fn layers() -> &'static [Layer] {
     &paint::style().layers
 }
 
-/// The road lane layer, whose `spread`/`lanes` ramps fan per-lane geometry across a road and
-/// whose zoom window gates it.
+/// The road carriageway layer, whose zoom window gates the per-lane road detail and whose width
+/// ramp says how wide one lane of it is.
 ///
-/// Matched on the roads source as well as the fan. [`Layer::lane_fan`] only asks "does this
-/// layer have a spread", and `transit-rail` has one for its corridor colours and is declared
-/// first, so matching on the fan alone silently answers with the rail layer — whose `minzoom`
-/// is 8 against the road lanes' 16. That is what drew turn arrows from z8, offset by the rail
-/// corridor's ramp instead of the road's.
-pub fn road_lane_layer(layers: &[Layer]) -> Option<&Layer> {
-    layers.iter().find(|l| l.lane_fan() && l.source_layer_id == dict::LAYER_ROADS)
+/// Matched on [`Layer::carriageway`], which is the flag that makes a layer draw road surfaces and
+/// which nothing but a road layer carries. Its predecessor matched [`Layer::lane_fan`] — "does this
+/// layer have a spread" — and `transit-rail` has one for its corridor colours and is declared
+/// first, so matching that way silently answered with the rail layer, whose `minzoom` is 8 against
+/// the road detail's 16. That is what drew turn arrows from z8, offset by the rail corridor's ramp
+/// instead of the road's, and is why the predicate here names the thing it wants rather than a
+/// property several layers happen to share.
+pub fn road_carriageway_layer(layers: &[Layer]) -> Option<&Layer> {
+    layers.iter().find(|l| l.carriageway)
 }
 
 #[cfg(test)]
@@ -822,19 +837,20 @@ mod tests {
     /// Turn arrows are gated by the *road* lane layer, not by whichever layer happens to be the
     /// first with a spread.
     ///
-    /// `transit-rail` carries a spread for its corridor colours and is declared before
-    /// `roads-lanes`, so a `find(|l| l.lane_fan())` answers with the rail layer and its
-    /// `minzoom: 8`. That shipped: turn arrows drew from z8, four zoom levels of dense per-frame
-    /// CPU triangle building for geometry that belongs at z16. Pinned against the real style
-    /// because the bug was entirely in the interaction between the predicate and the declaration
-    /// order — a hand-built two-layer fixture would have passed.
+    /// `transit-rail` carries a spread for its corridor colours and is declared before the road
+    /// layer, so a `find(|l| l.lane_fan())` answers with the rail layer and its `minzoom: 8`. That
+    /// shipped: turn arrows drew from z8, four zoom levels of dense per-frame CPU triangle building
+    /// for geometry that belongs at z16. Pinned against the real style because the bug was entirely
+    /// in the interaction between the predicate and the declaration order — a hand-built two-layer
+    /// fixture would have passed.
     #[test]
     fn turn_arrows_are_gated_by_the_road_lane_layer() {
-        let gate = road_lane_layer(layers()).expect("the road lane layer");
-        assert_eq!(gate.id, "roads-lanes", "not `transit-rail`, which also has a spread");
+        let gate = road_carriageway_layer(layers()).expect("the road carriageway layer");
+        assert_eq!(gate.id, "roads-carriageway", "not `transit-rail`, which has a spread");
 
         let rail = find("transit-rail");
         assert!(rail.lane_fan(), "the rail corridor fan is what made the naive predicate wrong");
+        assert!(!rail.carriageway, "and a corridor fan is not a carriageway");
         assert!(rail.min_zoom < gate.min_zoom, "and it is the earlier of the two");
 
         assert!(!gate.draws_at(12), "no turn arrows at z12");

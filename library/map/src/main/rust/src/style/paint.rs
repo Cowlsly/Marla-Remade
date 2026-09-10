@@ -262,6 +262,7 @@ fn layer(json: &Json) -> Result<Layer, String> {
         "gap_width",
         "spread",
         "lanes",
+        "carriageway",
         "dash",
         "text_size",
         "text_size_large",
@@ -441,6 +442,7 @@ fn layer(json: &Json) -> Result<Layer, String> {
         gap_width: Ramp::parse(json.get("gap_width"), &id, "gap_width", 0.0)?,
         spread: Ramp::parse(json.get("spread"), &id, "spread", 0.0)?,
         lanes: Ramp::parse(json.get("lanes"), &id, "lanes", 1.0)?,
+        carriageway: json.get("carriageway").and_then(Json::as_bool).unwrap_or(false),
         dash,
         text_size: Ramp::parse(json.get("text_size"), &id, "text_size", 0.0)?,
         // Optional second arm: present only where the authored style's `text-size` is a
@@ -556,8 +558,8 @@ mod tests {
         //
         // Basemap: 24 fills, 23 lines and 7 symbols. The 23 lines are the 12
         // surface/link layers, 10 bridge layers (5 casings + 5 fills), and the app-only
-        // `roads-lanes` divider layer (task WS-D) that draws a multi-lane carriageway's
-        // individual lanes at z16+: the authored
+        // `roads-carriageway` layer that draws a road's surface and its lane markings at
+        // z16+: the authored
         // `is_bridge` pass the flat file used to drop entirely, which is what hid the Bay
         // Bridge and the Golden Gate (task 8). The 7 symbols are the 4-deep places hierarchy
         // (country/region/locality/subplace) plus the 3 curved line labels WS-E added
@@ -1365,11 +1367,12 @@ mod tests {
     fn the_flat_style_agrees_with_basemap_json() {
         let root = basemap();
         for layer in layers() {
-            // `roads-lanes` is an app-only layer: it draws a multi-lane carriageway's individual
-            // lane dividers, which the authored `basemap.json` has no concept of. Its width, colour
-            // and spread are all deliberately its own, so — like transit's width — it is pinned by
-            // its own test (`road_lanes_fan_is_gated_and_spread`) rather than cross-checked here.
-            if layer.id == "roads-lanes" {
+            // `roads-carriageway` is an app-only layer: it draws a road's surface with its lane
+            // markings painted on, which the authored `basemap.json` has no concept of. Its width,
+            // colour and lane semantics are all deliberately its own, so — like transit's width —
+            // it is pinned by its own test (`the_carriageway_is_gated_and_sized_by_the_lane`)
+            // rather than cross-checked here.
+            if layer.id == "roads-carriageway" {
                 continue;
             }
             let authored = authored_layer(&root, &layer.authored);
@@ -1590,32 +1593,40 @@ mod tests {
         assert_eq!(layer.lanes.at(11.0).floor(), 3.0, "three from z11");
         assert_eq!(layer.lanes.at(13.0).floor(), 4.0, "four from z13");
         assert_eq!(layer.lanes.at(20.0).floor(), 4.0, "and it stays there");
-        // Nothing else moves sideways, or every road in the style would — except `roads-lanes`,
-        // which fans a multi-lane carriageway into its individual lane dividers by the same
-        // mechanism. Its own configuration is pinned by `road_lanes_fan_is_gated_and_spread`.
-        for other in layers().iter().filter(|l| l.id != "transit-rail" && l.id != "roads-lanes") {
+        // Nothing else moves sideways, or every road in the style would. The road lane fan used to
+        // be the one exception; the carriageway that replaced it needs no spread at all, because a
+        // marking's place across the road is a coordinate in the mesh rather than an offset of it.
+        for other in layers().iter().filter(|l| l.id != "transit-rail") {
             assert_eq!(other.spread.peak(), 0.0, "{} must not spread", other.id);
             assert_eq!(other.lanes.peak(), 1.0, "{} must not fan out", other.id);
         }
     }
 
-    /// The road lane fan: `roads-lanes` is the one road layer that spreads, it only appears once
-    /// the camera is close enough to make lanes legible, and its lane ramp is high enough to draw
-    /// every interior divider of the widest roads. Every other layer is held to no-spread by
-    /// `transit_lanes_step_with_zoom_over_a_constant_spacing`.
+    /// The road carriageway: `roads-carriageway` is the one layer drawn as a road surface, it only
+    /// appears once the camera is close enough to make lane markings legible, and its width ramp is
+    /// **one lane** rather than a whole road — the renderer multiplies by the feature's lane count,
+    /// so a two-lane street and an eight-lane motorway come off the same ramp at their true widths.
     #[test]
-    fn road_lanes_fan_is_gated_and_spread() {
-        let layer = find("roads-lanes");
-        assert!(layer.lane_fan(), "roads-lanes must fan into lanes");
-        assert_eq!(layer.min_zoom, 16, "the dense lane layer is gated to high zoom");
-        assert!(!layer.draws_at(15), "no lanes at z15");
-        assert!(layer.draws_at(16), "lanes from z16");
-        // The spacing grows with zoom (a lane is a ground distance, unlike a transit corridor's
-        // constant screen spacing), and is zero below the gate's reach.
-        assert!(layer.spread.at(16.0) > 0.0, "a lane has width at z16");
-        assert!(layer.spread.at(20.0) > layer.spread.at(16.0), "and it widens zooming in");
-        // High enough that `min(style.lanes, dividers)` never caps a real road's divider count.
-        assert!(layer.lanes.at(16.0).floor() >= 7.0, "up to an eight-lane road's dividers");
+    fn the_carriageway_is_gated_and_sized_by_the_lane() {
+        let layer = find("roads-carriageway");
+        assert!(layer.carriageway, "roads-carriageway must draw as a surface");
+        assert_eq!(
+            layers().iter().filter(|l| l.carriageway).count(),
+            1,
+            "exactly one layer draws road surfaces",
+        );
+        assert_eq!(layer.min_zoom, 16, "the dense lane detail is gated to high zoom");
+        assert!(!layer.draws_at(15), "no carriageway at z15");
+        assert!(layer.draws_at(16), "a carriageway from z16");
+        // A lane is a ground width, so it grows with zoom — roughly the 3.5 m real lane at each of
+        // these, which is what makes the shader's marking widths land where a driver expects them.
+        assert!(layer.width.at(16.0) > 0.0, "a lane has width at z16");
+        assert!(layer.width.at(20.0) > layer.width.at(16.0), "and it widens zooming in");
+        // The asphalt has to be darker than the off-white the shader paints its markings in, which
+        // is why this is not the white `roads-major` fill it draws over.
+        let road = find("roads-major");
+        assert_ne!(layer.light, road.light);
+        assert_ne!(layer.dark, road.dark);
     }
 
     /// The `kind` values an authored filter admits, or empty for "any of them".

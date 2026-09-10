@@ -595,26 +595,21 @@
       "lanes": { "interpolate": "linear", "stops": [[0, 1], [9, 2], [11, 3], [13, 4]] }
     },
     {
-      "id": "roads-lanes",
+      "id": "roads-carriageway",
       "authored": "roads_major",
       "source": "roads",
       "type": "line",
+      "carriageway": true,
       "kinds": ["highway", "major_road", "minor_road"],
       "forbid_flags": ["tunnel"],
       "minzoom": 16,
-      "light": "#b7bcc6",
-      "dark": "#5c6270",
+      "light": "#c8ccd3",
+      "dark": "#3a3f47",
       "width": {
-        "interpolate": "exponential",
-        "base": 1.6,
-        "stops": [[16, 0.4], [18, 0.7], [20, 1.2]]
-      },
-      "spread": {
         "interpolate": "exponential",
         "base": 2.0,
         "stops": [[16, 3.0], [18, 11.0], [20, 40.0]]
-      },
-      "lanes": { "interpolate": "linear", "stops": [[16, 8]] }
+      }
     },
     {
       "id": "poi-outdoor",

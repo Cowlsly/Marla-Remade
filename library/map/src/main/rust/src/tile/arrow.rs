@@ -62,10 +62,10 @@ pub fn arrow_for(mask: u16) -> Option<TurnArrow> {
 /// One arrow to draw for one lane, in tile-local coordinates.
 ///
 /// The anchor sits on the road's centreline a short way back from the junction; the renderer then
-/// pushes it sideways into its lane by the same lateral fan the lane dividers use, which is why the
-/// instance carries `ordinal` and `count` rather than a baked offset (the offset is a screen
-/// measurement that changes with zoom). `angle` is the road's heading at the end, in radians, so
-/// the glyph points the way the traffic flows.
+/// pushes it sideways onto its lane of the carriageway, which is why the instance carries `ordinal`
+/// and `count` rather than a baked offset (the offset is a screen measurement that changes with
+/// zoom). `angle` is the road's heading at the end, in radians, so the glyph points the way the
+/// traffic flows.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ArrowInstance {
     /// Anchor on the centreline, tile-local (extent units).
@@ -304,7 +304,7 @@ mod tests {
         assert!((max_x - 0.6).abs() < 1e-5, "tip a scale-length ahead of the anchor in +x");
         assert!((tip_y - 0.5).abs() < 1e-5, "and level with it, no offset");
         // A non-zero lateral offset shifts the whole glyph off the centreline (perpendicular to
-        // the heading); the sign of the real offset comes from lane_offset_px per lane.
+        // the heading); the sign of the real offset comes from the lane's place across the road.
         let mut v2 = Vec::new();
         arrow_verts(&through, 0.1, 0.2, &mut v2);
         let mean_y2 = v2.chunks(2).map(|p| p[1]).sum::<f32>() / (v2.len() / 2) as f32;

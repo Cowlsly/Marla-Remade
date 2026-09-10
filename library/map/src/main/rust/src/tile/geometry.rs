@@ -11,7 +11,7 @@
 //! strokes 7, and the shaders never saw any of it.
 
 use crate::style::{KindFilter, Layer, LayerKind, LayerToggles};
-use crate::tess::{fill, roof, stroke, terrain};
+use crate::tess::{fill, ribbon, roof, stroke, terrain};
 use crate::tile::arrow::{self, ArrowInstance};
 use crate::tile::symbol;
 use crate::tile::select::ANCESTOR_DEPTH;
@@ -26,26 +26,13 @@ use tilecodec::mamaps::dict::{LAYER_BUILDINGS, LAYER_EARTH, LAYER_ROADS, LAYER_T
 /// layer; this is the matching cost gate on the render side.
 pub const TRAFFIC_MIN_ZOOM: u8 = 12;
 
-/// The shallowest zoom the per-lane road detail (dividers and turn arrows) is built at.
+/// The shallowest zoom the per-lane road detail (the carriageway surface and its turn arrows) is
+/// built at.
 ///
-/// Matches the `roads-lanes` style layer's `minzoom` in `basemap.flat.json`: the dense lane detail
-/// is only legible zoomed right in, so below this the road draws as one line and carries no arrows.
+/// Matches the `roads-carriageway` style layer's `minzoom` in `basemap.flat.json`: lane markings
+/// are only legible zoomed right in, so below this the road draws as the ordinary stroked layers
+/// and carries no arrows.
 pub const ROAD_LANE_MIN_ZOOM: u8 = 16;
-
-/// How many levels ahead of itself a tile builds per-lane road detail, in place of the general
-/// [`ANCESTOR_DEPTH`](crate::tile::select::ANCESTOR_DEPTH).
-///
-/// The lookahead exists because a tile stands in for the levels below it, and the archive stops at
-/// z14 while lanes are drawn from z16 — so the z14 tile *must* build lane geometry it will not draw
-/// itself. But the general depth of 4 makes every tile from z12 up build it, and lane detail is the
-/// most expensive thing in this file: each divider re-strokes the road's entire geometry, so a
-/// six-lane road builds five extra full copies of itself, per tile, three levels before any of it
-/// can be drawn.
-///
-/// Two is the smallest value that still lets the deepest archive tile serve [`ROAD_LANE_MIN_ZOOM`].
-/// The cost is that a z12 or z13 ancestor standing in while its z14 child loads shows no lanes or
-/// arrows until the child lands — transient, and only at z16+.
-const LANE_ANCESTOR_DEPTH: u8 = 2;
 
 /// The height a `buildings` feature with no `height` tag extrudes to, in metres — about three
 /// storeys, so an unattributed building still reads as a building rather than a flat patch.
@@ -166,6 +153,35 @@ pub struct ShapedLabel {
     pub centreline: Option<Vec<(f32, f32)>>,
 }
 
+/// One tile's road carriageway surface, for one set of road-shape inputs.
+///
+/// Kept apart from [`LayerMesh`] because it is neither a stroke nor drawn through the line
+/// pipeline: its vertices carry an across-road coordinate ([`crate::tess::ribbon`]) and it draws
+/// through the ribbon pipeline, whose push block reads three slots differently. That split is
+/// deliberate rather than a wider shared format — [`TrafficMesh`] and the route overlay both ride
+/// the 7-float stroke vertex, so widening it to carry a coordinate only roads read would charge
+/// every one of them for a layer they do not draw.
+///
+/// One mesh per distinct ([`lanes`](Self::lanes), [`split`](Self::split), [`oneway`](Self::oneway))
+/// rather than one per feature or one per tile: those three are push constants, so features that
+/// agree on all of them can share a draw, and features that disagree cannot. Most roads in a tile
+/// are ordinary two-way streets, so the split is usually into very few meshes.
+pub struct CarriagewayMesh {
+    /// Index into the style's layer list, for the asphalt colour and the lane width ramp.
+    pub layer_index: usize,
+    /// Lanes across the whole road, both directions together — `Push.line.y`, and the multiplier
+    /// that turns the style's per-lane width into this road's own.
+    pub lanes: u8,
+    /// The across-road coordinate the opposing streams meet at, in -1..=1 — `Push.line.z`.
+    /// Meaningless, and zero, when [`oneway`](Self::oneway) is set.
+    pub split: f32,
+    /// Traffic runs one way, so the carriageway has no centre line at all — `Push.line.w`.
+    pub oneway: bool,
+    /// Interleaved `x, y, nx, ny, t, distance` per vertex — see [`crate::tess::ribbon`].
+    pub vertices: Vec<f32>,
+    pub indices: Vec<u32>,
+}
+
 /// One region's shape within one tile, for the selection mask.
 ///
 /// Kept apart from [`LayerMesh`] because it is not styled and not drawn in layer order: nothing
@@ -236,11 +252,22 @@ pub struct TileMesh {
     /// below [`TRAFFIC_MIN_ZOOM`]. Colour is resolved at draw time from a pushed table, so this
     /// is built once and survives every recolour.
     pub traffic: Vec<TrafficMesh>,
+    /// The road carriageways in this tile: the road surfaces the lane markings are painted on,
+    /// one mesh per distinct set of road-shape push inputs. Empty below the carriageway layer's
+    /// zoom window, and on any tile with no roads.
+    pub carriageways: Vec<CarriagewayMesh>,
+    /// The tile's driving convention says the line between opposing streams is yellow (the
+    /// Americas) rather than white — `Push.misc.z`.
+    ///
+    /// A property of the tile, not of a road, and `false` on any archive that carries no
+    /// convention at all: right-hand traffic with white markings is most of the world by land
+    /// area and the safer thing to be wrong about.
+    pub yellow_centre: bool,
     /// Symbol candidates: shaped once at tessellation time, sized per frame.
     pub labels: Vec<ShapedLabel>,
     /// Per-lane turn arrows at road junctions, from the archive's turn-lane table. One per marked
-    /// lane, placed on the centreline near the junction and pushed into its lane by the same
-    /// lateral fan the dividers use. Empty below the lane zoom gate and on any tile with no
+    /// lane, placed on the centreline near the junction and pushed sideways onto its lane of the
+    /// carriageway. Empty below the lane zoom gate and on any tile with no
     /// `turn:lanes`. The renderer draws these as glyphs; the anchors and directions are computed
     /// here so the placement is testable off-device.
     pub arrows: Vec<ArrowInstance>,
@@ -313,6 +340,13 @@ pub fn build_toggled(
 ) -> TileMesh {
     let mut meshes = Vec::with_capacity(layers.len());
     let mut labels = Vec::new();
+    // The tile's road surfaces, accumulated across every carriageway layer's features. Tile-wide
+    // (not per layer) because they draw in their own pass, not the flat layer loop.
+    let mut carriageways: Vec<CarriagewayMesh> = Vec::new();
+    // Which way traffic drives here, which is what says whether the forward lanes sit on the +1
+    // or the -1 side of the road. Absent on every archive that predates the convention byte, and
+    // the default — right-hand traffic, white markings — is what most of the world does.
+    let left_hand = tile.convention.is_some_and(|c| c.left_hand);
     // The tile's 3D buildings, accumulated across the buildings layer's features into one mesh.
     // Tile-wide (not per layer) because it draws in its own depth-tested pass, not the layer loop.
     let mut building_vertices: Vec<f32> = Vec::new();
@@ -328,15 +362,7 @@ pub fn build_toggled(
         if !toggles.enabled(layer.toggle) {
             continue;
         }
-        // Per-lane road detail gets its own, much shallower lookahead: see
-        // [`LANE_ANCESTOR_DEPTH`]. Scoped to the *roads* fan — `transit-rail` carries a spread
-        // too, and narrowing its window would stop coarse ancestors carrying rail corridors.
-        let layer_deepest = if layer.lane_fan() && layer.source_layer_id == LAYER_ROADS {
-            z.saturating_add(LANE_ANCESTOR_DEPTH)
-        } else {
-            deepest
-        };
-        if layer.min_zoom > layer_deepest || layer.max_zoom < z {
+        if layer.min_zoom > deepest || layer.max_zoom < z {
             continue;
         }
         let Some(source) = tile.layer(layer.source_layer_id) else { continue };
@@ -349,13 +375,6 @@ pub fn build_toggled(
         // path below keeps it off the hot road path entirely.
         #[allow(clippy::type_complexity)]
         let mut coloured: Vec<((u32, u8, u8, u8), Vec<f32>, Vec<u32>)> = Vec::new();
-
-        // Sub-meshes for a road drawn as its individual lanes: one per (divider ordinal, divider
-        // count), so a four-lane and a six-lane road in one tile fan by different amounts and each
-        // mesh carries the one lane tuple its offset needs. Stays empty for every layer but a
-        // lane-fan road layer, and the `lane_fan()` gate below keeps it off the hot road path.
-        #[allow(clippy::type_complexity)]
-        let mut lane_fans: Vec<((u8, u8), Vec<f32>, Vec<u32>)> = Vec::new();
 
         for (feature_index, feature) in source.features.iter().enumerate() {
             // Kind, then the road flag/detail filters: one call, so a surface layer never
@@ -415,7 +434,58 @@ pub fn build_toggled(
                         continue;
                     }
                     let gapped = layer.gapped();
-                    if feature.transit_color != 0 {
+                    if layer.carriageway {
+                        // The road's own surface, with its lane markings painted on by the
+                        // fragment shader rather than drawn. A polygon outline has no
+                        // carriageway, so only real line features take this path.
+                        if feature.geom_type != GEOM_LINE {
+                            continue;
+                        }
+                        let oneway = feature.is_oneway();
+                        // Most roads carry no `lanes` tag at all, and a zero lane count would push
+                        // a zero width and draw nothing. OSM's own reading of an untagged road is
+                        // one lane each way, which is also what makes the centre line appear.
+                        let lanes = match feature.lane_count {
+                            0 => {
+                                if oneway {
+                                    1
+                                } else {
+                                    2
+                                }
+                            }
+                            count => count,
+                        };
+                        let split = split_t(tile, layer, feature_index, lanes, left_hand);
+                        let at = match carriageways.iter().position(|m| {
+                            m.layer_index == index
+                                && m.lanes == lanes
+                                && m.oneway == oneway
+                                && m.split.to_bits() == split.to_bits()
+                        }) {
+                            Some(at) => at,
+                            None => {
+                                carriageways.push(CarriagewayMesh {
+                                    layer_index: index,
+                                    lanes,
+                                    split,
+                                    oneway,
+                                    vertices: Vec::new(),
+                                    indices: Vec::new(),
+                                });
+                                carriageways.len() - 1
+                            }
+                        };
+                        let Some(mesh) = carriageways.get_mut(at) else { continue };
+                        for part in parts {
+                            let flat = flatten(source.points(part));
+                            ribbon::ribbon(
+                                &flat,
+                                extent,
+                                &mut mesh.vertices,
+                                &mut mesh.indices,
+                            );
+                        }
+                    } else if feature.transit_color != 0 {
                         // A transit line carries its own colour: split into one sub-mesh per
                         // distinct (colour, ordinal, lanes, taper), because two routes of one
                         // colour on different ordinals draw as two parallel lines and one mesh
@@ -437,33 +507,6 @@ pub fn build_toggled(
                         for part in parts {
                             let flat = flatten(source.points(part));
                             stroke::stroke(&flat, extent, gapped, v, i);
-                        }
-                    } else if layer.lane_fan() {
-                        // A road drawn as its individual lanes: one divider line between each
-                        // adjacent pair, fanned across the carriageway by `lane_offset_px` at draw
-                        // time. A road with fewer than two lanes has no interior divider and so
-                        // contributes nothing here — its casing and fill are the ordinary road
-                        // layers' job. The geometry is stroked once per divider into a mesh keyed
-                        // by (ordinal, divider count), so the offset the shader applies is this
-                        // divider's alone.
-                        if feature.lane_count < 2 {
-                            continue;
-                        }
-                        let dividers = feature.lane_count - 1;
-                        for ordinal in 0..dividers {
-                            let key = (ordinal, dividers);
-                            let at = match lane_fans.iter().position(|(k, _, _)| *k == key) {
-                                Some(at) => at,
-                                None => {
-                                    lane_fans.push((key, Vec::new(), Vec::new()));
-                                    lane_fans.len() - 1
-                                }
-                            };
-                            let Some((_, v, i)) = lane_fans.get_mut(at) else { continue };
-                            for part in parts {
-                                let flat = flatten(source.points(part));
-                                stroke::stroke(&flat, extent, gapped, v, i);
-                            }
                         }
                     } else {
                         // Every ordinary road and boundary: one mesh for the whole layer.
@@ -550,24 +593,10 @@ pub fn build_toggled(
                 lane: (ordinal, lanes, taper),
             });
         }
-        // The road lane dividers: each sub-mesh is one divider drawn the width of the whole road,
-        // shifted to its lane boundary by `lane_offset_px` from the (ordinal, count) it carries.
-        // The layer's own colour paints them, so no `color_override`; `taper` is full (255) because
-        // a lane boundary does not ease in at a corridor end the way a transit route does.
-        for ((ordinal, count), vertices, indices) in lane_fans {
-            if indices.is_empty() {
-                continue;
-            }
-            meshes.push(LayerMesh {
-                layer_index: index,
-                kind: layer.kind,
-                vertices,
-                indices,
-                color_override: None,
-                lane: (ordinal, count, 255),
-            });
-        }
     }
+
+    // A road whose every part was degenerate would otherwise cost an empty draw.
+    carriageways.retain(|m| !m.indices.is_empty());
 
     TileMesh {
         z,
@@ -579,6 +608,8 @@ pub fn build_toggled(
         labels,
         regions: region_meshes(tile, extent, rings_validated),
         traffic: traffic_meshes(tile, extent, z, toggles),
+        carriageways,
+        yellow_centre: tile.convention.is_some_and(|c| c.yellow_centre),
         arrows: arrow_meshes(tile, z),
         generation,
     }
@@ -600,15 +631,50 @@ fn terrain_mesh(tile: &Body, ground_width_m: f64) -> TerrainMesh {
     TerrainMesh { vertices, indices }
 }
 
+/// The across-road coordinate the opposing streams of one road feature meet at, in -1..=1.
+///
+/// The ribbon measures `t` from the left of the geometry's own direction, and the archive's
+/// `forward` lanes are the ones running toward the feature's last point — the same direction. So
+/// under right-hand traffic the forward lanes take the +1 side and the backward lanes the -1 side,
+/// and under left-hand traffic they swap. Expressed as a fraction of the split's own total rather
+/// than of [`tilecodec::mamaps::body::Feature::lane_count`], so a table that disagrees with the
+/// lane tag still puts the line in the right *place*.
+///
+/// # It has to land on a lane boundary, not merely near one
+///
+/// `road_surface.frag` decides which boundary carries the centre line with
+/// `abs(boundaryT - centreT) < 1.0 / lanes` — half a lane, and **strictly** less. So a value that
+/// sits exactly halfway between two boundaries matches neither: the dividers either side both stay
+/// dashed and the centre-line band paints down the middle of a lane. A flat 0.0 does exactly that
+/// on any odd lane count, where the middle of the road *is* the middle of the centre lane.
+///
+/// So the unknown-split case does not push 0.0; it assumes the split a road with an odd lane count
+/// actually carries — the extra lane going to the forward direction — and runs it through the same
+/// arithmetic as a known one. On an even count that still comes out at 0.0, and it is what real
+/// data gives anyway: a three-lane two-way road is tagged 2/1, not "centred".
+fn split_t(tile: &Body, layer: &Layer, feature_index: usize, lanes: u8, left_hand: bool) -> f32 {
+    let known = tile
+        .feature_carriageway(layer.source_layer_id, feature_index)
+        .map(|shape| (shape.forward as u16, shape.backward as u16))
+        .filter(|(forward, backward)| forward + backward > 0);
+    let (forward, backward) = known.unwrap_or_else(|| {
+        let lanes = lanes.max(1) as u16;
+        (lanes - lanes / 2, lanes / 2)
+    });
+    let near_kerb = if left_hand { forward } else { backward };
+    2.0 * near_kerb as f32 / (forward + backward) as f32 - 1.0
+}
+
 /// The per-lane turn arrows for this tile, from the archive's turn-lane side table.
 ///
 /// One arrow per marked lane, at each turn-tagged road's junction end (and start, for backward
-/// lanes). Gated to [`ROAD_LANE_MIN_ZOOM`] like the lane dividers — and by the same
-/// [`LANE_ANCESTOR_DEPTH`] window the layer loop gives them, so a tile standing in for deeper
-/// levels builds them once and coarse ancestors do not build them at all.
+/// lanes). Gated to [`ROAD_LANE_MIN_ZOOM`] like the carriageway, over the same
+/// [`ANCESTOR_DEPTH`] window the layer loop uses — a tile stands in for the levels below it, and
+/// the archive stops at z14 while arrows are drawn from z16, so a z14 tile must build arrows it
+/// will not draw itself.
 /// Empty on any tile with no `turn:lanes` (no turn-lane table), which is nearly all.
 fn arrow_meshes(tile: &Body, z: u8) -> Vec<ArrowInstance> {
-    if z.saturating_add(LANE_ANCESTOR_DEPTH) < ROAD_LANE_MIN_ZOOM {
+    if z.saturating_add(ANCESTOR_DEPTH) < ROAD_LANE_MIN_ZOOM {
         return Vec::new();
     }
     let Some(source) = tile.layer(LAYER_ROADS) else { return Vec::new() };
@@ -936,6 +1002,7 @@ mod tests {
             gap_width: Ramp::constant(0.0),
             spread: Ramp::constant(0.0),
             lanes: Ramp::constant(1.0),
+            carriageway: false,
             dash: (0.0, 0.0),
             text_size: Ramp::constant(0.0),
             text_size_large: None,
@@ -1164,30 +1231,28 @@ mod tests {
         }
     }
 
-    /// A multi-lane road fans into one divider line per interior lane boundary, each in its own
-    /// mesh carrying the (ordinal, divider-count) the shader offsets it by; a road with a single
-    /// lane draws no divider at all. This is the road half of the lateral-fan the transit tests
-    /// above pin — driven by `lane_count` and the layer's own colour rather than a per-route one.
-    #[test]
-    fn a_multi_lane_road_fans_into_one_divider_per_interior_boundary() {
-        use tilecodec::mamaps::body::{Feature, Layer as BodyLayer, Part, NAME_NONE, WINDING_OUTER};
+    /// A body of straight roads, one per `(lane_count, oneway)` entry, on the `roads` layer.
+    fn carriageway_body(roads: &[(u8, bool)]) -> Body {
+        use tilecodec::mamaps::body::{
+            Feature, Layer as BodyLayer, Part, FLAG_IS_ONEWAY, NAME_NONE, WINDING_OUTER,
+        };
         use tilecodec::mamaps::dict;
         let mut body = Body::new(4096);
         let mut source = BodyLayer::new(dict::LAYER_ROADS);
-        // A four-lane road (three interior dividers) and a single-lane road (none).
-        for (lane_count, y) in [(4u8, 100i16), (1, 300)] {
+        for (i, &(lane_count, oneway)) in roads.iter().enumerate() {
             let parts_offset = source.parts.len() as u32;
             source.parts.push(Part {
                 coord_start: source.coords.len() as u32,
                 point_count: 2,
                 winding: WINDING_OUTER,
             });
+            let y = 100 + i as i16 * 100;
             source.coords.extend_from_slice(&[(0, y), (1000, y)]);
             source.features.push(Feature {
                 kind: crate::style::kind_id_for_test("major_road"),
                 kind_detail: 0,
                 geom_type: GEOM_LINE,
-                flags: 0,
+                flags: if oneway { FLAG_IS_ONEWAY } else { 0 },
                 name_idx: NAME_NONE,
                 parts_offset,
                 part_count: 1,
@@ -1199,31 +1264,191 @@ mod tests {
             });
         }
         body.layers.push(source);
+        body
+    }
 
+    /// The `roads-carriageway` layer as a one-layer slice, so a test states its own layer set.
+    fn carriageway_only() -> &'static [Layer] {
         let all = style::layers();
-        let at = all.iter().position(|l| l.id == "roads-lanes").expect("the road lanes layer");
-        let Some(only) = all.get(at..=at) else { panic!("a one-layer slice") };
+        let at = all.iter().position(|l| l.carriageway).expect("the carriageway layer");
+        all.get(at..=at).expect("a one-layer slice")
+    }
 
-        // Gated to high zoom: nothing while the deepest tile this stands in for is still below
-        // the floor (min_zoom 16 against z + ANCESTOR_DEPTH), the whole point of the dense layer.
-        assert!(
-            build(&body, only, 11, 0, 0, false).meshes.is_empty(),
-            "the lane layer is not tessellated below its floor",
-        );
+    /// **The path every real archive takes today.** The tiler is still wiring the producer side, so
+    /// no published tile carries a carriageway table or a marking convention, and the renderer has
+    /// to draw a correct road from the lane count alone: the split lands on a lane boundary, the
+    /// centre line is white, and a one-way suppresses it entirely.
+    #[test]
+    fn a_tile_with_no_carriageway_table_still_draws_a_correct_carriageway() {
+        let body = carriageway_body(&[(4, false), (3, true)]);
+        assert!(body.carriageways.is_empty(), "the fixture is a v7 archive with no table");
+        assert!(body.convention.is_none());
 
-        let mesh = build(&body, only, 16, 0, 0, false);
-        // Three dividers for the four-lane road, none for the one-lane road, and the layer's own
-        // colour (no per-feature override).
+        let mesh = build(&body, carriageway_only(), 16, 0, 0, false);
         assert_eq!(
-            mesh.meshes.iter().map(|m| m.lane).collect::<Vec<(u8, u8, u8)>>(),
-            vec![(0, 3, 255), (1, 3, 255), (2, 3, 255)],
-            "one mesh per interior divider of the four-lane road, in ordinal order",
+            mesh.carriageways.iter().map(|c| (c.lanes, c.oneway)).collect::<Vec<_>>(),
+            vec![(4, false), (3, true)],
+        );
+        assert_eq!(mesh.carriageways[0].split, 0.0, "an even count splits down the middle");
+        assert!(!mesh.yellow_centre, "no convention means white, which is most of the world");
+        assert!(mesh.meshes.is_empty(), "a carriageway is not a stroked layer mesh");
+    }
+
+    /// **The degenerate case the flat 0.0 default hid.** `road_surface.frag` picks the boundary
+    /// carrying the centre line with `abs(boundaryT - centreT) < 1.0 / lanes` — half a lane, and
+    /// strictly less — so a split that sits exactly halfway between two boundaries matches neither.
+    /// On an odd lane count the middle of the road is the middle of the centre *lane*, so a 0.0
+    /// default left both neighbouring dividers dashed and painted the centre line down a lane.
+    ///
+    /// This only ever bit the unknown-split path, which is the only path there is until the tiler
+    /// writes a carriageway table — so the invariant is asserted the way the shader tests it,
+    /// against every lane count a road can have, both hands of the road.
+    #[test]
+    fn an_unknown_split_always_lands_on_a_lane_boundary() {
+        use tilecodec::mamaps::body::MarkingConvention;
+        for left_hand in [false, true] {
+            for lanes in 1..=12u8 {
+                let mut body = carriageway_body(&[(lanes, false)]);
+                body.convention = Some(MarkingConvention { left_hand, yellow_centre: false });
+                let mesh = build(&body, carriageway_only(), 16, 0, 0, false);
+                let split = mesh.carriageways[0].split;
+                assert!((-1.0..=1.0).contains(&split), "{lanes} lanes gave t {split}");
+                // Exactly the shader's test, against the nearest boundary it would round to.
+                let boundary = (((split + 1.0) / 2.0) * lanes as f32).round();
+                let boundary_t = boundary / lanes as f32 * 2.0 - 1.0;
+                assert!(
+                    (boundary_t - split).abs() < 1.0 / lanes as f32,
+                    "{lanes} lanes: t {split} is not within half a lane of boundary {boundary_t}, \
+                     so the centre line would paint down the middle of a lane",
+                );
+            }
+        }
+    }
+
+    /// The odd lane goes to the forward direction, which is the split real data carries — a
+    /// three-lane two-way road is tagged 2/1, not "centred" — and which side of the road that puts
+    /// the line on still follows the driving convention.
+    #[test]
+    fn an_odd_lane_count_gives_the_extra_lane_to_the_forward_direction() {
+        use tilecodec::mamaps::body::MarkingConvention;
+        let third = 1.0f32 / 3.0;
+        for (left_hand, expected) in [(false, -third), (true, third)] {
+            let mut body = carriageway_body(&[(3, false)]);
+            body.convention = Some(MarkingConvention { left_hand, yellow_centre: false });
+            let mesh = build(&body, carriageway_only(), 16, 0, 0, false);
+            assert!(
+                (mesh.carriageways[0].split - expected).abs() < 1e-6,
+                "left_hand {left_hand}: {} is not {expected}",
+                mesh.carriageways[0].split,
+            );
+        }
+        // And the same three lanes tagged explicitly agree with the guess, so the fallback is not
+        // a second answer that real data will contradict.
+        let tagged = split_for(3, tilecodec::mamaps::body::Carriageway {
+            forward: 2,
+            backward: 1,
+            solid_dividers: 0,
+        });
+        assert!((tagged - -third).abs() < 1e-6, "tagged 2/1 gave {tagged}");
+    }
+
+    /// One road with a known carriageway row, tessellated under right-hand traffic.
+    fn split_for(lanes: u8, shape: tilecodec::mamaps::body::Carriageway) -> f32 {
+        use tilecodec::mamaps::dict;
+        let mut body = carriageway_body(&[(lanes, false)]);
+        body.carriageways = vec![(dict::LAYER_ROADS, vec![shape])];
+        build(&body, carriageway_only(), 16, 0, 0, false).carriageways[0].split
+    }
+
+    /// A road with no `lanes` tag — most of OSM — still gets a carriageway, because a zero lane
+    /// count would push a zero width and draw nothing at all where a road plainly is.
+    #[test]
+    fn an_untagged_road_falls_back_to_one_lane_each_way() {
+        let mesh = build(&carriageway_body(&[(0, false), (0, true)]), carriageway_only(), 16, 0, 0, false);
+        assert_eq!(
+            mesh.carriageways.iter().map(|c| (c.lanes, c.oneway)).collect::<Vec<_>>(),
+            vec![(2, false), (1, true)],
+        );
+    }
+
+    /// The push inputs are what splits the meshes, so roads that agree on all three share a draw
+    /// and roads that disagree cannot — the carriageway equivalent of the transit colour split.
+    #[test]
+    fn carriageways_split_into_one_mesh_per_distinct_road_shape() {
+        // Two four-lane two-ways, a six-lane two-way, and a four-lane one-way.
+        let body = carriageway_body(&[(4, false), (6, false), (4, false), (4, true)]);
+        let mesh = build(&body, carriageway_only(), 16, 0, 0, false);
+        assert_eq!(
+            mesh.carriageways.iter().map(|c| (c.lanes, c.oneway)).collect::<Vec<_>>(),
+            vec![(4, false), (6, false), (4, true)],
+            "one mesh per distinct shape, in first-seen feature order",
+        );
+        // The two four-lane two-ways really did share a mesh rather than each getting one.
+        assert_eq!(mesh.carriageways[0].indices.len(), mesh.carriageways[1].indices.len() * 2);
+        for c in &mesh.carriageways {
+            assert_eq!(c.vertices.len() % ribbon::FLOATS_PER_VERTEX, 0, "vertices are whole");
+            assert_eq!(c.indices.len() % 3, 0, "indices come in threes");
+            let vertex_count = (c.vertices.len() / ribbon::FLOATS_PER_VERTEX) as u32;
+            assert!(c.indices.iter().all(|&i| i < vertex_count), "an index is out of range");
+            assert!(c.vertices.iter().all(|f| f.is_finite()));
+        }
+    }
+
+    /// Where the archive *does* carry a split, the centre line goes at the boundary between the
+    /// directions — and which side that is depends on which side the country drives on, because
+    /// `forward` means "toward the feature's last point" and the ribbon measures `t` from the left
+    /// of that same direction.
+    #[test]
+    fn the_centre_line_follows_the_split_and_the_driving_side() {
+        use tilecodec::mamaps::body::{Carriageway, MarkingConvention};
+        use tilecodec::mamaps::dict;
+        // Three forward lanes, one backward.
+        let shape = Carriageway { forward: 3, backward: 1, solid_dividers: 0 };
+
+        let mut right = carriageway_body(&[(4, false)]);
+        right.carriageways = vec![(dict::LAYER_ROADS, vec![shape])];
+        right.convention = Some(MarkingConvention { left_hand: false, yellow_centre: true });
+        let mesh = build(&right, carriageway_only(), 16, 0, 0, false);
+        assert_eq!(
+            mesh.carriageways[0].split, -0.5,
+            "right-hand traffic keeps the forward lanes on the +1 side, so the one backward \
+             lane takes the quarter of the road nearest the -1 kerb",
+        );
+        assert!(mesh.yellow_centre, "the Americas paint the line between directions yellow");
+
+        let mut left = carriageway_body(&[(4, false)]);
+        left.carriageways = vec![(dict::LAYER_ROADS, vec![shape])];
+        left.convention = Some(MarkingConvention { left_hand: true, yellow_centre: false });
+        let mesh = build(&left, carriageway_only(), 16, 0, 0, false);
+        assert_eq!(mesh.carriageways[0].split, 0.5, "left-hand traffic mirrors it");
+        assert!(!mesh.yellow_centre);
+    }
+
+    /// A road the archive lists in the table but knows nothing about degrades to the same answer as
+    /// a tile with no table at all, rather than dividing by zero.
+    #[test]
+    fn a_road_with_an_empty_carriageway_row_falls_back_like_an_absent_one() {
+        use tilecodec::mamaps::body::Carriageway;
+        assert_eq!(split_for(4, Carriageway::default()), 0.0);
+        let odd = split_for(3, Carriageway::default());
+        assert!((odd - -(1.0f32 / 3.0)).abs() < 1e-6, "three lanes gave {odd}");
+    }
+
+    /// The dense lane detail is gated to high zoom, over the same ancestor window every other
+    /// layer uses: a tile builds what it will stand in for and no more.
+    #[test]
+    fn the_carriageway_is_not_built_below_its_zoom_window() {
+        let body = carriageway_body(&[(4, false)]);
+        assert!(
+            build(&body, carriageway_only(), 11, 0, 0, false).carriageways.is_empty(),
+            "z11 stands in no deeper than z15, which is below the carriageway floor",
         );
         assert!(
-            mesh.meshes.iter().all(|m| m.color_override.is_none()),
-            "a lane divider takes the layer's colour, not a per-feature one",
+            !build(&body, carriageway_only(), ROAD_LANE_MIN_ZOOM - ANCESTOR_DEPTH, 0, 0, false)
+                .carriageways
+                .is_empty(),
+            "the deepest archive tile must build what it stands in for at z16",
         );
-        assert!(mesh.meshes.iter().all(|m| m.kind == LayerKind::Line && !m.indices.is_empty()));
     }
 
     /// Turn arrows are produced from the archive's turn-lane table at high zoom and gated off
@@ -1359,6 +1584,7 @@ mod tests {
             gap_width: Ramp::constant(0.0),
             spread: Ramp::constant(0.0),
             lanes: Ramp::constant(1.0),
+            carriageway: false,
             dash: (0.0, 0.0),
             text_size: Ramp::constant(1.0),
             text_size_large: None,
@@ -1792,6 +2018,7 @@ mod tests {
             gap_width: Ramp::constant(0.0),
             spread: Ramp::constant(0.0),
             lanes: Ramp::constant(1.0),
+            carriageway: false,
             dash: (0.0, 0.0),
             text_size: Ramp::constant(12.0),
             text_size_large: None,

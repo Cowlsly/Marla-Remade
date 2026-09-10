@@ -55,13 +55,22 @@ struct ResidentTile {
     /// Uploaded with the rest of the tile; coloured per frame from the pushed table so a new
     /// speed reading never re-uploads or re-tessellates them.
     traffic: Vec<TrafficBuffers>,
+    /// The road carriageways in this tile, one per distinct set of road-shape push inputs. Drawn
+    /// in their own pass ([`Renderer::record_carriageways`]) through the ribbon pipeline, not the
+    /// flat layer loop, because the vertex format and three of the push slots differ. Empty below
+    /// the carriageway layer's zoom window.
+    carriageways: Vec<CarriagewayBuffers>,
+    /// The tile's driving convention paints the line between opposing streams yellow rather than
+    /// white. A property of the tile, not of a road, so it rides here and not on each mesh.
+    yellow_centre: bool,
     /// Shaped symbol candidates (CPU-side): the renderer emits quads per frame
     /// at the frame's text size. Shaped once on the worker thread.
     labels: Vec<geometry::ShapedLabel>,
     /// Per-lane turn arrows (CPU-side): placed once on the worker thread from the archive's
     /// turn-lane table. The renderer builds their triangles per frame — rotated, scaled to a screen
-    /// size and offset into their lane — because all three follow the camera, exactly as the lane
-    /// dividers' offset does. Empty below the lane zoom gate and on any tile with no `turn:lanes`.
+    /// size and offset into their lane — because all three follow the camera, exactly as the
+    /// carriageway's own width does. Empty below the lane zoom gate and on any tile with no
+    /// `turn:lanes`.
     arrows: Vec<crate::tile::arrow::ArrowInstance>,
     z: u8,
     x: u32,
@@ -84,6 +93,21 @@ struct ResidentTile {
 struct TrafficBuffers {
     /// The segment's `component_id`, the key into the pushed colour table.
     id: u64,
+    vertices: Buffer,
+    indices: Buffer,
+    index_count: u32,
+}
+
+/// One tile's carriageway surface for one set of road-shape inputs, on the GPU.
+///
+/// The three shape fields are push constants rather than vertex attributes, which is why they key
+/// the mesh split: every road in the tile that agrees on all three shares this draw.
+struct CarriagewayBuffers {
+    /// Index into the style's layer list, for the asphalt colour and the lane width ramp.
+    layer_index: usize,
+    lanes: u8,
+    split: f32,
+    oneway: bool,
     vertices: Buffer,
     indices: Buffer,
     index_count: u32,
@@ -918,6 +942,45 @@ impl Renderer {
                 });
             }
         }
+        // The tile's road carriageways: one mesh per distinct road shape, uploaded like the
+        // traffic segments above.
+        let mut carriageways = Vec::with_capacity(mesh.carriageways.len());
+        for road in &mesh.carriageways {
+            if road.indices.is_empty() {
+                continue;
+            }
+            unsafe {
+                let vertices = Buffer::upload(
+                    &self.context.instance,
+                    self.context.physical_device,
+                    &self.context.device,
+                    vk::BufferUsageFlags::VERTEX_BUFFER,
+                    &road.vertices,
+                )?;
+                let indices = match Buffer::upload(
+                    &self.context.instance,
+                    self.context.physical_device,
+                    &self.context.device,
+                    vk::BufferUsageFlags::INDEX_BUFFER,
+                    &road.indices,
+                ) {
+                    Ok(buffer) => buffer,
+                    Err(e) => {
+                        vertices.destroy(&self.context.device);
+                        return Err(e);
+                    }
+                };
+                carriageways.push(CarriagewayBuffers {
+                    layer_index: road.layer_index,
+                    lanes: road.lanes,
+                    split: road.split,
+                    oneway: road.oneway,
+                    vertices,
+                    indices,
+                    index_count: road.indices.len() as u32,
+                });
+            }
+        }
         // The tile's 3D buildings, if any: one combined mesh, uploaded like the rest.
         let buildings = if mesh.buildings.indices.is_empty() {
             None
@@ -988,6 +1051,8 @@ impl Renderer {
             terrain,
             regions,
             traffic,
+            carriageways,
+            yellow_centre: mesh.yellow_centre,
             labels: mesh.labels.clone(),
             arrows: mesh.arrows.clone(),
             z: mesh.z,
@@ -1084,6 +1149,10 @@ impl Renderer {
                 for segment in &tile.traffic {
                     segment.vertices.destroy(device);
                     segment.indices.destroy(device);
+                }
+                for road in &tile.carriageways {
+                    road.vertices.destroy(device);
+                    road.indices.destroy(device);
                 }
                 if let Some(buildings) = &tile.buildings {
                     buildings.vertices.destroy(device);
@@ -1264,12 +1333,14 @@ impl Renderer {
     ///    its flat `earth` fill in step 1; at pitch 0 the grid collapses to the flat footprint.
     /// 1. **Basemap layers**, layer-major across tiles, coarsest tile first (fill/line, then
     ///    symbols per layer). WS-D scales each tile draw's alpha through `Push.morph.x`.
-    /// 2. **`record_traffic`** — basemap detail, so it dims with the region scrim (WS-B animates
+    /// 2. **`record_carriageways`** — road surfaces and their lane markings at z16+, over the road
+    ///    fills they replace and still under the buildings and the deferred symbols.
+    /// 3. **`record_traffic`** — basemap detail, so it dims with the region scrim (WS-B animates
     ///    it via `Push.misc.w`).
-    /// 3. **`record_arrows`** — lane turn arrows over the roads.
-    /// 4. **`record_region_mask`** — stencil + scrim; dims 1–3, not the route/puck.
-    /// 5. **`record_route`** — over the scrim (a followed route must not dim), under the puck.
-    /// 6. **`record_overlays`** — markers (app pins; WS-F vehicles) billboarded upright under tilt,
+    /// 4. **`record_arrows`** — lane turn arrows over the roads.
+    /// 5. **`record_region_mask`** — stencil + scrim; dims 1–4, not the route/puck.
+    /// 6. **`record_route`** — over the scrim (a followed route must not dim), under the puck.
+    /// 7. **`record_overlays`** — markers (app pins; WS-F vehicles) billboarded upright under tilt,
     ///    then the puck on top; last.
     ///
     /// Where a new workstream slots in: **WS-A buildings** and **WS-G terrain** draw with the
@@ -1585,6 +1656,10 @@ impl Renderer {
         // Traffic sits on the roads it colours, so it draws after the basemap layer loop but
         // before the region scrim — it is basemap detail and should dim with everything else
         // when a region is selected, unlike the route.
+        // Road carriageways: over the flat layer loop, because the surface and its markings
+        // replace the road fills at this zoom, and under the buildings and deferred symbols
+        // below, because a carriageway is flat basemap like every other road layer.
+        self.record_carriageways(command_buffer, camera, layers, palette, &ordered, &mut submitted);
         // 3D buildings: after the flat basemap so they paint over it, depth-tested so they occlude
         // one another. Gated to z14+; at pitch 0 the building matrix collapses height to the
         // footprint, so the flat overhead map is unchanged. Before the deferred symbols, so POI
@@ -1614,13 +1689,105 @@ impl Renderer {
         device.end_command_buffer(command_buffer).map_err(|e| format!("end_command_buffer {e:?}"))
     }
 
+    /// Draw the road carriageways: each resident tile's road surfaces, with the lane markings
+    /// painted on by `road_surface.frag` as a function of the across-road coordinate rather than
+    /// drawn as geometry.
+    ///
+    /// Its own pass rather than a branch of the layer loop because the ribbon is a different vertex
+    /// format on a different pipeline, and because three of its push slots mean something else —
+    /// the `Push` doc comment in [`crate::vulkan::pipeline`] is the contract this fills in.
+    ///
+    /// Coarsest tile first, in `ordered`, for the same reason the layer loop is: a stale ancestor
+    /// standing in for a tile that has not arrived must be drawn *under* its descendants, or its
+    /// asphalt lands on top of the sharp child as it loads.
+    unsafe fn record_carriageways(
+        &self,
+        command_buffer: vk::CommandBuffer,
+        camera: &Camera,
+        layers: &[Layer],
+        palette: Palette,
+        ordered: &[u64],
+        submitted: &mut usize,
+    ) {
+        let device = &self.context.device;
+        let floor = camera.zoom.floor().clamp(0.0, 22.0) as u8;
+        let edge_aa = f32::from(self.swapchain.samples == vk::SampleCountFlags::TYPE_1);
+        let mut bound = false;
+        for key in ordered {
+            let Some(tile) = self.tiles.get(key) else { continue };
+            if tile.carriageways.is_empty() {
+                continue;
+            }
+            let tile_to_clip = camera.tile_to_clip(tile.z, tile.x, tile.y);
+            let tile_span_px = camera.tile_span_px(tile.z);
+            let yellow = f32::from(tile.yellow_centre);
+            for road in &tile.carriageways {
+                let Some(layer) = layers.get(road.layer_index) else { continue };
+                if !layer.draws_at(floor) {
+                    continue;
+                }
+                // The style ramp is one *lane's* width, so this road's own width is that times
+                // the lanes it carries — one number cannot describe both a two-lane street and an
+                // eight-lane motorway. Halved because the vertex shader offsets each kerb from
+                // the centreline, exactly as `Stroke::half_px` does for a stroke.
+                let half_width_px =
+                    layer.width.at(camera.zoom) * camera.density * road.lanes as f32 / 2.0;
+                if half_width_px <= 0.0 {
+                    continue;
+                }
+                if !bound {
+                    device.cmd_bind_pipeline(
+                        command_buffer,
+                        vk::PipelineBindPoint::GRAPHICS,
+                        self.pipelines.ribbon,
+                    );
+                    bound = true;
+                }
+                // The asphalt only. The markings are the shader's own palette, because they have
+                // to match the white it antialiases them against.
+                let asphalt = scale_alpha(layer.color(palette), layer.opacity_at(camera.zoom));
+                let push = Push {
+                    tile_to_clip,
+                    color: argb_to_rgba(asphalt),
+                    line: [
+                        half_width_px,
+                        road.lanes as f32,
+                        road.split,
+                        f32::from(road.oneway),
+                    ],
+                    misc: [tile_span_px, edge_aa, yellow, camera.time_seconds],
+                    // The markings are static, so unlike the traffic draw there is no phase to
+                    // animate and nothing to fade: `MORPH_NONE` is what the ribbon contract asks
+                    // for.
+                    morph: MORPH_NONE,
+                };
+                device.cmd_push_constants(
+                    command_buffer,
+                    self.pipelines.layout,
+                    vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT,
+                    0,
+                    push.as_bytes(),
+                );
+                device.cmd_bind_vertex_buffers(command_buffer, 0, &[road.vertices.buffer], &[0]);
+                device.cmd_bind_index_buffer(
+                    command_buffer,
+                    road.indices.buffer,
+                    0,
+                    vk::IndexType::UINT32,
+                );
+                device.cmd_draw_indexed(command_buffer, road.index_count, 1, 0, 0, 0);
+                *submitted += 1;
+            }
+        }
+    }
+
     /// Draw the per-lane turn arrows: one straight-arrow glyph per marked lane, rotated to point
-    /// where the lane leads and pushed into its lane by the same lateral fan the dividers use.
+    /// where the lane leads and pushed sideways onto the lane the carriageway painted.
     ///
     /// Built per frame — rotation, screen size and lane offset all follow the camera, exactly as
-    /// the dividers' offset does — and drawn through the **fill** pipeline as plain coloured
-    /// triangles, so it needs no glyph atlas and no new pipeline. Gated to the lane layer's zoom
-    /// floor (z16), so below it nothing is built or drawn.
+    /// the carriageway's width does — and drawn through the **fill** pipeline as plain coloured
+    /// triangles, so it needs no glyph atlas and no new pipeline. Gated to the carriageway layer's
+    /// zoom floor (z16), so below it nothing is built or drawn.
     unsafe fn record_arrows(
         &mut self,
         command_buffer: vk::CommandBuffer,
@@ -1628,16 +1795,19 @@ impl Renderer {
         layers: &[Layer],
         submitted: &mut usize,
     ) {
-        // The lane layer whose `spread`/`lanes` ramps decide the sideways offset. Without it there
-        // is no fan and every lane's arrow would stack on the centreline. Resolved through
-        // [`crate::style::road_lane_layer`], which is careful to pick the *road* lane layer and
+        // The carriageway layer, whose zoom window gates the arrows and whose width ramp puts them
+        // over the lanes its own markings drew. Resolved through
+        // [`crate::style::road_carriageway_layer`], which is careful to pick the *road* layer and
         // not the first layer that happens to carry a spread — see its doc comment.
-        let Some(lane_layer) = crate::style::road_lane_layer(layers) else { return };
+        let Some(carriageway) = crate::style::road_carriageway_layer(layers) else { return };
         let floor = camera.zoom.floor().clamp(0.0, 22.0) as u8;
-        if !lane_layer.draws_at(floor) {
+        if !carriageway.draws_at(floor) {
             return;
         }
         let density = camera.density;
+        // One lane of the carriageway, in device px. The lane count is the arrow's own, so a
+        // three-lane approach and a five-lane one are each spread across their whole road.
+        let lane_px = carriageway.width.at(camera.zoom) * density;
         let unit = crate::tile::arrow::unit_arrow_triangles();
         // Build each tile's triangles first — this borrows `self.tiles` — then upload and draw,
         // which takes `&mut self`. One batch per tile carries its own tile-to-clip matrix.
@@ -1653,8 +1823,14 @@ impl Renderer {
             let scale = ARROW_DP * density / span; // tile-local 0..1 units per unit-arrow coord
             let mut verts: Vec<f32> = Vec::with_capacity(tile.arrows.len() * unit.len() * 2);
             for a in &tile.arrows {
-                // Sideways into the lane, perpendicular to the road heading (not the glyph's turn).
-                let lateral = lane_layer.lane_offset_px(camera.zoom, density, a.ordinal, a.count, 255);
+                // Sideways onto the lane, perpendicular to the road heading (not the glyph's
+                // turn). Measured from the middle of the road out, so it is the lane's own centre
+                // in the same -1..+1 across-road coordinate `tess::ribbon` gives the shader — an
+                // arrow that does not sit between the dividers the markings drew is worse than no
+                // arrow at all.
+                let lanes = a.count.max(1) as f32;
+                let centre_t = (2.0 * a.ordinal as f32 + 1.0) / lanes - 1.0;
+                let lateral = centre_t * lane_px * lanes / 2.0;
                 crate::tile::arrow::arrow_verts(a, scale, lateral / span, &mut verts);
             }
             if !verts.is_empty() {
@@ -2899,6 +3075,10 @@ impl Drop for Renderer {
                     region.vertices.destroy(&self.context.device);
                     region.indices.destroy(&self.context.device);
                 }
+                for road in &tile.carriageways {
+                    road.vertices.destroy(&self.context.device);
+                    road.indices.destroy(&self.context.device);
+                }
                 if let Some(buildings) = &tile.buildings {
                     buildings.vertices.destroy(&self.context.device);
                     buildings.indices.destroy(&self.context.device);
@@ -2917,6 +3097,10 @@ impl Drop for Renderer {
                 for region in &tile.regions {
                     region.vertices.destroy(&self.context.device);
                     region.indices.destroy(&self.context.device);
+                }
+                for road in &tile.carriageways {
+                    road.vertices.destroy(&self.context.device);
+                    road.indices.destroy(&self.context.device);
                 }
                 if let Some(buildings) = &tile.buildings {
                     buildings.vertices.destroy(&self.context.device);
