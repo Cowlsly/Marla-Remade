@@ -1,3 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
+    <string name="difficulty_easy">Lätt</string>
+    <string name="difficulty_medium">Medel</string>
+    <string name="difficulty_hard">Svårt</string>
 </resources>
