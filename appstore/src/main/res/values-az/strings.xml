@@ -10,7 +10,7 @@
     <string name="this_will_uninstall_you_can_reinstall_la">%1$s silinəcək. Onu istənilən vaxt yenidən quraşdıra bilərsiniz.</string>
     <string name="last_sync">Son sinxronizasiya: %1$s</string>
     <string name="repositories">Mənbələr</string>
-    <string name="sources_are_fixed">Bu üç mənbə sistemə daxil edilib və dəyişdirilə bilməz. Digər F-Droid repozitoriyaları isə sadəcə başqası tərəfindən hazırlanmış ikili faylları (binaries) təqdim edir, buna görə də onları müqayisə edib yoxlamaq üçün heç bir əsas yoxdur.</string>
+    <string name="sources_are_fixed">Bu mənbələr daxilidir və başqa heç bir mənbə əlavə edilə bilməz — digər F-Droid depoları sadəcə başqasının qurduğu ikili faylları paylayır, buna görə də onları yoxlamaq üçün heç bir şey yoxdur. Mağazanın istifadə etməsini istəmədiyiniz hər hansı birini söndürün.</string>
     <string name="nav_home">Ana səhifə</string>
     <string name="nav_search">Axtarış</string>
     <string name="nav_updates">Yeniləmələr</string>
@@ -196,4 +196,13 @@
     <string name="install_failure_conflict">Bu, artıq quraşdırılmış versiya ilə ziddiyyət təşkil edir</string>
     <string name="install_failure_unknown">Sistem onu rədd etdi</string>
     <string name="version_update">%1$s → %2$s</string>
+    <string name="sources_all_disabled">Bütün mənbələr söndürülüb, ona görə də baxmaq, axtarmaq və ya yeniləmək üçün heç nə yoxdur.</string>
+    <string name="sync_all_sources_off">Sinxronizasiya ediləcək heç nə yoxdur — bütün mənbə söndürülüb.</string>
+    <string name="play_rate_limited">Play Store sorğuları məhdudlaşdırır — yenidən cəhd etməzdən əvvəl gözləyir…</string>
+    <string name="updates_progress">%1$s yenilənir — %3$d-dən %2$d-si</string>
+    <plurals name="updates_batch_installed">
+        <item quantity="one">%1$d tətbiq yeniləndi</item>
+        <item quantity="other">%1$d tətbiq yeniləndi</item>
+    </plurals>
+    <string name="updates_batch_partial">%2$d-dən %1$d yeniləndi. Qalanları uğursuz oldu: %3$s</string>
 </resources>
