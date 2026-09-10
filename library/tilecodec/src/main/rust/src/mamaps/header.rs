@@ -26,6 +26,15 @@ pub const MAGIC: &[u8; 7] = b"MAMAPS\0";
 /// unchanged. The bump is forced twice over: an older reader rejects both an unknown body flag and
 /// an unknown feature flag bit, so a v7 archive is a clean rejection rather than a wrong map.
 ///
+/// v7 also adds the `junction` layer (id 11) to [`dict::LAYERS`](super::dict::LAYERS): one
+/// `GEOM_LINE` feature per lane connector through an intersection, built from the same v6 routing
+/// graph `traffic` reads. **That was only free because it landed inside v7's window.** Appending a
+/// layer normally forces a bump of its own — v4 did exactly this for `traffic` — because `read`'s
+/// `check_matches_schema` compares the whole dictionary on open, so every existing archive stops
+/// opening. It cost nothing here only because v7 was committed but never built or shipped, leaving
+/// no deployed reader to reject. The window shuts the moment a v7 archive exists: any layer added
+/// after that costs v8.
+///
 /// v6 adds two optional trailing body sections behind new body flags: a per-building **S3DB
 /// attribute table** (`BODY_FLAG_BUILDING_TABLE`, dense-parallel to the `buildings` layer —
 /// heights, roof shape/height/direction/orientation and wall/roof colours for 3D extrusion) and a

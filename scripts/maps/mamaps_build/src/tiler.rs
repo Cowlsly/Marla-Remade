@@ -1288,7 +1288,15 @@ fn encode_batch(
                         // distinct component_id in the id table. Coalescing merges a class's lines
                         // into one feature, which would collapse every segment's id onto whichever
                         // came first — so it is skipped, keeping the layer one-to-one with its ids.
-                        if entry.layer.layer_id == tilecodec::mamaps::dict::LAYER_TRAFFIC {
+                        //
+                        // The junction layer is skipped for the neighbouring reason: it carries no
+                        // ids, but each feature is one lane's connector through an intersection and
+                        // they all share a class, so coalescing would chain unrelated connectors —
+                        // a left turn and the through movement beside it — into one polyline and
+                        // draw a ribbon between them.
+                        if entry.layer.layer_id == tilecodec::mamaps::dict::LAYER_TRAFFIC
+                            || entry.layer.layer_id == tilecodec::mamaps::dict::LAYER_JUNCTION
+                        {
                             continue;
                         }
                         lines.add(crate::coalesce::coalesce_lines_with_ids(

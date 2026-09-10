@@ -608,7 +608,22 @@
       "width": {
         "interpolate": "exponential",
         "base": 2.0,
-        "stops": [[16, 3.0], [18, 11.0], [20, 40.0]]
+        "stops": [[16, 3.0], [18, 11.0], [20, 40.0], [22, 160.0]]
+      }
+    },
+    {
+      "id": "junction-connector",
+      "authored": "roads_major",
+      "source": "junction",
+      "type": "line",
+      "carriageway": true,
+      "minzoom": 16,
+      "light": "#c8ccd3",
+      "dark": "#3a3f47",
+      "width": {
+        "interpolate": "exponential",
+        "base": 2.0,
+        "stops": [[16, 3.0], [18, 11.0], [20, 40.0], [22, 160.0]]
       }
     },
     {

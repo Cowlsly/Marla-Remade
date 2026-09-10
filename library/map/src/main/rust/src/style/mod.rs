@@ -694,15 +694,18 @@ pub fn layers() -> &'static [Layer] {
 /// The road carriageway layer, whose zoom window gates the per-lane road detail and whose width
 /// ramp says how wide one lane of it is.
 ///
-/// Matched on [`Layer::carriageway`], which is the flag that makes a layer draw road surfaces and
-/// which nothing but a road layer carries. Its predecessor matched [`Layer::lane_fan`] — "does this
-/// layer have a spread" — and `transit-rail` has one for its corridor colours and is declared
-/// first, so matching that way silently answered with the rail layer, whose `minzoom` is 8 against
-/// the road detail's 16. That is what drew turn arrows from z8, offset by the rail corridor's ramp
-/// instead of the road's, and is why the predicate here names the thing it wants rather than a
-/// property several layers happen to share.
+/// Matched on [`Layer::carriageway`] **and** on the roads source, because the flag alone does not
+/// name one layer: `junction-connector` draws a surface too, and would answer with a connector's
+/// single lane. Its predecessor matched [`Layer::lane_fan`] — "does this layer have a spread" — and
+/// `transit-rail` has one for its corridor colours and is declared first, so matching that way
+/// silently answered with the rail layer, whose `minzoom` is 8 against the road detail's 16. That
+/// is what drew turn arrows from z8, offset by the rail corridor's ramp instead of the road's.
+///
+/// Naming the source restores what that fix did before the `carriageway` flag replaced it, and is
+/// what keeps the answer out of the hands of the declaration order in `basemap.flat.json`: exactly
+/// one layer matches, so a reordered style or a third carriageway layer cannot re-point the gate.
 pub fn road_carriageway_layer(layers: &[Layer]) -> Option<&Layer> {
-    layers.iter().find(|l| l.carriageway)
+    layers.iter().find(|l| l.carriageway && l.source_layer_id == dict::LAYER_ROADS)
 }
 
 #[cfg(test)]
@@ -856,6 +859,34 @@ mod tests {
         assert!(!gate.draws_at(12), "no turn arrows at z12");
         assert!(!gate.draws_at(gate.min_zoom - 1), "nor one level below the lane floor");
         assert!(gate.draws_at(16), "turn arrows from z16");
+    }
+
+    /// And the answer does not depend on the order the style lists its layers in.
+    ///
+    /// `junction-connector` carries `carriageway` too, so a `find` on the flag alone is once again
+    /// a predicate several layers share, answering with whichever is declared first — the same
+    /// shape as the `lane_fan` bug above, one layer along. `paint`'s
+    /// `the_carriageway_is_gated_and_sized_by_the_lane` pins that order, which keeps today's style
+    /// honest; this pins that the order is not load-bearing in the first place. Asserted as a
+    /// filtered list rather than a `find`, because "one layer matches" is the property that makes
+    /// order irrelevant, and a `find` cannot tell one match from the first of several.
+    #[test]
+    fn the_arrow_gate_does_not_depend_on_the_declaration_order() {
+        let matches: Vec<&str> = layers()
+            .iter()
+            .filter(|l| l.carriageway && l.source_layer_id == dict::LAYER_ROADS)
+            .map(|l| l.id.as_str())
+            .collect();
+        assert_eq!(matches, vec!["roads-carriageway"], "the gate predicate must name one layer");
+
+        // The layer that would answer instead, and the two halves of why it does not.
+        let connector = find("junction-connector");
+        assert!(connector.carriageway, "a connector draws as a road surface as well");
+        assert_ne!(
+            connector.source_layer_id,
+            dict::LAYER_ROADS,
+            "but it reads the junction source, which is what keeps it out of the gate",
+        );
     }
 
     /// A kind the authored `case` gives its own colour has its own layer, and a kind that shares

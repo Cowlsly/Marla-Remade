@@ -16,7 +16,9 @@ use crate::tile::arrow::{self, ArrowInstance};
 use crate::tile::symbol;
 use crate::tile::select::ANCESTOR_DEPTH;
 use tilecodec::mamaps::body::{Body, GEOM_LINE, GEOM_POINT, GEOM_POLYGON};
-use tilecodec::mamaps::dict::{LAYER_BUILDINGS, LAYER_EARTH, LAYER_ROADS, LAYER_TRAFFIC};
+use tilecodec::mamaps::dict::{
+    LAYER_BUILDINGS, LAYER_EARTH, LAYER_JUNCTION, LAYER_ROADS, LAYER_TRAFFIC,
+};
 
 /// The shallowest zoom the traffic overlay is tessellated at.
 ///
@@ -166,6 +168,16 @@ pub struct ShapedLabel {
 /// rather than one per feature or one per tile: those three are push constants, so features that
 /// agree on all of them can share a draw, and features that disagree cannot. Most roads in a tile
 /// are ordinary two-way streets, so the split is usually into very few meshes.
+///
+/// # Lane connectors ride this too
+///
+/// A connector through a junction is the same asphalt with the same markings — it is the
+/// carriageway continued across the intersection — so it is this type on the same pipeline in the
+/// same pass, not a fourth mesh kind with a fourth pass. It differs only in what it pushes:
+/// [`lanes`](Self::lanes) 1 and [`oneway`](Self::oneway) set, always, because a connector is one
+/// lane of traffic in one direction whatever the feature carries. Its own
+/// [`layer_index`](Self::layer_index) keeps it in its own mesh, so a connector never shares a draw
+/// with a road.
 pub struct CarriagewayMesh {
     /// Index into the style's layer list, for the asphalt colour and the lane width ramp.
     pub layer_index: usize,
@@ -255,6 +267,10 @@ pub struct TileMesh {
     /// The road carriageways in this tile: the road surfaces the lane markings are painted on,
     /// one mesh per distinct set of road-shape push inputs. Empty below the carriageway layer's
     /// zoom window, and on any tile with no roads.
+    ///
+    /// Also carries the lane connectors through junctions, which are the same surface continued
+    /// across an intersection — see [`CarriagewayMesh`]. Empty of those on every tile that has no
+    /// junction layer, which today is all of them.
     pub carriageways: Vec<CarriagewayMesh>,
     /// The tile's driving convention says the line between opposing streams is yellow (the
     /// Americas) rather than white — `Push.misc.z`.
@@ -441,21 +457,33 @@ pub fn build_toggled(
                         if feature.geom_type != GEOM_LINE {
                             continue;
                         }
-                        let oneway = feature.is_oneway();
-                        // Most roads carry no `lanes` tag at all, and a zero lane count would push
-                        // a zero width and draw nothing. OSM's own reading of an untagged road is
-                        // one lane each way, which is also what makes the centre line appear.
-                        let lanes = match feature.lane_count {
-                            0 => {
-                                if oneway {
-                                    1
-                                } else {
-                                    2
+                        // A lane connector is one lane of traffic through a junction, by
+                        // construction: the tiler emits one feature per connector, already
+                        // sampled. So its shape is not read off the feature the way a road's is.
+                        // One-way because a single stream has no opposing direction to be
+                        // separated from, which is what suppresses the centre line; the split is
+                        // then meaningless, exactly as it is on a one-way road.
+                        let (lanes, oneway, split) = if layer.source_layer_id == LAYER_JUNCTION {
+                            (1, true, 0.0)
+                        } else {
+                            let oneway = feature.is_oneway();
+                            // Most roads carry no `lanes` tag at all, and a zero lane count would
+                            // push a zero width and draw nothing. OSM's own reading of an untagged
+                            // road is one lane each way, which is also what makes the centre line
+                            // appear.
+                            let lanes = match feature.lane_count {
+                                0 => {
+                                    if oneway {
+                                        1
+                                    } else {
+                                        2
+                                    }
                                 }
-                            }
-                            count => count,
+                                count => count,
+                            };
+                            let split = split_t(tile, layer, feature_index, lanes, left_hand);
+                            (lanes, oneway, split)
                         };
-                        let split = split_t(tile, layer, feature_index, lanes, left_hand);
                         let at = match carriageways.iter().position(|m| {
                             m.layer_index == index
                                 && m.lanes == lanes
@@ -1448,6 +1476,151 @@ mod tests {
                 .carriageways
                 .is_empty(),
             "the deepest archive tile must build what it stands in for at z16",
+        );
+    }
+
+    // --- lane connectors through junctions ---------------------------------
+
+    /// A body of straight lane connectors on the junction layer, each an already-sampled polyline
+    /// of three points — the shape the tiler emits, with the bezier sampled on its side.
+    ///
+    /// The features deliberately carry a lane count of six and no one-way flag, neither of which a
+    /// connector can actually be. A connector's shape is fixed by what it *is*, so the tests below
+    /// prove the renderer imposes that rather than reading it off the feature.
+    fn junction_body(count: usize) -> Body {
+        use tilecodec::mamaps::body::{Feature, Layer as BodyLayer, Part, NAME_NONE, WINDING_OUTER};
+        let mut body = Body::new(4096);
+        let mut source = BodyLayer::new(LAYER_JUNCTION);
+        for i in 0..count {
+            let parts_offset = source.parts.len() as u32;
+            source.parts.push(Part {
+                coord_start: source.coords.len() as u32,
+                point_count: 3,
+                winding: WINDING_OUTER,
+            });
+            let y = 100 + i as i16 * 100;
+            source.coords.extend_from_slice(&[(0, y), (500, y), (1000, y + 200)]);
+            source.features.push(Feature {
+                kind: 0,
+                kind_detail: 0,
+                geom_type: GEOM_LINE,
+                flags: 0,
+                name_idx: NAME_NONE,
+                parts_offset,
+                part_count: 1,
+                transit_color: 0,
+                transit_ordinal: 0,
+                transit_lanes: 0,
+                transit_taper: 0,
+                lane_count: 6,
+            });
+        }
+        body.layers.push(source);
+        body
+    }
+
+    /// The `junction-connector` layer as a one-layer slice, matching [`carriageway_only`].
+    fn connector_only() -> &'static [Layer] {
+        let all = style::layers();
+        let at = all.iter().position(|l| l.id == "junction-connector").expect("the connector layer");
+        all.get(at..=at).expect("a one-layer slice")
+    }
+
+    /// A connector goes through the carriageway path as one lane of one-way traffic, whatever the
+    /// feature carries.
+    ///
+    /// Both halves matter to `road_surface.frag`, which reads them straight out of the push block.
+    /// One lane leaves no interior lane boundary, so no divider is dashed down the middle of it;
+    /// one-way suppresses the centre line, which is the point — a single stream of traffic has no
+    /// opposing direction to be separated from, and a connector painted with a centre line reads
+    /// as a two-way road through the junction.
+    ///
+    /// Twelve of them, which is what a plain 4-arm crossroads emits (4 approaches x 3 legal exits,
+    /// no U-turn). They must collapse to **one** draw: every connector agrees on all three push
+    /// inputs by construction, so the mesh key coalesces them however many there are. That is what
+    /// keeps a dense tile to one extra draw call rather than one per connector, and it is the
+    /// property that would silently regress if a connector ever gained a per-feature shape.
+    #[test]
+    fn a_connector_is_one_lane_of_one_way_traffic_whatever_the_feature_carries() {
+        let mesh = build(&junction_body(12), connector_only(), 17, 0, 0, false);
+        assert_eq!(mesh.carriageways.len(), 1, "a whole crossroads is one draw, not twelve");
+        let connector = &mesh.carriageways[0];
+        assert_eq!(connector.lanes, 1, "one lane wide, not the six the feature claims");
+        assert!(connector.oneway, "and one-way, so no centre line is painted down it");
+        assert!(connector.split.abs() < 1e-6, "the split is meaningless on a one-way");
+        assert!(mesh.meshes.is_empty(), "a connector is not a stroked layer mesh");
+
+        // The ribbon vertex, so the existing pipeline and shaders draw it with no new format.
+        assert_eq!(connector.vertices.len() % ribbon::FLOATS_PER_VERTEX, 0);
+        assert_eq!(connector.indices.len() % 3, 0);
+        let vertex_count = (connector.vertices.len() / ribbon::FLOATS_PER_VERTEX) as u32;
+        assert_eq!(vertex_count, 72, "twelve connectors, three points each, two vertices a point");
+        assert!(connector.indices.iter().all(|&i| i < vertex_count), "an index is out of range");
+        assert!(connector.vertices.iter().all(|f| f.is_finite()));
+    }
+
+    /// Roads and connectors never share a draw, and the connector draws second.
+    ///
+    /// They disagree on every push input, so they could not share one anyway. The order is the
+    /// point: a connector overlaps the road surface at the mouth of the junction, and the road
+    /// painting over the connector would leave the connector's edge lines cut off short of where
+    /// they meet the kerb.
+    #[test]
+    fn connectors_and_roads_are_separate_draws_with_the_connector_over_the_road() {
+        let layers = style::layers();
+        let roads = layers.iter().position(|l| l.id == "roads-carriageway").expect("roads");
+        let connectors =
+            layers.iter().position(|l| l.id == "junction-connector").expect("connectors");
+        assert!(roads < connectors, "layer order is draw order, and the connector goes on top");
+
+        let mut body = carriageway_body(&[(4, false)]);
+        body.layers.extend(junction_body(1).layers);
+        let mesh = build(&body, layers, 16, 0, 0, false);
+        assert_eq!(
+            mesh.carriageways
+                .iter()
+                .map(|c| (c.layer_index, c.lanes, c.oneway))
+                .collect::<Vec<_>>(),
+            vec![(roads, 4, false), (connectors, 1, true)],
+        );
+    }
+
+    /// **The only path that exists today.** No archive carries a junction layer, and none will
+    /// until the tiler writes one, so the connector layer has to cost exactly nothing on every tile
+    /// there is: no mesh, no vertex, no draw, and no road drawn any differently.
+    ///
+    /// Asserted as a byte-equality against the carriageway layer on its own, rather than as "no
+    /// connector mesh appeared". The weaker form would still pass if the connector layer had
+    /// quietly changed a road's lane count or split on its way past, which is the failure that
+    /// would actually reach a screen.
+    #[test]
+    fn a_tile_with_no_junction_layer_is_untouched_by_the_connector_layer() {
+        let layers = style::layers();
+        let connectors =
+            layers.iter().position(|l| l.id == "junction-connector").expect("connectors");
+
+        // Ordinary roads at the carriageway zoom, and nothing else — a v7 archive.
+        let body = carriageway_body(&[(4, false), (3, true), (0, false)]);
+        assert!(body.layer(LAYER_JUNCTION).is_none(), "the fixture has no junction layer");
+
+        let full = build(&body, layers, 16, 0, 0, false);
+        let roads_only = build(&body, carriageway_only(), 16, 0, 0, false);
+        assert_eq!(full.carriageways.len(), roads_only.carriageways.len(), "an extra draw");
+        for (a, b) in full.carriageways.iter().zip(&roads_only.carriageways) {
+            assert_ne!(a.layer_index, connectors, "a connector mesh out of thin air");
+            assert_eq!(a.lanes, b.lanes);
+            assert_eq!(a.oneway, b.oneway);
+            assert!((a.split - b.split).abs() < 1e-6, "split {} became {}", b.split, a.split);
+            assert_eq!(a.vertices, b.vertices, "the road geometry is byte-identical");
+            assert_eq!(a.indices, b.indices);
+        }
+
+        // And the published tile, which is the real thing and carries no junction layer either.
+        let published = build(&real(), layers, 11, 339, 770, false);
+        assert!(published.carriageways.is_empty(), "z11 is below the carriageway floor anyway");
+        assert!(
+            !published.meshes.iter().any(|m| m.layer_index == connectors),
+            "the connector layer must not draw a stroked mesh either",
         );
     }
 

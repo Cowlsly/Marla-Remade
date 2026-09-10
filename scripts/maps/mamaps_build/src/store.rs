@@ -552,7 +552,11 @@ impl Provenance {
                 | u16::from(layers.places) << 7
                 | u16::from(layers.poi) << 8
                 | u16::from(layers.transit) << 9
-                | u16::from(layers.traffic) << 10,
+                | u16::from(layers.traffic) << 10
+                // Appending a bit needs no `INDEX_VERSION` bump: `Store::open` compares the whole
+                // `Provenance`, and a spill written before this layer existed carries a zero here,
+                // so a run that wants `junction` sees a mismatch and refuses the reuse by itself.
+                | u16::from(layers.junction) << 11,
             coastline,
             transit_routes,
             graph,

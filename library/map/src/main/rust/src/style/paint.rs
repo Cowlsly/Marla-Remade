@@ -556,10 +556,11 @@ mod tests {
         // that says what it is, instead of nudging a basemap total that then no longer
         // states what the basemap is.
         //
-        // Basemap: 24 fills, 23 lines and 7 symbols. The 23 lines are the 12
-        // surface/link layers, 10 bridge layers (5 casings + 5 fills), and the app-only
-        // `roads-carriageway` layer that draws a road's surface and its lane markings at
-        // z16+: the authored
+        // Basemap: 24 fills, 24 lines and 7 symbols. The 24 lines are the 12
+        // surface/link layers, 10 bridge layers (5 casings + 5 fills), and the two app-only
+        // carriageway layers that draw a road's surface and its lane markings at z16+ —
+        // `roads-carriageway` and `junction-connector`, which continues the same surface
+        // through an intersection: the authored
         // `is_bridge` pass the flat file used to drop entirely, which is what hid the Bay
         // Bridge and the Golden Gate (task 8). The 7 symbols are the 4-deep places hierarchy
         // (country/region/locality/subplace) plus the 3 curved line labels WS-E added
@@ -582,7 +583,7 @@ mod tests {
         };
         assert_eq!(
             (count(LayerKind::Fill, false), count(LayerKind::Line, false), count(LayerKind::Symbol, false)),
-            (24, 23, 7),
+            (24, 24, 7),
             "the basemap layer set",
         );
         assert_eq!(
@@ -1367,12 +1368,13 @@ mod tests {
     fn the_flat_style_agrees_with_basemap_json() {
         let root = basemap();
         for layer in layers() {
-            // `roads-carriageway` is an app-only layer: it draws a road's surface with its lane
-            // markings painted on, which the authored `basemap.json` has no concept of. Its width,
-            // colour and lane semantics are all deliberately its own, so — like transit's width —
-            // it is pinned by its own test (`the_carriageway_is_gated_and_sized_by_the_lane`)
-            // rather than cross-checked here.
-            if layer.id == "roads-carriageway" {
+            // A carriageway layer is app-only: it draws a road's surface with its lane markings
+            // painted on, which the authored `basemap.json` has no concept of. Its width, colour
+            // and lane semantics are all deliberately its own, so — like transit's width — it is
+            // pinned by its own test (`the_carriageway_is_gated_and_sized_by_the_lane`) rather
+            // than cross-checked here. `junction-connector` is the same surface continued through
+            // an intersection and has no authored counterpart either.
+            if layer.carriageway {
                 continue;
             }
             let authored = authored_layer(&root, &layer.authored);
@@ -1602,7 +1604,7 @@ mod tests {
         }
     }
 
-    /// The road carriageway: `roads-carriageway` is the one layer drawn as a road surface, it only
+    /// The road carriageway: `roads-carriageway` is the road layer drawn as a surface, it only
     /// appears once the camera is close enough to make lane markings legible, and its width ramp is
     /// **one lane** rather than a whole road — the renderer multiplies by the feature's lane count,
     /// so a two-lane street and an eight-lane motorway come off the same ramp at their true widths.
@@ -1610,10 +1612,21 @@ mod tests {
     fn the_carriageway_is_gated_and_sized_by_the_lane() {
         let layer = find("roads-carriageway");
         assert!(layer.carriageway, "roads-carriageway must draw as a surface");
+        // Two layers draw a surface now. `road_carriageway_layer` no longer picks between them by
+        // declaration order — it names the roads source — so this list is pinning *draw order*,
+        // not the gate: the connector has to come second, or the road surface paints over the
+        // connector at the mouth of the junction and clips its edge lines short of the kerb.
         assert_eq!(
-            layers().iter().filter(|l| l.carriageway).count(),
-            1,
-            "exactly one layer draws road surfaces",
+            layers().iter().filter(|l| l.carriageway).map(|l| l.id.as_str()).collect::<Vec<_>>(),
+            vec!["roads-carriageway", "junction-connector"],
+            "the layers drawn as road surfaces, in draw order",
+        );
+        // And the gate really is order-independent: it still answers the road layer when the
+        // connector is put first, which is what `turn_arrows_are_gated_by_the_road_lane_layer`
+        // relies on and what the flag alone could not promise.
+        assert_eq!(
+            super::super::road_carriageway_layer(layers()).map(|l| l.id.as_str()),
+            Some("roads-carriageway"),
         );
         assert_eq!(layer.min_zoom, 16, "the dense lane detail is gated to high zoom");
         assert!(!layer.draws_at(15), "no carriageway at z15");
@@ -1622,11 +1635,56 @@ mod tests {
         // these, which is what makes the shader's marking widths land where a driver expects them.
         assert!(layer.width.at(16.0) > 0.0, "a lane has width at z16");
         assert!(layer.width.at(20.0) > layer.width.at(16.0), "and it widens zooming in");
+        // And it keeps growing to the top of the range, which is the one part of this ramp that is
+        // not a styling choice. `Ramp::at` clamps above the last stop, so a ramp ending at z20
+        // freezes the lane at 40 dp while the world keeps doubling — the painted lane's *ground*
+        // width then halves per zoom, reaching a quarter of a lane by z22, and `MAX_ZOOM` is 22.
+        // That put the baked connector offset, which is a fixed projected size, 4x outside the
+        // road surface at full zoom. The z22 stop continues the base-2 progression so a lane holds
+        // one true ground width from z20 up; drop it and the cliff comes back.
+        for zoom in [20.0_f64, 21.0] {
+            let (here, next) = (layer.width.at(zoom), layer.width.at(zoom + 1.0));
+            assert!(
+                (f64::from(next / here) - 2.0).abs() < 1e-6,
+                "a lane must double from z{zoom} to z{}: {here} then {next}",
+                zoom + 1.0,
+            );
+        }
         // The asphalt has to be darker than the off-white the shader paints its markings in, which
         // is why this is not the white `roads-major` fill it draws over.
         let road = find("roads-major");
         assert_ne!(layer.light, road.light);
         assert_ne!(layer.dark, road.dark);
+    }
+
+    /// A connector is the carriageway continued through a junction, so it has to be the same
+    /// asphalt at the same width over the same zoom range.
+    ///
+    /// Divergence here does not fail anything, it just looks wrong: a connector a shade off the
+    /// road it joins draws a visible seam across every intersection, and one off the road's lane
+    /// width steps in or out at the kerb. Cheaper to pin than to notice on a screenshot.
+    #[test]
+    fn a_connector_matches_the_carriageway_it_continues() {
+        let (road, connector) = (find("roads-carriageway"), find("junction-connector"));
+        assert_eq!(connector.light, road.light, "a connector is the same asphalt");
+        assert_eq!(connector.dark, road.dark);
+        for zoom in [16.0, 17.5, 18.0, 20.0, 22.0] {
+            let (a, b) = (connector.width.at(zoom), road.width.at(zoom));
+            assert!(
+                (a - b).abs() < 1e-6,
+                "a connector is one lane of the road's own width at z{zoom}: {a} vs {b}",
+            );
+        }
+        // The same floor as the road, which is the point: a connector one zoom later than the
+        // carriageway it joins would leave every junction as a hole in the road surface for a
+        // whole zoom level, and one zoom earlier would hang it in the air with nothing to join.
+        // The tiler's junction layer is emitted from this zoom to match.
+        assert_eq!(connector.min_zoom, road.min_zoom, "a connector appears with its road");
+        assert_eq!(connector.max_zoom, road.max_zoom, "and leaves with it");
+        // No kind or flag filter: the junction layer carries connectors and nothing else, so
+        // there is nothing to narrow it to.
+        assert!(connector.kind_ids.is_empty());
+        assert_eq!((connector.require_flags, connector.forbid_flags), (0, 0));
     }
 
     /// The `kind` values an authored filter admits, or empty for "any of them".

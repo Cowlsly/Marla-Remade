@@ -273,7 +273,13 @@ import androidx.compose.material3.LocalContentColor
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.SolidColor
+import androidx.compose.ui.graphics.StrokeCap
+import androidx.compose.ui.graphics.StrokeJoin
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.graphics.vector.PathBuilder
+import androidx.compose.ui.graphics.vector.path
+import androidx.compose.ui.unit.dp
 import com.vayunmathur.library.util.NavBackStack
 import com.vayunmathur.library.util.NavKey
 
@@ -1049,6 +1055,152 @@ fun IconRoundaboutLeft(modifier: Modifier = Modifier, tint: Color = LocalContent
 @Composable
 fun IconRoundaboutRight(modifier: Modifier = Modifier, tint: Color = LocalContentColor.current) =
     AppIcon(Icons.Filled.RoundaboutRight, "Roundabout", modifier, tint)
+
+// --- Lane guidance ---
+// A real OSM `turn:lanes` lane can permit several movements at once. Road
+// signage draws that as one shaft carrying one head per permitted direction,
+// so these are built here rather than composed from the single-turn glyphs
+// above: stacking two full-size arrows in the same cell reads as a smudge.
+// Material has no combined-lane glyphs, so the paths are authored directly.
+
+private const val LANE_SHAFT_X = 12f
+private const val LANE_STROKE_WIDTH = 2.2f
+
+/** Where the branches leave the shaft. Every branch starts here so they fan out together. */
+private const val LANE_FORK_Y = 15f
+
+private enum class LaneBranch { LEFT, SLIGHT_LEFT, RIGHT, SLIGHT_RIGHT }
+
+private fun ImageVector.Builder.laneStroke(pathBuilder: PathBuilder.() -> Unit) =
+    path(
+        stroke = SolidColor(Color.Black),
+        strokeLineWidth = LANE_STROKE_WIDTH,
+        strokeLineCap = StrokeCap.Round,
+        strokeLineJoin = StrokeJoin.Round,
+        pathBuilder = pathBuilder,
+    )
+
+/** Arrowhead as a filled triangle: the tip plus the two base corners. */
+private fun ImageVector.Builder.laneHead(
+    tipX: Float,
+    tipY: Float,
+    baseAx: Float,
+    baseAy: Float,
+    baseBx: Float,
+    baseBy: Float,
+) = path(fill = SolidColor(Color.Black)) {
+    moveTo(tipX, tipY)
+    lineTo(baseAx, baseAy)
+    lineTo(baseBx, baseBy)
+    close()
+}
+
+private fun laneVector(
+    name: String,
+    through: Boolean,
+    branches: List<LaneBranch>,
+): ImageVector {
+    val builder = ImageVector.Builder(
+        name = name,
+        defaultWidth = 24.dp,
+        defaultHeight = 24.dp,
+        viewportWidth = 24f,
+        viewportHeight = 24f,
+    )
+    // A through lane runs the shaft up to its own head; otherwise it stops at
+    // the fork so the branches are the only thing carrying a head.
+    builder.laneStroke {
+        moveTo(LANE_SHAFT_X, 21f)
+        verticalLineTo(if (through) 7f else LANE_FORK_Y)
+    }
+    if (through) builder.laneHead(LANE_SHAFT_X, 2f, 15.2f, 7.4f, 8.8f, 7.4f)
+    branches.forEach { branch ->
+        when (branch) {
+            LaneBranch.RIGHT -> {
+                builder.laneStroke {
+                    moveTo(LANE_SHAFT_X, LANE_FORK_Y)
+                    quadTo(LANE_SHAFT_X, 9.5f, 18f, 9.5f)
+                }
+                builder.laneHead(22f, 9.5f, 18f, 6.5f, 18f, 12.5f)
+            }
+            LaneBranch.LEFT -> {
+                builder.laneStroke {
+                    moveTo(LANE_SHAFT_X, LANE_FORK_Y)
+                    quadTo(LANE_SHAFT_X, 9.5f, 6f, 9.5f)
+                }
+                builder.laneHead(2f, 9.5f, 6f, 12.5f, 6f, 6.5f)
+            }
+            LaneBranch.SLIGHT_RIGHT -> {
+                builder.laneStroke {
+                    moveTo(LANE_SHAFT_X, LANE_FORK_Y)
+                    quadTo(LANE_SHAFT_X, 10.5f, 16.5f, 7.5f)
+                }
+                builder.laneHead(20.2f, 5f, 18.2f, 10f, 14.8f, 5f)
+            }
+            LaneBranch.SLIGHT_LEFT -> {
+                builder.laneStroke {
+                    moveTo(LANE_SHAFT_X, LANE_FORK_Y)
+                    quadTo(LANE_SHAFT_X, 10.5f, 7.5f, 7.5f)
+                }
+                builder.laneHead(3.8f, 5f, 5.8f, 10f, 9.2f, 5f)
+            }
+        }
+    }
+    return builder.build()
+}
+
+private val LaneThroughLeft by lazy {
+    laneVector("LaneThroughLeft", through = true, branches = listOf(LaneBranch.LEFT))
+}
+private val LaneThroughRight by lazy {
+    laneVector("LaneThroughRight", through = true, branches = listOf(LaneBranch.RIGHT))
+}
+private val LaneThroughSlightLeft by lazy {
+    laneVector("LaneThroughSlightLeft", through = true, branches = listOf(LaneBranch.SLIGHT_LEFT))
+}
+private val LaneThroughSlightRight by lazy {
+    laneVector("LaneThroughSlightRight", through = true, branches = listOf(LaneBranch.SLIGHT_RIGHT))
+}
+private val LaneLeftRight by lazy {
+    laneVector("LaneLeftRight", through = false, branches = listOf(LaneBranch.LEFT, LaneBranch.RIGHT))
+}
+private val LaneThroughLeftRight by lazy {
+    laneVector(
+        "LaneThroughLeftRight",
+        through = true,
+        branches = listOf(LaneBranch.LEFT, LaneBranch.RIGHT),
+    )
+}
+
+@Composable
+fun IconLaneThroughLeft(modifier: Modifier = Modifier, tint: Color = LocalContentColor.current) =
+    AppIcon(LaneThroughLeft, "Straight or left lane", modifier, tint)
+
+@Composable
+fun IconLaneThroughRight(modifier: Modifier = Modifier, tint: Color = LocalContentColor.current) =
+    AppIcon(LaneThroughRight, "Straight or right lane", modifier, tint)
+
+@Composable
+fun IconLaneThroughSlightLeft(
+    modifier: Modifier = Modifier,
+    tint: Color = LocalContentColor.current,
+) = AppIcon(LaneThroughSlightLeft, "Straight or slight left lane", modifier, tint)
+
+@Composable
+fun IconLaneThroughSlightRight(
+    modifier: Modifier = Modifier,
+    tint: Color = LocalContentColor.current,
+) = AppIcon(LaneThroughSlightRight, "Straight or slight right lane", modifier, tint)
+
+@Composable
+fun IconLaneLeftRight(modifier: Modifier = Modifier, tint: Color = LocalContentColor.current) =
+    AppIcon(LaneLeftRight, "Left or right lane", modifier, tint)
+
+@Composable
+fun IconLaneThroughLeftRight(
+    modifier: Modifier = Modifier,
+    tint: Color = LocalContentColor.current,
+) = AppIcon(LaneThroughLeftRight, "Straight, left or right lane", modifier, tint)
 
 // --- PDF editor tools ---
 @Composable

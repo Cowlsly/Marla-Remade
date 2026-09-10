@@ -22,7 +22,7 @@
 //!
 //! # Size
 //!
-//! Eleven layers, ~108 kinds and 41 details, at a length byte each: under 2 KiB as measured,
+//! Twelve layers, ~108 kinds and 41 details, at a length byte each: under 2 KiB as measured,
 //! which is what lets the header, the dictionary and the root index share one 16 KiB opening
 //! read.
 
@@ -37,11 +37,12 @@ pub const NONE: u16 = 0;
 
 /// The layers this format carries, in draw order.
 ///
-/// A layer's id **is** its index here. Eleven: the seven the style draws, plus `places`
-/// (labels), `poi` (icons), `transit` (reserved by v2; populated when transit lands) and
+/// A layer's id **is** its index here. Twelve: the seven the style draws, plus `places`
+/// (labels), `poi` (icons), `transit` (reserved by v2; populated when transit lands),
 /// `traffic` (v4: one line per drivable component segment, recoloured live from a pushed
-/// id→speed table — geometry from the v6 routing graph, not the basemap). `u8` ids fit with
-/// room to spare.
+/// id→speed table — geometry from the v6 routing graph, not the basemap) and `junction`
+/// (v7: one line per lane connector through an intersection, also from the routing graph).
+/// `u8` ids fit with room to spare.
 pub const LAYERS: &[&str] = &[
     "earth",
     "water",
@@ -54,6 +55,7 @@ pub const LAYERS: &[&str] = &[
     "poi",
     "transit",
     "traffic",
+    "junction",
 ];
 
 pub const LAYER_EARTH: u8 = 0;
@@ -71,6 +73,17 @@ pub const LAYER_TRANSIT: u8 = 9;
 /// recolour it from a live id→speed push. Excluded from the basemap style: it draws only
 /// when the traffic overlay is enabled.
 pub const LAYER_TRAFFIC: u8 = 10;
+/// v7. One `GEOM_LINE` feature per **lane connector** through an intersection: the sampled
+/// centreline a single lane follows from an approach to an exit, built from the same v6
+/// routing graph `traffic` reads. Excluded from the basemap style — it draws only where the
+/// carriageway surface does, which is why its `min_zoom` is deep.
+///
+/// Added inside v7 rather than under a version bump of its own. Appending to [`LAYERS`]
+/// changes the dictionary every archive carries and [`Dictionary::check_matches_schema`]
+/// compares the whole table on open, so this is only safe because v7 was committed but never
+/// built or shipped — there is no deployed reader to refuse. Any layer appended after a v7
+/// archive exists must bump the format, the way v4 did for `traffic`.
+pub const LAYER_JUNCTION: u8 = 11;
 
 /// Every `kind` value the schema can emit, id 1 upward. Index 0 is [`NONE`].
 ///
@@ -465,7 +478,8 @@ mod tests {
         assert_eq!(d.layer_name(LAYER_POI), Some("poi"), "v2's icon layer");
         assert_eq!(d.layer_name(LAYER_TRANSIT), Some("transit"), "v2 reserves transit");
         assert_eq!(d.layer_name(LAYER_TRAFFIC), Some("traffic"), "v4's live traffic layer");
-        assert_eq!(d.layer_name(11), None, "past the table");
+        assert_eq!(d.layer_name(LAYER_JUNCTION), Some("junction"), "v7's lane connectors");
+        assert_eq!(d.layer_name(12), None, "past the table");
     }
 
     /// A duplicate would give one value two ids, so half the features carrying it would filter

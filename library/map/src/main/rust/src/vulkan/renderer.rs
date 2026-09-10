@@ -55,10 +55,11 @@ struct ResidentTile {
     /// Uploaded with the rest of the tile; coloured per frame from the pushed table so a new
     /// speed reading never re-uploads or re-tessellates them.
     traffic: Vec<TrafficBuffers>,
-    /// The road carriageways in this tile, one per distinct set of road-shape push inputs. Drawn
-    /// in their own pass ([`Renderer::record_carriageways`]) through the ribbon pipeline, not the
-    /// flat layer loop, because the vertex format and three of the push slots differ. Empty below
-    /// the carriageway layer's zoom window.
+    /// The road carriageways in this tile, one per distinct set of road-shape push inputs, plus
+    /// the lane connectors through its junctions. Drawn in their own pass
+    /// ([`Renderer::record_carriageways`]) through the ribbon pipeline, not the flat layer loop,
+    /// because the vertex format and three of the push slots differ. Empty below the carriageway
+    /// layer's zoom window.
     carriageways: Vec<CarriagewayBuffers>,
     /// The tile's driving convention paints the line between opposing streams yellow rather than
     /// white. A property of the tile, not of a road, so it rides here and not on each mesh.
@@ -1692,6 +1693,13 @@ impl Renderer {
     /// Draw the road carriageways: each resident tile's road surfaces, with the lane markings
     /// painted on by `road_surface.frag` as a function of the across-road coordinate rather than
     /// drawn as geometry.
+    ///
+    /// The lane connectors through junctions draw here too, and are why this loop needs no
+    /// connector-specific branch: a connector is the same asphalt on the same pipeline, differing
+    /// only in the lane count and one-way flag it pushes, both of which already ride on the mesh.
+    /// It belongs in this pass rather than beside it because it is carriageway — it has to sit
+    /// under the buildings and the deferred symbols exactly as the roads it joins do, and a second
+    /// pass could only get that right by accident.
     ///
     /// Its own pass rather than a branch of the layer loop because the ribbon is a different vertex
     /// format on a different pipeline, and because three of its push slots mean something else —

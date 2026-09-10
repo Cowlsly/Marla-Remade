@@ -265,15 +265,18 @@ fn run(
             "no --transit-routes given, so `transit` is empty; its lines come from GTFS, not the .pbf"
         );
     }
-    // The same asymmetry once more, for the traffic layer's graph source: the flag without the
-    // layer is a mistake worth stopping for, the layer without the flag is a legitimate build of
-    // an archive with no traffic overlay.
-    if run.graph.is_some() && !layers.traffic {
-        return Err("--graph was given but the traffic layer is not selected".to_string());
+    // The same asymmetry once more, for the two layers the routing graph feeds: the flag without
+    // either layer is a mistake worth stopping for, a layer without the flag is a legitimate build
+    // of an archive with no traffic overlay and no lane connectors.
+    if run.graph.is_some() && !layers.traffic && !layers.junction {
+        return Err(
+            "--graph was given but neither the traffic nor the junction layer is selected"
+                .to_string(),
+        );
     }
-    if run.graph.is_none() && layers.traffic {
+    if run.graph.is_none() && (layers.traffic || layers.junction) {
         println!(
-            "no --graph given, so `traffic` is empty; its lines come from the v6 routing graph, not the .pbf"
+            "no --graph given, so `traffic` and `junction` are empty; their lines come from the v6 routing graph, not the .pbf"
         );
     }
     let provenance = store::Provenance::of(
@@ -330,6 +333,12 @@ fn run(
             println!(
                 "  including {} drivable component segment(s) for the traffic layer",
                 stats.traffic_segments,
+            );
+        }
+        if stats.junction_connectors > 0 {
+            println!(
+                "  including {} lane connector(s) for the junction layer",
+                stats.junction_connectors,
             );
         }
         if stats.corridor_promotions > 0 {
@@ -535,6 +544,11 @@ fn derive_build_id(
             h = h.wrapping_mul(0x100_0000_01b3);
         }
     };
+    // Revision 13: a `junction` layer (id 11) is baked from the same v6 routing graph — one line
+    // per lane connector through an intersection. Folded into `.mamaps` v7 rather than bumping the
+    // format, because no v7 archive has been built, but the layer set moves and the dictionary
+    // every archive carries gains an entry, so a warm cache must miss.
+    //
     // Revision 12: `.mamaps` v4. A `traffic` layer (id 10) is baked from the v6 routing graph —
     // one line per drivable component segment, each carrying its packed `component_id` in the
     // body id table — and `FORMAT_VERSION` bumps 3->4. The layer set and the format both move, so
@@ -582,7 +596,7 @@ fn derive_build_id(
     // Revision 3: road `min_zoom` is decided per corridor (`corridor`), and place
     // `kind_detail` carries the reference basemap's 0-15 population rank rather than a
     // three-step one (`schema::places::rank_of`).
-    eat(b"mamaps_build/12");
+    eat(b"mamaps_build/13");
     eat(input.to_string_lossy().as_bytes());
     if let Ok(meta) = std::fs::metadata(input) {
         eat(&meta.len().to_le_bytes());
@@ -604,12 +618,14 @@ fn derive_build_id(
         u8::from(layers.poi),
         u8::from(layers.transit),
         u8::from(layers.traffic),
+        u8::from(layers.junction),
         min_zoom,
         max_zoom,
         // A build with a transit-routes file and one without carry different layers from the
         // same `.pbf`, and readers cache byte ranges under `(url, build_id)`.
         u8::from(transit_routes),
-        // Likewise a build with a graph carries the whole traffic layer that one without does not.
+        // Likewise a build with a graph carries the whole traffic and junction layers that one
+        // without does not.
         u8::from(graph),
     ]);
     eat(&simplification.to_le_bytes());

@@ -138,6 +138,8 @@ pub struct Stats {
     pub transit_routes: u64,
     /// Drivable component segments emitted into the `traffic` layer from the v6 routing graph.
     pub traffic_segments: u64,
+    /// Lane connectors emitted into the `junction` layer from the same graph.
+    pub junction_connectors: u64,
     /// Road ways whose `min_zoom` was pulled shallower to match their corridor.
     pub corridor_promotions: u64,
     pub rings: RingStats,
@@ -825,6 +827,13 @@ pub fn extract(
         stats.traffic_segments = schema::traffic::stream_graph(dir, &mut sink)?;
         stats.features += stats.traffic_segments;
         println!("  {} drivable component segment(s)", stats.traffic_segments);
+        // The `junction` layer rides the same graph: a lane connector is built from the junction
+        // node's own incident edges, so there is nothing to read that the traffic pass did not
+        // already need. `conventions` decides which side of a road the direction of travel sits
+        // on, and is borrowed here because it is moved into the store below.
+        stats.junction_connectors = schema::junction::stream_junctions(dir, &conventions, &mut sink)?;
+        stats.features += stats.junction_connectors;
+        println!("  {} lane connector(s)", stats.junction_connectors);
     }
     let store = sink.finish(spill_path)?;
     let store = store.with_conventions(conventions);

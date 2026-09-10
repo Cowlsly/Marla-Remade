@@ -26,6 +26,7 @@ use tilecodec::mamaps::dict;
 pub mod boundaries;
 pub mod buildings;
 pub mod earth;
+pub mod junction;
 pub mod land;
 pub mod places;
 pub mod poi;
@@ -164,6 +165,7 @@ pub struct Layers {
     pub poi: bool,
     pub transit: bool,
     pub traffic: bool,
+    pub junction: bool,
 }
 
 impl Layers {
@@ -185,6 +187,9 @@ impl Layers {
             // its data source (`--graph`) rather than an error: an archive with no traffic layer
             // is an obvious "no overlay", not the silent disaster an archive with no mainland is.
             traffic: true,
+            // v7's lane connectors, from the same `--graph` and empty without it for the same
+            // reason.
+            junction: true,
         }
     }
 
@@ -201,6 +206,7 @@ impl Layers {
             poi: false,
             transit: false,
             traffic: false,
+            junction: false,
         }
     }
 
@@ -220,10 +226,12 @@ impl Layers {
                 "poi" => layers.poi = true,
                 "transit" => layers.transit = true,
                 "traffic" => layers.traffic = true,
+                "junction" => layers.junction = true,
                 other => {
                     return Err(format!(
                         "unknown layer `{other}`; this generator produces earth, water, buildings, \
-                         roads, boundaries, landcover, landuse, places, poi, transit and traffic"
+                         roads, boundaries, landcover, landuse, places, poi, transit, traffic and \
+                         junction"
                     ))
                 }
             }
@@ -248,6 +256,7 @@ impl Layers {
             dict::LAYER_POI => self.poi,
             dict::LAYER_TRANSIT => self.transit,
             dict::LAYER_TRAFFIC => self.traffic,
+            dict::LAYER_JUNCTION => self.junction,
             _ => false,
         }
     }
@@ -421,7 +430,7 @@ mod tests {
             Layers { water: true, ..Layers::none() },
         );
         assert_eq!(
-            Layers::parse("earth,water,buildings,roads,boundaries,landcover,landuse,places,poi,transit,traffic")
+            Layers::parse("earth,water,buildings,roads,boundaries,landcover,landuse,places,poi,transit,traffic,junction")
                 .expect("all"),
             Layers::all(),
         );

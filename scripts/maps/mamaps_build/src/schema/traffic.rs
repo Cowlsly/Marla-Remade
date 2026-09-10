@@ -100,7 +100,7 @@ const RANK_BLOCK_BYTES: usize = 64;
 /// `type_` bit 6: this edge stores no geometry of its own; its twin runs `target -> source`.
 const REVERSE_GEOMETRY_FLAG: u8 = 0x40;
 /// The low six bits of `type_` are the road class.
-const ROAD_TYPE_MASK: u8 = 0x3F;
+pub(crate) const ROAD_TYPE_MASK: u8 = 0x3F;
 /// A `target_delta` of `i16::MIN` means the true target is in the escape table.
 const TARGET_DELTA_ESCAPE: i16 = i16::MIN;
 /// A `dist` u24 of all-ones means the true target and distance are in the escape table.
@@ -149,11 +149,14 @@ fn edge_bitmap_bytes(edges: u64) -> usize {
 /// The subset of the v6 graph reader the traffic layer needs: node coordinates, edge targets and
 /// types, and big-edge geometry. Names, distances and speed limits are skipped — the server reads
 /// those; the archive carries only geometry and the id.
-struct Graph {
+///
+/// `pub(crate)` because [`crate::schema::junction`] reads the same four files for the same reason
+/// and must not carry a second copy of this byte layout.
+pub(crate) struct Graph {
     nodes: Vec<u8>,
     edges: Vec<u8>,
     inter: Vec<u8>,
-    node_count: u64,
+    pub(crate) node_count: u64,
     escape_first_off: usize,
     escapes_off: usize,
     // intermediate.bin sub-table offsets
@@ -164,7 +167,7 @@ struct Graph {
 }
 
 impl Graph {
-    fn load(dir: &Path) -> Result<Graph> {
+    pub(crate) fn load(dir: &Path) -> Result<Graph> {
         let read = |name: &str| -> Result<Vec<u8>> {
             let path = dir.join(name);
             std::fs::read(&path)
@@ -260,24 +263,24 @@ impl Graph {
     }
 
     /// A node's `(lat_e7, lon_e7)`.
-    fn node(&self, n: u64) -> (i32, i32) {
+    pub(crate) fn node(&self, n: u64) -> (i32, i32) {
         let base = (n as usize) * 12;
         (i32_at(&self.nodes, base), i32_at(&self.nodes, base + 4))
     }
 
     /// A node's first outgoing edge index. The sentinel record (index `node_count`) holds
     /// `edge_count`, so `edge_ptr(n+1)` is always defined for a real node `n`.
-    fn edge_ptr(&self, n: u64) -> u32 {
+    pub(crate) fn edge_ptr(&self, n: u64) -> u32 {
         u32_at(&self.nodes, (n as usize) * 12 + 8)
     }
 
-    fn edge_type(&self, idx: u32) -> u8 {
+    pub(crate) fn edge_type(&self, idx: u32) -> u8 {
         self.edges[(idx as usize) * 7 + 5]
     }
 
     /// The target node of edge `idx` whose source is `s`, decoding the escape table when the
     /// delta or distance is sentinelled.
-    fn edge_target(&self, idx: u32, s: u32) -> Result<u32> {
+    pub(crate) fn edge_target(&self, idx: u32, s: u32) -> Result<u32> {
         let base = (idx as usize) * 7;
         let delta = i16_at(&self.edges, base);
         let dist = (self.edges[base + 2] as u32)
@@ -304,7 +307,7 @@ impl Graph {
     }
 
     /// Does edge `idx` store an interior-point blob?
-    fn geom_contains(&self, idx: u32) -> bool {
+    pub(crate) fn geom_contains(&self, idx: u32) -> bool {
         let byte = self.geom_present_off + (idx as usize) / 8;
         self.inter[byte] & (1u8 << (idx % 8)) != 0
     }
@@ -342,7 +345,7 @@ impl Graph {
 
     /// The full polyline of edge `idx` in canonical `source -> target` order, as `(lat_e7, lon_e7)`
     /// vertices: the source node, any stored interior points, then the target node.
-    fn polyline(&self, idx: u32, s: u32, t: u32) -> Vec<(i32, i32)> {
+    pub(crate) fn polyline(&self, idx: u32, s: u32, t: u32) -> Vec<(i32, i32)> {
         let (slat, slon) = self.node(s as u64);
         let (tlat, tlon) = self.node(t as u64);
         let mut out = Vec::with_capacity(4);
@@ -370,7 +373,7 @@ impl Graph {
     /// Is there a drivable edge running `from -> to`? Used to tell a straight two-way chord (which
     /// has such a twin and is emitted only in the canonical direction) from a one-way (which has
     /// none and is always emitted).
-    fn has_drivable_twin(&self, from: u32, to: u32) -> Result<bool> {
+    pub(crate) fn has_drivable_twin(&self, from: u32, to: u32) -> Result<bool> {
         let lo = self.edge_ptr(from as u64);
         let hi = self.edge_ptr(from as u64 + 1);
         for e in lo..hi {
@@ -444,19 +447,21 @@ pub fn stream_graph(dir: &Path, sink: &mut Sink) -> Result<u64> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
-    /// Build a minimal but real v6 graph on disk and stream it, so the reader is exercised against
-    /// the exact byte layout the contract specifies rather than a mock.
-    ///
-    /// Four nodes in a square. Edges:
-    /// * 0: node0 -> node1, one-way, curved (one interior point). Emitted: 2 segments.
-    /// * 1: node1 -> node2, straight two-way (canonical, `1 < 2`). Emitted: 1 segment.
-    /// * 2: node2 -> node1, straight two-way (non-canonical twin of edge 1). Skipped.
-    /// * 3: node2 -> node3, pedestrian (type 10). Skipped (not drivable).
-    struct GraphFixture {
-        dir: std::path::PathBuf,
+    /// One directed edge of a synthetic graph.
+    pub(crate) struct EdgeSpec {
+        pub source: u32,
+        pub target: u32,
+        pub type_: u8,
+        /// Interior points as `(d_lat, d_lon)` deltas, chained from the source. An empty list is a
+        /// straight chord, which is how the presence bitmap says "this edge stores no geometry".
+        pub interior: Vec<(i16, i16)>,
+    }
+
+    pub(crate) struct GraphFixture {
+        pub dir: std::path::PathBuf,
     }
     impl Drop for GraphFixture {
         fn drop(&mut self) {
@@ -464,28 +469,35 @@ mod tests {
         }
     }
 
-    fn write_fixture() -> GraphFixture {
+    /// Write a real v6 graph to a fresh temp directory, byte for byte as the contract specifies.
+    ///
+    /// `pub(crate)` because [`crate::schema::junction`] reads the same four files and tests against
+    /// the same layout; a second writer would be a second chance to disagree with `osm_ingest`.
+    ///
+    /// `edges` must be grouped by `source` ascending, which is what makes `nodes.bin`'s `edge_ptr`
+    /// a CSR row pointer. `lanes` is `(edge_idx, masks)` ascending, and writes no `lanes.bin` at
+    /// all when empty — which is the common shape of a real graph.
+    pub(crate) fn write_graph(
+        tag: &str,
+        coords: &[(i32, i32)],
+        edges: &[EdgeSpec],
+        lanes: &[(u32, Vec<u16>)],
+    ) -> GraphFixture {
         use std::sync::atomic::{AtomicU64, Ordering};
         static NEXT: AtomicU64 = AtomicU64::new(0);
         let dir = std::env::temp_dir().join(format!(
-            "mamaps_traffic_{}_{}",
+            "mamaps_{tag}_{}_{}",
             std::process::id(),
             NEXT.fetch_add(1, Ordering::Relaxed),
         ));
         std::fs::create_dir_all(&dir).expect("mkdir");
 
-        // Nodes at e7 coordinates. (lat_e7, lon_e7).
-        let coords: [(i32, i32); 4] = [
-            (35_000_000, -120_000_000),
-            (35_000_000, -119_990_000),
-            (35_010_000, -119_990_000),
-            (35_010_000, -120_000_000),
-        ];
-        // edge_ptr per node, then the sentinel. node0 owns edge 0; node1 owns edge 1; node2 owns
-        // edges 2,3; node3 owns none.
-        let edge_ptr: [u32; 5] = [0, 1, 2, 4, 4];
-        let node_count = 4u64;
-        let edge_count = 4u64;
+        let node_count = coords.len() as u64;
+        let edge_count = edges.len() as u64;
+        assert!(
+            edges.windows(2).all(|w| w[0].source <= w[1].source),
+            "a CSR row pointer needs the edges grouped by source",
+        );
 
         // metadata.bin (40 bytes).
         let mut meta = Vec::new();
@@ -497,90 +509,126 @@ mod tests {
         meta.extend_from_slice(&0u64.to_le_bytes()); // named_edges
         std::fs::write(dir.join("metadata.bin"), &meta).expect("meta");
 
-        // nodes.bin: NodeRec[node_count + 1], 12 bytes each.
+        // nodes.bin: NodeRec[node_count + 1], 12 bytes each. `edge_ptr` is the index of the first
+        // edge leaving each node, and the sentinel holds `edge_count`.
         let mut nodes = Vec::new();
-        for n in 0..node_count as usize {
-            nodes.extend_from_slice(&coords[n].0.to_le_bytes());
-            nodes.extend_from_slice(&coords[n].1.to_le_bytes());
-            nodes.extend_from_slice(&edge_ptr[n].to_le_bytes());
+        for (n, (lat, lon)) in coords.iter().enumerate() {
+            let first = edges.iter().position(|e| e.source as usize >= n).unwrap_or(edges.len());
+            nodes.extend_from_slice(&lat.to_le_bytes());
+            nodes.extend_from_slice(&lon.to_le_bytes());
+            nodes.extend_from_slice(&(first as u32).to_le_bytes());
         }
-        // Sentinel: coords don't matter, edge_ptr == edge_count.
         nodes.extend_from_slice(&0i32.to_le_bytes());
         nodes.extend_from_slice(&0i32.to_le_bytes());
-        nodes.extend_from_slice(&edge_ptr[node_count as usize].to_le_bytes());
+        nodes.extend_from_slice(&(edge_count as u32).to_le_bytes());
         std::fs::write(dir.join("nodes.bin"), &nodes).expect("nodes");
 
-        // edges.bin. EdgeRec[edge_count], 7 bytes: i16 target_delta, u24 dist, u8 type_, u8 speed.
-        let edge = |source: i64, target: i64, type_: u8| -> [u8; 7] {
-            let delta = (target - source) as i16;
-            let mut r = [0u8; 7];
-            r[0..2].copy_from_slice(&delta.to_le_bytes());
+        // edges.bin: EdgeRec[edge_count], 7 bytes: i16 target_delta, u24 dist, u8 type_, u8 speed.
+        let mut raw = Vec::new();
+        for e in edges {
+            let delta = (i64::from(e.target) - i64::from(e.source)) as i16;
+            raw.extend_from_slice(&delta.to_le_bytes());
             // dist: a plausible non-escape value.
-            r[2] = 0x10;
-            r[3] = 0x00;
-            r[4] = 0x00;
-            r[5] = type_;
-            r[6] = 50; // speed_limit
-            r
-        };
-        let mut edges = Vec::new();
-        edges.extend_from_slice(&edge(0, 1, 1)); // edge 0: 0->1 motorway, curved (geometry set below)
-        edges.extend_from_slice(&edge(1, 2, 7)); // edge 1: 1->2 residential, straight
-        edges.extend_from_slice(&edge(2, 1, 7)); // edge 2: 2->1 residential, straight (twin of 1)
-        edges.extend_from_slice(&edge(2, 3, 10)); // edge 3: 2->3 pedestrian, not drivable
-        // Pad EdgeRec section to an 8-byte boundary.
-        while edges.len() % 8 != 0 {
-            edges.push(0);
+            raw.extend_from_slice(&[0x10, 0x00, 0x00]);
+            raw.push(e.type_);
+            raw.push(50); // speed_limit
         }
-        // escape_first: u32[escape_blocks], all zero (no escapes). escape_blocks = ceil(4/1024)+1 = 2.
-        let escape_blocks = edge_count.div_ceil(ESCAPE_BLOCK) + 1;
-        for _ in 0..escape_blocks {
-            edges.extend_from_slice(&0u32.to_le_bytes());
+        // Pad the EdgeRec section to an 8-byte boundary, then the all-zero escape block index.
+        while raw.len() % 8 != 0 {
+            raw.push(0);
         }
-        // No escape rows, no names.
-        std::fs::write(dir.join("edges.bin"), &edges).expect("edges");
+        for _ in 0..(edge_count.div_ceil(ESCAPE_BLOCK) + 1) {
+            raw.extend_from_slice(&0u32.to_le_bytes());
+        }
+        std::fs::write(dir.join("edges.bin"), &raw).expect("edges");
 
-        // intermediate.bin. Only edge 0 carries geometry (one interior point).
-        // blob: one interior point for edge 0, as (i16 d_lat, i16 d_lon) from node0.
+        // intermediate.bin: the interior-point blob, then the presence bitmap, the coarse offsets
+        // and the per-geometry-edge within-block offsets, then the geometry-edge count.
         let mut blob = Vec::new();
-        // interior point roughly midway, curving off the straight chord.
-        let d_lat: i16 = 3_000; // +0.0003 deg
-        let d_lon: i16 = -5_000; // -0.0005 deg
-        blob.extend_from_slice(&d_lat.to_le_bytes());
-        blob.extend_from_slice(&d_lon.to_le_bytes());
-        // Pad blob to a multiple of 4 (already 4).
-        let blob_bytes = blob.len();
-
-        // geometry presence bitmap over edge_count edges: only edge 0 present.
-        let present_len = edge_count.div_ceil(8) as usize; // 1 byte
-        let rank_words = edge_count.div_ceil(512) as usize + 1; // 1 rank word
-        let mut bitmap = Vec::new();
-        for _ in 0..rank_words {
-            bitmap.extend_from_slice(&0u64.to_le_bytes()); // rank[0] = 0
-        }
-        let mut present = vec![0u8; present_len];
-        present[0] |= 1 << 0; // edge 0 present
-        bitmap.extend_from_slice(&present);
-
-        // coarse: u64[g_edges.div_ceil(32) + 1] = u64[2]. g_edges = 1.
-        let g_edges = 1u64;
-        let mut coarse = Vec::new();
-        coarse.extend_from_slice(&0u64.to_le_bytes());
-        coarse.extend_from_slice(&0u64.to_le_bytes());
-        // within: u16[g_edges + 1] = u16[2]: offset of geom 0 (=0) and end (=blob_bytes).
         let mut within = Vec::new();
-        within.extend_from_slice(&0u16.to_le_bytes());
-        within.extend_from_slice(&(blob_bytes as u16).to_le_bytes());
+        let mut present = vec![0u8; edge_count.div_ceil(8).max(1) as usize];
+        let mut g_edges = 0u64;
+        for (idx, e) in edges.iter().enumerate() {
+            if e.interior.is_empty() {
+                continue;
+            }
+            present[idx / 8] |= 1 << (idx % 8);
+            within.extend_from_slice(&(blob.len() as u16).to_le_bytes());
+            for (d_lat, d_lon) in &e.interior {
+                blob.extend_from_slice(&d_lat.to_le_bytes());
+                blob.extend_from_slice(&d_lon.to_le_bytes());
+            }
+            g_edges += 1;
+        }
+        within.extend_from_slice(&(blob.len() as u16).to_le_bytes());
 
-        let mut inter = Vec::new();
-        inter.extend_from_slice(&blob);
-        inter.extend_from_slice(&bitmap);
-        inter.extend_from_slice(&coarse);
+        let mut inter = blob;
+        // One rank word per RANK_BLOCK_BYTES of presence, all zero: every fixture here is well
+        // under 512 edges, so the rank of the first block is 0 and the rest is a popcount scan.
+        for _ in 0..(edge_count.div_ceil(512) + 1) {
+            inter.extend_from_slice(&0u64.to_le_bytes());
+        }
+        inter.extend_from_slice(&present);
+        for _ in 0..(g_edges.div_ceil(INTERMEDIATE_BLOCK) + 1) {
+            inter.extend_from_slice(&0u64.to_le_bytes());
+        }
         inter.extend_from_slice(&within);
         inter.extend_from_slice(&g_edges.to_le_bytes());
         std::fs::write(dir.join("intermediate.bin"), &inter).expect("inter");
 
+        // lanes.bin: [u32 n][(u32 edge_idx, u32 blob_off) x (n + 1)][u16 blob]. Sparse, so a graph
+        // with no tagged turn lanes carries no file at all.
+        if !lanes.is_empty() {
+            let mut index = Vec::new();
+            let mut masks = Vec::new();
+            index.extend_from_slice(&(lanes.len() as u32).to_le_bytes());
+            for (idx, lane_masks) in lanes {
+                index.extend_from_slice(&idx.to_le_bytes());
+                index.extend_from_slice(&(masks.len() as u32).to_le_bytes());
+                for m in lane_masks {
+                    masks.extend_from_slice(&m.to_le_bytes());
+                }
+            }
+            // The trailing sentinel exists only to give the last edge an end offset.
+            index.extend_from_slice(&u32::MAX.to_le_bytes());
+            index.extend_from_slice(&(masks.len() as u32).to_le_bytes());
+            index.extend_from_slice(&masks);
+            std::fs::write(dir.join("lanes.bin"), &index).expect("lanes");
+        }
+
         GraphFixture { dir }
+    }
+
+    /// The traffic layer's own graph: four nodes in a square. Edges:
+    /// * 0: node0 -> node1, one-way, curved (one interior point). Emitted: 2 segments.
+    /// * 1: node1 -> node2, straight two-way (canonical, `1 < 2`). Emitted: 1 segment.
+    /// * 2: node2 -> node1, straight two-way (non-canonical twin of edge 1). Skipped.
+    /// * 3: node2 -> node3, pedestrian (type 10). Skipped (not drivable).
+    fn write_fixture() -> GraphFixture {
+        let coords: [(i32, i32); 4] = [
+            (35_000_000, -120_000_000),
+            (35_000_000, -119_990_000),
+            (35_010_000, -119_990_000),
+            (35_010_000, -120_000_000),
+        ];
+        let edge = |source, target, type_, interior: &[(i16, i16)]| EdgeSpec {
+            source,
+            target,
+            type_,
+            interior: interior.to_vec(),
+        };
+        write_graph(
+            "traffic",
+            &coords,
+            &[
+                // An interior point roughly midway, curving off the straight chord.
+                edge(0, 1, 1, &[(3_000, -5_000)]),
+                edge(1, 2, 7, &[]),
+                edge(2, 1, 7, &[]),
+                edge(2, 3, 10, &[]),
+            ],
+            &[],
+        )
     }
 
     #[test]
