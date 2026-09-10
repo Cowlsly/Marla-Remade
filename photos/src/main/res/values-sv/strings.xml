@@ -1,4 +1,5 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <string name="color">Färg</string>
+    <string name="recent">Senaste</string>
 </resources>
