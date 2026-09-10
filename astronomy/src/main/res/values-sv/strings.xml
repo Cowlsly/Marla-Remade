@@ -2,4 +2,5 @@
 <resources>
     <string name="display">Visning</string>
     <string name="use_current_location">Använd aktuell plats</string>
+    <string name="settings">Inställningar</string>
 </resources>
