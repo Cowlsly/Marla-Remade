@@ -71,4 +71,75 @@
     <string name="until_date">Qədər: <xliff:g id="date" example="31 Dekabr 2025">%1$s</xliff:g></string>
     <string name="repeat_mode_pattern">Nümunə</string>
     <string name="repeat_mode_dates">Xüsusi tarixlər</string>
+    <string name="repeat_on_dates">Bu tarixlərdə təkrarlanır</string>
+    <string name="repeat_date_first"><xliff:g id="date" example="Bazar ertəsi, Dekabr 1">%1$s</xliff:g> (tədbir tarixi)</string>
+    <string name="repeat_add_date">Tarix əlavə edin</string>
+    <plurals name="repeat_dates_summary">
+        <item quantity="one"><xliff:g id="count" example="1">%1$d</xliff:g> tarixində</item>
+        <item quantity="other"><xliff:g id="count" example="4">%1$d</xliff:g> tarixlərində</item>
+    </plurals>
+    <string name="new_local_calendar">Yeni yerli təqvim</string>
+    <string name="calendar_name">Təqvim adı</string>
+    <string name="choose_color">Rəng seçin:</string>
+    <string name="change_color_for">Bu təqvim üçün rəng dəyişdirin</string>
+    <string name="change_color">Rəngi dəyişin</string>
+    <string name="delete_calendar">Təqvimi silin</string>
+    <string name="delete_calendar_confirm">Bu təqvimi silmək istədiyinizə əminsiniz? Bu, təqvimdəki bütün tədbirləri siləcək.</string>
+    <string name="delete_calendar_name_confirm">\"<xliff:g id="calendar_name" example="Work">%1$s</xliff:g>\" elementini silmək istədiyinizə əminsinizmi? Bu, təqvimdəki bütün tədbirləri siləcək.</string>
+    <string name="rename_calendar">Təqvimin adını dəyişin</string>
+    <string name="new_name">Yeni ad</string>
+    <string name="create_a_calendar">Təqvim yaradın</string>
+    <string name="choose_timezone">Saat qurşağını seçin</string>
+    <string name="open_location_in_navigation">Açıq yer</string>
+    <string name="delete_this_event">Bu tədbiri silin</string>
+    <string name="delete_all_events">Bütün tədbirləri silin</string>
+    <string name="create_new_calendar">+ Yeni təqvim yaradın</string>
+    <string name="import_ics_file">.ics faylını idxal edin</string>
+    <string name="export_ics_file">.ics faylını ixrac edin</string>
+    <string name="export_events_to_ics_file">Hadisələri .ics faylına ixrac edin</string>
+    <string name="export_ics_success">Təqvim ixrac edildi</string>
+    <string name="export_ics_failed_format">Təqvim ixracı uğursuz oldu: <xliff:g id="error" example="permission denied">%1$s</xliff:g></string>
+    <string name="import_events">Tədbirləri idxal edin</string>
+    <string name="import_to_existing_calendar">Mövcud təqvimə idxal edin</string>
+    <string name="create_new_calendar_option">Yeni təqvim yaradın</string>
+    <string name="no_events_found">Heç bir tədbir tapılmadı</string>
+    <plurals name="import_summary">
+        <item quantity="one"><xliff:g id="count" example="5">%1$d</xliff:g> hadisəsi idxal üçün hazırdır</item>
+        <item quantity="other"><xliff:g id="count" example="5">%1$d</xliff:g> tədbirləri idxal etməyə hazırdır</item>
+    </plurals>
+    <string name="default_layout">Standart Düzən</string>
+    <string name="search_countries">Ölkələri axtarın</string>
+    <string name="choose_language">Dil seçin</string>
+    <string name="holiday_calendars">Bayram təqvimləri</string>
+    <string name="please_grant_calendar_permission">Təqvimə icazə verin</string>
+    <string name="import_events_from_ics_files">Hadisələri .ics fayllarından idxal edin</string>
+    <string name="theme">Mövzu</string>
+    <string name="add_public_holidays_for_countries">Ölkələr üçün rəsmi tətillər əlavə edin</string>
+    <string name="reminder_at_time_of_event">Hadisə baş verən vaxt</string>
+    <string name="default_reminders">Defolt xatırlatmalar</string>
+    <string name="default_reminders_description">Xatırlatmalar <xliff:g id="calendar_name" example="Work">%1$s</xliff:g> daxilindəki yeni tədbirlərə avtomatik olaraq əlavə edildi.</string>
+    <string name="apply_to_existing_events">Mövcud tədbirlərə tətbiq edin</string>
+    <plurals name="reminder_days_before">
+        <item quantity="one"><xliff:g id="count" example="1">%1$d</xliff:g> gün əvvəl</item>
+        <item quantity="other"><xliff:g id="count" example="3">%1$d</xliff:g> gün əvvəl</item>
+    </plurals>
+    <plurals name="reminder_hours_before">
+        <item quantity="one"><xliff:g id="count" example="1">%1$d</xliff:g> saat əvvəl</item>
+        <item quantity="other"><xliff:g id="count" example="5">%1$d</xliff:g> saat əvvəl</item>
+    </plurals>
+    <plurals name="reminder_minutes_before">
+        <item quantity="one"><xliff:g id="count" example="1">%1$d</xliff:g> dəqiqə əvvəl</item>
+        <item quantity="other"><xliff:g id="count" example="15">%1$d</xliff:g> dəqiqə əvvəl</item>
+    </plurals>
+    <string name="rrule_daily">Gündəlik</string>
+    <plurals name="rrule_every_days">
+        <item quantity="one">Hər <xliff:g id="count" example="1">%1$d</xliff:g> gün</item>
+        <item quantity="other">Hər <xliff:g id="count" example="3">%1$d</xliff:g> gün</item>
+    </plurals>
+    <string name="rrule_weekly">Həftəlik</string>
+    <plurals name="rrule_every_weeks">
+        <item quantity="one">Hər <xliff:g id="count" example="1">%1$d</xliff:g> həftə</item>
+        <item quantity="other">Hər <xliff:g id="count" example="2">%1$d</xliff:g> həftə</item>
+    </plurals>
+    <string name="rrule_monthly">Aylıq</string>
 </resources>
