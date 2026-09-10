@@ -1,3 +1,7 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
+    <string name="hide">Dölj</string>
+    <string name="copy">Kopiera</string>
+    <string name="enable">Aktivera</string>
+    <string name="bookmarks">Bokmärken</string>
 </resources>
