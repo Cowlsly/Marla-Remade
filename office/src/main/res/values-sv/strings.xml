@@ -8,4 +8,13 @@
     <string name="general">Allmänt</string>
     <string name="all">Alla</string>
     <string name="share_link">Dela länk</string>
+    <string name="normal">Normal</string>
+    <string name="heading_1">Rubrik 1</string>
+    <string name="heading_2">Rubrik 2</string>
+    <string name="heading_3">Rubrik 3</string>
+    <string name="left">Vänster</string>
+    <string name="center">Centrera</string>
+    <string name="right">Höger</string>
+    <string name="justify">Justera</string>
+    <string name="clear_formatting">Rensa formatering</string>
 </resources>
