@@ -4,4 +4,6 @@
     <string name="create">Skapa</string>
     <string name="search">Sök</string>
     <string name="today">I dag</string>
+    <string name="theme_light">Ljust</string>
+    <string name="theme_dark">Mörkt</string>
 </resources>
