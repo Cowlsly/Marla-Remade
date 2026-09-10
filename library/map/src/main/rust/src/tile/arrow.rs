@@ -62,10 +62,10 @@ pub fn arrow_for(mask: u16) -> Option<TurnArrow> {
 /// One arrow to draw for one lane, in tile-local coordinates.
 ///
 /// The anchor sits on the road's centreline a short way back from the junction; the renderer then
-/// pushes it sideways onto its lane of the carriageway, which is why the instance carries `ordinal`
-/// and `count` rather than a baked offset (the offset is a screen measurement that changes with
-/// zoom). `angle` is the road's heading at the end, in radians, so the glyph points the way the
-/// traffic flows.
+/// pushes it sideways onto its lane of the carriageway, which is why the instance carries
+/// `ordinal`, `count` and `fan_offset` rather than a baked offset (the offset is a screen
+/// measurement that changes with zoom). `angle` is the road's heading at the end, in radians, so
+/// the glyph points the way the traffic flows.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ArrowInstance {
     /// Anchor on the centreline, tile-local (extent units).
@@ -75,15 +75,32 @@ pub struct ArrowInstance {
     /// This lane's index from the left, and the lane count, for the lateral fan.
     pub ordinal: u8,
     pub count: u8,
+    /// The shift that puts this direction's fan on its own half of the carriageway, in lane
+    /// widths, positive to the right of travel — see [`fan_offset`]. Zero on a one-way and
+    /// wherever the road's total lane count is unknown, which keeps the fan centred.
+    pub fan_offset: f32,
     /// The glyph to draw.
     pub arrow: TurnArrow,
+    /// Absolute heading of the exit this lane leads to, radians, when the archive knows it.
+    ///
+    /// The angle the glyph actually bends through is `exit_angle - angle`, which is whatever the
+    /// two roads happen to meet at. `None` means the archive carries only the `LANE_*` class and
+    /// no geometry, and the glyph falls back to [`nominal_turn_angle`]; see [`turn_angle`].
+    pub exit_angle: Option<f32>,
+    /// Traffic keeps left on this tile, which is the side a U-turn is made from — see
+    /// [`nominal_turn_angle`], the only angle the convention changes.
+    pub left_hand: bool,
 }
 
 /// How far back from the junction the arrows sit, as a fraction of the road's final segment.
 ///
 /// Placed a little inside the tile rather than exactly on the node so the whole arrow — which draws
 /// ahead of its anchor — stays on the carriageway instead of overhanging the junction.
-const SETBACK: f32 = 0.5;
+///
+/// Must stay well under `0.5`. At exactly a half the forward and backward anchors are both the
+/// midpoint of a two-point line, so the two directions' arrows land on the same spot pointing
+/// opposite ways and draw as a single shaft with a head at each end.
+const SETBACK: f32 = 0.15;
 
 /// Place one arrow per lane for a road's turn masks, in tile-local coordinates.
 ///
@@ -92,20 +109,71 @@ const SETBACK: f32 = 0.5;
 /// it (i.e. back down the way). A lane whose mask has no indication draws nothing. The `ordinal`
 /// runs left to right in the direction of travel, matching the mask order the archive stores.
 ///
+/// `total_lanes` is the road's whole lane count (both directions) and `left_hand` its driving
+/// convention; together they decide which half of the carriageway a direction's fan sits on, via
+/// [`fan_offset`]. `total_lanes` of zero means the road carries no `lanes` tag.
+///
 /// Returns an empty vec for a line too short to have a heading, so a degenerate clip draws nothing
 /// rather than an arrow pointing nowhere.
-pub fn place_arrows(line: &[(f32, f32)], turns: &LaneTurns) -> Vec<ArrowInstance> {
+pub fn place_arrows(
+    line: &[(f32, f32)],
+    turns: &LaneTurns,
+    total_lanes: u8,
+    left_hand: bool,
+) -> Vec<ArrowInstance> {
     let mut out = Vec::new();
     if line.len() < 2 {
         return out;
     }
-    place_dir(line, &turns.forward, false, &mut out);
-    place_dir(line, &turns.backward, true, &mut out);
+    place_dir(line, &turns.forward, false, total_lanes, left_hand, &mut out);
+    place_dir(line, &turns.backward, true, total_lanes, left_hand, &mut out);
     out
 }
 
+/// How far this direction's fan sits from the road's centreline, in lane widths, positive to the
+/// right of the direction of travel.
+///
+/// A direction's lanes occupy one *half* of the carriageway, not the middle of it: under right-hand
+/// traffic they are the rightmost `count` of the road's `total_lanes` and under left-hand traffic
+/// the leftmost. [`place_arrows`] builds the fan centred on the road's centreline, so this is the
+/// shift that moves it onto that half — half the lanes the other direction takes, signed by the
+/// convention. Without it every arrow on a two-way road is drawn a full half-carriageway into the
+/// oncoming lanes, in either convention.
+///
+/// Zero, and so no shift at all, whenever the direction *is* the whole road: a one-way carries
+/// every lane, and a road whose `lanes` tag is missing or disagrees with the mask list has no
+/// trustworthy total to measure a half from. Both keep the centred fan, which is where every arrow
+/// sat before the convention reached this pass.
+pub fn fan_offset(count: u8, total_lanes: u8, left_hand: bool) -> f32 {
+    let spare = f32::from(total_lanes.saturating_sub(count)) / 2.0;
+    if left_hand {
+        -spare
+    } else {
+        spare
+    }
+}
+
+/// Where this arrow's lane sits across the road, in lane widths from the centreline, positive to
+/// the right of the direction of travel.
+///
+/// The fan — `ordinal + 0.5 - count / 2` — spreads a direction's lanes about its own centre, and
+/// [`fan_offset`] moves that centre onto the half of the carriageway the direction occupies.
+/// Multiplying by one lane's width in device pixels is the whole of the renderer's lateral
+/// placement, which is why it lives here as a pure function rather than in the Android-only pass.
+pub fn lane_centre(inst: &ArrowInstance) -> f32 {
+    let count = f32::from(inst.count.max(1));
+    f32::from(inst.ordinal) + 0.5 - count / 2.0 + inst.fan_offset
+}
+
 /// One direction's arrows. `backward` reverses which end and which way the heading points.
-fn place_dir(line: &[(f32, f32)], masks: &[u16], backward: bool, out: &mut Vec<ArrowInstance>) {
+fn place_dir(
+    line: &[(f32, f32)],
+    masks: &[u16],
+    backward: bool,
+    total_lanes: u8,
+    left_hand: bool,
+    out: &mut Vec<ArrowInstance>,
+) {
     if masks.is_empty() {
         return;
     }
@@ -122,22 +190,36 @@ fn place_dir(line: &[(f32, f32)], masks: &[u16], backward: bool, out: &mut Vec<A
     let angle = dy.atan2(dx);
     let anchor = (tip.0 - dx * SETBACK, tip.1 - dy * SETBACK);
     let count = masks.len().min(u8::MAX as usize) as u8;
+    let fan_offset = fan_offset(count, total_lanes, left_hand);
     for (i, &mask) in masks.iter().enumerate().take(u8::MAX as usize) {
         if let Some(arrow) = arrow_for(mask) {
-            out.push(ArrowInstance { anchor, angle, ordinal: i as u8, count, arrow });
+            let ordinal = i as u8;
+            out.push(ArrowInstance {
+                anchor,
+                angle,
+                ordinal,
+                count,
+                arrow,
+                exit_angle: None,
+                fan_offset,
+                left_hand,
+            });
         }
     }
 }
 
-/// The extra rotation an arrow's glyph takes on top of the road heading, in radians, so the arrow
-/// points where the manoeuvre leads rather than straight down the lane.
+/// The angle the glyph bends through for an indication, in radians, when nothing better is known.
 ///
-/// A single straight-arrow shape ([`unit_arrow_triangles`]) is rotated by `heading + turn_offset`
-/// rather than carrying a distinct shape per indication — far less geometry and impossible to get
-/// subtly wrong per variant. Left turns are **negative** (tile-space `y` grows southward, so the
-/// left of an eastbound road is `-y`, reached by a negative rotation); right turns positive. Through
-/// is straight, reverse is a half turn, and the merges lean like their slight cousins.
-pub fn turn_offset(arrow: TurnArrow) -> f32 {
+/// Left turns are **negative** (tile-space `y` grows southward, so the left of an eastbound road is
+/// `-y`); right turns positive. These are nominal — one representative angle per `LANE_*` class —
+/// and are only the fallback: [`turn_angle`] prefers the real geometric angle wherever the lane's
+/// exit heading is known, because a junction's arms meet at whatever angles the roads happen to
+/// take, not at a handful of tidy multiples of thirty degrees.
+///
+/// Every angle here is fixed by its `LANE_*` class alone except the U-turn, which is the one
+/// manoeuvre the driving convention turns around: it crosses the oncoming stream to the far kerb,
+/// so it hooks left where traffic keeps right and right where traffic keeps left.
+pub fn nominal_turn_angle(arrow: TurnArrow, left_hand: bool) -> f32 {
     use std::f32::consts::PI;
     match arrow {
         TurnArrow::Through => 0.0,
@@ -147,38 +229,134 @@ pub fn turn_offset(arrow: TurnArrow) -> f32 {
         TurnArrow::SlightRight => PI / 6.0,
         TurnArrow::Right => PI / 2.0,
         TurnArrow::SharpRight => 3.0 * PI / 4.0,
-        TurnArrow::Reverse => PI,
+        TurnArrow::Reverse => {
+            if left_hand {
+                PI
+            } else {
+                -PI
+            }
+        }
         TurnArrow::MergeLeft => -PI / 6.0,
         TurnArrow::MergeRight => PI / 6.0,
     }
 }
 
-/// A straight arrow pointing along `+x`, as a triangle list in unit coordinates (roughly `-1..1`).
+/// How far this arrow bends, in radians: the measured turn from the lane's approach heading to the
+/// exit it leads to, or [`nominal_turn_angle`] when the archive carries no exit heading.
 ///
-/// Three triangles — a rectangular shaft and a triangular head — nine vertices. The renderer
-/// rotates, scales to a screen size and positions each copy; keeping the shape here (and pure)
-/// makes it a unit test rather than a screenshot. Vertices are `(x, y)` pairs, three per triangle.
-pub const UNIT_ARROW_TRIANGLES: [(f32, f32); 9] = [
-    // Shaft, two triangles.
-    (-0.8, -0.15),
-    (0.2, -0.15),
-    (0.2, 0.15),
-    (-0.8, -0.15),
-    (0.2, 0.15),
-    (-0.8, 0.15),
-    // Head, one triangle, tip at +x.
-    (0.2, -0.4),
-    (1.0, 0.0),
-    (0.2, 0.4),
-];
+/// Wrapped to `(-pi, pi]`, so a manoeuvre is always drawn as the short way round.
+pub fn turn_angle(inst: &ArrowInstance) -> f32 {
+    match inst.exit_angle {
+        Some(exit) => wrap_pi(exit - inst.angle),
+        None => nominal_turn_angle(inst.arrow, inst.left_hand),
+    }
+}
 
-/// A straight arrow pointing along `+x`, as a triangle list in unit coordinates (roughly `-1..1`).
+/// Wrap an angle into `(-pi, pi]`.
+fn wrap_pi(angle: f32) -> f32 {
+    use std::f32::consts::PI;
+    let wrapped = (angle + PI).rem_euclid(2.0 * PI) - PI;
+    if wrapped <= -PI {
+        wrapped + 2.0 * PI
+    } else {
+        wrapped
+    }
+}
+
+// This glyph and the lane-guidance glyphs in
+// `library/ui/src/main/java/com/vayunmathur/library/ui/Icons.kt` (`laneVector`) are deliberate
+// counterparts: the same shaft-then-bend-then-filled-head construction over the same `LANE_*`
+// vocabulary, so a manoeuvre reads the same painted on the road as it does in the guidance bar.
+// One is Compose vector paths and the other is Rust tessellation, so there is no code to share
+// across that boundary — the two have to be changed together or the map and the bar drift apart.
+
+/// Half-width of the arrow's shaft, in unit-arrow coordinates.
+const SHAFT_HALF_WIDTH: f32 = 0.15;
+/// The back of the shaft: the straight run `TAIL_X..BEND_START_X` lies along the lane.
+const TAIL_X: f32 = -0.9;
+/// Where the bend leaves the straight run — the counterpart of `LANE_FORK_Y` in `Icons.kt`.
+const BEND_START_X: f32 = 0.0;
+/// Arc length of the bend, the same whatever the angle, so every glyph carries the same amount of
+/// paint and a sharper turn curls tighter instead of reaching further across the road.
+const BEND_LEN: f32 = 0.55;
+const HEAD_LEN: f32 = 0.45;
+const HEAD_HALF_WIDTH: f32 = 0.4;
+/// Pieces the bend is sampled into. Six is smooth at the ~9dp the arrow draws at, and is fixed
+/// rather than angle-dependent so a glyph's vertex count is the constant [`ARROW_VERTS`].
+const BEND_SEGMENTS: usize = 6;
+
+/// Vertices in one arrow's triangle list, whatever angle it bends through.
 ///
-/// A borrow of [`UNIT_ARROW_TRIANGLES`]. It used to build a fresh `Vec` per call, and
-/// [`arrow_verts`] calls it once **per arrow per frame**, so a junction-dense tile heap-allocated
-/// and freed a nine-element vector hundreds of times a frame for a constant.
-pub fn unit_arrow_triangles() -> &'static [(f32, f32)] {
-    &UNIT_ARROW_TRIANGLES
+/// One quad (six vertices) per centreline segment, plus the head's three. Constant so the renderer
+/// can size a tile's whole vertex buffer up front — this used to be `UNIT_ARROW_TRIANGLES.len()`
+/// back when a single straight shape was merely rotated.
+pub const ARROW_VERTS: usize = 6 * (BEND_SEGMENTS + 1) + 3;
+
+/// The glyph's centreline for a bend of `turn` radians: the tail, then the bend sampled into
+/// [`BEND_SEGMENTS`] pieces, each point paired with the path's heading there.
+///
+/// The bend is a circular arc of fixed length [`BEND_LEN`] and therefore radius `BEND_LEN / |turn|`
+/// — tangent to the lane where it starts and pointing exactly along `turn` where it ends, for any
+/// `turn` at all rather than for a handful of buckets. As `turn` approaches zero the radius
+/// diverges and the arc becomes the straight continuation of the shaft, which is taken directly.
+fn unit_centreline(turn: f32) -> [((f32, f32), f32); BEND_SEGMENTS + 2] {
+    let mut pts = [((TAIL_X, 0.0), 0.0f32); BEND_SEGMENTS + 2];
+    let sweep = turn.abs();
+    let side = if turn < 0.0 { -1.0 } else { 1.0 };
+    // Below this an arc of this length departs from its chord by far less than a pixel, and
+    // `BEND_LEN / sweep` is on its way to overflowing; draw the straight run it is indistinguishable
+    // from instead.
+    let straight = sweep < 1e-3;
+    let radius = if straight { 0.0 } else { BEND_LEN / sweep };
+    for i in 0..=BEND_SEGMENTS {
+        let t = i as f32 / BEND_SEGMENTS as f32;
+        let u = sweep * t;
+        let point = if straight {
+            (BEND_START_X + BEND_LEN * t, 0.0)
+        } else {
+            (BEND_START_X + radius * u.sin(), side * radius * (1.0 - u.cos()))
+        };
+        pts[i + 1] = (point, side * u);
+    }
+    pts
+}
+
+/// One edge of the shaft at a centreline point, offset perpendicular to the heading there.
+fn shaft_edge(((x, y), heading): ((f32, f32), f32), half_width: f32) -> (f32, f32) {
+    (x - heading.sin() * half_width, y + heading.cos() * half_width)
+}
+
+/// The arrow as a triangle list in unit coordinates (roughly `-1..1`), running along `+x` — the
+/// direction of travel — and then bending through `turn` radians.
+///
+/// A left turn is therefore an L: it follows the lane and only then bends, the way a road-surface
+/// marking and the navigation lane bar both draw one. It is emphatically *not* a straight arrow
+/// aimed sideways across the road, which is what rotating a single fixed shape produced. `turn` is
+/// continuous, so every angle a junction can present is drawable.
+///
+/// Returned by value as a fixed-size array rather than a `Vec`: [`arrow_verts`] calls this once per
+/// arrow per frame, so it must not allocate. Vertices are `(x, y)`, three per triangle, with the
+/// head last in the order base, tip, base.
+pub fn unit_arrow_triangles(turn: f32) -> [(f32, f32); ARROW_VERTS] {
+    let mut out = [(0.0f32, 0.0f32); ARROW_VERTS];
+    let pts = unit_centreline(turn);
+    // The shaft, one quad per centreline segment. Both corners of a segment's end use that point's
+    // own heading, so consecutive quads share an edge exactly and the ribbon has no gap at a joint.
+    let mut n = 0;
+    for pair in pts.windows(2) {
+        let (a, b) = (pair[0], pair[1]);
+        let (al, ar) = (shaft_edge(a, -SHAFT_HALF_WIDTH), shaft_edge(a, SHAFT_HALF_WIDTH));
+        let (bl, br) = (shaft_edge(b, -SHAFT_HALF_WIDTH), shaft_edge(b, SHAFT_HALF_WIDTH));
+        out[n..n + 6].copy_from_slice(&[al, bl, br, al, br, ar]);
+        n += 6;
+    }
+    // The head: a filled triangle off the end of the bend, aimed along where the bend left off.
+    let ((ex, ey), heading) = pts[pts.len() - 1];
+    let (hc, hs) = (heading.cos(), heading.sin());
+    out[n] = (ex + hs * HEAD_HALF_WIDTH, ey - hc * HEAD_HALF_WIDTH);
+    out[n + 1] = (ex + hc * HEAD_LEN, ey + hs * HEAD_LEN);
+    out[n + 2] = (ex - hs * HEAD_HALF_WIDTH, ey + hc * HEAD_HALF_WIDTH);
+    out
 }
 
 /// Transform the unit arrow into tile-local triangle vertices for one placed arrow, appending
@@ -186,18 +364,17 @@ pub fn unit_arrow_triangles() -> &'static [(f32, f32)] {
 ///
 /// `scale` is tile-local units per unit-arrow coordinate (the arrow's screen size ÷ the tile's
 /// screen span); `lateral` is the sideways lane offset in the same tile-local units, applied
-/// perpendicular to the **road heading** so each lane's arrow sits over its lane; the glyph is
-/// rotated by `heading + turn_offset(arrow)` so it points where the lane leads. This is the exact
-/// math the renderer runs per frame, factored out so it is a unit test rather than a screenshot.
+/// perpendicular to the road heading so each lane's arrow sits over its lane. The glyph is rotated
+/// by the road heading alone — the manoeuvre is *built into* the shape by [`turn_angle`] rather
+/// than added to the rotation. This is the exact math the renderer runs per frame, factored out so
+/// it is a unit test rather than a screenshot.
 pub fn arrow_verts(inst: &ArrowInstance, scale: f32, lateral: f32, out: &mut Vec<f32>) {
     // Perpendicular to the road heading (left is -y in tile space), for the lane offset.
     let (rc, rs) = (inst.angle.cos(), inst.angle.sin());
     let (cx, cy) = (inst.anchor.0 - rs * lateral, inst.anchor.1 + rc * lateral);
-    let glyph = inst.angle + turn_offset(inst.arrow);
-    let (gc, gs) = (glyph.cos(), glyph.sin());
-    for &(ux, uy) in unit_arrow_triangles() {
-        let rx = ux * gc - uy * gs;
-        let ry = ux * gs + uy * gc;
+    for (ux, uy) in unit_arrow_triangles(turn_angle(inst)) {
+        let rx = ux * rc - uy * rs;
+        let ry = ux * rs + uy * rc;
         out.push(cx + rx * scale);
         out.push(cy + ry * scale);
     }
@@ -233,7 +410,7 @@ mod tests {
             forward: vec![LANE_LEFT, tilecodec::mamaps::body::LANE_NONE, LANE_THROUGH | LANE_RIGHT],
             backward: vec![],
         };
-        let arrows = place_arrows(&line, &turns);
+        let arrows = place_arrows(&line, &turns, 3, false);
         assert_eq!(arrows.len(), 2, "the unmarked middle lane draws nothing");
         assert!(arrows.iter().all(|a| a.angle.abs() < 1e-6), "eastbound heading is 0");
         assert!(arrows.iter().all(|a| a.count == 3), "the count is the whole lane set");
@@ -248,7 +425,7 @@ mod tests {
     fn backward_arrows_point_down_the_way_from_its_start() {
         let line = [(0.0, 0.0), (100.0, 0.0)];
         let turns = LaneTurns { forward: vec![], backward: vec![LANE_THROUGH] };
-        let arrows = place_arrows(&line, &turns);
+        let arrows = place_arrows(&line, &turns, 1, false);
         assert_eq!(arrows.len(), 1);
         // Heading toward the start of an eastbound way is due west: pi radians.
         assert!((arrows[0].angle.abs() - std::f32::consts::PI).abs() < 1e-6);
@@ -259,28 +436,251 @@ mod tests {
     #[test]
     fn a_degenerate_line_places_no_arrows() {
         let turns = LaneTurns { forward: vec![LANE_THROUGH], backward: vec![] };
-        assert!(place_arrows(&[(1.0, 1.0)], &turns).is_empty());
-        assert!(place_arrows(&[], &turns).is_empty());
+        assert!(place_arrows(&[(1.0, 1.0)], &turns, 1, false).is_empty());
+        assert!(place_arrows(&[], &turns, 1, false).is_empty());
         // Two coincident points have no direction.
-        assert!(place_arrows(&[(5.0, 5.0), (5.0, 5.0)], &turns).is_empty());
+        assert!(place_arrows(&[(5.0, 5.0), (5.0, 5.0)], &turns, 1, false).is_empty());
     }
 
-    /// The glyph shape is a whole number of triangles, and the turn offsets point left negative /
-    /// right positive with through straight — the sign convention the renderer rotates by.
+    /// The glyph runs *along* the lane before it bends, which is what makes a left turn read as a
+    /// left turn rather than as a straight arrow aimed across the road.
     #[test]
-    fn the_arrow_glyph_is_triangles_and_turns_have_the_right_sign() {
-        let tris = unit_arrow_triangles();
-        assert_eq!(tris.len() % 3, 0, "a triangle list is a multiple of three vertices");
-        assert!(!tris.is_empty());
-        // The head reaches furthest in +x, so the arrow points along its local +x axis.
-        let max_x = tris.iter().fold(f32::MIN, |m, &(x, _)| m.max(x));
-        assert!((max_x - 1.0).abs() < 1e-6, "the tip is at +x");
-        assert_eq!(turn_offset(TurnArrow::Through), 0.0);
-        assert!(turn_offset(TurnArrow::Left) < 0.0, "left is a negative rotation");
-        assert!(turn_offset(TurnArrow::Right) > 0.0, "right is a positive rotation");
-        assert!(turn_offset(TurnArrow::SharpLeft) < turn_offset(TurnArrow::Left), "sharper is more");
-        assert!(turn_offset(TurnArrow::SlightLeft) > turn_offset(TurnArrow::Left), "slighter is less");
-        assert!((turn_offset(TurnArrow::Reverse).abs() - std::f32::consts::PI).abs() < 1e-6);
+    fn the_glyph_runs_along_the_lane_and_then_bends() {
+        use std::f32::consts::PI;
+        // A through arrow is straight along +x with its tip at the far end and no sideways reach.
+        let straight = unit_arrow_triangles(0.0);
+        assert_eq!(straight.len() % 3, 0, "a triangle list is a multiple of three vertices");
+        let max_x = straight.iter().fold(f32::MIN, |m, &(x, _)| m.max(x));
+        assert!((max_x - 1.0).abs() < 1e-5, "the tip is at +x");
+        assert!(straight.iter().all(|&(_, y)| y.abs() < HEAD_HALF_WIDTH + 1e-5), "and it is straight");
+
+        // A left turn is an L. Its tail still lies on the lane axis pointing down the lane, and
+        // only the far end has swung out to -y; a rotated straight arrow would instead have swung
+        // its tail out to +y and crossed the road.
+        let left = unit_arrow_triangles(-PI / 2.0);
+        let tail_x = left.iter().fold(f32::MAX, |m, &(x, _)| m.min(x));
+        assert!((tail_x - TAIL_X).abs() < 1e-5, "the shaft starts behind the anchor, on the axis");
+        let tail_y = left
+            .iter()
+            .filter(|&&(x, _)| (x - TAIL_X).abs() < 1e-5)
+            .fold(0.0f32, |m, &(_, y)| m.max(y.abs()));
+        assert!(tail_y <= SHAFT_HALF_WIDTH + 1e-5, "the tail sits on the lane it leaves");
+        let tip = left[ARROW_VERTS - 2];
+        assert!(tip.0 > 0.0, "the arrow advances down the lane first");
+        assert!(tip.1 < -0.5, "and only then swings its head out to the left");
+    }
+
+    /// The bend is the angle it is given, whatever that angle is — the whole point of measuring the
+    /// junction rather than bucketing it.
+    #[test]
+    fn the_bend_takes_any_angle_a_junction_happens_to_have() {
+        for &turn in &[0.0f32, 0.07, -0.41, 0.83, -1.27, 2.6, -3.0] {
+            let glyph = unit_arrow_triangles(turn);
+            assert_eq!(glyph.len(), ARROW_VERTS, "the vertex count does not vary with the angle");
+            let (base_a, tip, base_b) =
+                (glyph[ARROW_VERTS - 3], glyph[ARROW_VERTS - 2], glyph[ARROW_VERTS - 1]);
+            let mid = ((base_a.0 + base_b.0) / 2.0, (base_a.1 + base_b.1) / 2.0);
+            let aimed = (tip.1 - mid.1).atan2(tip.0 - mid.0);
+            assert!((aimed - turn).abs() < 1e-4, "asked for {turn}, head aims along {aimed}");
+        }
+    }
+
+    /// And it tracks that angle continuously: two junctions a hair apart draw glyphs a hair apart,
+    /// which a bucketed angle could not do.
+    #[test]
+    fn a_slightly_different_junction_draws_a_slightly_different_arrow() {
+        let near = unit_arrow_triangles(0.50);
+        let nudged = unit_arrow_triangles(0.51);
+        let far = unit_arrow_triangles(0.60);
+        let spread = |a: &[(f32, f32); ARROW_VERTS], b: &[(f32, f32); ARROW_VERTS]| {
+            a.iter().zip(b).map(|(p, q)| (p.0 - q.0).hypot(p.1 - q.1)).fold(0.0f32, f32::max)
+        };
+        assert!(spread(&near, &nudged) > 1e-4, "the glyph tracks the angle, it does not snap");
+        assert!(spread(&near, &nudged) < spread(&near, &far), "and tracks it proportionately");
+    }
+
+    /// A measured exit heading beats the nominal class angle, and the turn is always the short way
+    /// round.
+    #[test]
+    fn the_measured_exit_beats_the_nominal_angle_and_wraps_the_short_way() {
+        let inst = ArrowInstance {
+            anchor: (0.5, 0.5),
+            angle: 0.0,
+            ordinal: 0,
+            count: 1,
+            arrow: TurnArrow::Right,
+            exit_angle: None,
+            fan_offset: 0.0,
+            left_hand: false,
+        };
+        let nominal = nominal_turn_angle(TurnArrow::Right, false);
+        assert!((turn_angle(&inst) - nominal).abs() < 1e-6, "no exit heading, fall back to class");
+        // An exit 22 degrees off the approach bends 22 degrees, not the 90 its class nominates.
+        let measured = ArrowInstance { exit_angle: Some(0.384), ..inst };
+        assert!((turn_angle(&measured) - 0.384).abs() < 1e-5);
+        // Approach and exit either side of the wrap point: the turn is 0.28 radians, not -6.
+        let wrapped = ArrowInstance { angle: 3.0, exit_angle: Some(-3.0), ..inst };
+        let short_way = 2.0 * std::f32::consts::PI - 6.0;
+        assert!((turn_angle(&wrapped) - short_way).abs() < 1e-5, "got {}", turn_angle(&wrapped));
+    }
+
+    /// The nominal angles keep the left-negative / right-positive sign convention the placement
+    /// geometry and the renderer are both written against.
+    #[test]
+    fn the_nominal_turn_angles_have_the_right_sign() {
+        let nominal = |arrow| nominal_turn_angle(arrow, false);
+        assert!(nominal(TurnArrow::Through).abs() < 1e-6);
+        assert!(nominal(TurnArrow::Left) < 0.0, "left is a negative bend");
+        assert!(nominal(TurnArrow::Right) > 0.0, "right is a positive bend");
+        let (left, sharp) = (TurnArrow::Left, TurnArrow::SharpLeft);
+        assert!(nominal(sharp) < nominal(left), "sharper bends further");
+        let slight = TurnArrow::SlightLeft;
+        assert!(nominal(slight) > nominal(left), "slighter bends less");
+    }
+
+    /// The U-turn is the one nominal angle the driving convention turns around: it is made across
+    /// the oncoming stream, so it hooks left where traffic keeps right and right where it keeps
+    /// left. Every other class is the same bend under either convention.
+    ///
+    /// Checked as a half turn and a sign rather than against `±PI` exactly, and as an exact
+    /// negation of each other rather than by comparing two independently computed floats.
+    #[test]
+    fn a_u_turn_hooks_toward_the_kerb_traffic_drives_on() {
+        use std::f32::consts::PI;
+        let right_hand = nominal_turn_angle(TurnArrow::Reverse, false);
+        let left_hand = nominal_turn_angle(TurnArrow::Reverse, true);
+        assert!((right_hand.abs() - PI).abs() < 1e-6, "a U-turn is a half turn either way");
+        assert!((left_hand.abs() - PI).abs() < 1e-6, "a U-turn is a half turn either way");
+        assert!(right_hand < 0.0, "hooks left where traffic keeps right");
+        assert!(left_hand > 0.0, "and right where traffic keeps left");
+        assert!((right_hand + left_hand).abs() < 1e-6, "the two are the same turn mirrored");
+        // And it is the only one that moves: every other class ignores the convention.
+        for arrow in [
+            TurnArrow::Through,
+            TurnArrow::SlightLeft,
+            TurnArrow::Left,
+            TurnArrow::SharpLeft,
+            TurnArrow::SlightRight,
+            TurnArrow::Right,
+            TurnArrow::SharpRight,
+            TurnArrow::MergeLeft,
+            TurnArrow::MergeRight,
+        ] {
+            let (r, l) = (nominal_turn_angle(arrow, false), nominal_turn_angle(arrow, true));
+            assert_eq!(r, l, "{arrow:?} is not a convention-dependent manoeuvre");
+        }
+    }
+
+    /// And the convention reaches the glyph: a U-turn placed on a left-hand-traffic road bends the
+    /// other way from the same lane on a right-hand one.
+    #[test]
+    fn the_tiles_convention_reaches_the_u_turn_glyph() {
+        let line = [(0.0, 0.0), (100.0, 0.0)];
+        let turns = LaneTurns { forward: vec![LANE_REVERSE], backward: vec![] };
+        let bend = |left_hand| {
+            let arrows = place_arrows(&line, &turns, 1, left_hand);
+            assert_eq!(arrows.len(), 1);
+            turn_angle(&arrows[0])
+        };
+        assert!(bend(false) < 0.0, "right-hand traffic hooks its U-turn left");
+        assert!(bend(true) > 0.0, "left-hand traffic hooks it right");
+        // A measured exit heading still wins: the convention is only the fallback's business.
+        let mut arrows = place_arrows(&line, &turns, 1, true);
+        arrows[0].exit_angle = Some(-0.5);
+        assert!(turn_angle(&arrows[0]) < 0.0, "a known exit beats the nominal U-turn");
+    }
+
+    /// The two directions' arrows do not land on top of each other, which is what drew as a single
+    /// double-headed shaft.
+    #[test]
+    fn the_two_directions_do_not_stack_into_one_double_headed_shaft() {
+        // With a half-segment setback both anchors were the midpoint of the same two-point line:
+        // the same spot, opposite headings, i.e. one shaft with a head at each end.
+        let line = [(0.0, 0.0), (100.0, 0.0)];
+        let turns = LaneTurns { forward: vec![LANE_THROUGH], backward: vec![LANE_THROUGH] };
+        let arrows = place_arrows(&line, &turns, 2, false);
+        assert_eq!(arrows.len(), 2);
+        let gap = (arrows[0].anchor.0 - arrows[1].anchor.0).abs();
+        assert!(gap > 1.0, "the two directions anchor apart, not on top of each other");
+        assert!(arrows[0].anchor.0 > 50.0, "forward sits back from the way's end");
+        assert!(arrows[1].anchor.0 < 50.0, "backward sits back from the way's start");
+    }
+
+    /// The shaft never folds through itself, however tight the bend.
+    ///
+    /// The inner edge of the bend has radius `BEND_LEN / |turn| - SHAFT_HALF_WIDTH`, smallest at a
+    /// U-turn; if the constants ever let that go negative the ribbon inverts and the glyph draws as
+    /// a bow tie. Checked as consistent triangle winding rather than by re-deriving the radius.
+    #[test]
+    fn the_shaft_does_not_fold_at_the_tightest_bend() {
+        use std::f32::consts::PI;
+        for step in -24i32..=24 {
+            let turn = PI * step as f32 / 24.0;
+            let glyph = unit_arrow_triangles(turn);
+            // The shaft is everything before the head's three vertices.
+            for tri in glyph[..ARROW_VERTS - 3].chunks(3) {
+                let (a, b, c) = (tri[0], tri[1], tri[2]);
+                let area = (b.0 - a.0) * (c.1 - a.1) - (b.1 - a.1) * (c.0 - a.0);
+                assert!(area > 1e-6, "shaft triangle inverted at turn {turn}, area {area}");
+            }
+        }
+    }
+
+    /// A direction's lanes sit on its own half of the carriageway rather than straddling the
+    /// centreline, and which half is the driving convention: the left-hand fan is the mirror image
+    /// of the right-hand one.
+    ///
+    /// Compared as a sign and as a sum against its mirror rather than for exact equality — the two
+    /// are the same arithmetic with one negation, but not bit-for-bit.
+    #[test]
+    fn each_direction_keeps_to_its_own_half_and_mirrors_with_the_convention() {
+        let line = [(0.0, 0.0), (100.0, 0.0)];
+        // Two lanes each way, both directions tagged: four lanes across the road.
+        let turns = LaneTurns {
+            forward: vec![LANE_LEFT, LANE_THROUGH],
+            backward: vec![LANE_THROUGH, LANE_RIGHT],
+        };
+        let centres = |left_hand| {
+            place_arrows(&line, &turns, 4, left_hand).iter().map(lane_centre).collect::<Vec<f32>>()
+        };
+        let right = centres(false);
+        let left = centres(true);
+        assert_eq!(right.len(), 4, "two lanes each way");
+        // Every lane of a direction is on the driver's own side of the centreline — measured in
+        // that direction's own travel frame, so both directions come out the same side.
+        assert!(right.iter().all(|&c| c > 0.0), "right-hand traffic keeps right: {right:?}");
+        assert!(left.iter().all(|&c| c < 0.0), "left-hand traffic keeps left: {left:?}");
+        // And the two conventions are mirror images across the centreline.
+        for (r, l) in right.iter().zip(left.iter().rev()) {
+            assert!((r + l).abs() < 1e-5, "{r} does not mirror {l}");
+        }
+        // The outermost lane of a four-lane road is a lane and a half from its centre, so the fan
+        // lands on the carriageway rather than a half-road short of it.
+        let outermost = right.iter().fold(0.0f32, |m, &c| m.max(c));
+        assert!((outermost - 1.5).abs() < 1e-5, "outermost lane at {outermost}, not 1.5");
+    }
+
+    /// A one-way carries every lane, so its fan stays centred on the road — and a road whose total
+    /// is unknown or disagrees keeps the centred fan it has always had. Neither depends on the
+    /// convention, which is what makes the no-convention path behave exactly as it did before.
+    #[test]
+    fn a_one_way_and_an_unknown_total_keep_the_centred_fan_either_way() {
+        let line = [(0.0, 0.0), (100.0, 0.0)];
+        let turns =
+            LaneTurns { forward: vec![LANE_LEFT, LANE_THROUGH, LANE_RIGHT], backward: vec![] };
+        let cases =
+            [(3u8, "a three-lane one-way"), (0, "no lanes tag"), (2, "a total that disagrees")];
+        for (total, what) in cases {
+            for left_hand in [false, true] {
+                let centres: Vec<f32> =
+                    place_arrows(&line, &turns, total, left_hand).iter().map(lane_centre).collect();
+                assert_eq!(centres.len(), 3, "{what}");
+                assert!(centres[1].abs() < 1e-6, "{what}: the middle lane is the centreline");
+                assert!((centres[0] + centres[2]).abs() < 1e-6, "{what}: the fan is centred");
+                assert!(centres[0] < 0.0, "{what}: ordinal 0 is the leftmost lane");
+                assert!(centres[2] > 0.0, "{what}: and the last ordinal the rightmost");
+            }
+        }
     }
 
     /// The renderer's per-arrow transform: a through arrow points along the road (its tip furthest
@@ -295,10 +695,13 @@ mod tests {
             ordinal: 0,
             count: 1,
             arrow: TurnArrow::Through,
+            exit_angle: None,
+            fan_offset: 0.0,
+            left_hand: false,
         };
         let mut v = Vec::new();
         arrow_verts(&through, 0.1, 0.0, &mut v);
-        assert_eq!(v.len(), unit_arrow_triangles().len() * 2);
+        assert_eq!(v.len(), ARROW_VERTS * 2);
         let max_x = v.chunks(2).map(|p| p[0]).fold(f32::MIN, f32::max);
         let tip_y = v.chunks(2).max_by(|a, b| a[0].total_cmp(&b[0])).unwrap()[1];
         assert!((max_x - 0.6).abs() < 1e-5, "tip a scale-length ahead of the anchor in +x");

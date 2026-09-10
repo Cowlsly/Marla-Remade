@@ -1789,8 +1789,8 @@ impl Renderer {
         }
     }
 
-    /// Draw the per-lane turn arrows: one straight-arrow glyph per marked lane, rotated to point
-    /// where the lane leads and pushed sideways onto the lane the carriageway painted.
+    /// Draw the per-lane turn arrows: one glyph per marked lane, bent by the manoeuvre the lane
+    /// leads into and pushed sideways onto the lane the carriageway painted.
     ///
     /// Built per frame — rotation, screen size and lane offset all follow the camera, exactly as
     /// the carriageway's width does — and drawn through the **fill** pipeline as plain coloured
@@ -1816,7 +1816,9 @@ impl Renderer {
         // One lane of the carriageway, in device px. The lane count is the arrow's own, so a
         // three-lane approach and a five-lane one are each spread across their whole road.
         let lane_px = carriageway.width.at(camera.zoom) * density;
-        let unit = crate::tile::arrow::unit_arrow_triangles();
+        // Every glyph tessellates to the same vertex count whatever angle it bends through, so a
+        // tile's buffer is sized exactly once up front and never grows.
+        let verts_per_arrow = crate::tile::arrow::ARROW_VERTS * 2;
         // Build each tile's triangles first — this borrows `self.tiles` — then upload and draw,
         // which takes `&mut self`. One batch per tile carries its own tile-to-clip matrix.
         let mut batches: Vec<([f32; 16], Vec<f32>)> = Vec::new();
@@ -1829,16 +1831,14 @@ impl Renderer {
                 continue;
             }
             let scale = ARROW_DP * density / span; // tile-local 0..1 units per unit-arrow coord
-            let mut verts: Vec<f32> = Vec::with_capacity(tile.arrows.len() * unit.len() * 2);
+            let mut verts: Vec<f32> = Vec::with_capacity(tile.arrows.len() * verts_per_arrow);
             for a in &tile.arrows {
                 // Sideways onto the lane, perpendicular to the road heading (not the glyph's
-                // turn). Measured from the middle of the road out, so it is the lane's own centre
-                // in the same -1..+1 across-road coordinate `tess::ribbon` gives the shader — an
-                // arrow that does not sit between the dividers the markings drew is worse than no
-                // arrow at all.
-                let lanes = a.count.max(1) as f32;
-                let centre_t = (2.0 * a.ordinal as f32 + 1.0) / lanes - 1.0;
-                let lateral = centre_t * lane_px * lanes / 2.0;
+                // turn). `lane_centre` measures from the middle of the road out, in lane widths,
+                // and already accounts for the half of the carriageway this direction occupies
+                // under the tile's driving convention — an arrow that does not sit between the
+                // dividers the markings drew is worse than no arrow at all.
+                let lateral = crate::tile::arrow::lane_centre(a) * lane_px;
                 crate::tile::arrow::arrow_verts(a, scale, lateral / span, &mut verts);
             }
             if !verts.is_empty() {

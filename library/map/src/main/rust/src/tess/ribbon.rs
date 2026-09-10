@@ -277,6 +277,23 @@ mod tests {
     }
 
     #[test]
+    fn points_one_tile_unit_apart_still_give_a_unit_normal() {
+        // `dedupe` only drops *exactly* coincident points, so the shortest surviving
+        // segment is one integer tile unit — never short enough for `direction` to
+        // divide by something near zero. Junction connectors converging on a shared
+        // arm endpoint lean on this. It stops holding the moment a caller feeds in
+        // coordinates that are not integer tile units, or `dedupe` grows a tolerance.
+        let mut v = Vec::new();
+        ribbon(&[0, 0, 1, 0, 1, 1, 2, 1], 4096, &mut v, &mut Vec::new());
+        for (i, f) in v.iter().enumerate() {
+            assert!(f.is_finite(), "float {i} is {f}");
+        }
+        assert!((normal_len(&v, 0) - 1.0).abs() < 1e-5, "start {}", normal_len(&v, 0));
+        let last = v.len() / FLOATS_PER_VERTEX - 1;
+        assert!((normal_len(&v, last) - 1.0).abs() < 1e-5, "end {}", normal_len(&v, last));
+    }
+
+    #[test]
     fn repeated_vertices_are_dropped() {
         let mut v = Vec::new();
         ribbon(&[0, 0, 0, 0, 0, 0, 50, 0], 100, &mut v, &mut Vec::new());

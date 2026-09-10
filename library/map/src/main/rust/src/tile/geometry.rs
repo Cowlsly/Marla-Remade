@@ -638,7 +638,7 @@ pub fn build_toggled(
         traffic: traffic_meshes(tile, extent, z, toggles),
         carriageways,
         yellow_centre: tile.convention.is_some_and(|c| c.yellow_centre),
-        arrows: arrow_meshes(tile, z),
+        arrows: arrow_meshes(tile, z, left_hand),
         generation,
     }
 }
@@ -701,7 +701,15 @@ fn split_t(tile: &Body, layer: &Layer, feature_index: usize, lanes: u8, left_han
 /// the archive stops at z14 while arrows are drawn from z16, so a z14 tile must build arrows it
 /// will not draw itself.
 /// Empty on any tile with no `turn:lanes` (no turn-lane table), which is nearly all.
-fn arrow_meshes(tile: &Body, z: u8) -> Vec<ArrowInstance> {
+///
+/// The lane count and the driving convention go in alongside the geometry because a direction's
+/// lanes occupy one *half* of the carriageway: without them the fan is centred on the road and
+/// every arrow on a two-way sits in the oncoming lanes. `left_hand` is threaded in from the caller
+/// rather than read again here, so the arrows and the carriageway split cannot disagree about which
+/// side the forward lanes are on. The raw [`Feature::lane_count`] is passed on, not the one-each-way
+/// fallback the ribbon uses: [`arrow::fan_offset`] deliberately keeps the centred fan when there is
+/// no trustworthy total, and inventing one here would override that.
+fn arrow_meshes(tile: &Body, z: u8, left_hand: bool) -> Vec<ArrowInstance> {
     if z.saturating_add(ANCESTOR_DEPTH) < ROAD_LANE_MIN_ZOOM {
         return Vec::new();
     }
@@ -726,7 +734,7 @@ fn arrow_meshes(tile: &Body, z: u8) -> Vec<ArrowInstance> {
                 line.push((x as f32 / extent, y as f32 / extent));
             }
         }
-        out.extend(arrow::place_arrows(&line, turns));
+        out.extend(arrow::place_arrows(&line, turns, feature.lane_count, left_hand));
     }
     out
 }
