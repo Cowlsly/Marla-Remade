@@ -1,3 +1,11 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
+    <string name="theme">Tema</string>
+    <string name="all_languages">Alla språk</string>
+    <string name="rename">Byt namn</string>
+    <string name="new_folder">Ny mapp</string>
+    <string name="new_file">Ny fil</string>
+    <string name="create">Skapa</string>
+    <string name="close">Stäng</string>
+    <string name="search">Sök</string>
 </resources>
