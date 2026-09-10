@@ -2,4 +2,5 @@
 <resources>
     <string name="copy">Kopiera</string>
     <string name="close">Stäng</string>
+    <string name="share_link">Dela länk</string>
 </resources>
