@@ -1,3 +1,9 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
+    <string name="action_cancel">Avbryt</string>
+    <string name="first_name">Förnamn</string>
+    <string name="last_name">Efternamn</string>
+    <string name="email">E-post</string>
+    <string name="addresses">Adresser</string>
+    <string name="delete_account">Ta bort konto</string>
 </resources>
