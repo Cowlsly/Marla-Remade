@@ -5,4 +5,7 @@
     <string name="enable">Aktivera</string>
     <string name="bookmarks">Bokmärken</string>
     <string name="outline">Dispositionsvy</string>
+    <string name="general">Allmänt</string>
+    <string name="all">Alla</string>
+    <string name="share_link">Dela länk</string>
 </resources>
