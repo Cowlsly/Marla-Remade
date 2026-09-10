@@ -11,4 +11,6 @@
     <string name="reload">Ladda om</string>
     <string name="all">Alla</string>
     <string name="font_size">Teckenstorlek</string>
+    <string name="no_results">Inga resultat</string>
+    <string name="settings">Inställningar</string>
 </resources>
