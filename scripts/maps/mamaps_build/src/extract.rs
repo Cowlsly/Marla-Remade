@@ -142,6 +142,8 @@ pub struct Stats {
     pub junction_connectors: u64,
     /// Road ways whose `min_zoom` was pulled shallower to match their corridor.
     pub corridor_promotions: u64,
+    /// Untagged road ways that took a lane count from a tagged neighbour. See [`crate::lanefill`].
+    pub lanes_inherited: u64,
     pub rings: RingStats,
 }
 
@@ -496,6 +498,43 @@ pub fn extract(
         );
     }
 
+    // --- lane inheritance -------------------------------------------------------------------
+    //
+    // A junction stub OSM left untagged takes a lane count from the road it interrupts, instead of
+    // the renderer's flat `oneway ? 1 : 2`. See [`crate::lanefill`] for the conditions and the
+    // measurements behind each of them. It runs here rather than in pass 1 because the conditions
+    // are geometric — a length and a turn angle — and coordinates are only resolved above.
+    let inherited_lanes = {
+        let mut collector = crate::lanefill::Collector::create(spill_path)?;
+        let mut reader = WayReader::open(&ways_path)?;
+        let mut refs: Vec<i64> = Vec::new();
+        while let Some((id, class, name, lane_count, _, _, _, _)) = reader.next(&mut refs)? {
+            // Roads, and not slip roads. A ramp leaves a junction carrying its parent's name on
+            // very nearly its parent's heading, so it would inherit the mainline's width onto a
+            // single-lane ramp; `corridor` leaves links out of a corridor for the same reason.
+            if class.layer != tilecodec::mamaps::dict::LAYER_ROADS
+                || class.flags & tilecodec::mamaps::body::FLAG_IS_LINK != 0
+            {
+                continue;
+            }
+            let Some(name) = name.as_deref() else {
+                continue;
+            };
+            let line = table.line(&refs);
+            collector.push(&crate::lanefill::Segment {
+                id,
+                name,
+                lanes: lane_count,
+                oneway: class.flags & tilecodec::mamaps::body::FLAG_IS_ONEWAY != 0,
+                nodes: &refs,
+                line: &line,
+            })?;
+        }
+        collector.finish()?
+    };
+    stats.lanes_inherited = inherited_lanes.len() as u64;
+    mark("lane counts inherited");
+
     // --- materialise ----------------------------------------------------------------------
     //
     // Ways in **id order**, which is the order the spill file is already in. It used to be a sort of
@@ -606,6 +645,15 @@ pub fn extract(
             if let Ok(at) = promoted.binary_search_by_key(id, |(id, _)| *id) {
                 class.min_zoom = promoted[at].1;
             }
+            // A neighbour's lane count, where OSM tagged none on this way. Only ever consulted
+            // for a way that has none of its own, so a tag is never overridden.
+            let lane_count = if *lane_count == 0 {
+                inherited_lanes
+                    .binary_search_by_key(id, |(id, _)| *id)
+                    .map_or(0, |at| inherited_lanes[at].1)
+            } else {
+                *lane_count
+            };
             // Only a label way carries its id onward. A road or a building is merged with its
             // neighbours by `coalesce`, which leaves the survivor's id arbitrary, and the id
             // table exists for `poi` and `places` alone.
@@ -619,7 +667,7 @@ pub fn extract(
                 name.clone(),
                 std::mem::take(&mut refs),
                 id,
-                *lane_count,
+                lane_count,
                 turn_fwd.clone(),
                 turn_bwd.clone(),
                 *carriageway,

@@ -93,6 +93,24 @@
 //! term is half a lane at every degree and the reach is the setback, flat. No change to
 //! [`SETBACK_M`] was needed and none was made.
 //!
+//! ## Reading a screenshot of this layer
+//!
+//! Counter-intuitive, and worth knowing before judging a geometry change here by eye. A connector
+//! draws as a one-lane carriageway ribbon, so by width it is mostly asphalt — but the
+//! `junction-connector` style layer declares the *same* colours as `roads-carriageway`, on purpose,
+//! so that a connector reads as the carriageway continued rather than as a stripe laid over it.
+//! Across the junction box, which the crossing road ribbons already cover, that makes the ribbon's
+//! asphalt an exact identity against what is beneath it: same style entry, same colour, depth off.
+//!
+//! **So where a connector overlies road surface, its only visible signature is the fraction of its
+//! width that is lane marking** — which is why the geometry here says ribbons while the screenshot
+//! that prompted this work said thin white strokes. Where a connector leaves the road the asphalt
+//! does show, as grey against bare earth; the tangle this layer first shipped with had both, white
+//! over the carriageway and grey beyond it. Figures measured on the renderer side.
+//!
+//! The practical consequence: do not judge a change to the geometry above by how much asphalt
+//! appears. Judge it by where the markings fall.
+//!
 //! # Lateral offset is baked in projected units, not ground metres
 //!
 //! Each connector's polyline already carries its lane's offset across the carriageway. That offset

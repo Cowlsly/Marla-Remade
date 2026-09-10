@@ -34,6 +34,7 @@ mod coalesce;
 mod corridor;
 mod dem;
 mod extract;
+mod lanefill;
 mod rings;
 mod shapefile;
 mod schema;
@@ -354,6 +355,12 @@ fn run(
                 stats.corridor_promotions,
             );
         }
+        if stats.lanes_inherited > 0 {
+            println!(
+                "  {} untagged road way(s) took a lane count from a neighbour",
+                stats.lanes_inherited,
+            );
+        }
         if run.keep_store {
             let index = store.save_index(provenance, stats.features).map_err(|e| e.to_string())?;
             println!("  wrote {} so --reuse-store can skip stage A", index.display());
@@ -658,6 +665,7 @@ fn build_report(
     out.push_str(&format!("  \"nodes_classified\": {},\n", stats.nodes_classified));
     out.push_str(&format!("  \"transit_routes\": {},\n", stats.transit_routes));
     out.push_str(&format!("  \"corridor_promotions\": {},\n", stats.corridor_promotions));
+    out.push_str(&format!("  \"lanes_inherited\": {},\n", stats.lanes_inherited));
     out.push_str(&format!("  \"features\": {},\n", stats.features));
     out.push_str(&format!("  \"geometry_failed\": {},\n", stats.geometry_failed));
     out.push_str(&format!("  \"nodes_needed\": {},\n", stats.nodes_needed));
