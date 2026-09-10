@@ -17,4 +17,6 @@
     <string name="right">Höger</string>
     <string name="justify">Justera</string>
     <string name="clear_formatting">Rensa formatering</string>
+    <string name="computing">Beräknar…</string>
+    <string name="unknown">Okänd</string>
 </resources>
