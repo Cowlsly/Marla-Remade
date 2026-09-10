@@ -1,3 +1,108 @@
 <?xml version="1.0" encoding="utf-8"?>
-<resources>
+<resources xmlns:xliff="urn:oasis:names:tc:xliff:document:1.2">
+    <string name="app_name">Väder</string>
+    <string name="weather_widget_description">Aktuell tid, datum och väder i en överblick – tryck för prognosen</string>
+    <string name="weather_title">Väder</string>
+    <string name="no_locations_yet">Inga platser ännu</string>
+    <string name="add_a_city_or_use_your_current_location">Lägg till en stad eller använd din aktuella plats för att se prognosen.</string>
+    <string name="add_location">Lägg till plats</string>
+    <string name="use_current_location">Använd aktuell plats</string>
+    <string name="locating">Hämtar plats…</string>
+    <string name="detect_your_device_s_current_location_au">Identifiera enhetens aktuella plats automatiskt och lägg till den i listan</string>
+    <string name="current_location">Aktuell plats</string>
+    <string name="locations">Platser</string>
+    <string name="set_units">Enheter</string>
+    <string name="search_location">Sök plats</string>
+    <string name="city_name_hint">Stadens namn</string>
+    <string name="no_matches">Inga träffar</string>
+    <string name="confirm_delete">Bekräfta borttagning</string>
+    <string name="couldn_t_determine_location">Det gick inte att fastställa platsen</string>
+    <string name="location_permission_denied">Platsbehörighet nekades</string>
+    <string name="max_min">Max <xliff:g id="max" example="28°C">%1$s</xliff:g> Min <xliff:g id="min" example="14°C">%2$s</xliff:g></string>
+    <string name="feels_like">Känns som <xliff:g id="temp" example="26°C">%1$s</xliff:g></string>
+    <string name="dew_point">Daggpunkt</string>
+    <string name="from_gusts">Från <xliff:g id="direction" example="NW">%1$s</xliff:g> · Byar <xliff:g id="gusts" example="18 km/h">%2$s</xliff:g></string>
+    <string name="not_enough_data_to_plot">Inte tillräckligt med data för att rita diagrammet.</string>
+    <string name="map_time">Tid</string>
+    <string name="condition_clear">Klart</string>
+    <string name="condition_mostly_clear">Mestadels klart</string>
+    <string name="condition_partly_cloudy">Delvis molnigt</string>
+    <string name="condition_cloudy">Molnigt</string>
+    <string name="condition_fog">Dimma</string>
+    <string name="condition_drizzle">Duggregn</string>
+    <string name="condition_rain">Regn</string>
+    <string name="condition_snow">Snö</string>
+    <string name="condition_thunderstorm">Åskväder</string>
+    <string name="condition_unknown">Okänt</string>
+    <string name="metric_temperature">Temperatur</string>
+    <string name="metric_feels_like">Känns som</string>
+    <string name="metric_humidity">Luftfuktighet</string>
+    <string name="metric_precipitation">Nederbörd</string>
+    <string name="metric_wind_speed">Vindhastighet</string>
+    <string name="metric_wind_gusts">Vindbyar</string>
+    <string name="metric_pressure">Lufttryck</string>
+    <string name="metric_visibility">Sikt</string>
+    <string name="metric_cloud_cover">Molntäcke</string>
+    <string name="metric_uv_index">UV-index</string>
+    <string name="block_sun">Sol</string>
+    <string name="block_pollen">Pollen</string>
+    <string name="block_wind">Vind</string>
+    <string name="block_air_quality">Luftkvalitet</string>
+    <string name="block_moon">Måne</string>
+    <string name="moon_phase_new">Nymåne</string>
+    <string name="moon_phase_waxing_crescent">Tilltagande skära</string>
+    <string name="moon_phase_first_quarter">Första kvarteret</string>
+    <string name="moon_phase_waxing_gibbous">Tilltagande halvmåne</string>
+    <string name="moon_phase_full">Fullmåne</string>
+    <string name="moon_phase_waning_gibbous">Avtagande halvmåne</string>
+    <string name="moon_phase_last_quarter">Sista kvarteret</string>
+    <string name="moon_phase_waning_crescent">Avtagande skära</string>
+    <string name="hourly_forecast">Timprognos</string>
+    <string name="daily_forecast">Dygnsprognos</string>
+    <string name="now">Nu</string>
+    <string name="today">I dag</string>
+    <string name="today_short">IDAG</string>
+    <string name="tomorrow_short">I MORGON</string>
+    <string name="level_none">Ingen</string>
+    <string name="level_low">Låg</string>
+    <string name="level_medium">Medel</string>
+    <string name="level_moderate">Måttlig</string>
+    <string name="level_high">Hög</string>
+    <string name="level_very_high">Mycket hög</string>
+    <string name="level_extreme">Extrem</string>
+    <string name="level_severe">Allvarlig</string>
+    <string name="cloud_clear">Klart</string>
+    <string name="cloud_mostly_clear">Mestadels klart</string>
+    <string name="cloud_partly_cloudy">Delvis molnigt</string>
+    <string name="cloud_mostly_cloudy">Mestadels molnigt</string>
+    <string name="cloud_overcast">Mulet</string>
+    <string name="aqi_good">Bra</string>
+    <string name="aqi_moderate">Måttlig</string>
+    <string name="aqi_unhealthy_sensitive">Ohälsosam (känsliga grupper)</string>
+    <string name="aqi_unhealthy">Ohälsosam</string>
+    <string name="aqi_very_unhealthy">Mycket ohälsosam</string>
+    <string name="aqi_hazardous">Farlig</string>
+    <string name="precip_raining_now">Det regnar nu</string>
+    <string name="precip_no_rain_next_2h">Inget regn de närmaste 2 timmarna</string>
+    <string name="gusts">Byar <xliff:g id="gusts" example="18 km/h">%1$s</xliff:g></string>
+    <string name="precip_rain_starting_now">Regnet börjar nu</string>
+    <string name="precip_rain_in_min">Regn om cirka <xliff:g id="minutes" example="15">%1$d</xliff:g> min</string>
+    <string name="last_updated">Senast uppdaterad <xliff:g id="time_ago" example="2h ago">%1$s</xliff:g></string>
+    <string name="no_data_yet">Inga data ännu</string>
+    <string name="just_now">just nu</string>
+    <string name="minutes_ago">för <xliff:g id="minutes" example="5">%1$d</xliff:g> min sedan</string>
+    <string name="hours_ago">för <xliff:g id="hours" example="2">%1$d</xliff:g> h sedan</string>
+    <string name="days_ago">för <xliff:g id="days" example="3">%1$d</xliff:g> d sedan</string>
+    <string name="duration_h_m"><xliff:g id="hours" example="11">%1$d</xliff:g> h <xliff:g id="minutes" example="30">%2$d</xliff:g> min</string>
+    <string name="summary_title">Sammanfattning</string>
+    <string name="summary_mixed_conditions">blandade förhållanden</string>
+    <string name="summary_expect_conditions">Räkna med <xliff:g id="conditions" example="light rain">%1$s</xliff:g> under dagen.</string>
+    <string name="summary_high_low">Högsta <xliff:g id="high" example="24°C">%1$s</xliff:g>, lägsta <xliff:g id="low" example="12°C">%2$s</xliff:g>.</string>
+    <string name="summary_rain_likely">Regn är troligt – ta med ett paraply.</string>
+    <string name="summary_showers_possible">Skurar kan förekomma senare.</string>
+    <string name="summary_slight_chance_rain">Liten risk för regn.</string>
+    <string name="summary_winds_noticeable">Vinden kommer att märkas i dag.</string>
+    <string name="weather_no_data">—</string>
+    <string name="weather_temp_format"><xliff:g id="temp" example="22">%1$d</xliff:g>°</string>
+    <string name="weather_blob_widget_description">Väder i en organisk bubbla – stor temperatur med ikon och mörkt blågrön bakgrund</string>
 </resources>
