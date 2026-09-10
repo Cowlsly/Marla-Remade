@@ -3,4 +3,6 @@
     <string name="close">Stäng</string>
     <string name="use_current_location">Använd aktuell plats</string>
     <string name="current_location">Aktuell plats</string>
+    <string name="cancel">Avbryt</string>
+    <string name="searching">Söker…</string>
 </resources>
