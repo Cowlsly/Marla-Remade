@@ -681,16 +681,26 @@ fn terrain_mesh(tile: &Body, ground_width_m: f64) -> TerrainMesh {
 /// arithmetic as a known one. On an even count that still comes out at 0.0, and it is what real
 /// data gives anyway: a three-lane two-way road is tagged 2/1, not "centred".
 fn split_t(tile: &Body, layer: &Layer, feature_index: usize, lanes: u8, left_hand: bool) -> f32 {
-    let known = tile
-        .feature_carriageway(layer.source_layer_id, feature_index)
-        .map(|shape| (shape.forward as u16, shape.backward as u16))
-        .filter(|(forward, backward)| forward + backward > 0);
-    let (forward, backward) = known.unwrap_or_else(|| {
-        let lanes = lanes.max(1) as u16;
-        (lanes - lanes / 2, lanes / 2)
-    });
+    let (forward, backward) = known_split(tile, layer.source_layer_id, feature_index)
+        .unwrap_or_else(|| {
+            let lanes = lanes.max(1) as u16;
+            (lanes - lanes / 2, lanes / 2)
+        });
     let near_kerb = if left_hand { forward } else { backward };
     2.0 * near_kerb as f32 / (forward + backward) as f32 - 1.0
+}
+
+/// The road's `(forward, backward)` lane split as the archive records it, or `None` where it does
+/// not — no carriageway table, or an all-zero entry.
+///
+/// The single read of that table. [`split_t`] puts the centre line at the boundary it implies and
+/// [`arrow_meshes`] fans each direction's arrows over its own side of that same boundary; reading
+/// it once means the marking and the arrows cannot disagree about where the road divides. They
+/// differ only in what they assume when it is absent, which is a judgement each makes for itself.
+fn known_split(tile: &Body, layer_id: u8, feature_index: usize) -> Option<(u16, u16)> {
+    tile.feature_carriageway(layer_id, feature_index)
+        .map(|shape| (shape.forward as u16, shape.backward as u16))
+        .filter(|(forward, backward)| forward + backward > 0)
 }
 
 /// The per-lane turn arrows for this tile, from the archive's turn-lane side table.
@@ -702,13 +712,12 @@ fn split_t(tile: &Body, layer: &Layer, feature_index: usize, lanes: u8, left_han
 /// will not draw itself.
 /// Empty on any tile with no `turn:lanes` (no turn-lane table), which is nearly all.
 ///
-/// The lane count and the driving convention go in alongside the geometry because a direction's
+/// The lane split and the driving convention go in alongside the geometry because a direction's
 /// lanes occupy one *half* of the carriageway: without them the fan is centred on the road and
 /// every arrow on a two-way sits in the oncoming lanes. `left_hand` is threaded in from the caller
 /// rather than read again here, so the arrows and the carriageway split cannot disagree about which
-/// side the forward lanes are on. The raw [`Feature::lane_count`] is passed on, not the one-each-way
-/// fallback the ribbon uses: [`arrow::fan_offset`] deliberately keeps the centred fan when there is
-/// no trustworthy total, and inventing one here would override that.
+/// side the forward lanes are on, and the split itself comes from [`known_split`] — the same read
+/// [`split_t`] places the centre line from — for the same reason.
 fn arrow_meshes(tile: &Body, z: u8, left_hand: bool) -> Vec<ArrowInstance> {
     if z.saturating_add(ANCESTOR_DEPTH) < ROAD_LANE_MIN_ZOOM {
         return Vec::new();
@@ -734,7 +743,33 @@ fn arrow_meshes(tile: &Body, z: u8, left_hand: bool) -> Vec<ArrowInstance> {
                 line.push((x as f32 / extent, y as f32 / extent));
             }
         }
-        out.extend(arrow::place_arrows(&line, turns, feature.lane_count, left_hand));
+        // How the road divides, from the same table the centre line is placed from, so an arrow
+        // and the marking beside it cannot disagree about which lanes belong to which direction.
+        // Absent that, the same fallback the ribbon and `split_t` use — an untagged road is one
+        // lane each way, or one lane for a one-way, and an odd count gives the extra lane forward.
+        // Not read off the mask lists, which describe only the lanes that carry a turn indication.
+        let oneway = feature.is_oneway();
+        let lanes = match feature.lane_count {
+            0 => {
+                if oneway {
+                    1
+                } else {
+                    2
+                }
+            }
+            count => count,
+        };
+        let lanes_each_way = known_split(tile, LAYER_ROADS, index).unwrap_or_else(|| {
+            let lanes = u16::from(lanes);
+            if oneway {
+                (lanes, 0)
+            } else {
+                (lanes - lanes / 2, lanes / 2)
+            }
+        });
+        let lanes_each_way =
+            (lanes_each_way.0.min(u8::MAX.into()) as u8, lanes_each_way.1.min(u8::MAX.into()) as u8);
+        out.extend(arrow::place_arrows(&line, turns, lanes_each_way, left_hand));
     }
     out
 }

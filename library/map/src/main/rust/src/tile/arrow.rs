@@ -72,7 +72,9 @@ pub struct ArrowInstance {
     pub anchor: (f32, f32),
     /// Heading of travel at the junction, radians (atan2(dy, dx)).
     pub angle: f32,
-    /// This lane's index from the left, and the lane count, for the lateral fan.
+    /// This lane's index from the left, and how many lanes this direction has, for the lateral
+    /// fan. The count comes from the road's split rather than from the mask list, so the fan and
+    /// the centre line divide the carriageway the same way.
     pub ordinal: u8,
     pub count: u8,
     /// The shift that puts this direction's fan on its own half of the carriageway, in lane
@@ -109,24 +111,28 @@ const SETBACK: f32 = 0.15;
 /// it (i.e. back down the way). A lane whose mask has no indication draws nothing. The `ordinal`
 /// runs left to right in the direction of travel, matching the mask order the archive stores.
 ///
-/// `total_lanes` is the road's whole lane count (both directions) and `left_hand` its driving
-/// convention; together they decide which half of the carriageway a direction's fan sits on, via
-/// [`fan_offset`]. `total_lanes` of zero means the road carries no `lanes` tag.
+/// `lanes_each_way` is `(forward, backward)` — how the road's lanes divide between the two
+/// directions, the **same pair the centre line is placed from**, so the arrows and the marking
+/// cannot land on different boundaries. With `left_hand` it decides which half of the carriageway
+/// each direction's fan sits on, via [`fan_offset`]. `(0, 0)` means nothing is known about the
+/// road's shape, which keeps every fan centred.
 ///
 /// Returns an empty vec for a line too short to have a heading, so a degenerate clip draws nothing
 /// rather than an arrow pointing nowhere.
 pub fn place_arrows(
     line: &[(f32, f32)],
     turns: &LaneTurns,
-    total_lanes: u8,
+    lanes_each_way: (u8, u8),
     left_hand: bool,
 ) -> Vec<ArrowInstance> {
     let mut out = Vec::new();
     if line.len() < 2 {
         return out;
     }
-    place_dir(line, &turns.forward, false, total_lanes, left_hand, &mut out);
-    place_dir(line, &turns.backward, true, total_lanes, left_hand, &mut out);
+    let (forward, backward) = lanes_each_way;
+    let total = forward.saturating_add(backward);
+    place_dir(line, &turns.forward, false, forward, total, left_hand, &mut out);
+    place_dir(line, &turns.backward, true, backward, total, left_hand, &mut out);
     out
 }
 
@@ -134,18 +140,18 @@ pub fn place_arrows(
 /// right of the direction of travel.
 ///
 /// A direction's lanes occupy one *half* of the carriageway, not the middle of it: under right-hand
-/// traffic they are the rightmost `count` of the road's `total_lanes` and under left-hand traffic
-/// the leftmost. [`place_arrows`] builds the fan centred on the road's centreline, so this is the
-/// shift that moves it onto that half — half the lanes the other direction takes, signed by the
-/// convention. Without it every arrow on a two-way road is drawn a full half-carriageway into the
-/// oncoming lanes, in either convention.
+/// traffic they are the rightmost `own_lanes` of the road's `total_lanes` and under left-hand
+/// traffic the leftmost. [`place_arrows`] builds the fan centred on the road's centreline, so this
+/// is the shift that moves it onto that half — half the lanes the other direction takes, signed by
+/// the convention. Without it every arrow on a two-way road is drawn a full half-carriageway into
+/// the oncoming lanes, in either convention.
 ///
 /// Zero, and so no shift at all, whenever the direction *is* the whole road: a one-way carries
-/// every lane, and a road whose `lanes` tag is missing or disagrees with the mask list has no
-/// trustworthy total to measure a half from. Both keep the centred fan, which is where every arrow
-/// sat before the convention reached this pass.
-pub fn fan_offset(count: u8, total_lanes: u8, left_hand: bool) -> f32 {
-    let spare = f32::from(total_lanes.saturating_sub(count)) / 2.0;
+/// every lane, and a road whose shape is unknown has no trustworthy total to measure a half from.
+/// Both keep the centred fan, which is where every arrow sat before the convention reached this
+/// pass.
+pub fn fan_offset(own_lanes: u8, total_lanes: u8, left_hand: bool) -> f32 {
+    let spare = f32::from(total_lanes.saturating_sub(own_lanes)) / 2.0;
     if left_hand {
         -spare
     } else {
@@ -166,10 +172,15 @@ pub fn lane_centre(inst: &ArrowInstance) -> f32 {
 }
 
 /// One direction's arrows. `backward` reverses which end and which way the heading points.
+///
+/// `own_lanes` is how many lanes this direction has per the road's split and `total_lanes` the
+/// whole road; both are widened to cover the masks actually present, because an arrow placed past
+/// the edge of the carriageway is worse than one placed on a road we have miscounted.
 fn place_dir(
     line: &[(f32, f32)],
     masks: &[u16],
     backward: bool,
+    own_lanes: u8,
     total_lanes: u8,
     left_hand: bool,
     out: &mut Vec<ArrowInstance>,
@@ -189,8 +200,9 @@ fn place_dir(
     }
     let angle = dy.atan2(dx);
     let anchor = (tip.0 - dx * SETBACK, tip.1 - dy * SETBACK);
-    let count = masks.len().min(u8::MAX as usize) as u8;
-    let fan_offset = fan_offset(count, total_lanes, left_hand);
+    let marked = masks.len().min(u8::MAX as usize) as u8;
+    let count = own_lanes.max(marked);
+    let fan_offset = fan_offset(count, total_lanes.max(count), left_hand);
     for (i, &mask) in masks.iter().enumerate().take(u8::MAX as usize) {
         if let Some(arrow) = arrow_for(mask) {
             let ordinal = i as u8;
@@ -410,7 +422,7 @@ mod tests {
             forward: vec![LANE_LEFT, tilecodec::mamaps::body::LANE_NONE, LANE_THROUGH | LANE_RIGHT],
             backward: vec![],
         };
-        let arrows = place_arrows(&line, &turns, 3, false);
+        let arrows = place_arrows(&line, &turns, (3, 0), false);
         assert_eq!(arrows.len(), 2, "the unmarked middle lane draws nothing");
         assert!(arrows.iter().all(|a| a.angle.abs() < 1e-6), "eastbound heading is 0");
         assert!(arrows.iter().all(|a| a.count == 3), "the count is the whole lane set");
@@ -425,7 +437,7 @@ mod tests {
     fn backward_arrows_point_down_the_way_from_its_start() {
         let line = [(0.0, 0.0), (100.0, 0.0)];
         let turns = LaneTurns { forward: vec![], backward: vec![LANE_THROUGH] };
-        let arrows = place_arrows(&line, &turns, 1, false);
+        let arrows = place_arrows(&line, &turns, (0, 1), false);
         assert_eq!(arrows.len(), 1);
         // Heading toward the start of an eastbound way is due west: pi radians.
         assert!((arrows[0].angle.abs() - std::f32::consts::PI).abs() < 1e-6);
@@ -436,10 +448,10 @@ mod tests {
     #[test]
     fn a_degenerate_line_places_no_arrows() {
         let turns = LaneTurns { forward: vec![LANE_THROUGH], backward: vec![] };
-        assert!(place_arrows(&[(1.0, 1.0)], &turns, 1, false).is_empty());
-        assert!(place_arrows(&[], &turns, 1, false).is_empty());
+        assert!(place_arrows(&[(1.0, 1.0)], &turns, (1, 0), false).is_empty());
+        assert!(place_arrows(&[], &turns, (1, 0), false).is_empty());
         // Two coincident points have no direction.
-        assert!(place_arrows(&[(5.0, 5.0), (5.0, 5.0)], &turns, 1, false).is_empty());
+        assert!(place_arrows(&[(5.0, 5.0), (5.0, 5.0)], &turns, (1, 0), false).is_empty());
     }
 
     /// The glyph runs *along* the lane before it bends, which is what makes a left turn read as a
@@ -578,14 +590,14 @@ mod tests {
         let line = [(0.0, 0.0), (100.0, 0.0)];
         let turns = LaneTurns { forward: vec![LANE_REVERSE], backward: vec![] };
         let bend = |left_hand| {
-            let arrows = place_arrows(&line, &turns, 1, left_hand);
+            let arrows = place_arrows(&line, &turns, (1, 0), left_hand);
             assert_eq!(arrows.len(), 1);
             turn_angle(&arrows[0])
         };
         assert!(bend(false) < 0.0, "right-hand traffic hooks its U-turn left");
         assert!(bend(true) > 0.0, "left-hand traffic hooks it right");
         // A measured exit heading still wins: the convention is only the fallback's business.
-        let mut arrows = place_arrows(&line, &turns, 1, true);
+        let mut arrows = place_arrows(&line, &turns, (1, 0), true);
         arrows[0].exit_angle = Some(-0.5);
         assert!(turn_angle(&arrows[0]) < 0.0, "a known exit beats the nominal U-turn");
     }
@@ -598,7 +610,7 @@ mod tests {
         // the same spot, opposite headings, i.e. one shaft with a head at each end.
         let line = [(0.0, 0.0), (100.0, 0.0)];
         let turns = LaneTurns { forward: vec![LANE_THROUGH], backward: vec![LANE_THROUGH] };
-        let arrows = place_arrows(&line, &turns, 2, false);
+        let arrows = place_arrows(&line, &turns, (1, 1), false);
         assert_eq!(arrows.len(), 2);
         let gap = (arrows[0].anchor.0 - arrows[1].anchor.0).abs();
         assert!(gap > 1.0, "the two directions anchor apart, not on top of each other");
@@ -641,7 +653,10 @@ mod tests {
             backward: vec![LANE_THROUGH, LANE_RIGHT],
         };
         let centres = |left_hand| {
-            place_arrows(&line, &turns, 4, left_hand).iter().map(lane_centre).collect::<Vec<f32>>()
+            place_arrows(&line, &turns, (2, 2), left_hand)
+                .iter()
+                .map(lane_centre)
+                .collect::<Vec<f32>>()
         };
         let right = centres(false);
         let left = centres(true);
@@ -660,6 +675,32 @@ mod tests {
         assert!((outermost - 1.5).abs() < 1e-5, "outermost lane at {outermost}, not 1.5");
     }
 
+    /// An asymmetric split is read from the road's own division, not from the mask count: on a
+    /// five-lane road divided 4/1 the four forward lanes take four fifths of the carriageway and
+    /// the single backward lane the rest, which is where the centre line is drawn from too.
+    ///
+    /// This is the case that separates a shared split from a per-direction guess — halving the
+    /// road would put the boundary a full lane out.
+    #[test]
+    fn an_asymmetric_split_puts_the_fan_where_the_centre_line_is() {
+        let line = [(0.0, 0.0), (100.0, 0.0)];
+        let turns = LaneTurns {
+            forward: vec![LANE_LEFT, LANE_THROUGH, LANE_THROUGH, LANE_RIGHT],
+            backward: vec![LANE_THROUGH],
+        };
+        let arrows = place_arrows(&line, &turns, (4, 1), false);
+        assert_eq!(arrows.len(), 5);
+        let centres: Vec<f32> = arrows.iter().map(lane_centre).collect();
+        // The road spans -2.5..2.5 lane widths. The boundary sits a lane and a half left of
+        // centre, so forward holds -1.5..2.5 and backward the single lane beyond it.
+        for (got, want) in centres.iter().zip([-1.0, 0.0, 1.0, 2.0, 2.0]) {
+            assert!((got - want).abs() < 1e-5, "got {centres:?}, wanted the 4/1 division");
+        }
+        // The backward lane is measured in its own travel frame, so it too is on the driver's
+        // right — the same side of the road as the forward lanes are in theirs.
+        assert!(centres[4] > 0.0, "the single backward lane keeps right in its own frame");
+    }
+
     /// A one-way carries every lane, so its fan stays centred on the road — and a road whose total
     /// is unknown or disagrees keeps the centred fan it has always had. Neither depends on the
     /// convention, which is what makes the no-convention path behave exactly as it did before.
@@ -668,12 +709,17 @@ mod tests {
         let line = [(0.0, 0.0), (100.0, 0.0)];
         let turns =
             LaneTurns { forward: vec![LANE_LEFT, LANE_THROUGH, LANE_RIGHT], backward: vec![] };
-        let cases =
-            [(3u8, "a three-lane one-way"), (0, "no lanes tag"), (2, "a total that disagrees")];
-        for (total, what) in cases {
+        let cases = [
+            ((3u8, 0u8), "a three-lane one-way"),
+            ((0, 0), "no lanes tag"),
+            ((2, 0), "a split that disagrees"),
+        ];
+        for (lanes_each_way, what) in cases {
             for left_hand in [false, true] {
-                let centres: Vec<f32> =
-                    place_arrows(&line, &turns, total, left_hand).iter().map(lane_centre).collect();
+                let centres: Vec<f32> = place_arrows(&line, &turns, lanes_each_way, left_hand)
+                    .iter()
+                    .map(lane_centre)
+                    .collect();
                 assert_eq!(centres.len(), 3, "{what}");
                 assert!(centres[1].abs() < 1e-6, "{what}: the middle lane is the centreline");
                 assert!((centres[0] + centres[2]).abs() < 1e-6, "{what}: the fan is centred");

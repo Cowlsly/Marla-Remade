@@ -25,8 +25,9 @@
 //! | Which movements are legal | **Inference.** Every exit but the U-turn back where you came from is assumed legal. The graph carries no turn restrictions. |
 //! | A lane's turn indication, where `turn:lanes` is tagged | **Data.** `lanes.bin`, keyed by directed edge, ordered left→right. |
 //! | A lane's turn indication everywhere else | **Inference**, and this is the overwhelming majority of roads. |
-//! | How many lanes an arm has, absent `turn:lanes` | **Inference**, and the weakest link. An approach is assumed to have one lane per legal exit; an exit, one lane per approach that may legally feed it. The same rule read from either end — [`effective_lanes`]. |
+//! | How many lanes an arm has, absent `turn:lanes` | **Neither, and the important row.** One lane in the direction of travel — not a guess but the carriageway renderer's own default, so a connector lands on the painted asphalt. [`effective_lanes`]. |
 //! | Which lane of the exit a movement lands in | **Inference.** The convention in [`exit_lane`], stated below. |
+//! | Lane width |
 //! | Lane width | **Neither, and worth knowing which.** [`LANE_WIDTH_MERCATOR_M`] is not a road measurement — it is tuned to the width the renderer paints a lane at. |
 //! | The setback the arc starts at | **Neither.** [`SETBACK_M`] is a nominal guess at how big an intersection is. |
 //!
@@ -35,25 +36,39 @@
 //! Ordinary urban intersections are a heuristic and will need tuning against screenshots. Nothing
 //! here should be read as knowing where the paint is.
 //!
-//! # Both ends of a connector are placed by the same rule
+//! # Both ends of a connector are placed by the same rule, and a lane count is never invented
 //!
-//! A connector runs from a lane to a lane, so both ends need a lane index and a lane count, and
-//! the two must come from the same place: [`effective_lanes`] for the count and [`lane_offset_m`]
-//! for the offset, called once per end. That is not a stylistic preference — it is the bug this
-//! section exists to prevent. The exit end used to keep whatever `lanes.bin` left on its [`Arm`],
-//! which for an untagged road is 1, so [`exit_lane`] returned lane 0 for every movement and every
-//! connector entering an arm terminated on one identical point. A degree-`d` junction emitted the
-//! correct `d * (d - 1)` connectors and only `d` distinct endpoints; a dozen ribbons converging on
-//! four pencil points is the tangle of hairlines that reached a device.
+//! A connector runs from a lane to a lane, so both ends need a lane index and a lane count. Those
+//! come from [`effective_lanes`] and [`lane_offset_m`], called once per end. Two defects lived
+//! here and they had to be fixed together, because fixing either alone makes the other worse.
 //!
-//! An exit's inferred count is the mirror of an approach's and is computed **once per junction,
-//! not once per approach**. Per approach it would vary with whoever happened to be looking at the
-//! arm, which at an asymmetric junction is the same drift one level down.
+//! **The ends disagreed.** The exit end kept whatever `lanes.bin` left on its [`Arm`], while the
+//! approach end was widened to the junction's exit count, so [`exit_lane`] returned lane 0 for
+//! every movement and every connector entering an arm terminated on one identical point. A
+//! degree-`d` junction emitted the correct `d * (d - 1)` connectors and only `d` distinct
+//! endpoints: a wide fan at one end collapsing to a pencil point at the other, which is the tangle
+//! of hairlines that reached a device.
+//!
+//! **The width was fabricated.** `legal.len()` is a count of *exits*, borrowed as a lane count
+//! because it was in scope. It is not a measurement of anything. At a 4-way it claims three lanes
+//! per direction where the renderer paints one, so the outermost connector starts 2.5 lane widths
+//! off the centreline on a carriageway whose kerb is at 1.0 — off the road entirely.
+//!
+//! Mirroring the fabricated count to the exit end would have made both ends agree, and put *both*
+//! of them off the asphalt instead of one. So the count is not mirrored; it is removed.
+//! [`effective_lanes`] takes an [`Arm`] and nothing else, which makes the two ends agree by
+//! construction and makes an observer-dependent count unrepresentable rather than merely absent.
+//!
+//! The honest consequence: at an untagged junction every movement out of an arm shares that arm's
+//! one lane, so connectors meet at the arm's mouth instead of fanning, and `d` distinct endpoints
+//! at a degree-`d` junction is now the *correct* answer rather than the symptom. Separating them
+//! would mean drawing lanes that do not exist.
 //!
 //! ## Which lane of the exit a movement lands in
 //!
-//! With `N` approach lanes and `M` exit lanes, for the group of approach lanes making the *same*
-//! movement into the *same* exit, ranked `0..r` left→right:
+//! Only ever more than one lane where `turn:lanes` says so. With `N` approach lanes and `M` exit
+//! lanes, for the group of approach lanes making the *same* movement into the *same* exit, ranked
+//! `0..r` left→right:
 //!
 //! - **Through and reverse** hold position: `floor(in_lane * M / N)`, clamped. Identity when
 //!   `N == M`, which is what a straight-through wants and is what lets it draw as a straight line
@@ -68,22 +83,15 @@
 //! **This is convention, not data, and it is written down so it can be argued with.** Nothing in
 //! the graph says which lane feeds which.
 //!
-//! ## The inferred count is not the painted width
+//! ## The setback does not scale with the junction's degree
 //!
-//! Worth knowing before reading a screenshot, because it looks like a bug and is not this one. The
-//! carriageway renderer's own fallback for an untagged road is one lane each way — `lane_count 0`
-//! becomes `oneway ? 1 : 2` across *both* directions, in `tile/geometry.rs`. The inference here is
-//! wider than that at any junction of degree 4 or more, so at an untagged crossroads the
-//! connectors fan across more lanes than there is asphalt painted.
-//!
-//! That is also the whole of why the furthest a connector reaches from the node grows with the
-//! junction's degree — about 14.5 m at degree 3 against 20.9 m at degree 8. [`SETBACK_M`] is
-//! constant and additionally clamped to a fraction of each arm's own length; what grows is the
-//! lateral fan, whose outermost lane sits at `(count - 0.5)` widths and whose `count` is
-//! `degree - 1`. It is the fan widening, not the setback lengthening, and it is a property of the
-//! lane-count inference at *both* ends rather than a defect in either. Narrowing it means capping
-//! the inference at what is painted, which collapses the approach fan too and is a separate
-//! argument from this one.
+//! Worth recording, because the measurement that suggested it did was reading the fabricated width.
+//! [`SETBACK_M`] is constant and additionally clamped to a fraction of each arm's own length. The
+//! furthest a connector reached from the node used to grow with degree — about 14.5 m at degree 3
+//! against 20.9 m at degree 8 — because the *lateral* fan grew: its outermost lane sat at
+//! `(count - 0.5)` widths with `count = degree - 1`. With the fabricated count gone the lateral
+//! term is half a lane at every degree and the reach is the setback, flat. No change to
+//! [`SETBACK_M`] was needed and none was made.
 //!
 //! # Lateral offset is baked in projected units, not ground metres
 //!
@@ -604,12 +612,13 @@ struct Arm {
     heading: f64,
     /// The edge's own length in metres, which caps how far the connector may reach along it.
     length_m: f64,
-    /// Lanes running this way, and whether the road carries traffic the other way too. Together
-    /// they place a lane across the carriageway.
-    lanes: usize,
+    /// Whether the road carries traffic the other way too, which decides whether this direction's
+    /// lanes sit on the centreline or a half-carriageway to one side of it.
     two_way: bool,
     /// Per-lane `turn:lanes` masks, left→right, when `lanes.bin` has them. `None` is the common
-    /// case and is what sends a movement down the inferred path.
+    /// case. This is also the arm's only lane-count source — see [`effective_lanes`], which is
+    /// deliberately the one way to ask, so a count can never be fabricated from something that
+    /// merely happened to be in scope.
     masks: Option<Vec<u16>>,
 }
 
@@ -646,18 +655,8 @@ fn arm(
         return None;
     }
     let masks = lanes.and_then(|table| table.masks(idx)).filter(|m| !m.is_empty());
-    // Absent `turn:lanes`, the lane count is filled in by the caller from the junction's own shape;
-    // one lane is the floor.
-    let lane_count = masks.as_ref().map_or(1, Vec::len);
     let two_way = graph.has_drivable_twin(to, from).unwrap_or(false);
-    Some(Arm {
-        neighbour: if outgoing { to } else { from },
-        heading,
-        length_m,
-        lanes: lane_count,
-        two_way,
-        masks,
-    })
+    Some(Arm { neighbour: if outgoing { to } else { from }, heading, length_m, two_way, masks })
 }
 
 /// A lane's centre, in metres right of the road's centreline as seen by traffic travelling this
@@ -683,21 +682,31 @@ fn lane_offset_m(k: usize, count: usize, two_way: bool, left_hand: bool, width: 
     carriageway + within
 }
 
-/// How many lanes to spread one arm's connector ends across.
+/// How many lanes to spread one arm's connector ends across, in its direction of travel.
 ///
-/// `turn:lanes` where the arm carries it, `inferred` where it does not — and the point of it being
-/// a function is that **both ends of a connector are placed by this same rule**. The module docs
-/// have what went wrong when they were not.
+/// **A lane count is a property of the arm and of nothing else.** That is why this takes only an
+/// [`Arm`] and why it is the single way to ask: both ends of a connector read it, so neither can
+/// drift from the other, and no caller can substitute a number that merely happened to be in scope.
+/// An earlier version took the junction's shape as a fallback and produced a count that varied with
+/// which approach was looking at the arm.
 ///
-/// `inferred` must be *this arm's own* inference: the number of legal exits for an approach, the
-/// number of approaches that may legally feed it for an exit. Handing an exit the approach's count
-/// makes the exit's layout depend on who is looking at it, which is the same drift one level down.
-fn effective_lanes(arm: &Arm, inferred: usize) -> usize {
-    if arm.masks.is_some() {
-        arm.lanes
-    } else {
-        inferred.max(1)
-    }
+/// `turn:lanes` from `lanes.bin` is the only real value reachable here — the v6 routing graph
+/// carries no lane count, and OSM's own `lanes` tag lives in the extract path keyed by way rather
+/// than by directed edge, so joining to it is a separate piece of work.
+///
+/// **The fallback of 1 is the carriageway renderer's own default, not a guess.** `tile/geometry.rs`
+/// turns `lane_count 0` into `oneway ? 1 : 2`, counted across *both* directions; a two-way road is
+/// therefore one lane each way and a one-way road one lane. [`lane_offset_m`] counts per direction
+/// and adds the opposing half-carriageway itself, so both of those cases are 1 in this function's
+/// units. Matching it is the whole point: a connector then starts and ends where the asphalt is
+/// actually painted instead of where a second, disagreeing default put it.
+///
+/// The cost is honest and worth stating. At an untagged junction every movement out of an arm
+/// shares that arm's single lane, so the connectors meet at the arm's mouth rather than fanning.
+/// That is what a single-lane road *is*. Inventing a wider fan to separate them draws lanes that
+/// are not there and puts the endpoints off the carriageway, which is the defect this replaces.
+fn effective_lanes(arm: &Arm) -> usize {
+    arm.masks.as_ref().map_or(1, Vec::len)
 }
 
 /// Sample the connector from lane `in_lane` of `approach` into lane `out_lane` of `exit`.
@@ -898,18 +907,6 @@ pub fn stream_junctions(dir: &Path, conventions: &Conventions, sink: &mut Sink) 
             )
             .left_hand;
 
-        // Each exit's lane count, mirroring the approach's inference from the other end: one lane
-        // per approach that may legally feed the arm. Computed here, once for the junction, and
-        // deliberately not inside the approach loop below — an exit that is three lanes wide to one
-        // approach and two to another is the same end-placement drift this fix exists to remove.
-        let exit_lanes: Vec<usize> = out_arms
-            .iter()
-            .map(|exit| {
-                let feeders = in_arms.iter().filter(|a| a.neighbour != exit.neighbour).count();
-                effective_lanes(exit, feeders)
-            })
-            .collect();
-
         for approach in &in_arms {
             // Every exit but the one back the way you came. The graph carries no turn restrictions,
             // so this is the whole legality model: inference, and generous.
@@ -928,9 +925,13 @@ pub fn stream_junctions(dir: &Path, conventions: &Conventions, sink: &mut Sink) 
             // Left→right as the driver sees them, which is the order lane masks are stored in.
             legal.sort_by(|a, b| a.1.total_cmp(&b.1));
 
-            // `turn:lanes` where it exists, junction shape where it does not. The inferred case is
-            // the overwhelming majority of roads: one lane is assumed per legal exit, in the same
-            // left→right order, which is the most a junction's own topology can say.
+            // Both ends read the same function of their own arm, so neither can drift from the
+            // other and neither depends on who is looking. No count is derived from the junction's
+            // shape: `legal.len()` counts exits, not lanes, and using it as a width fanned the
+            // endpoints across phantom lanes and off the carriageway.
+            let approach_lanes = effective_lanes(approach);
+
+            // `turn:lanes` where it exists, the arm's own lane count where it does not.
             let mut pairs: Vec<(usize, usize)> = match &approach.masks {
                 Some(masks) => {
                     let mut pairs = Vec::new();
@@ -955,12 +956,17 @@ pub fn stream_junctions(dir: &Path, conventions: &Conventions, sink: &mut Sink) 
                     }
                     pairs
                 }
-                None => (0..legal.len()).map(|i| (i, legal[i].0)).collect(),
+                // Untagged, which is the overwhelming majority of roads. The arm's real lanes are
+                // spread over its legal exits — and since an untagged arm has exactly one, every
+                // movement leaves from lane 0 and the connectors share the arm's mouth. Assigning
+                // a lane *index* per exit here was the other half of the fabricated width: it put
+                // the third movement 1.5 lane widths out on a road with one lane.
+                None => {
+                    let lanes: Vec<usize> = (0..approach_lanes).collect();
+                    let exits: Vec<usize> = legal.iter().map(|(i, _, _)| *i).collect();
+                    distribute(&lanes, &exits)
+                }
             };
-
-            // Absent `turn:lanes` the junction's own topology is all there is to go on: one lane
-            // per legal exit. `exit_lanes` is that same rule read from the other end.
-            let approach_lanes = effective_lanes(approach, legal.len());
 
             // Ordered so a movement's lanes rank left→right, and deduplicated because two tagged
             // indications can fall back to the same exit and would otherwise draw one connector
@@ -973,7 +979,7 @@ pub fn stream_junctions(dir: &Path, conventions: &Conventions, sink: &mut Sink) 
                 let Some((_, _, turn)) = legal.iter().find(|(i, _, _)| *i == exit_index) else {
                     continue;
                 };
-                let out_lanes = exit_lanes[exit_index];
+                let out_lanes = effective_lanes(exit);
                 // This lane's place among the lanes making the same movement into the same exit.
                 let siblings: Vec<usize> =
                     pairs.iter().filter(|(_, e)| *e == exit_index).map(|&(l, _)| l).collect();
@@ -1074,53 +1080,60 @@ mod tests {
         (emitted, lines)
     }
 
-    /// **Both ends of a connector are placed by the same rule, and the exit end is where it broke.**
+    /// **A connector must start and end on the asphalt the renderer actually paints.**
     ///
-    /// The failure this pins is not that connectors were missing but where they stopped. The
-    /// approach end was spread across an inferred lane count while the exit end kept the raw
-    /// `lanes.bin` value, which for an untagged road is 1 — so [`exit_lane`] returned lane 0 for
-    /// every movement and every connector entering an arm terminated on one identical point. This
-    /// degree-4 fixture emitted 12 connectors with 12 distinct starts and **4** distinct ends, and
-    /// three ribbons converging on each of four pencil points is the tangle of hairlines that
-    /// reached a device.
+    /// Two defects met here and neither could be fixed alone. The ends disagreed — the approach was
+    /// widened to the junction's exit count while the exit kept `lanes.bin`'s, so [`exit_lane`]
+    /// returned lane 0 for every movement and all `d - 1` connectors into an arm terminated on one
+    /// shared point. And the width itself was fabricated: `legal.len()` counts exits, not lanes.
+    /// Mirroring the fabricated width would have made the two ends agree and put *both* of them off
+    /// the road, which is why this pins position rather than spread.
     ///
-    /// `distinct_ends` is pinned to a number and not only to `starts == ends`, because that weaker
-    /// form passes if both ends collapse together. Revert the exit's lane count to the arm's own
-    /// and this reads 4.
+    /// An untagged two-way road is one lane each way — the carriageway renderer's own default — so
+    /// the kerb is one lane width from the centreline and every connector end belongs at half of
+    /// one, on the driver's side. Under the fabricated count the outermost lane sat at 2.5 widths
+    /// against that kerb at 1.0, so this fails on the starts; mirror it and it fails on the ends
+    /// too.
     ///
-    /// Points are compared at 1e-7 degrees, about a centimetre — enough to separate lane offsets
-    /// that are metres apart, and no exact float equality anywhere.
+    /// Distinct endpoints are deliberately *not* asserted. With one real lane per direction the
+    /// movements out of an arm share it, so `d` distinct endpoints at a degree-`d` junction is the
+    /// correct answer; separating them would mean drawing lanes that are not there.
     #[test]
-    fn every_connector_into_an_exit_ends_in_a_lane_of_its_own() {
+    fn a_connector_starts_and_ends_on_the_painted_carriageway() {
         let (emitted, lines) = stream(&crossroads(&[]));
-        assert_eq!(emitted, 12, "four approaches x three exits, unchanged by the endpoint fix");
+        assert_eq!(emitted, 12, "four approaches x three exits, unchanged");
 
-        let at = |p: (f64, f64)| ((p.0 * 1e7).round() as i64, (p.1 * 1e7).round() as i64);
-        let starts: BTreeSet<(i64, i64)> = lines.iter().map(|l| at(l[0])).collect();
-        let ends: BTreeSet<(i64, i64)> =
-            lines.iter().map(|l| at(*l.last().expect("a connector has points"))).collect();
+        // The fixture's arms run due north, east, south and west, so of a point's two displacements
+        // from the node the larger is the along-road setback and the smaller is the lateral offset.
+        // This inverts `offset_degrees`, which reads longitude at the node's own latitude.
+        let lane = lane_width_ground_m(35.0);
+        let lateral = |(lon, lat): (f64, f64)| {
+            let east = (lon + 120.0) * METRES_PER_DEGREE * 35.0f64.to_radians().cos();
+            let north = (lat - 35.0) * METRES_PER_DEGREE;
+            east.abs().min(north.abs())
+        };
+        for line in &lines {
+            for (end, p) in [("start", line[0]), ("end", *line.last().expect("points"))] {
+                let off = lateral(p);
+                assert!(
+                    off < lane,
+                    "a connector's {end} sits {off:.2} m from the centreline, past the kerb at \
+                     {lane:.2} m. An untagged two-way road is one lane each way, so this connector \
+                     is drawn clean off the road it is meant to join — a lane count has been \
+                     fabricated from something that is not a lane count.",
+                );
+                assert!(
+                    (off - lane * 0.5).abs() < 0.05,
+                    "a connector's {end} belongs in the middle of the arm's single lane, at \
+                     {:.2} m from the centreline, not {off:.2} m",
+                    lane * 0.5,
+                );
+            }
+        }
 
-        assert_eq!(
-            ends.len(),
-            12,
-            "{} distinct endpoints for 12 connectors: every movement into the same exit arm is \
-             terminating on one shared point, which draws as a spray of hairlines converging on a \
-             pencil point. Each connector must end in its own lane of the exit.",
-            ends.len(),
-        );
-        assert_eq!(
-            starts.len(),
-            ends.len(),
-            "the two ends of a connector are being spread by different rules: {} distinct starts \
-             against {} distinct ends",
-            starts.len(),
-            ends.len(),
-        );
-
-        // And the mirror's other consequence: with the same count at both ends a straight-through
-        // movement keeps its lane index and therefore its offset, so it is genuinely straight and
-        // samples as two points. One per approach. With the exit collapsed to one lane the two
-        // offsets differed by a lane width and all twelve came out bent.
+        // Both ends reading the same count is what lets a straight-through movement keep its lane
+        // and therefore its offset, so it is genuinely straight and samples as two points. One per
+        // approach. With the ends disagreeing the two offsets differed and all twelve came out bent.
         assert_eq!(
             lines.iter().filter(|l| l.len() == 2).count(),
             4,
@@ -1128,21 +1141,35 @@ mod tests {
         );
     }
 
-    /// The rule both ends share, at the unit level.
+    /// The single source both ends read, and the default it falls back to.
+    ///
+    /// The fallback is not a guess. It is the carriageway renderer's `lane_count 0 -> oneway ? 1 : 2`
+    /// read in this module's per-direction units, where both branches come to one lane, so a
+    /// connector is laid out across exactly the asphalt that gets painted.
     #[test]
-    fn an_arms_lane_count_is_its_tagged_one_or_the_junctions_inference() {
-        let tagged = Arm {
+    fn an_arms_lane_count_is_its_tagged_one_or_the_renderers_own_default() {
+        let arm_with = |masks: Option<Vec<u16>>, two_way: bool| Arm {
             neighbour: 1,
             heading: 0.0,
             length_m: 100.0,
-            lanes: 2,
-            two_way: true,
-            masks: Some(vec![LANE_LEFT, LANE_THROUGH]),
+            two_way,
+            masks,
         };
-        let untagged = Arm { masks: None, lanes: 1, ..tagged };
-        assert_eq!(effective_lanes(&tagged, 5), 2, "`turn:lanes` wins over the inference");
-        assert_eq!(effective_lanes(&untagged, 5), 5, "absent it, the junction's own shape");
-        assert_eq!(effective_lanes(&untagged, 0), 1, "a lane count is never zero");
+        assert_eq!(
+            effective_lanes(&arm_with(Some(vec![LANE_LEFT, LANE_THROUGH]), true)),
+            2,
+            "`turn:lanes` is the only real lane count reachable from the routing graph",
+        );
+        assert_eq!(
+            effective_lanes(&arm_with(None, true)),
+            1,
+            "a two-way road is two lanes across both directions, so one each way",
+        );
+        assert_eq!(
+            effective_lanes(&arm_with(None, false)),
+            1,
+            "and a one-way road is one lane, which is the renderer's other branch",
+        );
     }
 
     /// **A tiler-side `min_zoom` past the archive's deepest zoom deletes a layer in silence.**
@@ -1358,8 +1385,14 @@ mod tests {
 
         // 0.0009 deg of latitude is ~100 m anywhere; a degree of longitude shrinks with cos, so the
         // east/west arms need a wider step at 60 to stay the same distance out.
-        let (_, at_equator) = stream(&crossroads_at(0, 9_000, &[]));
-        let (_, at_sixty) = stream(&crossroads_at(600_000_000, 18_000, &[]));
+        //
+        // The north approach is tagged with three lanes, because an untagged arm is one lane each
+        // way and one lane has no spread to measure. `turn:lanes` is the only real lane count this
+        // module can reach, so it is also the only fixture in which several connectors leave one
+        // arm at several different offsets — which is exactly what this test needs to compare.
+        let tagged = || (4u32, vec![LANE_LEFT, LANE_THROUGH, LANE_RIGHT]);
+        let (_, at_equator) = stream(&crossroads_at(0, 9_000, &[tagged()]));
+        let (_, at_sixty) = stream(&crossroads_at(600_000_000, 18_000, &[tagged()]));
         assert_eq!(at_equator.len(), 12);
         assert_eq!(at_sixty.len(), 12);
 
@@ -1508,32 +1541,11 @@ mod tests {
             !graph.has_drivable_twin(0, 1).expect("twin"),
             "the fixture is only meaningful if nothing leaves the junction northward",
         );
-        let (emitted, lines) = stream(&fixture);
+        let (emitted, _) = stream(&fixture);
         // Three approaches. From the north: east and south are both legal (2). From the east: south
         // only, since the U-turn back east is excluded and nothing runs north (1). From the south:
         // east only (1).
         assert_eq!(emitted, 4, "the one-way approach contributes its two movements");
-
-        // **The asymmetric case, and what pins an exit's lane count to the junction rather than to
-        // whichever approach happens to be looking at it.** Here the approaches disagree about how
-        // many legal exits they have — the north approach has two, the south has one — so an exit
-        // sized from the looking approach's own `legal.len()` is two lanes wide to one of them and
-        // one lane wide to the other. The east arm's two connectors then both resolve to lane 0 and
-        // share a point, and this reads 3. Sized from the arm's own feeders it is two lanes wide to
-        // everyone, and the left turn into it and the right turn into it end a lane apart.
-        //
-        // The symmetric crossroads cannot catch this: there every approach has the same number of
-        // legal exits, so the wrong count and the right one are the same number.
-        let at = |p: (f64, f64)| ((p.0 * 1e7).round() as i64, (p.1 * 1e7).round() as i64);
-        let ends: BTreeSet<(i64, i64)> =
-            lines.iter().map(|l| at(*l.last().expect("a connector has points"))).collect();
-        assert_eq!(
-            ends.len(),
-            4,
-            "{} distinct endpoints for 4 connectors at an asymmetric junction: an exit's lane \
-             count is varying with the approach that is looking at it",
-            ends.len(),
-        );
     }
 
     /// Left-hand traffic mirrors the connectors rather than leaving them on the wrong side.
