@@ -369,6 +369,12 @@ pub fn build_toggled(
     let mut building_vertices: Vec<f32> = Vec::new();
     let mut building_indices: Vec<u32> = Vec::new();
     let ground_width_m = tile_ground_width_m(z, y);
+    // Every point in this tile where the carriageway changes width. Scanned once, tile-wide,
+    // because the step it removes is *between* two features — `coalesce`'s merge key includes
+    // the lane count, so a road whose count changes arrives as two — and no per-feature pass
+    // can see a pair.
+    let transitions = taper::Nodes::scan(tile);
+    let taper_run = taper::taper_run(ground_width_m);
     let deepest = z.saturating_add(ANCESTOR_DEPTH);
     let extent = tile.extent as u32;
 
@@ -494,9 +500,20 @@ pub fn build_toggled(
                         let Some(mesh) = carriageways.get_mut(at) else { continue };
                         for part in parts {
                             let flat = flatten(source.points(part));
-                            ribbon::ribbon(
+                            // Where this section abuts one of a different lane count, ramp to
+                            // the width the two share rather than stepping to it. Per part, and
+                            // carried in the vertices rather than in a push constant — which is
+                            // why it does not join the mesh key above, and why parts with
+                            // different tapers can still share one draw.
+                            let taper = if layer.source_layer_id == LAYER_JUNCTION {
+                                ribbon::Taper::NONE
+                            } else {
+                                transitions.taper(&flat, lanes, taper_run)
+                            };
+                            ribbon::ribbon_tapered(
                                 &flat,
                                 extent,
+                                taper,
                                 &mut mesh.vertices,
                                 &mut mesh.indices,
                             );
@@ -1422,8 +1439,133 @@ mod tests {
         build(&body, carriageway_only(), 16, 0, 0, false).carriageways[0].split
     }
 
-    /// A road with no `lanes` tag — most of OSM — still gets a carriageway, because a zero lane
-    /// count would push a zero width and draw nothing at all where a road plainly is.
+    /// A body of road sections laid end to end along one line, each `(lane_count, length)` in tile
+    /// units.
+    ///
+    /// The shape the defect actually has: `coalesce`'s merge key includes the lane count, so a road
+    /// whose count changes mid-block arrives as two features that share an endpoint exactly.
+    fn abutting_body(sections: &[(u8, i16)]) -> Body {
+        use tilecodec::mamaps::body::{
+            Feature, Layer as BodyLayer, Part, NAME_NONE, WINDING_OUTER,
+        };
+        use tilecodec::mamaps::dict;
+        let mut body = Body::new(4096);
+        let mut source = BodyLayer::new(dict::LAYER_ROADS);
+        let mut x = 0i16;
+        for &(lane_count, length) in sections {
+            let parts_offset = source.parts.len() as u32;
+            source.parts.push(Part {
+                coord_start: source.coords.len() as u32,
+                point_count: 2,
+                winding: WINDING_OUTER,
+            });
+            source.coords.extend_from_slice(&[(x, 2000), (x + length, 2000)]);
+            x += length;
+            source.features.push(Feature {
+                kind: crate::style::kind_id_for_test("major_road"),
+                kind_detail: 0,
+                geom_type: GEOM_LINE,
+                flags: 0,
+                name_idx: NAME_NONE,
+                parts_offset,
+                part_count: 1,
+                transit_color: 0,
+                transit_ordinal: 0,
+                transit_lanes: 0,
+                transit_taper: 0,
+                lane_count,
+            });
+        }
+        body.layers.push(source);
+        body
+    }
+
+    /// One lane's width in tile-local units, standing in for the style ramp.
+    const TEST_LANE: f32 = 0.01;
+
+    /// How wide the carriageway is, in lanes, at the vertex nearest tile-local `x`.
+    ///
+    /// Reproduces what reaches a pixel rather than reading the mesh's own fields:
+    /// `record_carriageways` pushes `lane width x lanes / 2` and `road_surface.vert` offsets each
+    /// kerb by `normal * t * halfWidth`. The roads in these fixtures run east, so the kerbs are the
+    /// y offsets either side of the centreline.
+    fn lanes_across(mesh: &CarriagewayMesh, x: f32) -> f32 {
+        let floats = ribbon::FLOATS_PER_VERTEX;
+        let half_width = TEST_LANE * f32::from(mesh.lanes) / 2.0;
+        let points = mesh.vertices.len() / floats / 2;
+        let distance = |point: usize| (mesh.vertices[point * 2 * floats] - x).abs();
+        let nearest = (0..points)
+            .min_by(|&a, &b| distance(a).total_cmp(&distance(b)))
+            .expect("a carriageway mesh has points");
+        let kerb = |vertex: usize| {
+            let f = vertex * floats;
+            mesh.vertices[f + 1] + mesh.vertices[f + 3] * mesh.vertices[f + 4] * half_width
+        };
+        (kerb(nearest * 2 + 1) - kerb(nearest * 2)).abs() / TEST_LANE
+    }
+
+    /// **The defect the user reported, end to end through `tessellate`.**
+    ///
+    /// A four-lane section running into a two-lane one used to step: two features, two meshes, two
+    /// constant half-widths, and a hard shoulder-step where they met. The wide section must now
+    /// arrive at the shared point exactly as wide as the narrow one.
+    #[test]
+    fn a_lane_count_change_tapers_instead_of_stepping() {
+        let body = abutting_body(&[(4, 1000), (2, 1000)]);
+        let mesh = build(&body, carriageway_only(), 16, 0, 0, false);
+        let shapes: Vec<u8> = mesh.carriageways.iter().map(|c| c.lanes).collect();
+        assert_eq!(shapes, vec![4, 2], "still one mesh per lane count");
+
+        let (wide, narrow) = (&mesh.carriageways[0], &mesh.carriageways[1]);
+        let node = 1000.0 / 4096.0;
+        let wide_at_node = lanes_across(wide, node);
+        let narrow_at_node = lanes_across(narrow, node);
+        assert!(
+            (wide_at_node - narrow_at_node).abs() < 1e-4,
+            "the kerbs must meet: {wide_at_node} lanes against {narrow_at_node}",
+        );
+        assert!((narrow_at_node - 2.0).abs() < 1e-4, "and on the narrow road's width");
+        // The far end is untouched, so the taper is local to the change rather than shrinking the
+        // whole road.
+        assert!((lanes_across(wide, 0.0) - 4.0).abs() < 1e-4, "{}", lanes_across(wide, 0.0));
+    }
+
+    /// The counterpart, so the test above cannot pass by tapering everything: a road that does not
+    /// change width must be byte-identical to what it was before the taper existed.
+    #[test]
+    fn a_road_of_constant_width_is_not_tapered_at_all() {
+        let body = abutting_body(&[(4, 1000), (4, 1000)]);
+        let mesh = build(&body, carriageway_only(), 16, 0, 0, false);
+        assert_eq!(mesh.carriageways.len(), 1, "one lane count, one mesh");
+        let road = &mesh.carriageways[0];
+        for x in [0.0, 1000.0 / 4096.0, 2000.0 / 4096.0] {
+            let across = lanes_across(road, x);
+            assert!((across - 4.0).abs() < 1e-4, "full width at {x}: {across}");
+        }
+        // Every normal is still the plain unit or miter length the untapered path emits.
+        let floats = ribbon::FLOATS_PER_VERTEX;
+        for vertex in 0..road.vertices.len() / floats {
+            let (nx, ny) = (road.vertices[vertex * floats + 2], road.vertices[vertex * floats + 3]);
+            let length = (nx * nx + ny * ny).sqrt();
+            assert!((length - 1.0).abs() < 1e-5, "vertex {vertex} normal is {length}");
+        }
+    }
+
+    /// A junction connector is one lane by construction and is placed with a setback from the arms,
+    /// so it must never be pulled into a road's transition even if an endpoint coincides.
+    #[test]
+    fn a_lane_count_change_does_not_taper_the_connectors() {
+        let body = abutting_body(&[(4, 1000), (2, 1000)]);
+        let mesh = build(&body, carriageway_only(), 16, 0, 0, false);
+        assert!(
+            mesh.carriageways.iter().all(|c| c.layer_index == 0),
+            "the fixture carries no junction layer, so this pins the roads path alone",
+        );
+        // The taper rode in the vertices, not the mesh key, so the two sections did not multiply
+        // into a mesh per part.
+        assert_eq!(mesh.carriageways.len(), 2);
+    }
+
     #[test]
     fn an_untagged_road_falls_back_to_one_lane_each_way() {
         let mesh = build(&carriageway_body(&[(0, false), (0, true)]), carriageway_only(), 16, 0, 0, false);

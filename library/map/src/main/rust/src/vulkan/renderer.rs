@@ -1843,6 +1843,10 @@ impl Renderer {
                 continue;
             }
             let scale = ARROW_DP * density / span; // tile-local 0..1 units per unit-arrow coord
+            // What turns the arrows' ground setback into this tile's units. A property of the tile
+            // and not of the camera, so the arrows stay the same distance behind the junction at
+            // every zoom — see `arrow::tile_local_per_metre`.
+            let per_metre = crate::tile::arrow::tile_local_per_metre(tile.z, tile.y);
             let mut verts: Vec<f32> = Vec::with_capacity(tile.arrows.len() * verts_per_arrow);
             for a in &tile.arrows {
                 // Sideways onto the lane, perpendicular to the road heading (not the glyph's
@@ -1851,7 +1855,7 @@ impl Renderer {
                 // under the tile's driving convention — an arrow that does not sit between the
                 // dividers the markings drew is worse than no arrow at all.
                 let lateral = crate::tile::arrow::lane_centre(a) * lane_px;
-                crate::tile::arrow::arrow_verts(a, scale, lateral / span, &mut verts);
+                crate::tile::arrow::arrow_verts(a, scale, lateral / span, per_metre, &mut verts);
             }
             if !verts.is_empty() {
                 batches.push((camera.tile_to_clip(tile.z, tile.x, tile.y), verts));

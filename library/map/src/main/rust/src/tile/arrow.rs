@@ -61,17 +61,23 @@ pub fn arrow_for(mask: u16) -> Option<TurnArrow> {
 
 /// One arrow to draw for one lane, in tile-local coordinates.
 ///
-/// The anchor sits on the road's centreline a short way back from the junction; the renderer then
-/// pushes it sideways onto its lane of the carriageway, which is why the instance carries
-/// `ordinal`, `count` and `fan_offset` rather than a baked offset (the offset is a screen
-/// measurement that changes with zoom). `angle` is the road's heading at the end, in radians, so
-/// the glyph points the way the traffic flows.
+/// This is where the road *ends*, not where the glyph sits: the setback that puts the arrow back on
+/// the approach is a ground distance, and a ground distance cannot be turned into tile-local units
+/// without the tile's zoom and latitude, which this pass is not given. [`placed_anchor`] applies it
+/// from `junction_end`, `angle` and `run`. The renderer then pushes the glyph sideways onto its
+/// lane of the carriageway, which is why the instance carries `ordinal`, `count` and `fan_offset`
+/// rather than a baked offset (the offset is a screen measurement that changes with zoom). `angle`
+/// is the road's heading at the end, in radians, so the glyph points the way the traffic flows.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ArrowInstance {
-    /// Anchor on the centreline, tile-local (extent units).
-    pub anchor: (f32, f32),
+    /// The road's junction end on the centreline, tile-local. Not the glyph's position — see
+    /// [`placed_anchor`].
+    pub junction_end: (f32, f32),
     /// Heading of travel at the junction, radians (atan2(dy, dx)).
     pub angle: f32,
+    /// How far back along `angle` the approach runs straight, tile-local: the furthest the setback
+    /// may travel before it would leave the road. See [`straight_run`].
+    pub run: f32,
     /// This lane's index from the left, and how many lanes this direction has, for the lateral
     /// fan. The count comes from the road's split rather than from the mask list, so the fan and
     /// the centre line divide the carriageway the same way.
@@ -94,22 +100,109 @@ pub struct ArrowInstance {
     pub left_hand: bool,
 }
 
-/// How far back from the junction the arrows sit, as a fraction of the road's final segment.
+/// How far back from the junction the arrows sit, in **ground metres**.
 ///
-/// Placed a little inside the tile rather than exactly on the node so the whole arrow — which draws
-/// ahead of its anchor — stays on the carriageway instead of overhanging the junction.
+/// A distance on the ground, not a fraction of anything and not a count of pixels: a painted turn
+/// arrow sits a fixed distance behind the stop line whatever the zoom, and whatever length the
+/// archive's simplifier happened to leave the way's last segment. The rule this replaced was 15% of
+/// that final segment, so a way split a few metres short of its junction node — which is most of
+/// them — set its arrow back well under a metre and drew it inside the intersection.
 ///
-/// Must stay well under `0.5`. At exactly a half the forward and backward anchors are both the
-/// midpoint of a two-point line, so the two directions' arrows land on the same spot pointing
-/// opposite ways and draw as a single shaft with a head at each end.
-const SETBACK: f32 = 0.15;
+/// **This number has to clear the intersection box, and how big that box is is decided in a crate
+/// this one cannot see.** `scripts/maps/mamaps_build/src/schema/junction.rs` carries the build
+/// side's own setback, its nominal guess at an intersection's half-width, and that crate is a
+/// detached-workspace host tool: it depends on `tilecodec` and so does this crate, but neither
+/// depends on the other, so there is no import that could make the two one definition. They are
+/// coupled by this paragraph and by nothing else. Sharing them means lifting the junction box size
+/// into `tilecodec`, which both sides already depend on, and reading it from both — a change to
+/// `tilecodec` and to the build side, neither of which is this file.
+const SETBACK_M: f32 = 20.0;
+
+/// How far the straight run may stray from the approach's ray, as a fraction of the distance
+/// walked back along it.
+///
+/// Measured cumulatively from the junction end rather than segment by segment: the archive
+/// quantises vertices onto the tile grid, so a short segment's heading is mostly quantisation
+/// noise, while the drift of a vertex from the ray is not.
+const STRAIGHT_RUN_DRIFT: f32 = 0.1;
+
+/// The fraction of a road's whole length either direction's setback may use.
+///
+/// Under a half so the two directions cannot meet in the middle of a short way, which is the case
+/// that draws them as one shaft with a head at each end.
+const RUN_FRACTION: f32 = 0.45;
+
+/// Tile-local units — the tile's 0..1 square — per ground metre at tile `(z, y)`'s own latitude.
+///
+/// The tile square is a *Web Mercator* square and Mercator's scale carries a `1 / cos φ` term, so a
+/// fixed number of tile-local units is a different ground distance at every latitude: what is 20 m
+/// at the equator is 15.9 m at 38°N and 10 m at 60°N. Converting through the tile's own latitude is
+/// what makes [`SETBACK_M`] the same distance on the ground everywhere, which is the whole reason
+/// for stating it in metres.
+///
+/// Taken at the tile's centre row. A tile spans a few hundred metres wherever arrows draw, over
+/// which `cos φ` moves by well under a percent.
+pub fn tile_local_per_metre(z: u8, y: u32) -> f32 {
+    /// The equator in metres: one whole turn of Mercator x.
+    const EQUATOR_M: f64 = 40_075_016.686;
+    let tiles = (1u64 << z.min(31)) as f64;
+    let n = std::f64::consts::PI * (1.0 - 2.0 * (f64::from(y) + 0.5) / tiles);
+    let lat = n.sinh().atan();
+    (tiles / (EQUATOR_M * lat.cos())) as f32
+}
+
+/// Where this arrow's glyph sits: [`SETBACK_M`] metres back along the approach from the road's
+/// junction end, or as far as the approach runs straight, whichever is nearer.
+///
+/// `local_per_metre` is [`tile_local_per_metre`] for the tile the arrow was built in. It is the
+/// caller's to supply because [`place_arrows`] is handed a polyline and nothing that identifies the
+/// tile it came from, and the renderer holds the tile.
+pub fn placed_anchor(inst: &ArrowInstance, local_per_metre: f32) -> (f32, f32) {
+    let back = (SETBACK_M * local_per_metre).min(inst.run).max(0.0);
+    (inst.junction_end.0 - inst.angle.cos() * back, inst.junction_end.1 - inst.angle.sin() * back)
+}
+
+/// How far the approach runs straight back from its junction end, in tile-local units.
+///
+/// The setback travels in a straight line along the approach heading, so it may only travel as far
+/// as the road keeps going that way. Walked back vertex by vertex from the end, taking each
+/// vertex's distance *along* the heading while its distance *across* the heading stays within
+/// [`STRAIGHT_RUN_DRIFT`] of that — so a road that curves away from its junction shortens its own
+/// setback rather than throwing the arrow off the carriageway. Capped at [`RUN_FRACTION`] of the
+/// whole line.
+///
+/// `unit` is the direction of travel at the end, normalised; `backward` picks which end.
+fn straight_run(line: &[(f32, f32)], backward: bool, unit: (f32, f32)) -> f32 {
+    let total: f32 = line.windows(2).map(|p| (p[1].0 - p[0].0).hypot(p[1].1 - p[0].1)).sum();
+    let tip = if backward { line[0] } else { line[line.len() - 1] };
+    let mut run = 0.0f32;
+    for i in 1..line.len() {
+        let p = if backward { line[i] } else { line[line.len() - 1 - i] };
+        let (vx, vy) = (tip.0 - p.0, tip.1 - p.1);
+        let along = vx * unit.0 + vy * unit.1;
+        let across = (vx * unit.1 - vy * unit.0).abs();
+        // `along <= run` also stops a polyline that doubles back on itself.
+        if along <= run || across > STRAIGHT_RUN_DRIFT * along {
+            break;
+        }
+        run = along;
+    }
+    run.min(total * RUN_FRACTION)
+}
 
 /// Place one arrow per lane for a road's turn masks, in tile-local coordinates.
 ///
-/// `line` is the road's centreline (extent units). Forward lanes are placed at the **last** point
-/// (the way's junction end) heading toward it; backward lanes at the **first** point heading toward
-/// it (i.e. back down the way). A lane whose mask has no indication draws nothing. The `ordinal`
-/// runs left to right in the direction of travel, matching the mask order the archive stores.
+/// `line` is the road's centreline (tile-local 0..1). Forward lanes are placed at the **last**
+/// point (the way's junction end) heading toward it; backward lanes at the **first** point heading
+/// toward it (i.e. back down the way). A lane whose mask has no indication draws nothing. The
+/// `ordinal` runs left to right in the direction of travel, matching the mask order the archive
+/// stores.
+///
+/// The instances carry the junction end itself, not the glyph's position: the setback that puts the
+/// arrow back on the approach is [`SETBACK_M`] ground metres, and nothing here knows the tile's
+/// zoom or latitude to convert that into tile-local units. What this pass does contribute is
+/// [`straight_run`], the distance the setback may travel before it would leave the road; the two
+/// meet in [`placed_anchor`].
 ///
 /// `lanes_each_way` is `(forward, backward)` — how the road's lanes divide between the two
 /// directions, the **same pair the centre line is placed from**, so the arrows and the marking
@@ -199,7 +292,8 @@ fn place_dir(
         return;
     }
     let angle = dy.atan2(dx);
-    let anchor = (tip.0 - dx * SETBACK, tip.1 - dy * SETBACK);
+    let len = dx.hypot(dy);
+    let run = straight_run(line, backward, (dx / len, dy / len));
     let marked = masks.len().min(u8::MAX as usize) as u8;
     let count = own_lanes.max(marked);
     let fan_offset = fan_offset(count, total_lanes.max(count), left_hand);
@@ -207,8 +301,9 @@ fn place_dir(
         if let Some(arrow) = arrow_for(mask) {
             let ordinal = i as u8;
             out.push(ArrowInstance {
-                anchor,
+                junction_end: tip,
                 angle,
+                run,
                 ordinal,
                 count,
                 arrow,
@@ -376,14 +471,24 @@ pub fn unit_arrow_triangles(turn: f32) -> [(f32, f32); ARROW_VERTS] {
 ///
 /// `scale` is tile-local units per unit-arrow coordinate (the arrow's screen size ÷ the tile's
 /// screen span); `lateral` is the sideways lane offset in the same tile-local units, applied
-/// perpendicular to the road heading so each lane's arrow sits over its lane. The glyph is rotated
-/// by the road heading alone — the manoeuvre is *built into* the shape by [`turn_angle`] rather
-/// than added to the rotation. This is the exact math the renderer runs per frame, factored out so
-/// it is a unit test rather than a screenshot.
-pub fn arrow_verts(inst: &ArrowInstance, scale: f32, lateral: f32, out: &mut Vec<f32>) {
+/// perpendicular to the road heading so each lane's arrow sits over its lane; `local_per_metre` is
+/// [`tile_local_per_metre`] for the tile, which is what turns the ground setback into this tile's
+/// units. The along-road setback is applied here rather than baked into the instance so that the
+/// one function the renderer calls per arrow cannot be made to skip it. The glyph is rotated by the
+/// road heading alone — the manoeuvre is *built into* the shape by [`turn_angle`] rather than added
+/// to the rotation. This is the exact math the renderer runs per frame, factored out so it is a
+/// unit test rather than a screenshot.
+pub fn arrow_verts(
+    inst: &ArrowInstance,
+    scale: f32,
+    lateral: f32,
+    local_per_metre: f32,
+    out: &mut Vec<f32>,
+) {
     // Perpendicular to the road heading (left is -y in tile space), for the lane offset.
     let (rc, rs) = (inst.angle.cos(), inst.angle.sin());
-    let (cx, cy) = (inst.anchor.0 - rs * lateral, inst.anchor.1 + rc * lateral);
+    let (ax, ay) = placed_anchor(inst, local_per_metre);
+    let (cx, cy) = (ax - rs * lateral, ay + rc * lateral);
     for (ux, uy) in unit_arrow_triangles(turn_angle(inst)) {
         let rx = ux * rc - uy * rs;
         let ry = ux * rs + uy * rc;
@@ -428,8 +533,12 @@ mod tests {
         assert!(arrows.iter().all(|a| a.count == 3), "the count is the whole lane set");
         assert_eq!((arrows[0].ordinal, arrows[0].arrow), (0, TurnArrow::Left));
         assert_eq!((arrows[1].ordinal, arrows[1].arrow), (2, TurnArrow::Through), "ordinal kept");
-        // Anchored back from the junction, not on it.
-        assert!(arrows[0].anchor.0 < 100.0 && arrows[0].anchor.0 > 50.0);
+        // The instance carries the junction end itself; the ground setback moves the drawn anchor
+        // back off it.
+        assert_eq!(arrows[0].junction_end, (100.0, 0.0));
+        let per_m = tile_local_per_metre(14, 6331);
+        let drawn = placed_anchor(&arrows[0], per_m);
+        assert!(drawn.0 < 100.0, "drawn back from the junction, not on it");
     }
 
     /// Backward lanes anchor at the other end and point the other way.
@@ -441,7 +550,8 @@ mod tests {
         assert_eq!(arrows.len(), 1);
         // Heading toward the start of an eastbound way is due west: pi radians.
         assert!((arrows[0].angle.abs() - std::f32::consts::PI).abs() < 1e-6);
-        assert!(arrows[0].anchor.0 > 0.0 && arrows[0].anchor.0 < 100.0);
+        assert_eq!(arrows[0].junction_end, (0.0, 0.0));
+        assert!(placed_anchor(&arrows[0], tile_local_per_metre(14, 6331)).0 > 0.0);
     }
 
     /// A line too short to have a heading draws nothing rather than an arrow pointing nowhere.
@@ -516,8 +626,9 @@ mod tests {
     #[test]
     fn the_measured_exit_beats_the_nominal_angle_and_wraps_the_short_way() {
         let inst = ArrowInstance {
-            anchor: (0.5, 0.5),
+            junction_end: (0.5, 0.5),
             angle: 0.0,
+            run: 0.0,
             ordinal: 0,
             count: 1,
             arrow: TurnArrow::Right,
@@ -612,10 +723,12 @@ mod tests {
         let turns = LaneTurns { forward: vec![LANE_THROUGH], backward: vec![LANE_THROUGH] };
         let arrows = place_arrows(&line, &turns, (1, 1), false);
         assert_eq!(arrows.len(), 2);
-        let gap = (arrows[0].anchor.0 - arrows[1].anchor.0).abs();
-        assert!(gap > 1.0, "the two directions anchor apart, not on top of each other");
-        assert!(arrows[0].anchor.0 > 50.0, "forward sits back from the way's end");
-        assert!(arrows[1].anchor.0 < 50.0, "backward sits back from the way's start");
+        let per_m = tile_local_per_metre(14, 6331);
+        let forward = placed_anchor(&arrows[0], per_m);
+        let backward = placed_anchor(&arrows[1], per_m);
+        assert!((forward.0 - backward.0).abs() > 1.0, "the two directions draw apart");
+        assert!(forward.0 > 50.0, "forward sits back from the way's end");
+        assert!(backward.0 < 50.0, "backward sits back from the way's start");
     }
 
     /// The shaft never folds through itself, however tight the bend.
@@ -729,15 +842,121 @@ mod tests {
         }
     }
 
+    /// A latitude test: the tile square is a Mercator square, so a metre is a larger fraction of a
+    /// tile the further from the equator, and it is that factor that keeps [`SETBACK_M`] a ground
+    /// distance rather than a Mercator one.
+    #[test]
+    fn a_metre_is_a_bigger_slice_of_a_tile_the_further_north_it_is() {
+        let equator = tile_local_per_metre(14, 8192);
+        let burlingame = tile_local_per_metre(14, 6331);
+        assert!(burlingame > equator, "Mercator stretches: {burlingame} vs {equator}");
+        // An equator tile at z14 spans the equator divided by the tile count, by definition.
+        let span_m = 1.0 / equator;
+        assert!((span_m - 40_075_016.686 / 16384.0).abs() < 1.0, "{span_m} m across the tile");
+    }
+
+    /// The setback is a distance on the ground, not a fraction of whatever the archive's simplifier
+    /// left as the way's final segment.
+    ///
+    /// This is the defect the device showed: an OSM way split a few metres short of its junction
+    /// node has a short final segment, and a fraction of that is no setback at all, so the arrow
+    /// drew inside the intersection.
+    #[test]
+    fn the_setback_is_a_ground_distance_not_a_fraction_of_the_final_segment() {
+        let per_m = tile_local_per_metre(14, 6331);
+        let turns = LaneTurns { forward: vec![LANE_THROUGH], backward: vec![] };
+        let back_m = |line: &[(f32, f32)]| {
+            let arrows = place_arrows(line, &turns, (1, 0), false);
+            (arrows[0].junction_end.0 - placed_anchor(&arrows[0], per_m).0) / per_m
+        };
+        // The same eastbound approach reaching the same node, once as one long segment and once
+        // split five metres short of it.
+        let one_segment = [(0.4, 0.5), (0.5, 0.5)];
+        let split_short = [(0.4, 0.5), (0.5 - 5.0 * per_m, 0.5), (0.5, 0.5)];
+        assert!((back_m(&one_segment) - 20.0).abs() < 0.5, "{} m", back_m(&one_segment));
+        assert!((back_m(&split_short) - 20.0).abs() < 0.5, "{} m", back_m(&split_short));
+    }
+
+    /// And it does not drift with the tile's zoom: the same road built into a coarse tile and a
+    /// fine one sets its arrow back the same number of metres, which a tile-local constant or a
+    /// pixel measurement could not do.
+    #[test]
+    fn the_setback_is_the_same_ground_distance_at_every_tile_zoom() {
+        let turns = LaneTurns { forward: vec![LANE_THROUGH], backward: vec![] };
+        for (z, y) in [(12u8, 1582u32), (13, 3165), (14, 6331)] {
+            let per_m = tile_local_per_metre(z, y);
+            let arrows = place_arrows(&[(0.1, 0.5), (0.5, 0.5)], &turns, (1, 0), false);
+            let back_m = (arrows[0].junction_end.0 - placed_anchor(&arrows[0], per_m).0) / per_m;
+            assert!((back_m - 20.0).abs() < 0.5, "z{z} set back {back_m} m");
+        }
+    }
+
+    /// An approach that curves away from its junction shortens its own setback rather than
+    /// throwing the arrow off the carriageway: the setback travels in a straight line, so it may
+    /// only travel as far as the road keeps going that way.
+    #[test]
+    fn a_curving_approach_shortens_its_setback_instead_of_leaving_the_road() {
+        let per_m = tile_local_per_metre(14, 6331);
+        let turns = LaneTurns { forward: vec![LANE_THROUGH], backward: vec![] };
+        // Ten metres of straight run into the node, and before that the road bends hard north.
+        let bend = [
+            (0.5 - 40.0 * per_m, 0.5 - 30.0 * per_m),
+            (0.5 - 10.0 * per_m, 0.5),
+            (0.5, 0.5),
+        ];
+        let arrows = place_arrows(&bend, &turns, (1, 0), false);
+        let anchor = placed_anchor(&arrows[0], per_m);
+        let back_m = (arrows[0].junction_end.0 - anchor.0) / per_m;
+        assert!(back_m > 9.0 && back_m < 11.0, "stops where the road does, {back_m} m");
+        assert!((anchor.1 - 0.5).abs() < 1e-6, "and stays on the straight run it measured");
+    }
+
+    /// A way too short to give both directions a full setback still keeps them apart, which is the
+    /// case that used to draw as one shaft with a head at each end.
+    #[test]
+    fn a_short_way_shares_its_length_between_the_two_directions() {
+        let per_m = tile_local_per_metre(14, 6331);
+        // A twenty-metre stub: a full setback each way would carry the two past each other.
+        let line = [(0.5, 0.5), (0.5 + 20.0 * per_m, 0.5)];
+        let turns = LaneTurns { forward: vec![LANE_THROUGH], backward: vec![LANE_THROUGH] };
+        let arrows = place_arrows(&line, &turns, (1, 1), false);
+        let (forward, backward) =
+            (placed_anchor(&arrows[0], per_m), placed_anchor(&arrows[1], per_m));
+        assert!(forward.0 < line[1].0, "forward is back from its own end");
+        assert!(backward.0 > line[0].0, "backward is back from its own end");
+        assert!(forward.0 > backward.0, "and they have not crossed: {forward:?} {backward:?}");
+    }
+
+    /// The setback reaches the drawn glyph, not just the instance: the whole arrow moves back by
+    /// the ground distance, so nothing downstream can place it at the junction node by forgetting.
+    #[test]
+    fn the_glyph_is_drawn_at_the_set_back_anchor_not_at_the_junction() {
+        let per_m = tile_local_per_metre(14, 6331);
+        let turns = LaneTurns { forward: vec![LANE_THROUGH], backward: vec![] };
+        let arrows = place_arrows(&[(0.4, 0.5), (0.5, 0.5)], &turns, (1, 0), false);
+        let tip_x = |local_per_metre| {
+            let mut verts = Vec::new();
+            arrow_verts(&arrows[0], 0.001, 0.0, local_per_metre, &mut verts);
+            verts.chunks(2).map(|p| p[0]).fold(f32::MIN, f32::max)
+        };
+        // Against the same glyph with no setback at all, so this measures the shift and not the
+        // glyph's own reach ahead of its anchor.
+        let shift_m = (tip_x(0.0) - tip_x(per_m)) / per_m;
+        assert!((shift_m - 20.0).abs() < 0.5, "the glyph moved back {shift_m} m");
+    }
+
     /// The renderer's per-arrow transform: a through arrow points along the road (its tip furthest
     /// along +heading), the lane offset shifts it perpendicular to the heading, and a left arrow's
     /// tip lands to the left of the road.
     #[test]
     fn arrow_verts_rotate_scale_and_offset_into_the_lane() {
-        // Eastbound through arrow at tile-centre, no lane offset: tip furthest in +x.
+        // Eastbound through arrow at tile-centre, no lane offset: tip furthest in +x. A zero run
+        // means no setback, which isolates the rotate-scale-offset transform this checks; the
+        // setback itself is `the_glyph_is_drawn_at_the_set_back_anchor_not_at_the_junction`.
         let through = ArrowInstance {
-            anchor: (0.5, 0.5),
+            junction_end: (0.5, 0.5),
             angle: 0.0,
+            run: 0.0,
             ordinal: 0,
             count: 1,
             arrow: TurnArrow::Through,
@@ -746,7 +965,7 @@ mod tests {
             left_hand: false,
         };
         let mut v = Vec::new();
-        arrow_verts(&through, 0.1, 0.0, &mut v);
+        arrow_verts(&through, 0.1, 0.0, 1.0, &mut v);
         assert_eq!(v.len(), ARROW_VERTS * 2);
         let max_x = v.chunks(2).map(|p| p[0]).fold(f32::MIN, f32::max);
         let tip_y = v.chunks(2).max_by(|a, b| a[0].total_cmp(&b[0])).unwrap()[1];
@@ -755,13 +974,13 @@ mod tests {
         // A non-zero lateral offset shifts the whole glyph off the centreline (perpendicular to
         // the heading); the sign of the real offset comes from the lane's place across the road.
         let mut v2 = Vec::new();
-        arrow_verts(&through, 0.1, 0.2, &mut v2);
+        arrow_verts(&through, 0.1, 0.2, 1.0, &mut v2);
         let mean_y2 = v2.chunks(2).map(|p| p[1]).sum::<f32>() / (v2.len() / 2) as f32;
         assert!((mean_y2 - 0.5).abs() > 0.1, "the lane offset moves the arrow off the centreline");
         // A left arrow on an eastbound road points north (-y): its tip is above the anchor.
         let left = ArrowInstance { arrow: TurnArrow::Left, ..through };
         let mut v3 = Vec::new();
-        arrow_verts(&left, 0.1, 0.0, &mut v3);
+        arrow_verts(&left, 0.1, 0.0, 1.0, &mut v3);
         let tip = v3.chunks(2).min_by(|a, b| a[1].total_cmp(&b[1])).unwrap();
         assert!(tip[1] < 0.5, "a left turn's tip is north of the anchor");
     }
