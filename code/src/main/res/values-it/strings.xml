@@ -45,4 +45,5 @@
     <string name="go">Vai</string>
     <string name="discard_changes_title">Scartare le modifiche non salvate?</string>
     <string name="discard">Scarta</string>
+    <string name="all_languages">Tutte le lingue</string>
 </resources>
