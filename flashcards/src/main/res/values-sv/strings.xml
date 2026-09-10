@@ -1,4 +1,13 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <string name="speak">Läs upp</string>
+    <string name="delete">Ta bort</string>
+    <string name="name">Namn</string>
+    <string name="cancel">Avbryt</string>
+    <string name="theme_system">System</string>
+    <string name="theme_light">Ljust</string>
+    <string name="theme_dark">Mörkt</string>
+    <string name="preview">Förhandsvisning</string>
+    <string name="save">Spara</string>
+    <string name="undo">Ångra</string>
 </resources>
