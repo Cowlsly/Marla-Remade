@@ -6,6 +6,7 @@ import android.hardware.display.DisplayManager
 import android.hardware.display.VirtualDisplay
 import android.hardware.display.VirtualDisplayConfig
 import android.util.Log
+import android.view.Display
 import android.view.Surface
 import com.vayunmathur.cast.platform.mirror.CaptureGeometry
 
@@ -68,6 +69,11 @@ private const val CAST_DISPLAY_FLAGS =
 
 /** What the display is called, in Settings and in `dumpsys display`. */
 private const val DISPLAY_NAME = "cast"
+/**
+ * Nominal refresh rate for a declared mode. `VirtualDisplayAdapter` rebuilds each declared mode at
+ * the display's own refresh rate and reads only its width and height, so this value is not shown.
+ */
+private const val DESKTOP_MODE_REFRESH_RATE = 60f
 
 /**
  * Namespaces the unique id so it cannot collide with another adapter's.
@@ -119,7 +125,12 @@ class CastSystemDisplay(context: Context) {
      * verified against `DisplayManager.java` and restated on each constant above.
      */
     @SuppressLint("WrongConstant")
-    fun start(surface: Surface, geometry: CaptureGeometry, receiverId: String?): Boolean {
+    fun start(
+        surface: Surface,
+        geometry: CaptureGeometry,
+        receiverId: String?,
+        supportedModes: List<CaptureGeometry> = emptyList(),
+    ): Boolean {
         if (displays == null) {
             Log.w(TAG, "no DisplayManager")
             return false
@@ -133,6 +144,7 @@ class CastSystemDisplay(context: Context) {
             )
                 .setFlags(CAST_DISPLAY_FLAGS)
                 .setSurface(surface)
+            builder.applySupportedModes(supportedModes)
             receiverId?.let { builder.applyUniqueId("$UNIQUE_ID_PREFIX$it") }
             display = displays.createVirtualDisplay(builder.build())
             if (display == null) Log.w(TAG, "the platform returned no display")
@@ -170,6 +182,49 @@ class CastSystemDisplay(context: Context) {
             Log.w(TAG, "setUniqueId unavailable; display preferences will not persist", e)
         }
     }
+
+    /**
+     * `VirtualDisplayConfig.Builder.setSupportedModes`, which is `@SystemApi` and
+     * `@FlaggedApi(FLAG_VIRTUAL_DISPLAYS_SUPPORT_DESKTOP_MODE)` - not on the public SDK this module
+     * compiles against - hence reflection. Each [CaptureGeometry] becomes a `Display.Mode`; the
+     * framework re-creates each at the display's own refresh rate, reading only width and height,
+     * so Settings' resolution picker ends up offering exactly these sizes.
+     *
+     * Best effort, and never fatal to the display: on a build without the framework change the
+     * method is absent and the picker simply shows the single mode the display was created at,
+     * which is the pre-desktop behaviour.
+     */
+    private fun VirtualDisplayConfig.Builder.applySupportedModes(modes: List<CaptureGeometry>) {
+        if (modes.isEmpty()) return
+        try {
+            val displayModes = modes.mapNotNull { buildDisplayMode(it.width, it.height) }
+            if (displayModes.isEmpty()) return
+            VirtualDisplayConfig.Builder::class.java
+                .getMethod("setSupportedModes", List::class.java)
+                .invoke(this, displayModes)
+        } catch (e: Throwable) {
+            Log.w(TAG, "setSupportedModes unavailable; the resolution picker will show one mode", e)
+        }
+    }
+
+    /**
+     * A `Display.Mode` for [width] x [height]. Its constructor is not on the public SDK, so it is
+     * reached reflectively; the refresh rate is nominal (see [DESKTOP_MODE_REFRESH_RATE]).
+     */
+    private fun buildDisplayMode(width: Int, height: Int): Display.Mode? =
+        try {
+            Display.Mode::class.java
+                .getDeclaredConstructor(
+                    Int::class.javaPrimitiveType,
+                    Int::class.javaPrimitiveType,
+                    Float::class.javaPrimitiveType,
+                )
+                .apply { isAccessible = true }
+                .newInstance(width, height, DESKTOP_MODE_REFRESH_RATE)
+        } catch (e: Throwable) {
+            Log.w(TAG, "Display.Mode(int, int, float) unavailable; cannot declare ${width}x$height", e)
+            null
+        }
 
     fun release() {
         runCatching { display?.release() }

@@ -28,13 +28,18 @@ class CastRemoteDisplayService : Service() {
     private var provider: MaRemoteDisplayProvider? = null
 
     override fun onBind(intent: Intent?): IBinder? {
-        if (intent?.action != RemoteDisplayProvider.SERVICE_INTERFACE) return null
-        val existing = provider ?: try {
-            MaRemoteDisplayProvider(this).also { provider = it }
-        } catch (e: LinkageError) {
-            Log.w(TAG, "com.android.media.remotedisplay is not on this device", e)
+        Log.i(TAG, "onBind called action=${intent?.action}")
+        if (intent?.action != RemoteDisplayProvider.SERVICE_INTERFACE) {
+            Log.w(TAG, "onBind: action mismatch (want ${RemoteDisplayProvider.SERVICE_INTERFACE}), returning null")
             return null
         }
+        val existing = provider ?: try {
+            MaRemoteDisplayProvider(this).also { provider = it }
+        } catch (e: Throwable) {
+            Log.e(TAG, "onBind: failed to construct MaRemoteDisplayProvider", e)
+            return null
+        }
+        Log.i(TAG, "onBind: returning provider binder=${existing.binder}")
         return existing.binder
     }
 

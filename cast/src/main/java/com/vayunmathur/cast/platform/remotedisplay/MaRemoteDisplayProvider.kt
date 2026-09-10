@@ -81,11 +81,13 @@ class MaRemoteDisplayProvider(context: Context) : RemoteDisplayProvider(context)
     private var pairTimeoutJob: Job? = null
 
     init {
+        Log.i(TAG, "MaRemoteDisplayProvider constructed")
         scope.launch { CastController.mirrorPhase.collect { onMirrorPhase(it) } }
         scope.launch { CastController.sessionState.collect { onSessionState(it) } }
     }
 
     override fun onDiscoveryModeChanged(mode: Int) {
+        Log.i(TAG, "onDiscoveryModeChanged mode=$mode")
         if (mode == RemoteDisplayProvider.DISCOVERY_MODE_NONE) {
             discoveryJob?.cancel()
             discoveryJob = null
@@ -245,6 +247,7 @@ class MaRemoteDisplayProvider(context: Context) : RemoteDisplayProvider(context)
     }
 
     private fun syncRoutes(found: List<CastDevice>) {
+        Log.i(TAG, "syncRoutes: ${found.size} device(s): ${found.map { it.friendlyName }}")
         val seen = found.associateBy { it.id }
         devices.clear()
         devices.putAll(seen)

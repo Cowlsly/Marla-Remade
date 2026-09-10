@@ -482,7 +482,10 @@ object CastController {
             // lays it out for whatever size the display was created at rather than reproducing the
             // phone.
             val geometry = if (source is MirrorSource.SystemDisplay) {
-                MirrorGeometry.forDesktop(appContext, codec.selection, activeClient.displayModes)
+                val desktopModes =
+                    MirrorGeometry.desktopModes(appContext, codec.selection, activeClient.displayModes)
+                source.supportedModes = desktopModes
+                desktopModes.first()
             } else {
                 MirrorGeometry.forDisplay(appContext, codec.selection)
             }

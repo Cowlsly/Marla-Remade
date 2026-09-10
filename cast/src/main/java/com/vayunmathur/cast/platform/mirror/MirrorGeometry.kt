@@ -179,32 +179,55 @@ object MirrorGeometry {
         context: Context,
         chosen: CodecSelection.Chosen,
         modes: List<DisplayMode>,
-    ): CaptureGeometry {
-        val largest = modes.maxByOrNull { it.area }
-        if (largest == null) {
-            Log.w(TAG, "the TV advertised no panel modes; composing the desktop for the phone")
-            return forDisplay(context, chosen)
-        }
+    ): CaptureGeometry = desktopModes(context, chosen, modes).first()
 
-        val (fittedWidth, fittedHeight) = chosen.receiverLimits.fit(largest.width, largest.height)
+    /**
+     * Every desktop resolution this phone can actually send, largest first.
+     *
+     * The first entry is what a desktop is composed at by default - the panel's biggest mode,
+     * fitted to the TV's decoder and then clamped to what this phone's *encoder* will emit (a 4K
+     * panel behind a 1080p-class encoder lands here). The rest are the smaller panel modes, each
+     * likewise encodable, and they are what fills Android's external-display resolution picker
+     * once they are declared on the virtual display via `VirtualDisplayConfig.setSupportedModes`.
+     *
+     * Falls back to the single [forDisplay] geometry when the receiver advertised no modes (a
+     * pre-version-8 television) or when nothing it offered is encodable - the old,
+     * wrong-but-working behaviour, and the one mode the picker then shows.
+     */
+    fun desktopModes(
+        context: Context,
+        chosen: CodecSelection.Chosen,
+        modes: List<DisplayMode>,
+    ): List<CaptureGeometry> {
         val frameRate = frameRateFor(chosen.receiverLimits)
-        val (width, height) =
-            EncoderSupport.clampToEncoder(chosen.codec, fittedWidth, fittedHeight, frameRate)
-        val bitRate = bitRateFor(width, height, frameRate, chosen)
-        val density = desktopDensityFor(width, height)
-
+        val sizes = LinkedHashSet<Pair<Int, Int>>()
+        for (mode in modes) {
+            val (fittedWidth, fittedHeight) = chosen.receiverLimits.fit(mode.width, mode.height)
+            val (width, height) =
+                EncoderSupport.clampToEncoder(chosen.codec, fittedWidth, fittedHeight, frameRate)
+            if (width > 0 && height > 0) sizes.add(width to height)
+        }
+        val geometries = sizes
+            .map { (width, height) ->
+                CaptureGeometry(
+                    width = width,
+                    height = height,
+                    densityDpi = desktopDensityFor(width, height),
+                    bitRate = bitRateFor(width, height, frameRate, chosen),
+                )
+            }
+            // Largest first: the sender composes at the head and the picker lists from the top.
+            .sortedByDescending { it.width.toLong() * it.height }
+        if (geometries.isEmpty()) {
+            Log.w(TAG, "the TV advertised no encodable panel modes; composing for the phone")
+            return listOf(forDisplay(context, chosen))
+        }
         Log.i(
             TAG,
-            "desktop: panel is ${largest.width}x${largest.height}, sending ${width}x$height " +
-                "@ ${frameRate}fps at ${bitRate / 1_000_000.0} Mbit/s, ${density}dpi" +
-                chosen.rateReasoning(),
+            "desktop: offering ${geometries.joinToString { "${it.width}x${it.height}" }} " +
+                "@ ${frameRate}fps${chosen.rateReasoning()}",
         )
-        return CaptureGeometry(
-            width = width,
-            height = height,
-            densityDpi = density,
-            bitRate = bitRate,
-        )
+        return geometries
     }
 
     /**

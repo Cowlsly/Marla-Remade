@@ -65,6 +65,7 @@
         android:protectionLevel="signature" />
 
     <application
+        android:name=".CastApplication"
         android:allowBackup="true"
         android:dataExtractionRules="@xml/data_extraction_rules"
         android:icon="@mipmap/ic_launcher"
@@ -86,13 +87,23 @@
             android:launchMode="singleTop"
             android:theme="@style/Theme.General">
             <intent-filter>
-                <action android:name="android.intent.action.MAIN" />
-                <category android:name="android.intent.category.LAUNCHER" />
-            </intent-filter>
-            <intent-filter>
                 <action android:name="android.service.quicksettings.action.QS_TILE_PREFERENCES" />
             </intent-filter>
         </activity>
+        <!-- Launcher entry as an alias so MAOS can hide it (there the app's own screen-sharing UI
+             is redundant - the OS drives casting) without disabling MainActivity, which is still
+             reached as the QS tile's preferences/settings activity. CastApplication disables this
+             alias when the app is the privileged system remote-display provider (only on MAOS); on
+             an ordinary install it stays enabled and the icon shows. -->
+        <activity-alias
+            android:name=".LauncherAlias"
+            android:exported="true"
+            android:targetActivity=".MainActivity">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity-alias>
 
         <activity
             android:name=".platform.mirror.MirrorConsentActivity"

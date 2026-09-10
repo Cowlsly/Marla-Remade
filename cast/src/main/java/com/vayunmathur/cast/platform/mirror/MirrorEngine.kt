@@ -270,7 +270,7 @@ class MirrorEngine(
                 // mirror of the phone. The id is written back onto the source so the caller can
                 // publish it to the route - the framework will not go looking for it.
                 val desktop = CastSystemDisplay(appContext)
-                if (!desktop.start(surface, geometry, source.receiverId)) {
+                if (!desktop.start(surface, geometry, source.receiverId, source.supportedModes)) {
                     encoder.release()
                     desktop.release()
                     return false

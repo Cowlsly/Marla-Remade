@@ -62,6 +62,16 @@ sealed interface MirrorSource {
          */
         var receiverId: String? = null
             internal set
+
+        /**
+         * The desktop resolutions to declare on the display, largest (the default) first.
+         *
+         * These become the display's `supportedModes`, which is what populates Android's
+         * external-display resolution picker. Empty until [com.vayunmathur.cast.platform.CastController]
+         * computes them from the TV's advertised modes and this phone's encoder limits.
+         */
+        var supportedModes: List<CaptureGeometry> = emptyList()
+            internal set
     }
 
     /**
