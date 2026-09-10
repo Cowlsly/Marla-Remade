@@ -3,4 +3,5 @@
     <string name="title_settings">Inställningar</string>
     <string name="action_update">Uppdatera</string>
     <string name="language">Språk</string>
+    <string name="off">Av</string>
 </resources>
