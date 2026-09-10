@@ -56,7 +56,7 @@ use rayon::prelude::*;
 
 use crate::schema::{self, Class, Layers};
 use crate::store::{Sink, Store, WayCounts, WayReader, WaySink};
-use tilecodec::mamaps::body::BuildingAttrs;
+use tilecodec::mamaps::body::{BuildingAttrs, Carriageway};
 use tilecodec::mamaps::dict::LAYER_BUILDINGS;
 
 /// One classified feature, in lon/lat, ready to tile.
@@ -90,6 +90,11 @@ pub struct Feature {
     /// draw per-lane arrows at junctions. See [`crate::schema::roads::turn_masks`].
     pub turn_fwd: Vec<u16>,
     pub turn_bwd: Vec<u16>,
+    /// How a road's lanes divide between the two directions, and which dividers between them may
+    /// not be crossed. Default for every other layer and for a road whose split was never
+    /// surveyed. Baked into the body's carriageway side table so the renderer can put the centre
+    /// line where it belongs rather than down the middle. See [`crate::schema::roads::carriageway`].
+    pub carriageway: Carriageway,
     /// A building's OSM Simple 3D Buildings attributes (height, roof, colours), `None` for every
     /// non-building feature. Baked into the body's building side table so the renderer can extrude
     /// the footprint in 3D. See [`crate::schema::buildings::attrs`].
@@ -151,6 +156,9 @@ struct Way {
     /// [`crate::schema::roads::turn_masks`].
     turn_fwd: Vec<u16>,
     turn_bwd: Vec<u16>,
+    /// A road's directional lane split and solid dividers; default otherwise. See
+    /// [`crate::schema::roads::carriageway`].
+    carriageway: Carriageway,
     /// A building's S3DB attributes, `None` for every non-building. See
     /// [`crate::schema::buildings::attrs`].
     building: Option<BuildingAttrs>,
@@ -172,6 +180,9 @@ struct Relation {
     id: i64,
     /// A building relation's S3DB attributes (a multipolygon `building=*`), `None` otherwise.
     building: Option<BuildingAttrs>,
+    /// The ISO 3166-1 code of an `admin_level=2` relation, `None` for every other relation. What
+    /// the tile's marking convention is resolved from — see [`crate::schema::boundaries::Conventions`].
+    iso: Option<String>,
 }
 
 /// Read `input` and spill every feature the schema classifies to `spill_path`.
@@ -258,9 +269,10 @@ pub fn extract(
                                 }
                             }
                             let name = schema::display_name(&way.tags, class.layer);
-                            // A road's carriageway lane count and per-lane turn masks, baked so the
-                            // renderer can draw the lanes individually and place turn arrows. Zero
-                            // and empty for every other layer.
+                            // A road's carriageway lane count, per-lane turn masks and directional
+                            // split, baked so the renderer can draw the lanes individually, place
+                            // turn arrows and put the centre line where the traffic divides. Zero,
+                            // empty and default for every other layer.
                             let is_road =
                                 class.layer == tilecodec::mamaps::dict::LAYER_ROADS;
                             let lane_count = if is_road {
@@ -272,6 +284,11 @@ pub fn extract(
                                 schema::roads::turn_masks(&way.tags)
                             } else {
                                 (Vec::new(), Vec::new())
+                            };
+                            let carriageway = if is_road {
+                                schema::roads::carriageway(&way.tags)
+                            } else {
+                                Carriageway::default()
                             };
                             // A building's S3DB attributes, parsed once here beside its class.
                             // Zero-cost for the overwhelming majority of ways, which are not
@@ -290,6 +307,7 @@ pub fn extract(
                                     lane_count,
                                     turn_fwd,
                                     turn_bwd,
+                                    carriageway,
                                     building,
                                 },
                             ));
@@ -327,6 +345,10 @@ pub fn extract(
                             } else {
                                 None
                             };
+                            // A country's code, kept so the region shape below can stamp its
+                            // driving side and centre-line colour onto the tiles it covers.
+                            let iso = schema::boundaries::country_code(&relation.tags)
+                                .map(str::to_string);
                             // An administrative relation yields *two* features: the border, which
                             // is a line and is what the basemap draws, and the region's shape,
                             // which nothing draws and the region mask reads. They cannot be one
@@ -343,6 +365,7 @@ pub fn extract(
                                         name: name.clone(),
                                         id: relation.id,
                                         building: None,
+                                        iso: iso.clone(),
                                     });
                                 }
                             }
@@ -353,6 +376,7 @@ pub fn extract(
                                 name,
                                 id: relation.id,
                                 building,
+                                iso: None,
                             });
                         }
                     }
@@ -375,6 +399,7 @@ pub fn extract(
                     way.lane_count,
                     &way.turn_fwd,
                     &way.turn_bwd,
+                    way.carriageway,
                     way.building,
                 )?;
             }
@@ -556,12 +581,24 @@ pub fn extract(
     // 64 Ki ways at ~10 nodes each is a few tens of MB of geometry in flight, against a build that
     // peaks near 7 GB.
     const MATERIALISE_BATCH: usize = 64 * 1024;
-    let mut batch: Vec<(Class, Option<String>, Vec<i64>, u64, u8, Vec<u16>, Vec<u16>, Option<BuildingAttrs>)> =
-        Vec::with_capacity(MATERIALISE_BATCH);
+    #[allow(clippy::type_complexity)]
+    let mut batch: Vec<(
+        Class,
+        Option<String>,
+        Vec<i64>,
+        u64,
+        u8,
+        Vec<u16>,
+        Vec<u16>,
+        Carriageway,
+        Option<BuildingAttrs>,
+    )> = Vec::with_capacity(MATERIALISE_BATCH);
     let mut built: Vec<Option<Geometry<(f64, f64)>>> = Vec::with_capacity(MATERIALISE_BATCH);
     loop {
         let more = reader.next(&mut refs)?;
-        if let Some((id, class, name, lane_count, turn_fwd, turn_bwd, building)) = more.as_ref() {
+        if let Some((id, class, name, lane_count, turn_fwd, turn_bwd, carriageway, building)) =
+            more.as_ref()
+        {
             let mut class = *class;
             // The corridor's zoom, where it is shallower than this way's own.
             if let Ok(at) = promoted.binary_search_by_key(id, |(id, _)| *id) {
@@ -583,6 +620,7 @@ pub fn extract(
                 *lane_count,
                 turn_fwd.clone(),
                 turn_bwd.clone(),
+                *carriageway,
                 *building,
             ));
         }
@@ -592,7 +630,7 @@ pub fn extract(
             par::install(|| {
                 batch
                     .par_iter()
-                    .map(|(class, _, refs, _, _, _, _, _)| {
+                    .map(|(class, _, refs, _, _, _, _, _, _)| {
                         let line = table.line(refs);
                         // A label layer's ways are centroided to points: a town mapped as an area
                         // is still one label, not a loop. Everything else keeps its geometry.
@@ -604,8 +642,10 @@ pub fn extract(
                     })
                     .collect_into_vec(&mut built);
             });
-            for ((class, name, _, id, lane_count, turn_fwd, turn_bwd, building), geometry) in
-                batch.iter().zip(built.drain(..))
+            for (
+                (class, name, _, id, lane_count, turn_fwd, turn_bwd, carriageway, building),
+                geometry,
+            ) in batch.iter().zip(built.drain(..))
             {
                 match geometry {
                     Some(geometry) => {
@@ -613,7 +653,11 @@ pub fn extract(
                         // those; everything else — and a plain road — goes the plain, named way.
                         if let Some(b) = building {
                             sink.push_building(class, &geometry, name.as_deref(), *b)?;
-                        } else if *lane_count > 0 || !turn_fwd.is_empty() || !turn_bwd.is_empty() {
+                        } else if *lane_count > 0
+                            || !turn_fwd.is_empty()
+                            || !turn_bwd.is_empty()
+                            || !carriageway.is_empty()
+                        {
                             sink.push_road(
                                 class,
                                 &geometry,
@@ -621,6 +665,7 @@ pub fn extract(
                                 *lane_count,
                                 turn_fwd,
                                 turn_bwd,
+                                *carriageway,
                             )?;
                         } else {
                             sink.push_named(class, &geometry, name.as_deref(), *id)?;
@@ -649,6 +694,11 @@ pub fn extract(
         "relation(s)",
         true,
     );
+    // Which driving side and centre-line colour applies where, accumulated as the country shapes
+    // go past. Empty on a build with `boundaries` switched off, because nothing classifies an
+    // administrative relation then and there is no country geometry to resolve against — such a
+    // build's tiles carry no convention and the renderer falls back to right-hand and white.
+    let mut conventions = schema::boundaries::Conventions::default();
     for relation in &relations {
         bar.tick("relation(s)");
         // A `places` relation (a country, a region) is labelled at its centroid: one point, not
@@ -716,6 +766,12 @@ pub fn extract(
         if let Some(building) = relation.building {
             sink.push_building(&relation.class, &Geometry::Polygons(polygons), None, building)?;
         } else {
+            // The country's own shape is also what says how its roads are marked. Stamped before
+            // the shape is moved into the sink, from the assembled rings rather than from a
+            // separate geometry, so the grid and the border line agree about where the country is.
+            if let Some(iso) = &relation.iso {
+                conventions.add(iso, &polygons);
+            }
             sink.push_named(&relation.class, &Geometry::Polygons(polygons), None, id)?;
         }
         stats.features += 1;
@@ -771,6 +827,7 @@ pub fn extract(
         println!("  {} drivable component segment(s)", stats.traffic_segments);
     }
     let store = sink.finish(spill_path)?;
+    let store = store.with_conventions(conventions);
     // The one phase that had no mark after it, and it turned out to be the largest single item in the
     // build outside tiling: ~25 s of a 136 s California run. It is 170 M coordinate lookups through
     // the mapped node table plus 3.3 GB of spill written, all on one thread.
@@ -1089,7 +1146,8 @@ mod tests {
         // Ascending way ids, as pass 1 produces; overlapping refs, as real ways have.
         for way in 0..64i64 {
             let refs: Vec<i64> = (0..8).map(|i| way * 5 + i).collect();
-            sink.push(way + 1, &class, &refs, None, 0, &[], &[], None).expect("push");
+            sink.push(way + 1, &class, &refs, None, 0, &[], &[], Carriageway::default(), None)
+                .expect("push");
         }
         let counts = sink.finish().expect("finish");
 

@@ -21,7 +21,9 @@
 //! street at z8 is not detail, it is a grey wash — and it is also most of the bytes. The `min_zoom`
 //! column below is the single most consequential table in this crate.
 
-use tilecodec::mamaps::body::{FLAG_IS_BRIDGE, FLAG_IS_LINK, FLAG_IS_TUNNEL};
+use tilecodec::mamaps::body::{
+    Carriageway, FLAG_IS_BRIDGE, FLAG_IS_LINK, FLAG_IS_ONEWAY, FLAG_IS_TUNNEL,
+};
 use tilecodec::mamaps::dict::LAYER_ROADS;
 
 use super::{detail, kind, Class, TagSource};
@@ -181,11 +183,16 @@ pub fn classify(tags: &(impl TagSource + ?Sized)) -> Option<Class> {
     None
 }
 
-/// The three booleans, and the reason this layer was worth redoing.
+/// The four booleans, and the reason this layer was worth redoing.
 ///
 /// `is_link` is derived from the class name rather than read from a tag, because OSM spells a slip
 /// road as `highway=motorway_link` and there is no `link=yes`. That matches what upstream emits and
 /// what the style filters with `!has is_link`.
+///
+/// `is_oneway` is a flag rather than side-table data because it is what decides whether a
+/// carriageway has a centre line at all, and because a flag is part of `coalesce`'s merge key —
+/// so a one-way and a two-way of the same class cannot collapse into one feature wearing
+/// whichever direction came first.
 fn flags(tags: &(impl TagSource + ?Sized), value: &str) -> u8 {
     let mut flags = 0u8;
     // `tunnel=building_passage` is a tunnel; only `no` is not. Same for a bridge tagged `viaduct`
@@ -198,6 +205,12 @@ fn flags(tags: &(impl TagSource + ?Sized), value: &str) -> u8 {
     }
     if value.ends_with("_link") {
         flags |= FLAG_IS_LINK;
+    }
+    // `oneway=yes` and only that, which is the test [`osm_ingest::roads::is_oneway`] applies, so a
+    // road cannot be one-way to the router and two-way to the carriageway drawn under it.
+    // `oneway=-1` is a direction rather than a flag and neither models it.
+    if tags.get("oneway") == Some("yes") {
+        flags |= FLAG_IS_ONEWAY;
     }
     flags
 }
@@ -241,6 +254,79 @@ pub fn turn_masks(tags: &(impl TagSource + ?Sized)) -> (Vec<u16>, Vec<u16>) {
         ..Default::default()
     };
     osm_ingest::roads::lane_masks(&rt)
+}
+
+/// How a road's lanes divide between the two directions, and which of the dividers between them
+/// may not be crossed.
+///
+/// [`lane_count`] is the total; this is what the surface renderer needs on top of it to put the
+/// centre line anywhere but the middle. `forward` runs toward the way's last point and `backward`
+/// toward its first, the same convention [`turn_masks`] uses, and `oneway` is decided by
+/// [`osm_ingest::roads::is_oneway`] so the split agrees with how the router traverses the road.
+///
+/// **An absent split stays absent.** A two-way road tagged only `lanes=4` comes back all-zero
+/// rather than as 2/2, because 2/2 is a guess dressed as a survey — the renderer already draws an
+/// unknown split down the middle, and on an odd total the guess would be wrong rather than
+/// unhelpful. All-zero is also what lets a tile of untagged residential streets carry no
+/// carriageway table at all.
+pub fn carriageway(tags: &(impl TagSource + ?Sized)) -> Carriageway {
+    let total = lane_count(tags) as u32;
+    let forward = osm_ingest::tags::parse_int_tag(tags.get("lanes:forward"));
+    let backward = osm_ingest::tags::parse_int_tag(tags.get("lanes:backward"));
+    let (forward, backward) = if tags.get("oneway") == Some("yes") {
+        // Every lane runs one way, so the total is the forward count even when the way also
+        // carries a `lanes:forward` that agrees with it.
+        (if forward > 0 { forward } else { total }, 0)
+    } else {
+        // One side tagged implies the other, and the pair is the more common tagging than either
+        // alone. Saturating rather than wrapping: `lanes=2` with `lanes:backward=3` is a mistagged
+        // road, and the answer to it is "nothing known about the other side".
+        (
+            if forward > 0 { forward } else { total.saturating_sub(backward) },
+            if backward > 0 { backward } else { total.saturating_sub(forward) },
+        )
+    };
+    // A split that does not add up to the total is not a split: the renderer reads the two
+    // together, so 3 forward and 4 backward of five lanes would be a shape it cannot draw. The
+    // dividers survive it — they are a property of the total, not of the division.
+    let (forward, backward) = if forward + backward == total { (forward, backward) } else { (0, 0) };
+    Carriageway {
+        forward: forward.min(osm_ingest::tags::MAX_LANES) as u8,
+        backward: backward.min(osm_ingest::tags::MAX_LANES) as u8,
+        solid_dividers: solid_dividers(tags.get("change:lanes"), total),
+    }
+}
+
+/// The interior dividers a lane change is prohibited across, a bit each from the leftmost.
+///
+/// Only the unsuffixed `change:lanes` is read. The `:forward`/`:backward` pair describes each
+/// direction's lanes in *that direction's* left-to-right order, so stitching the two into one
+/// carriageway-wide ordering needs the driving side — which is a property of the tile rather than
+/// of the way and is not known here. The plain tag is already ordered the way this field is.
+///
+/// A divider is solid when either lane it separates forbids crossing it: lane `k` tagged
+/// `not_right` or `no`, or lane `k + 1` tagged `not_left` or `no`.
+fn solid_dividers(spec: Option<&str>, lanes: u32) -> u32 {
+    let Some(spec) = spec.filter(|s| !s.is_empty()) else {
+        return 0;
+    };
+    let values: Vec<&str> = spec.split('|').map(str::trim).collect();
+    // A list that does not describe this road's lanes describes some other road's, and half of it
+    // applied to this one would draw solid lines down the wrong gaps.
+    if values.len() as u32 != lanes {
+        return 0;
+    }
+    let mut bits = 0u32;
+    // A road with more than 32 interior dividers has none recorded past the 32nd, which no real
+    // road reaches.
+    for k in 0..values.len().saturating_sub(1).min(32) {
+        let blocked = matches!(values[k], "no" | "not_right")
+            || matches!(values[k + 1], "no" | "not_left");
+        if blocked {
+            bits |= 1 << k;
+        }
+    }
+    bits
 }
 
 #[cfg(test)]
@@ -393,6 +479,108 @@ mod tests {
         // A road with no turn tags carries nothing either way.
         let (fwd, bwd) = turn_masks(&[("highway", "residential")][..]);
         assert!(fwd.is_empty() && bwd.is_empty());
+    }
+
+    /// A one-way is a flag rather than side-table data: it is what decides whether the carriageway
+    /// has a centre line at all, and `coalesce` keys on flags — so a one-way and a two-way of the
+    /// same class cannot merge into one feature wearing whichever direction came first.
+    #[test]
+    fn a_oneway_is_flagged_and_only_oneway_yes_counts() {
+        let oneway = classify_tags(&[("highway", "primary"), ("oneway", "yes")]).expect("oneway");
+        assert_eq!(oneway.flags, FLAG_IS_ONEWAY);
+        // The same test the routing graph applies: `-1` is a direction rather than a flag, and
+        // neither models it.
+        for value in ["no", "-1", "reversible", "alternating", ""] {
+            let class = classify_tags(&[("highway", "primary"), ("oneway", value)]).expect(value);
+            assert_eq!(class.flags, 0, "oneway={value} is not a one-way here");
+        }
+        // And it combines with the other three.
+        let ramp = classify_tags(&[("highway", "motorway_link"), ("oneway", "yes"), ("bridge", "yes")])
+            .expect("ramp");
+        assert_eq!(ramp.flags, FLAG_IS_LINK | FLAG_IS_BRIDGE | FLAG_IS_ONEWAY);
+    }
+
+    /// The directional split the surface renderer places a centre line from. A one-way puts every
+    /// lane forward; a two-way needs one side tagged and infers the other from the total.
+    #[test]
+    fn the_carriageway_divides_the_lane_total_between_the_directions() {
+        let split = |pairs: &[(&str, &str)]| carriageway(pairs);
+        assert_eq!(
+            split(&[("highway", "motorway"), ("oneway", "yes"), ("lanes", "3")]),
+            Carriageway { forward: 3, backward: 0, solid_dividers: 0 },
+            "every lane of a one-way runs forward",
+        );
+        assert_eq!(
+            split(&[("highway", "primary"), ("lanes", "4"), ("lanes:backward", "1")]),
+            Carriageway { forward: 3, backward: 1, solid_dividers: 0 },
+            "one side tagged implies the other",
+        );
+        assert_eq!(
+            split(&[
+                ("highway", "primary"),
+                ("lanes", "5"),
+                ("lanes:forward", "3"),
+                ("lanes:backward", "2"),
+            ]),
+            Carriageway { forward: 3, backward: 2, solid_dividers: 0 },
+        );
+    }
+
+    /// **An absent split stays absent.** 2/2 for a road tagged only `lanes=4` would be a guess
+    /// dressed as a survey, and the renderer already draws an unknown split down the middle. It is
+    /// also what lets a tile of untagged residential streets carry no carriageway table at all.
+    #[test]
+    fn a_split_that_was_never_surveyed_or_does_not_add_up_is_left_unknown() {
+        let split = |pairs: &[(&str, &str)]| carriageway(pairs);
+        assert_eq!(
+            split(&[("highway", "primary"), ("lanes", "4")]),
+            Carriageway::default(),
+            "a bare total says nothing about the division",
+        );
+        assert_eq!(split(&[("highway", "residential")][..]), Carriageway::default());
+        // Mistagged: three forward and three backward of four lanes is a shape nothing can draw.
+        assert_eq!(
+            split(&[
+                ("highway", "primary"),
+                ("lanes", "4"),
+                ("lanes:forward", "3"),
+                ("lanes:backward", "3"),
+            ]),
+            Carriageway::default(),
+        );
+    }
+
+    /// `change:lanes` marks the gaps a lane change is prohibited across, one bit per interior
+    /// divider from the leftmost. Either lane can forbid the crossing.
+    #[test]
+    fn a_prohibited_lane_change_becomes_a_solid_divider() {
+        let dividers = |pairs: &[(&str, &str)]| carriageway(pairs).solid_dividers;
+        // Four lanes, three interior dividers. `not_right` on lane 0 makes divider 0 solid, `no`
+        // on lane 2 makes dividers 1 and 2 solid.
+        assert_eq!(
+            dividers(&[
+                ("highway", "primary"),
+                ("lanes", "4"),
+                ("change:lanes", "not_right|yes|no|yes"),
+            ]),
+            0b111,
+        );
+        assert_eq!(
+            dividers(&[("highway", "primary"), ("lanes", "2"), ("change:lanes", "yes|yes")]),
+            0,
+            "a road nothing is prohibited on has no solid dividers",
+        );
+        // A list that does not describe this road's lanes describes some other road's, and half of
+        // it applied here would draw solid lines down the wrong gaps.
+        assert_eq!(
+            dividers(&[("highway", "primary"), ("lanes", "4"), ("change:lanes", "no|no")]),
+            0,
+        );
+        // The dividers are a property of the total, so they survive an unusable split.
+        assert_eq!(
+            dividers(&[("highway", "primary"), ("lanes", "3"), ("change:lanes", "yes|no|yes")]),
+            0b11,
+        );
     }
 
     #[test]

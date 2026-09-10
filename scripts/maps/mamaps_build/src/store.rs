@@ -49,7 +49,7 @@ use tile_build::spill::{
 
 use crate::extract::Feature;
 use crate::schema::Class;
-use tilecodec::mamaps::body::BuildingAttrs;
+use tilecodec::mamaps::body::{BuildingAttrs, Carriageway};
 
 /// The property key the packed [`Class`] travels under.
 ///
@@ -97,6 +97,29 @@ const LANE_COUNT_KEY: &str = "l";
 /// spill pays nothing for the roads and every non-road that have none.
 const TURN_FWD_KEY: &str = "tf";
 const TURN_BWD_KEY: &str = "tb";
+
+/// The property key a road's carriageway travels under, as a `Uint` packing the forward and
+/// backward lane counts a byte each and the solid-divider bits above them (see
+/// [`pack_carriageway`]).
+///
+/// Only a road whose split was actually surveyed sets it. Absent (not zero) otherwise, so the
+/// spill pays nothing for the roads whose division is unknown — which is most of them, and the
+/// same bargain [`NAME_KEY`] and [`LANE_COUNT_KEY`] make.
+const CARRIAGEWAY_KEY: &str = "cw";
+
+/// A [`Carriageway`] as the single `Uint` the spill carries it as: forward in bits 0..8, backward
+/// in 8..16, the divider bits in 16..48. Lossless, and the inverse is [`unpack_carriageway`].
+fn pack_carriageway(c: Carriageway) -> u64 {
+    (c.forward as u64) | ((c.backward as u64) << 8) | ((c.solid_dividers as u64) << 16)
+}
+
+fn unpack_carriageway(bits: u64) -> Carriageway {
+    Carriageway {
+        forward: bits as u8,
+        backward: (bits >> 8) as u8,
+        solid_dividers: (bits >> 16) as u32,
+    }
+}
 
 /// The property keys a building's S3DB attributes travel under, three `Uint`s packing the eight
 /// [`BuildingAttrs`] fields (see [`pack_building`]). Only `buildings` features set them, and every
@@ -300,11 +323,12 @@ impl Sink {
         self.write_record(class, geometry)
     }
 
-    /// Push a road with its carriageway lane count and per-lane turn masks: like [`Sink::push`],
-    /// plus the optional display name (so a road's label survives even when it carries lane data)
-    /// and the lane count (body `lane_count`) and forward/backward `turn:lanes` masks (body
-    /// turn-lane table). Refused with no name and all lane data empty — a plain, nameless road goes
-    /// through [`Sink::push`] and carries no extra property at all, so the spill pays nothing for it.
+    /// Push a road with its carriageway lane count, per-lane turn masks and directional split:
+    /// like [`Sink::push`], plus the optional display name (so a road's label survives even when it
+    /// carries lane data), the lane count (body `lane_count`), the forward/backward `turn:lanes`
+    /// masks (body turn-lane table) and the [`Carriageway`] (body carriageway table). Refused with
+    /// no name and all lane data empty — a plain, nameless road goes through [`Sink::push`] and
+    /// carries no extra property at all, so the spill pays nothing for it.
     pub fn push_road(
         &mut self,
         class: &Class,
@@ -313,8 +337,14 @@ impl Sink {
         lane_count: u8,
         turn_fwd: &[u16],
         turn_bwd: &[u16],
+        carriageway: Carriageway,
     ) -> Result<()> {
-        if name.is_none() && lane_count == 0 && turn_fwd.is_empty() && turn_bwd.is_empty() {
+        if name.is_none()
+            && lane_count == 0
+            && turn_fwd.is_empty()
+            && turn_bwd.is_empty()
+            && carriageway.is_empty()
+        {
             return err("a road pushed with no lane data".to_string());
         }
         self.props[0].1 = Value::Uint(pack(class)?);
@@ -332,6 +362,10 @@ impl Sink {
         if !turn_bwd.is_empty() {
             self.props
                 .push((TURN_BWD_KEY.to_string(), Value::String(osm_ingest::roads::pack_lanes(turn_bwd))));
+        }
+        if !carriageway.is_empty() {
+            self.props
+                .push((CARRIAGEWAY_KEY.to_string(), Value::Uint(pack_carriageway(carriageway))));
         }
         self.write_record(class, geometry)
     }
@@ -424,6 +458,7 @@ impl Sink {
             bbox: bbox.unwrap_or((0, 0, 0, 0)),
             chunks,
             chunk_mins,
+            conventions: crate::schema::boundaries::Conventions::default(),
         })
     }
 
@@ -452,6 +487,14 @@ pub struct Store {
     chunk_mins: Vec<u8>,
     count: u64,
     bbox: (i32, i32, i32, i32),
+    /// Which marking convention applies where, resolved once from the extract's country relations.
+    ///
+    /// Not a property of the features and so not in the spill: it is one small grid for the whole
+    /// build, read by the tiler once per tile. It rides on the `Store` because that is the one
+    /// thing stage A already hands the tiler, and because `--reuse-store` has to reproduce it — a
+    /// reused build that silently drew every road right-hand would be the kind of difference
+    /// nothing downstream could see.
+    conventions: crate::schema::boundaries::Conventions,
 }
 
 /// What a spill was built from, so reusing one cannot silently build the wrong archive.
@@ -520,6 +563,13 @@ impl Provenance {
 /// Magic and version of the sidecar index. Bumped whenever the layout below changes, so an index
 /// written by an older build is refused rather than misread.
 ///
+/// v7: `roads` features carry a directional carriageway split under the `cw` property key, and the
+/// index gained the marking-convention grid stage A resolves from the country relations. A v6
+/// spill has neither, and `--reuse-store` over one would feed a tiler that now builds a carriageway
+/// side table and bakes the tile's marking convention beside it with a spill that carries neither
+/// — an archive whose roads all draw as an undivided stroke, which is exactly what v7 exists to
+/// stop.
+///
 /// v6: `buildings` features carry S3DB attributes (height, roof, colours) under the `ba`/`bb`/`bc`
 /// property keys, and road/river names now ride on `roads`/`water` line features. A v5 spill has
 /// neither, and `--reuse-store` over one would feed a tiler that now builds a building side table
@@ -540,7 +590,7 @@ impl Provenance {
 /// v2: `layers` widened to `u16` (ten layers) and the spill's packed class widened its layer
 /// field to 4 bits, so a v1 spill would misdecode every feature. Refused here, not there.
 const INDEX_MAGIC: &[u8; 8] = b"MAMASTOR";
-const INDEX_VERSION: u32 = 6;
+const INDEX_VERSION: u32 = 7;
 
 impl Store {
     /// Write the sidecar that lets [`Store::open`] skip stage A.
@@ -575,6 +625,7 @@ impl Store {
         }
         out.extend_from_slice(&(self.chunk_mins.len() as u64).to_le_bytes());
         out.extend_from_slice(&self.chunk_mins);
+        out.extend_from_slice(&self.conventions.to_bytes());
         std::fs::write(&path, &out)
             .map_err(|e| osm_ingest::proto::Error(format!("cannot write {}: {e}", path.display())))?;
         Ok(path)
@@ -657,6 +708,10 @@ impl Store {
         }
         let min_count = u64::from_le_bytes(take(8)?.try_into().expect("eight bytes")) as usize;
         let chunk_mins = take(min_count)?.to_vec();
+        // The convention grid trails the chunk index, so it is whatever is left. Last, because it
+        // is the only variable-length section whose length is not known before the one before it
+        // has been read.
+        let (conventions, _) = crate::schema::boundaries::Conventions::from_bytes(&raw[at..])?;
         // The same cross-check `WaySink::finish` makes, for the same reason: two indexes that
         // disagree silently drop real features from a handful of tiles at one zoom.
         if chunk_mins.len() != chunks.len().saturating_sub(1) {
@@ -674,6 +729,7 @@ impl Store {
                 bbox: (bbox[0], bbox[1], bbox[2], bbox[3]),
                 chunks,
                 chunk_mins,
+                conventions,
             },
             features,
         ))
@@ -745,7 +801,28 @@ impl Store {
     }
 
     pub fn from_parts(path: PathBuf, chunks: Vec<u64>, chunk_mins: Vec<u8>) -> Self {
-        Self { path, chunks, chunk_mins, count: 0, bbox: (0, 0, 0, 0) }
+        Self {
+            path,
+            chunks,
+            chunk_mins,
+            count: 0,
+            bbox: (0, 0, 0, 0),
+            conventions: crate::schema::boundaries::Conventions::default(),
+        }
+    }
+
+    /// Take the marking-convention grid stage A resolved from the country relations.
+    pub fn with_conventions(
+        mut self,
+        conventions: crate::schema::boundaries::Conventions,
+    ) -> Self {
+        self.conventions = conventions;
+        self
+    }
+
+    /// Which marking convention applies where, for the tiler to stamp onto each tile.
+    pub fn conventions(&self) -> &crate::schema::boundaries::Conventions {
+        &self.conventions
     }
 
     pub fn reader_for_wanted(&self, wanted: Vec<usize>, z: u8) -> Result<ZoomReader> {
@@ -805,6 +882,7 @@ impl Store {
             } else if feature.lane_count != 0
                 || !feature.turn_fwd.is_empty()
                 || !feature.turn_bwd.is_empty()
+                || !feature.carriageway.is_empty()
             {
                 sink.push_road(
                     &feature.class,
@@ -813,6 +891,7 @@ impl Store {
                     feature.lane_count,
                     &feature.turn_fwd,
                     &feature.turn_bwd,
+                    feature.carriageway,
                 )?;
             } else {
                 sink.push_named(&feature.class, &feature.geometry, feature.name.as_deref(), feature.id)?;
@@ -843,6 +922,7 @@ fn feature_of(record: tile_build::spill::NormalizedFeature) -> Result<Feature> {
     let mut lane_count: u8 = 0;
     let mut turn_fwd: Vec<u16> = Vec::new();
     let mut turn_bwd: Vec<u16> = Vec::new();
+    let mut carriageway = Carriageway::default();
     let mut bld_a: Option<u64> = None;
     let mut bld_b: Option<u64> = None;
     let mut bld_c: Option<u64> = None;
@@ -878,6 +958,9 @@ fn feature_of(record: tile_build::spill::NormalizedFeature) -> Result<Feature> {
             (TURN_BWD_KEY, Value::String(packed)) => {
                 turn_bwd = unpack_lanes(packed)?;
             }
+            (CARRIAGEWAY_KEY, Value::Uint(bits)) => {
+                carriageway = unpack_carriageway(*bits);
+            }
             (BLD_A_KEY, Value::Uint(v)) => bld_a = Some(*v),
             (BLD_B_KEY, Value::Uint(v)) => bld_b = Some(*v),
             (BLD_C_KEY, Value::Uint(v)) => bld_c = Some(*v),
@@ -904,6 +987,7 @@ fn feature_of(record: tile_build::spill::NormalizedFeature) -> Result<Feature> {
         lane_count,
         turn_fwd,
         turn_bwd,
+        carriageway,
         building: match (bld_a, bld_b, bld_c) {
             (Some(a), Some(b), Some(c)) => Some(unpack_building(a, b, c)),
             (None, None, None) => None,
@@ -1213,6 +1297,10 @@ impl Reader {
 /// | ref count | unsigned varint |
 /// | refs | zigzag varint of each ref's gap from the one before it, the first from zero |
 /// | name | unsigned varint byte length, then that many UTF-8 bytes (zero when nameless) |
+/// | lane count | unsigned varint |
+/// | turn masks | a count then each `u16`, forward then backward |
+/// | carriageway | unsigned varint of the packed forward/backward/divider word |
+/// | building | a presence byte, then three packed varints when set |
 ///
 /// Delta coding earns its keep rather than being a flourish. The refs are ~150 M ids on California
 /// and the file is read twice — once to collect the node ids pass 3 must resolve, once to build
@@ -1251,9 +1339,11 @@ impl WaySink {
     ///
     /// `name` is the display label for `places`/`poi` ways, `None` for every other layer. Written
     /// as a length-prefixed string per record — zero bytes for the nameless, which is nearly all
-    /// of them. `lane_count`, `turn_fwd` and `turn_bwd` are a road's carriageway lane count and
-    /// per-lane turn masks, empty for every other layer and for a road with no lane tags; a handful
-    /// of trailing varints per record, which the scratch file (removed after materialise) affords.
+    /// of them. `lane_count`, `turn_fwd`, `turn_bwd` and `carriageway` are a road's lane count,
+    /// per-lane turn masks and directional split, empty for every other layer and for a road with
+    /// no lane tags; a handful of trailing varints per record, which the scratch file (removed
+    /// after materialise) affords.
+    #[allow(clippy::too_many_arguments)]
     pub fn push(
         &mut self,
         id: i64,
@@ -1263,6 +1353,7 @@ impl WaySink {
         lane_count: u8,
         turn_fwd: &[u16],
         turn_bwd: &[u16],
+        carriageway: Carriageway,
         building: Option<BuildingAttrs>,
     ) -> Result<()> {
         if self.count > 0 && id <= self.last_id {
@@ -1298,6 +1389,9 @@ impl WaySink {
                 put_uvarint(&mut self.record, m as u64);
             }
         }
+        // The directional split, as one packed varint. Zero — one byte — for the roads whose
+        // division was never surveyed, which is most of them.
+        put_uvarint(&mut self.record, pack_carriageway(carriageway));
         // The building attributes: a presence byte, then the three packed words when present. A
         // non-building writes one zero byte; a building — even one with no S3DB tags — writes its
         // (usually all-zero) words so the tiler's side table stays dense-parallel to the layer.
@@ -1363,8 +1457,8 @@ impl WayReader {
         })
     }
 
-    /// The next way's id, class, display name, lane count and per-lane turn masks, with its node
-    /// refs written into `refs`.
+    /// The next way's id, class, display name, lane count, per-lane turn masks and carriageway,
+    /// with its node refs written into `refs`.
     ///
     /// `refs` belongs to the caller and is cleared here, so one allocation serves the whole file.
     /// Returning a fresh `Vec` instead would be one allocation per classified way, several million
@@ -1379,8 +1473,18 @@ impl WayReader {
     pub fn next(
         &mut self,
         refs: &mut Vec<i64>,
-    ) -> Result<Option<(i64, Class, Option<String>, u8, Vec<u16>, Vec<u16>, Option<BuildingAttrs>)>>
-    {
+    ) -> Result<
+        Option<(
+            i64,
+            Class,
+            Option<String>,
+            u8,
+            Vec<u16>,
+            Vec<u16>,
+            Carriageway,
+            Option<BuildingAttrs>,
+        )>,
+    > {
         refs.clear();
         let Some(delta) = self.uvarint_or_end()? else {
             return Ok(None);
@@ -1439,6 +1543,7 @@ impl WayReader {
         };
         let turn_fwd = read_masks()?;
         let turn_bwd = read_masks()?;
+        let carriageway = unpack_carriageway(self.uvarint()?);
         // The building attributes: a presence byte, then three packed words when set.
         let building = if self.uvarint()? != 0 {
             let a = self.uvarint()?;
@@ -1448,7 +1553,7 @@ impl WayReader {
         } else {
             None
         };
-        Ok(Some((id, class, name, lane_count, turn_fwd, turn_bwd, building)))
+        Ok(Some((id, class, name, lane_count, turn_fwd, turn_bwd, carriageway, building)))
     }
 
     /// One varint, or `None` if the file ended cleanly on a record boundary.
@@ -1737,15 +1842,24 @@ mod tests {
         let road = Class::line(dict::LAYER_ROADS, schema::kind("highway"), 3);
         // Refs chosen to exercise the delta coding: a large first id, a run of neighbours, a jump
         // backwards, and a way with none at all.
-        let cases: Vec<(i64, Class, Vec<i64>, u8, Vec<u16>, Vec<u16>)> = vec![
-            (1, lake, vec![10_000_000_001, 10_000_000_002, 10_000_000_003, 9_000_000_000], 0, vec![], vec![]),
-            // A four-lane road with forward and backward turn masks, both surviving the spill.
-            (2, road, vec![], 4, vec![4u16, 2, 2, 34], vec![1, 2]),
-            (i64::MAX, lake, vec![-5, 0, 5, i64::MAX, i64::MIN], 0, vec![], vec![]),
+        let cases: Vec<(i64, Class, Vec<i64>, u8, Vec<u16>, Vec<u16>, Carriageway)> = vec![
+            (1, lake, vec![10_000_000_001, 10_000_000_002, 10_000_000_003, 9_000_000_000], 0, vec![], vec![], Carriageway::default()),
+            // A four-lane road with forward and backward turn masks and a 3/1 split, all surviving
+            // the spill.
+            (
+                2,
+                road,
+                vec![],
+                4,
+                vec![4u16, 2, 2, 34],
+                vec![1, 2],
+                Carriageway { forward: 3, backward: 1, solid_dividers: 0b101 },
+            ),
+            (i64::MAX, lake, vec![-5, 0, 5, i64::MAX, i64::MIN], 0, vec![], vec![], Carriageway::default()),
         ];
         let mut sink = WaySink::create(&path).expect("create");
-        for (id, class, refs, lanes, fwd, bwd) in &cases {
-            sink.push(*id, class, refs, None, *lanes, fwd, bwd, None).expect("push");
+        for (id, class, refs, lanes, fwd, bwd, carriageway) in &cases {
+            sink.push(*id, class, refs, None, *lanes, fwd, bwd, *carriageway, None).expect("push");
         }
         let counts = sink.finish().expect("finish");
         assert_eq!(counts.ways, 3, "one record per push");
@@ -1753,8 +1867,8 @@ mod tests {
 
         let mut reader = WayReader::open(&path).expect("open");
         let mut refs: Vec<i64> = Vec::new();
-        for (id, class, expected, lanes, fwd, bwd) in &cases {
-            let (got_id, got_class, got_name, got_lanes, got_fwd, got_bwd, _got_building) =
+        for (id, class, expected, lanes, fwd, bwd, carriageway) in &cases {
+            let (got_id, got_class, got_name, got_lanes, got_fwd, got_bwd, got_cw, _got_building) =
                 reader.next(&mut refs).expect("read").expect("a way");
             assert_eq!(got_id, *id);
             assert_eq!(got_class, *class);
@@ -1762,6 +1876,7 @@ mod tests {
             assert_eq!(got_lanes, *lanes, "a road's lane count survives the spill");
             assert_eq!(&got_fwd, fwd, "forward turn masks survive the spill");
             assert_eq!(&got_bwd, bwd, "backward turn masks survive the spill");
+            assert_eq!(got_cw, *carriageway, "the directional split survives the spill");
             assert_eq!(&refs, expected);
         }
         assert!(reader.next(&mut refs).expect("read").is_none(), "and then the end");
@@ -1778,10 +1893,11 @@ mod tests {
         let path = temp("ways_unsorted");
         let class = Class::line(dict::LAYER_ROADS, schema::kind("highway"), 3);
         let mut sink = WaySink::create(&path).expect("create");
-        sink.push(100, &class, &[1, 2], None, 0, &[], &[], None).expect("push");
-        assert!(sink.push(99, &class, &[3], None, 0, &[], &[], None).is_err(), "an id going backwards");
-        assert!(sink.push(100, &class, &[3], None, 0, &[], &[], None).is_err(), "and the same id twice");
-        sink.push(101, &class, &[3], None, 0, &[], &[], None).expect("but forwards is fine");
+        let none = Carriageway::default();
+        sink.push(100, &class, &[1, 2], None, 0, &[], &[], none, None).expect("push");
+        assert!(sink.push(99, &class, &[3], None, 0, &[], &[], none, None).is_err(), "an id going backwards");
+        assert!(sink.push(100, &class, &[3], None, 0, &[], &[], none, None).is_err(), "and the same id twice");
+        sink.push(101, &class, &[3], None, 0, &[], &[], none, None).expect("but forwards is fine");
         let _ = std::fs::remove_file(&path);
     }
 
@@ -1792,8 +1908,9 @@ mod tests {
         let path = temp("ways_truncated");
         let class = Class::area(dict::LAYER_WATER, schema::kind("lake"), 6);
         let mut sink = WaySink::create(&path).expect("create");
-        sink.push(1, &class, &[7, 8, 9], None, 0, &[], &[], None).expect("push");
-        sink.push(2, &class, &[11, 12, 13], Some("named"), 0, &[], &[], None).expect("push");
+        let none = Carriageway::default();
+        sink.push(1, &class, &[7, 8, 9], None, 0, &[], &[], none, None).expect("push");
+        sink.push(2, &class, &[11, 12, 13], Some("named"), 0, &[], &[], none, None).expect("push");
         sink.finish().expect("finish");
 
         let whole = std::fs::read(&path).expect("read");
@@ -1814,7 +1931,7 @@ mod tests {
         let class = Class::line(dict::LAYER_ROADS, schema::kind("highway"), 3);
         let refs: Vec<i64> = (0..1000).map(|i| 10_000_000_000 + i).collect();
         let mut sink = WaySink::create(&path).expect("create");
-        sink.push(1, &class, &refs, None, 0, &[], &[], None).expect("push");
+        sink.push(1, &class, &refs, None, 0, &[], &[], Carriageway::default(), None).expect("push");
         sink.finish().expect("finish");
         let bytes = std::fs::metadata(&path).expect("metadata").len();
         // The first ref is a full-width id; every one after it is a delta of 1, one byte.
@@ -1828,14 +1945,15 @@ mod tests {
         let path = temp("ways_named");
         let class = Class::line(dict::LAYER_POI, schema::kind("cafe"), 15);
         let mut sink = WaySink::create(&path).expect("create");
-        sink.push(1, &class, &[7, 8], Some("Café"), 0, &[], &[], None).expect("push");
-        sink.push(2, &class, &[9], None, 0, &[], &[], None).expect("push");
+        let none = Carriageway::default();
+        sink.push(1, &class, &[7, 8], Some("Café"), 0, &[], &[], none, None).expect("push");
+        sink.push(2, &class, &[9], None, 0, &[], &[], none, None).expect("push");
         sink.finish().expect("finish");
         let mut reader = WayReader::open(&path).expect("open");
         let mut refs: Vec<i64> = Vec::new();
-        let (_, _, name, _, _, _, _) = reader.next(&mut refs).expect("read").expect("a way");
+        let (_, _, name, _, _, _, _, _) = reader.next(&mut refs).expect("read").expect("a way");
         assert_eq!(name.as_deref(), Some("Café"), "UTF-8 survives the spill");
-        let (_, _, name, _, _, _, _) = reader.next(&mut refs).expect("read").expect("a way");
+        let (_, _, name, _, _, _, _, _) = reader.next(&mut refs).expect("read").expect("a way");
         assert_eq!(name, None);
         let _ = std::fs::remove_file(&path);
     }

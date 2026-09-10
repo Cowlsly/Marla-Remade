@@ -285,6 +285,11 @@ pub struct ChunkEntry {
     /// remapped alongside it when `coalesce` and stage C rebuild the feature vector, so the body's
     /// building side table stays aligned to the features it describes.
     pub buildings: Vec<BuildingAttrs>,
+    /// The per-feature directional carriageway split, dense-parallel to `layer.features` on the
+    /// `roads` layer and empty on every other. Rides the merge like `ids` (concatenated, not
+    /// remapped) and is remapped alongside it when `coalesce` rebuilds the feature vector. Stage C
+    /// is not given it: a road is a line, and `rings::normalise` never drops one.
+    pub carriageways: Vec<tilecodec::mamaps::body::Carriageway>,
 }
 
 impl ChunkEntry {
@@ -295,6 +300,7 @@ impl ChunkEntry {
             ids: Vec::new(),
             turn_lanes: Vec::new(),
             buildings: Vec::new(),
+            carriageways: Vec::new(),
         }
     }
 
@@ -407,7 +413,7 @@ pub fn build(store: &Store, settings: &Settings) -> Result<(Vec<u8>, Vec<ZoomSta
                 break;
             }
             let encoding = std::time::Instant::now();
-            let done = encode_batch(batch, settings.dem.as_ref())?;
+            let done = encode_batch(batch, settings.dem.as_ref(), store.conventions())?;
             stats.encode_ms += encoding.elapsed().as_millis() as u64;
             let appending = std::time::Instant::now();
             for (id, encoded, rings, lines) in done {
@@ -1029,6 +1035,8 @@ fn concatenate(into: &mut ChunkEntry, from: ChunkEntry) {
     into.turn_lanes.extend(from.turn_lanes);
     // The building attrs ride the same way, dense-parallel to the buildings layer's features.
     into.buildings.extend(from.buildings);
+    // And the carriageways, dense-parallel to the roads layer's.
+    into.carriageways.extend(from.carriageways);
 }
 
 /// Stage C and body encoding for a batch of merged tiles, in parallel, results in tile order.
@@ -1250,7 +1258,11 @@ fn add_ocean(layers: &mut Vec<ChunkEntry>) {
     // the sea has no OSM element to name anyway.
 }
 
-fn encode_batch(batch: Vec<(u64, Vec<ChunkEntry>)>, dem: Option<&crate::dem::Dem>) -> Result<Vec<Encoded>> {
+fn encode_batch(
+    batch: Vec<(u64, Vec<ChunkEntry>)>,
+    dem: Option<&crate::dem::Dem>,
+    conventions: &crate::schema::boundaries::Conventions,
+) -> Result<Vec<Encoded>> {
     let min_len = par::min_task_len(batch.len());
     let on = timing();
     par::install(|| {
@@ -1284,6 +1296,7 @@ fn encode_batch(batch: Vec<(u64, Vec<ChunkEntry>)>, dem: Option<&crate::dem::Dem
                             Some(&mut entry.ids),
                             Some(&mut entry.turn_lanes),
                             Some(&mut entry.buildings),
+                            Some(&mut entry.carriageways),
                         ));
                     }
                     // **The sea.** There is no `natural=ocean` in OpenStreetMap — water is defined
@@ -1427,6 +1440,42 @@ fn encode_batch(batch: Vec<(u64, Vec<ChunkEntry>)>, dem: Option<&crate::dem::Dem
                         buildings
                             .push((entry.layer.layer_id, std::mem::take(&mut entry.buildings)));
                     }
+                    // The carriageway side table, built like the two above and checked against the
+                    // feature count for the same reason.
+                    //
+                    // A tile where no road's split was ever surveyed usually emits no table at all,
+                    // so it costs nothing for lane data that does not exist. The exception is a
+                    // tile whose country is not the default one: the convention only reaches the
+                    // wire alongside a table, and a tile of untagged residential streets in Tokyo
+                    // still has to say that traffic keeps left. So an all-default table is kept
+                    // exactly when there is a non-default convention to carry with it.
+                    let (z, x, y) = tilecodec::pmtiles::tile_zxy(id);
+                    let convention = conventions.at_tile(z, x, y);
+                    let mut carriageways: Vec<(u8, Vec<tilecodec::mamaps::body::Carriageway>)> =
+                        Vec::new();
+                    for entry in &mut layers {
+                        if entry.carriageways.is_empty() {
+                            continue;
+                        }
+                        if entry.carriageways.len() != entry.layer.features.len() {
+                            return err(format!(
+                                "layer {} has {} carriageway record(s) for {} feature(s) after \
+                                 coalesce and stage C",
+                                entry.layer.layer_id,
+                                entry.carriageways.len(),
+                                entry.layer.features.len(),
+                            ));
+                        }
+                        if convention == tilecodec::mamaps::body::MarkingConvention::default()
+                            && entry.carriageways.iter().all(|c| c.is_empty())
+                        {
+                            entry.carriageways.clear();
+                            continue;
+                        }
+                        carriageways
+                            .push((entry.layer.layer_id, std::mem::take(&mut entry.carriageways)));
+                    }
+                    let convention = (!carriageways.is_empty()).then_some(convention);
                     let body = Body {
                         extent: EXTENT as u16,
                         layers: layers.into_iter().map(|entry| entry.layer).collect(),
@@ -1438,15 +1487,9 @@ fn encode_batch(batch: Vec<(u64, Vec<ChunkEntry>)>, dem: Option<&crate::dem::Dem
                         // not from OSM geometry. When a dataset was given, sample its grid onto this
                         // tile's z/x/y; a tile with no DEM under it (ocean, off-coverage) gets None
                         // and stays 16-byte. Without a dataset every tile stays None.
-                        heightmap: dem.and_then(|d| {
-                            let (z, x, y) = tilecodec::pmtiles::tile_zxy(id);
-                            d.heightmap_for(z, x, y)
-                        }),
-                        // The carriageway table and its marking convention are not wired into the
-                        // tiler yet; every tile stays without one, which the renderer reads as
-                        // "nothing known beyond the lane count" and falls back to a plain stroke.
-                        carriageways: Vec::new(),
-                        convention: None,
+                        heightmap: dem.and_then(|d| d.heightmap_for(z, x, y)),
+                        carriageways,
+                        convention,
                     };
                     let encoded = timed(on, &SERIALIZE_NANOS, || {
                         tilecodec::mamaps::body::serialize_into(&body, scratch)
@@ -1588,6 +1631,7 @@ fn push(entry: &mut ChunkEntry, feature: &Feature, geometry: &IntGeometry) -> (u
                         forward: feature.turn_fwd.clone(),
                         backward: feature.turn_bwd.clone(),
                     });
+                    entry.carriageways.push(feature.carriageway);
                 }
                 added.0 += 1;
             }
@@ -1710,6 +1754,7 @@ mod tests {
             turn_fwd: Vec::new(),
             turn_bwd: Vec::new(),
             building: None,
+            carriageway: tilecodec::mamaps::body::Carriageway::default(),
         }
     }
 
@@ -1733,6 +1778,7 @@ mod tests {
                     turn_fwd: Vec::new(),
             turn_bwd: Vec::new(),
             building: None,
+            carriageway: tilecodec::mamaps::body::Carriageway::default(),
         };
         let features = vec![poi, lake(-120.0, 35.0, 0.01, 0)];
         let (bytes, _) = build(&spilled(&features), &settings(14, 14)).expect("build");
@@ -1774,6 +1820,7 @@ mod tests {
                     turn_fwd: Vec::new(),
             turn_bwd: Vec::new(),
             building: None,
+            carriageway: tilecodec::mamaps::body::Carriageway::default(),
         };
         let (bytes, _) = build(&spilled(&[road]), &settings(14, 14)).expect("build");
         // The reader's own version byte, so an older reader rejects the archive cleanly.
@@ -1824,6 +1871,7 @@ mod tests {
             turn_fwd: Vec::new(),
             turn_bwd: Vec::new(),
             building: Some(attrs),
+            carriageway: tilecodec::mamaps::body::Carriageway::default(),
         };
         let (bytes, _) = build(&spilled(&[building]), &settings(14, 14)).expect("build");
         assert_eq!(
@@ -1866,6 +1914,7 @@ mod tests {
             turn_fwd: Vec::new(),
             turn_bwd: Vec::new(),
             building: Some(BuildingAttrs::default()),
+            carriageway: tilecodec::mamaps::body::Carriageway::default(),
         };
         let (bytes, _) = build(&spilled(&[building]), &settings(14, 14)).expect("build");
         for (_, _, body) in &tilecodec::mamaps::read::read_all(&bytes).expect("read") {
@@ -1909,6 +1958,7 @@ mod tests {
             turn_fwd: Vec::new(),
             turn_bwd: Vec::new(),
             building: None,
+            carriageway: tilecodec::mamaps::body::Carriageway::default(),
         };
         // A ramp grid: sample(col, row) = 32768 + row*10 + col, so a read-back names its cell.
         let mut grid = Vec::with_capacity(dim as usize * dim as usize);
@@ -1967,6 +2017,7 @@ mod tests {
             turn_fwd: Vec::new(),
             turn_bwd: Vec::new(),
             building: None,
+            carriageway: tilecodec::mamaps::body::Carriageway::default(),
         };
         let river = Feature {
             class: Class::line(dict::LAYER_WATER, crate::schema::kind("river"), 12),
@@ -1981,6 +2032,7 @@ mod tests {
             turn_fwd: Vec::new(),
             turn_bwd: Vec::new(),
             building: None,
+            carriageway: tilecodec::mamaps::body::Carriageway::default(),
         };
         let (bytes, _) = build(&spilled(&[road, river]), &settings(14, 14)).expect("build");
         let entries = tilecodec::mamaps::read::read_all(&bytes).expect("read");
@@ -2025,6 +2077,7 @@ mod tests {
             turn_fwd: fwd,
             turn_bwd: Vec::new(),
             building: None,
+            carriageway: tilecodec::mamaps::body::Carriageway::default(),
         };
         let (bytes, _) = build(&spilled(&[road]), &settings(14, 14)).expect("build");
         let entries = tilecodec::mamaps::read::read_all(&bytes).expect("read");
@@ -2074,6 +2127,7 @@ mod tests {
                             turn_fwd: Vec::new(),
                 turn_bwd: Vec::new(),
                 building: None,
+                carriageway: tilecodec::mamaps::body::Carriageway::default(),
             });
         }
         let (bytes, _) = build(&spilled(&features), &settings(14, 14)).expect("build");
@@ -2126,6 +2180,7 @@ mod tests {
                     turn_fwd: Vec::new(),
             turn_bwd: Vec::new(),
             building: None,
+            carriageway: tilecodec::mamaps::body::Carriageway::default(),
         };
         let traffic = |c: i32, r: i32, i: u64| Feature {
             class: traffic_class(),
@@ -2140,6 +2195,7 @@ mod tests {
                     turn_fwd: Vec::new(),
             turn_bwd: Vec::new(),
             building: None,
+            carriageway: tilecodec::mamaps::body::Carriageway::default(),
         };
 
         let mut base = Vec::new();
@@ -2201,6 +2257,7 @@ mod tests {
                     turn_fwd: Vec::new(),
             turn_bwd: Vec::new(),
             building: None,
+            carriageway: tilecodec::mamaps::body::Carriageway::default(),
         };
         let border = Feature {
             class: Class::line(
@@ -2223,6 +2280,7 @@ mod tests {
                     turn_fwd: Vec::new(),
             turn_bwd: Vec::new(),
             building: None,
+            carriageway: tilecodec::mamaps::body::Carriageway::default(),
         };
         let (bytes, _) = build(&spilled(&[region, border]), &settings(14, 14)).expect("build");
         let entries = tilecodec::mamaps::read::read_all(&bytes).expect("read");
@@ -2276,6 +2334,7 @@ mod tests {
                     turn_fwd: Vec::new(),
             turn_bwd: Vec::new(),
             building: None,
+            carriageway: tilecodec::mamaps::body::Carriageway::default(),
         };
         // One patch of land, and a lake sitting on it so the water layer already exists. Plus a
         // marine protected area out at sea with no land under it at all — a real `landuse` polygon
@@ -2295,6 +2354,7 @@ mod tests {
                             turn_fwd: Vec::new(),
                 turn_bwd: Vec::new(),
                 building: None,
+                carriageway: tilecodec::mamaps::body::Carriageway::default(),
             },
             Feature {
                 class: Class::area(
@@ -2313,6 +2373,7 @@ mod tests {
                             turn_fwd: Vec::new(),
                 turn_bwd: Vec::new(),
                 building: None,
+                carriageway: tilecodec::mamaps::body::Carriageway::default(),
             },
         ];
         let store = spilled(&features);
@@ -2381,6 +2442,7 @@ mod tests {
                     turn_fwd: Vec::new(),
             turn_bwd: Vec::new(),
             building: None,
+            carriageway: tilecodec::mamaps::body::Carriageway::default(),
         }];
         let store = spilled(&features);
         let (bytes, _) = build(&store, &settings(8, 8)).expect("build");
@@ -2492,6 +2554,7 @@ mod tests {
                             turn_fwd: Vec::new(),
                 turn_bwd: Vec::new(),
                 building: None,
+                carriageway: tilecodec::mamaps::body::Carriageway::default(),
             },
         ];
         let first = build(&spilled(&features), &settings(0, 8)).expect("first").0;
@@ -2520,6 +2583,7 @@ mod tests {
                             turn_fwd: Vec::new(),
                 turn_bwd: Vec::new(),
                 building: None,
+                carriageway: tilecodec::mamaps::body::Carriageway::default(),
             },
         ];
         let (bytes, _) = build(&spilled(&features), &settings(14, 14)).expect("build");
@@ -2553,6 +2617,7 @@ mod tests {
                     turn_fwd: Vec::new(),
             turn_bwd: Vec::new(),
             building: None,
+            carriageway: tilecodec::mamaps::body::Carriageway::default(),
         }];
         let (_, stats) = build(&spilled(&features), &settings(6, 14)).expect("build");
         let at = |z: u8| stats.iter().find(|s| s.zoom == z).expect("zoom").points;
@@ -2574,6 +2639,7 @@ mod tests {
                             turn_fwd: Vec::new(),
                 turn_bwd: Vec::new(),
                 building: None,
+                carriageway: tilecodec::mamaps::body::Carriageway::default(),
             });
             // A line as well, so the merge has to rebase a `GEOM_LINE` feature's parts too, and a
             // long one so it crosses tiles rather than sitting inside one.
@@ -2586,6 +2652,7 @@ mod tests {
                             turn_fwd: Vec::new(),
                 turn_bwd: Vec::new(),
                 building: None,
+                carriageway: tilecodec::mamaps::body::Carriageway::default(),
             });
         }
         features
@@ -2675,6 +2742,7 @@ mod tests {
                             turn_fwd: Vec::new(),
                 turn_bwd: Vec::new(),
                 building: None,
+                carriageway: tilecodec::mamaps::body::Carriageway::default(),
             })
             .collect();
         let store = spilled(&features);
@@ -2705,7 +2773,7 @@ mod tests {
     #[test]
     fn concatenating_two_chunks_of_a_layer_is_one_layer() {
         let class = Class::area(dict::LAYER_WATER, crate::schema::kind("lake"), 0);
-        let feature = Feature { class, geometry: square(0.0, 0.0, 1.0), name: None, id: tilecodec::mamaps::body::ID_NONE, transit_color: 0, transit_ordinal: 0, transit_lanes: 0, transit_taper: 0, lane_count: 0, turn_fwd: Vec::new(), turn_bwd: Vec::new(), building: None };
+        let feature = Feature { class, geometry: square(0.0, 0.0, 1.0), name: None, id: tilecodec::mamaps::body::ID_NONE, transit_color: 0, transit_ordinal: 0, transit_lanes: 0, transit_taper: 0, lane_count: 0, turn_fwd: Vec::new(), turn_bwd: Vec::new(), building: None, carriageway: tilecodec::mamaps::body::Carriageway::default() };
         // Tile-local already, so the fixture is about the arenas rather than about projection, and
         // big enough that no minimum-area floor can drop it.
         let box_at = |x: i32| {
@@ -2824,6 +2892,7 @@ mod tests {
                                     turn_fwd: Vec::new(),
                     turn_bwd: Vec::new(),
                     building: None,
+                    carriageway: tilecodec::mamaps::body::Carriageway::default(),
                 });
             }
             let store = spilled(&features);

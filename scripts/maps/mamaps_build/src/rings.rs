@@ -684,6 +684,7 @@ mod tests {
                 name: None, id: tilecodec::mamaps::body::ID_NONE, transit_color: 0, transit_ordinal: 0, transit_lanes: 0, transit_taper: 0, lane_count: 0,
                             turn_fwd: Vec::new(),
                 turn_bwd: Vec::new(),
+                carriageway: tilecodec::mamaps::body::Carriageway::default(),
                 building: None,
             },
             crate::extract::Feature {
@@ -696,6 +697,7 @@ mod tests {
                 name: None, id: tilecodec::mamaps::body::ID_NONE, transit_color: 0, transit_ordinal: 0, transit_lanes: 0, transit_taper: 0, lane_count: 0,
                             turn_fwd: Vec::new(),
                 turn_bwd: Vec::new(),
+                carriageway: tilecodec::mamaps::body::Carriageway::default(),
                 building: None,
             },
         ];

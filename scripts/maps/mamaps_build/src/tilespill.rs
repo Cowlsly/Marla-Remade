@@ -73,7 +73,10 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
 
-use tilecodec::mamaps::body::{BuildingAttrs, Feature as BodyFeature, Layer as BodyLayer, Part};
+use tilecodec::mamaps::body::{
+    BuildingAttrs, Carriageway, Feature as BodyFeature, Layer as BodyLayer, Part,
+    CARRIAGEWAY_RECORD_LEN,
+};
 use tilecodec::proto::{err, Error, Result};
 
 use crate::tiler::ChunkEntry;
@@ -460,6 +463,27 @@ impl ChunkReader<'_> {
                 consumed += BUILDING_BYTES;
             }
         }
+        // The carriageway section, last, when the flag is set: one [`CARRIAGEWAY_RECORD_LEN`]
+        // record per feature, dense.
+        if header.has_carriageways {
+            entry.carriageways = Vec::with_capacity(header.features);
+            for _ in 0..header.features {
+                self.fill(CARRIAGEWAY_RECORD_LEN)?;
+                let o = self.used;
+                entry.carriageways.push(Carriageway {
+                    forward: self.buf[o],
+                    backward: self.buf[o + 1],
+                    solid_dividers: u32::from_le_bytes([
+                        self.buf[o + 2],
+                        self.buf[o + 3],
+                        self.buf[o + 4],
+                        self.buf[o + 5],
+                    ]),
+                });
+                self.used += CARRIAGEWAY_RECORD_LEN;
+                consumed += CARRIAGEWAY_RECORD_LEN;
+            }
+        }
         self.left -= 1;
         self.spill.read.fetch_add(consumed as u64, Ordering::Relaxed);
         self.spill.read_entries.fetch_add(1, Ordering::Relaxed);
@@ -524,11 +548,18 @@ fn entry_bytes(entry: &ChunkEntry) -> Result<u64> {
     } else {
         entry.buildings.len() as u64 * BUILDING_BYTES as u64
     };
+    // And the carriageway section, likewise fixed-width and one per feature.
+    let carriageways_bytes = if entry.carriageways.is_empty() {
+        0
+    } else {
+        entry.carriageways.len() as u64 * CARRIAGEWAY_RECORD_LEN as u64
+    };
     Ok(ENTRY_HEADER_BYTES as u64
         + payload_bytes(features, parts, coords, ids)
         + names_bytes
         + turns_bytes
-        + buildings_bytes)
+        + buildings_bytes
+        + carriageways_bytes)
 }
 
 /// The payload width implied by an entry's four counts. A pure function of the header, which is
@@ -551,13 +582,19 @@ fn encode_entry(tile: u64, layer_id: u8, entry: &ChunkEntry, out: &mut Vec<u8>) 
     out[base + 16..base + 20].copy_from_slice(&(layer.coords.len() as u32).to_le_bytes());
     out[base + 20] = layer_id;
     // Byte 21 flags a turn-lane section after the names; byte 22 a building section after that;
-    // byte 23 stays reserved zero. The building section is `features` records (one per feature,
-    // dense), each a BUILDING_BYTES packed [`BuildingAttrs`]. Present only for a `buildings` tile
-    // that had S3DB attributes in it.
+    // byte 23 a carriageway section after that. The building section is `features` records (one per
+    // feature, dense), each a BUILDING_BYTES packed [`BuildingAttrs`]. Present only for a
+    // `buildings` tile that had S3DB attributes in it.
+    //
+    // The carriageway section is the same shape for the `roads` layer. It has to be here rather
+    // than reconstructed later: a side table that never reaches the spill is dropped on every
+    // build that spills a zoom, and the archive comes back with no lane markings and no error.
     let has_turns = !entry.turn_lanes.is_empty();
     let has_buildings = !entry.buildings.is_empty();
+    let has_carriageways = !entry.carriageways.is_empty();
     out[base + 21] = has_turns as u8;
     out[base + 22] = has_buildings as u8;
+    out[base + 23] = has_carriageways as u8;
     out[base + 24..base + 28].copy_from_slice(&(entry.names.len() as u32).to_le_bytes());
     out[base + 28..base + 32].copy_from_slice(&(entry.ids.len() as u32).to_le_bytes());
     for feature in &layer.features {
@@ -616,6 +653,15 @@ fn encode_entry(tile: u64, layer_id: u8, entry: &ChunkEntry, out: &mut Vec<u8>) 
             out.extend_from_slice(&a.roof_colour.to_le_bytes());
         }
     }
+    // The carriageway section, last, when present. One record per feature, in the same field order
+    // the body's own [`CARRIAGEWAY_RECORD_LEN`] record uses.
+    if has_carriageways {
+        for c in &entry.carriageways {
+            out.push(c.forward);
+            out.push(c.backward);
+            out.extend_from_slice(&c.solid_dividers.to_le_bytes());
+        }
+    }
 }
 
 struct EntryHeader {
@@ -628,20 +674,21 @@ struct EntryHeader {
     ids: usize,
     has_turns: bool,
     has_buildings: bool,
+    has_carriageways: bool,
 }
 
 fn entry_header(head: &[u8; ENTRY_HEADER_BYTES]) -> Result<EntryHeader> {
-    // Byte 23 must be zero: a newer writer would use it, so a nonzero value there means the reader
-    // is the wrong version for the file. Bytes 21 (turn-lane flag) and 22 (building flag) are 0 or
-    // 1; anything else is likewise a version mismatch. Guessing would decode a field that moved.
-    if head[23] != 0 {
-        return err("a tile chunk entry has a nonzero reserved tail");
-    }
+    // Bytes 21 (turn-lane flag), 22 (building flag) and 23 (carriageway flag) are 0 or 1; anything
+    // else means the reader is the wrong version for the file, because a newer writer would be
+    // using the spare values. Guessing would decode a field that moved.
     if head[21] > 1 {
         return err("a tile chunk entry has an unknown turn-lane flag");
     }
     if head[22] > 1 {
         return err("a tile chunk entry has an unknown building flag");
+    }
+    if head[23] > 1 {
+        return err("a tile chunk entry has an unknown carriageway flag");
     }
     let u32_at =
         |o: usize| u32::from_le_bytes(head[o..o + 4].try_into().expect("4 bytes")) as usize;
@@ -655,6 +702,7 @@ fn entry_header(head: &[u8; ENTRY_HEADER_BYTES]) -> Result<EntryHeader> {
         ids: u32_at(28),
         has_turns: head[21] == 1,
         has_buildings: head[22] == 1,
+        has_carriageways: head[23] == 1,
     };
     // A layer either has an id per feature or none at all. Checked before the length so a garbled
     // count is refused as the desync it is rather than as a size that happens not to fit.
@@ -737,6 +785,7 @@ fn decode_fixed(header: &EntryHeader, payload: &[u8]) -> Result<ChunkEntry> {
         ids,
         turn_lanes: Vec::new(),
         buildings: Vec::new(),
+        carriageways: Vec::new(),
     })
 }
 
@@ -829,7 +878,7 @@ mod tests {
         for (i, feature) in layer.features.iter_mut().enumerate() {
             feature.parts_offset = i as u32;
         }
-        ChunkEntry { layer, names: names.iter().map(|s| s.to_string()).collect(), ids: Vec::new(), turn_lanes: Vec::new(), buildings: Vec::new() }
+        ChunkEntry { layer, names: names.iter().map(|s| s.to_string()).collect(), ids: Vec::new(), turn_lanes: Vec::new(), buildings: Vec::new(), carriageways: Vec::new() }
     }
 
     /// Every shape an entry can take, including the empty ones that a naive length check would let
@@ -842,6 +891,7 @@ mod tests {
             ids: Vec::new(),
             turn_lanes: Vec::new(),
             buildings: Vec::new(),
+            carriageways: Vec::new(),
         };
         vec![
             // Empty layer: no features, no parts, no coords.
@@ -866,6 +916,7 @@ mod tests {
                     ids: Vec::new(),
                     turn_lanes: Vec::new(),
                     buildings: Vec::new(),
+                    carriageways: Vec::new(),
                 },
             ),
             // The extremes of every field: `u16::MAX` kinds, `i16` at both ends, a hole.
@@ -895,6 +946,7 @@ mod tests {
                     ids: Vec::new(),
                     turn_lanes: Vec::new(),
                     buildings: Vec::new(),
+                    carriageways: Vec::new(),
                 },
             ),
             // Several layers on one tile, which is what the merge collapses.
@@ -916,6 +968,7 @@ mod tests {
                     ids: Vec::new(),
                     turn_lanes: Vec::new(),
                     buildings: Vec::new(),
+                    carriageways: Vec::new(),
                 },
             ),
             ((5, 10), ChunkEntry::new(10)),
@@ -933,6 +986,20 @@ mod tests {
                         u64::MAX,
                     ],
                     ..entry(8, vec![named(3, 1), named(5, 0), named(7, 0)], &["Bar"])
+                },
+            ),
+            // The carriageway arena, which only `roads` carries: a divided road, a one-way with
+            // every lane forward, and a road whose split was never surveyed — all three in one
+            // entry, because the section is dense and the unsurveyed one still needs its slot.
+            (
+                (8, 4),
+                ChunkEntry {
+                    carriageways: vec![
+                        Carriageway { forward: 3, backward: 1, solid_dividers: 0b101 },
+                        Carriageway { forward: 2, backward: 0, solid_dividers: u32::MAX },
+                        Carriageway::default(),
+                    ],
+                    ..entry(4, vec![named(1, 0), named(2, 0), named(3, 0)], &[])
                 },
             ),
         ]
@@ -956,6 +1023,59 @@ mod tests {
         assert_eq!(at.entries, want.len() as u64);
         assert_eq!(drain(&spill, &at, 1 << 16), want);
         spill.check_books().expect("the books balance");
+    }
+
+    /// **The silent one.** A `ChunkEntry.carriageways` that never reaches the spill is dropped on
+    /// every build that spills chunks — which is every real build — and the archive comes out with
+    /// no carriageway table, no lane markings and no error anywhere. Nothing else in this module
+    /// would notice: the books balance, the features are all there, and the map merely looks like
+    /// the renderer is at fault.
+    ///
+    /// So the section is asserted on its own rather than only inside `every_layer`: a road with a
+    /// divided carriageway, a one-way with every lane forward, and one whose split was never
+    /// surveyed — the last because the section is dense and its slot has to survive too.
+    #[test]
+    fn a_carriageway_section_survives_the_scratch_file() {
+        let spill = ChunkSpill::create(tmp("carriageways")).expect("create");
+        let want = ChunkEntry {
+            carriageways: vec![
+                Carriageway { forward: 3, backward: 1, solid_dividers: 0b101 },
+                Carriageway { forward: 2, backward: 0, solid_dividers: u32::MAX },
+                Carriageway::default(),
+            ],
+            ..entry(4, vec![named(1, 0), named(2, 0), named(3, 0)], &[])
+        };
+        let mut map: BTreeMap<(u64, u8), ChunkEntry> = BTreeMap::new();
+        map.insert((1, 4), want.clone());
+        let at = spill.write_chunk(map).expect("write");
+        let got = drain(&spill, &at, 1 << 16);
+        assert_eq!(got, vec![((1u64, 4u8), want)]);
+        // And the books, which are what would catch a section written but not accounted for.
+        spill.check_books().expect("the books balance");
+    }
+
+    /// A layer with no surveyed split writes no section at all, so a `boundaries` or `water` tile
+    /// pays nothing for a table that only roads ever have.
+    #[test]
+    fn an_entry_with_no_carriageways_writes_no_section() {
+        let spill = ChunkSpill::create(tmp("nocarriageways")).expect("create");
+        let bare = entry(4, vec![named(1, 0), named(2, 0)], &[]);
+        let mut map: BTreeMap<(u64, u8), ChunkEntry> = BTreeMap::new();
+        map.insert((1, 4), bare.clone());
+        let at = spill.write_chunk(map).expect("write");
+        let with = ChunkEntry {
+            carriageways: vec![Carriageway::default(); 2],
+            ..entry(4, vec![named(1, 0), named(2, 0)], &[])
+        };
+        let mut map: BTreeMap<(u64, u8), ChunkEntry> = BTreeMap::new();
+        map.insert((1, 4), with);
+        let at_with = spill.write_chunk(map).expect("write");
+        assert_eq!(
+            at_with.len - at.len,
+            2 * CARRIAGEWAY_RECORD_LEN as u64,
+            "the section costs exactly one record per feature and nothing when absent",
+        );
+        assert_eq!(drain(&spill, &at, 1 << 16), vec![((1u64, 4u8), bare)]);
     }
 
     /// The read accounting survives a buffer compaction mid-entry. Names are pulled one inline
@@ -996,7 +1116,7 @@ mod tests {
             layer.coords.push((i as i16, 0));
         }
         let mut map: BTreeMap<(u64, u8), ChunkEntry> = BTreeMap::new();
-        map.insert((7, 8), ChunkEntry { layer, names: names.clone(), ids: Vec::new() , turn_lanes: Vec::new(), buildings: Vec::new() });
+        map.insert((7, 8), ChunkEntry { layer, names: names.clone(), ids: Vec::new() , turn_lanes: Vec::new(), buildings: Vec::new(), carriageways: Vec::new() });
         let at = spill.write_chunk(map).expect("write");
         // Window of one header: every name tops up (and compacts) mid-entry.
         let read = drain(&spill, &at, ENTRY_HEADER_BYTES);
@@ -1095,12 +1215,21 @@ mod tests {
         assert!(reader.next().is_err(), "a chunk with bytes past its last entry read as complete");
     }
 
+    /// Byte 23 was the reserved tail and is now the carriageway flag, so the three section flags
+    /// are the whole of bytes 21..24. Each is 0 or 1: a spare value there means a newer writer put
+    /// something in it, and guessing would decode a section that moved.
     #[test]
-    fn a_dirty_reserved_tail_errors() {
-        let mut head = [0u8; ENTRY_HEADER_BYTES];
+    fn an_unknown_section_flag_errors() {
+        let head = [0u8; ENTRY_HEADER_BYTES];
         entry_header(&head).expect("a zero header is legal");
-        head[23] = 1;
-        assert!(entry_header(&head).is_err(), "a nonzero reserved tail decoded");
+        for flag in 21..24 {
+            let mut set = head;
+            set[flag] = 1;
+            entry_header(&set).unwrap_or_else(|e| panic!("byte {flag} set is legal: {e:?}"));
+            let mut spare = head;
+            spare[flag] = 2;
+            assert!(entry_header(&spare).is_err(), "byte {flag} decoded a spare value");
+        }
     }
 
     /// The word that was the second reserved tail is now the id count, and an id count that is

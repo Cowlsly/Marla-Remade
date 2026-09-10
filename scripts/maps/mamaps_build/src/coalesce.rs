@@ -56,6 +56,12 @@
 //! different corridor ordinals are drawn as two parallel lines, and merging them would put both
 //! on whichever ordinal came first.
 //!
+//! The carriageway joins the key too, and it is the one part of the key that is **not** on the
+//! feature: the directional split lives in a side table because it is present on a minority of
+//! roads. It has to be in the key all the same, because two four-lane roads that divide 3/1 and
+//! 1/3 are drawn as different surfaces with the centre line in different places. A one-way and a
+//! two-way are already separated for free, because that one is a flag.
+//!
 //! Direction is not preserved through a join and does not need to be: nothing in
 //! [`tilecodec::mamaps::body`]'s flag set reads a line's direction, so `A -> B` and `B -> A` draw
 //! the same. Joins are made head-to-tail only, so a part is never reversed anyway.
@@ -70,7 +76,9 @@
 
 use std::collections::HashMap;
 
-use tilecodec::mamaps::body::{BuildingAttrs, LaneTurns, Layer, Part, GEOM_LINE, WINDING_OUTER};
+use tilecodec::mamaps::body::{
+    BuildingAttrs, Carriageway, LaneTurns, Layer, Part, GEOM_LINE, WINDING_OUTER,
+};
 
 /// What coalescing a build saved, for the report.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
@@ -93,7 +101,12 @@ impl Stats {
 /// What makes two line features interchangeable to a renderer. The trailing `name_idx` keeps two
 /// differently-named roads or rivers of the same class apart, so a curved label is never attached
 /// to a line that merged with a neighbour of another name; same-named fragments still merge.
-type Class = (u16, u16, u8, u32, u8, u8, u8, u8, u16);
+///
+/// The last three come from the carriageway side table rather than from the feature, and they are
+/// in the key for the same reason `transit_color` is: two four-lane roads of one class that divide
+/// 3/1 and 1/3 are drawn as different surfaces, and merging them would put both on whichever split
+/// came first. `flags` already separates a one-way from a two-way, because that is a flag.
+type Class = (u16, u16, u8, u32, u8, u8, u8, u8, u16, u8, u8, u32);
 
 /// One line part, as `(coord_start, point_count)` into a layer's existing arena.
 ///
@@ -109,11 +122,11 @@ type Run = Vec<Span>;
 /// Polygon features are left exactly as they were, in place; only the parts table and the arena are
 /// rebuilt around them, which [`crate::rings::normalise`] does immediately afterwards anyway.
 pub fn coalesce_lines(layer: &mut Layer) -> Stats {
-    coalesce_lines_with_ids(layer, None, None, None)
+    coalesce_lines_with_ids(layer, None, None, None, None)
 }
 
-/// As [`coalesce_lines`], but also rewrites an id side table and a turn-lane side table so they
-/// stay parallel to the features.
+/// As [`coalesce_lines`], but also rewrites an id side table, a turn-lane side table and a
+/// carriageway side table so they stay parallel to the features.
 ///
 /// The tables are indexed by feature position, so merging lines without rewriting them leaves more
 /// entries than features and the encoder rejects the tile. A merged line takes the id of the first
@@ -121,11 +134,14 @@ pub fn coalesce_lines(layer: &mut Layer) -> Stats {
 /// are *not* lines populate the id table at all (see `extract::tracks_ids`). Turn masks are the
 /// opposite: they belong to a *road* line, so a line that carries any is held out of merging
 /// entirely (each becomes its own survivor) rather than folded into a neighbour and losing them.
+/// A carriageway takes the third route: it is part of the merge key, so a survivor's split is by
+/// construction the split every line it absorbed had.
 pub fn coalesce_lines_with_ids(
     layer: &mut Layer,
     ids: Option<&mut Vec<u64>>,
     turns: Option<&mut Vec<LaneTurns>>,
     buildings: Option<&mut Vec<BuildingAttrs>>,
+    carriageways: Option<&mut Vec<Carriageway>>,
 ) -> Stats {
     let mut stats = Stats {
         features_before: layer.features.len() as u64,
@@ -151,6 +167,12 @@ pub fn coalesce_lines_with_ids(
         None => vec![false; layer.features.len()],
     };
 
+    // The split a feature's key carries, read out before the tables are borrowed mutably below.
+    // Default when the layer has no carriageway table, which is every layer but `roads`.
+    let split = |at: usize| -> Carriageway {
+        carriageways.as_deref().and_then(|c| c.get(at).copied()).unwrap_or_default()
+    };
+
     // Every line part, grouped by class, in feature-then-part order.
     let mut order: Vec<Class> = Vec::new();
     let mut group_of: HashMap<Class, usize> = HashMap::new();
@@ -159,7 +181,7 @@ pub fn coalesce_lines_with_ids(
         if feature.geom_type != GEOM_LINE || unmergeable[index] {
             continue;
         }
-        let class = class_of(feature);
+        let class = class_of(feature, split(index));
         let at = *group_of.entry(class).or_insert_with(|| {
             order.push(class);
             groups.push(Vec::new());
@@ -203,7 +225,7 @@ pub fn coalesce_lines_with_ids(
             kept.push(index);
             continue;
         }
-        let class = class_of(feature);
+        let class = class_of(feature, split(index));
         let at = group_of[&class];
         if emitted[at] {
             continue;
@@ -250,6 +272,11 @@ pub fn coalesce_lines_with_ids(
             *buildings = kept.iter().map(|&at| buildings[at]).collect();
         }
     }
+    if let Some(carriageways) = carriageways {
+        if !carriageways.is_empty() {
+            *carriageways = kept.iter().map(|&at| carriageways[at]).collect();
+        }
+    }
 
     layer.features = features;
     layer.parts = parts;
@@ -259,7 +286,7 @@ pub fn coalesce_lines_with_ids(
     stats
 }
 
-fn class_of(feature: &tilecodec::mamaps::body::Feature) -> Class {
+fn class_of(feature: &tilecodec::mamaps::body::Feature, carriageway: Carriageway) -> Class {
     (
         feature.kind,
         feature.kind_detail,
@@ -270,6 +297,9 @@ fn class_of(feature: &tilecodec::mamaps::body::Feature) -> Class {
         feature.transit_taper,
         feature.lane_count,
         feature.name_idx,
+        carriageway.forward,
+        carriageway.backward,
+        carriageway.solid_dividers,
     )
 }
 
@@ -588,6 +618,79 @@ mod tests {
         assert_eq!(layer.features[0].transit_ordinal, 0);
         assert_eq!(layer.features[1].transit_ordinal, 1);
         assert_eq!(all_parts(&layer), vec![vec![(0, 0), (1, 0)], vec![(1, 0), (2, 0)]]);
+    }
+
+    /// **The one part of the merge key that is not on the feature.** Two four-lane roads of the
+    /// same class that divide 3/1 and 1/3 are drawn as different surfaces with the centre line in
+    /// different places, and the split lives in a side table rather than on the feature — so
+    /// without it in the key they would touch end to end, splice, and both come out on whichever
+    /// division happened to come first.
+    #[test]
+    fn a_differing_directional_split_keeps_two_roads_of_one_class_apart() {
+        let mut layer = layer_of(&[
+            (7, GEOM_LINE, vec![vec![(0, 0), (1, 0)]]),
+            (7, GEOM_LINE, vec![vec![(1, 0), (2, 0)]]),
+        ]);
+        for feature in &mut layer.features {
+            feature.lane_count = 4;
+        }
+        let mut carriageways = vec![
+            Carriageway { forward: 3, backward: 1, solid_dividers: 0 },
+            Carriageway { forward: 1, backward: 3, solid_dividers: 0 },
+        ];
+        coalesce_lines_with_ids(&mut layer, None, None, None, Some(&mut carriageways));
+        assert_arena_is_tiled(&layer);
+        assert_eq!(layer.features.len(), 2, "two splits, two features");
+        assert_eq!(
+            all_parts(&layer),
+            vec![vec![(0, 0), (1, 0)], vec![(1, 0), (2, 0)]],
+            "they touch end to end, so without the split in the key they would be spliced",
+        );
+        // And the side table still describes the features it is parallel to, in order.
+        assert_eq!(
+            carriageways,
+            vec![
+                Carriageway { forward: 3, backward: 1, solid_dividers: 0 },
+                Carriageway { forward: 1, backward: 3, solid_dividers: 0 },
+            ],
+        );
+    }
+
+    /// The counterpart, so the key is not simply always-distinct: roads that agree on their split
+    /// still merge, and the survivor's entry is the split both of them had.
+    #[test]
+    fn an_equal_directional_split_still_merges() {
+        let mut layer = layer_of(&[
+            (7, GEOM_LINE, vec![vec![(0, 0), (1, 0)]]),
+            (7, GEOM_LINE, vec![vec![(1, 0), (2, 0)]]),
+        ]);
+        for feature in &mut layer.features {
+            feature.lane_count = 4;
+        }
+        let split = Carriageway { forward: 3, backward: 1, solid_dividers: 0b10 };
+        let mut carriageways = vec![split, split];
+        coalesce_lines_with_ids(&mut layer, None, None, None, Some(&mut carriageways));
+        assert_arena_is_tiled(&layer);
+        assert_eq!(layer.features.len(), 1);
+        assert_eq!(all_parts(&layer), vec![vec![(0, 0), (1, 0), (2, 0)]]);
+        assert_eq!(carriageways, vec![split], "the side table shrinks with the features");
+    }
+
+    /// Solid dividers are part of the split, so a road where a lane change is prohibited does not
+    /// merge with one where it is allowed — the difference is a solid line against a dashed one.
+    #[test]
+    fn a_solid_divider_separates_two_otherwise_identical_carriageways() {
+        let mut layer = layer_of(&[
+            (7, GEOM_LINE, vec![vec![(0, 0), (1, 0)]]),
+            (7, GEOM_LINE, vec![vec![(1, 0), (2, 0)]]),
+        ]);
+        let mut carriageways = vec![
+            Carriageway { forward: 2, backward: 2, solid_dividers: 0 },
+            Carriageway { forward: 2, backward: 2, solid_dividers: 0b1 },
+        ];
+        coalesce_lines_with_ids(&mut layer, None, None, None, Some(&mut carriageways));
+        assert_arena_is_tiled(&layer);
+        assert_eq!(layer.features.len(), 2);
     }
 
     /// The point of the whole module, in the shape the real data has: thousands of two-point
