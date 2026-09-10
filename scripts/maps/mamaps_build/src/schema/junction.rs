@@ -22,7 +22,7 @@
 //! | Which nodes are junctions | **Data.** The generator collapses degree-2 chains, so a surviving node of degree ≥ 3 is a real fork. |
 //! | Where each approach and exit runs | **Data.** Node coordinates and edge polylines. |
 //! | Approach and exit headings | **Data**, derived: `atan2` over the first geometry step, because the graph stores no headings. |
-//! | Which movements are legal | **Inference.** Every exit but the U-turn back where you came from is assumed legal. The graph carries no turn restrictions. |
+//! | Which movements are legal | **Inference.** Every exit but a reversal is assumed legal — excluded by *angle*, not just by whether it returns to the same neighbour, because a divided highway's median slot reverses onto a different node. The graph carries no turn restrictions. |
 //! | A lane's turn indication, where `turn:lanes` is tagged | **Data.** `lanes.bin`, keyed by directed edge, ordered left→right. |
 //! | A lane's turn indication everywhere else | **Inference**, and this is the overwhelming majority of roads. |
 //! | How many lanes an arm has, absent `turn:lanes` | **Neither, and the important row.** One lane in the direction of travel — not a guess but the carriageway renderer's own default, so a connector lands on the painted asphalt. [`effective_lanes`]. |
@@ -808,6 +808,13 @@ fn exit_lane(
 /// exit by angle is used instead, because a tagged indication with nowhere to go is far more likely
 /// to be a threshold disagreement than a lane that leads nowhere.
 fn exits_for(turn: Turn, legal: &[(usize, f64, Turn)]) -> Vec<usize> {
+    // A lane tagged `turn:lanes=reverse` has nowhere to go, because reversals are not legal
+    // movements here. Returning empty rather than falling through matters: `legal` holds no
+    // reversal, so the closest-by-angle fallback below would attach the lane to whatever sharp
+    // turn happens to be nearest and emit a connector into a road the lane does not feed.
+    if turn == Turn::Reverse {
+        return Vec::new();
+    }
     let exact: Vec<usize> =
         legal.iter().filter(|(_, _, t)| *t == turn).map(|(i, _, _)| *i).collect();
     if !exact.is_empty() {
@@ -918,6 +925,13 @@ pub fn stream_junctions(dir: &Path, conventions: &Conventions, sink: &mut Sink) 
                     let delta = normalise_degrees(exit.heading - approach.heading);
                     (i, delta, classify_turn(delta))
                 })
+                // A reversal is not a movement this layer draws, and the neighbour test above does
+                // not catch it. On a divided highway the median slot reverses onto the *opposing
+                // carriageway*, which is a different node, so it survives that filter and arrives
+                // here as a legal 180-degree movement. The curve it produces never enters the
+                // junction at all: with `f_out = -f_in` all four bezier control points sit behind
+                // the node, so it draws as a flat hook doubling back along the approach.
+                .filter(|(_, _, turn)| *turn != Turn::Reverse)
                 .collect();
             if legal.is_empty() {
                 continue;
@@ -1509,6 +1523,67 @@ mod tests {
         assert_eq!(source_of(&graph, 7), 4);
         assert_eq!(source_of(&graph, 0), 0);
         assert_eq!(source_of(&graph, 3), 0);
+    }
+
+    /// **A divided highway's median U-turn slot, which is the case the neighbour test cannot see.**
+    ///
+    /// Node 1 is the approaching carriageway and node 2 the opposing one running alongside it, so a
+    /// reversal at node 0 leaves toward a *different* node and survives
+    /// `exit.neighbour != approach.neighbour`. The median is ~9 m, which puts the exit 5 degrees off
+    /// due north and the movement at 175 degrees — inside [`classify_turn`]'s 170-degree reversal
+    /// threshold, and a realistic width rather than one tuned to just clear it.
+    fn divided_highway() -> GraphFixture {
+        let coords: [(i32, i32); 4] = [
+            (350_000_000, -1_200_000_000), // 0: the junction
+            (350_009_000, -1_200_000_000), // 1: north, the carriageway traffic arrives on
+            (350_009_000, -1_199_999_000), // 2: north, the opposing carriageway across the median
+            (350_000_000, -1_199_988_000), // 3: east, so the node has three neighbours
+        ];
+        let edge = |source, target| EdgeSpec { source, target, type_: 7, interior: Vec::new() };
+        write_graph(
+            "junction_divided",
+            &coords,
+            &[edge(0, 2), edge(0, 3), edge(1, 0), edge(3, 0)],
+            &[],
+        )
+    }
+
+    /// **A reversal onto a different node is not a legal movement, and used to draw a fishhook.**
+    ///
+    /// `exit.neighbour != approach.neighbour` excludes the U-turn back the way you came and nothing
+    /// else, so a 180-degree movement reaching a different node came through as legal. Its geometry
+    /// is degenerate rather than merely ugly: with `f_out = -f_in` the four control points along
+    /// the approach's forward axis are `-back`, `-0.45*back`, `-0.45*ahead`, `-ahead` — every one
+    /// negative, so the whole curve stays behind the node and never enters the junction. At the
+    /// usual 14 m setback its apex sits 8.2 m short of the node while it swings half a lane either
+    /// side of the centreline: a flat hook doubling back along the approach.
+    ///
+    /// Pinned on both the count and the shape. The count alone would pass if the reversal were
+    /// merely redirected somewhere, and the shape alone would pass if it were dropped for an
+    /// unrelated reason.
+    #[test]
+    fn a_reversal_onto_a_different_node_is_not_emitted() {
+        let (emitted, lines) = stream(&divided_highway());
+        // Three movements reach the legality filter: from the north, the reversal onto the opposing
+        // carriageway and the left onto the east arm; from the east, the right onto the opposing
+        // carriageway. Only the reversal is dropped.
+        assert_eq!(emitted, 2, "the reversal onto the opposing carriageway must not be emitted");
+        assert_eq!(lines.len(), 2);
+
+        // And no survivor doubles back. Both ends of the fishhook sat ~14 m up the approach; a
+        // connector that genuinely crosses the junction has at most one end far up any single arm.
+        // The threshold is well clear of the half-lane lateral offset a legitimate end carries.
+        let north_m = |p: (f64, f64)| (p.1 - 35.0) * METRES_PER_DEGREE;
+        for line in &lines {
+            let (start, end) = (line[0], *line.last().expect("a connector has points"));
+            assert!(
+                !(north_m(start) > 5.0 && north_m(end) > 5.0),
+                "a connector runs from {:.1} m to {:.1} m north of the junction, both ends up the \
+                 same arm: it doubles back along the approach instead of crossing the node",
+                north_m(start),
+                north_m(end),
+            );
+        }
     }
 
     /// A one-way approach is the case [`InEdges`] exists for: the junction has no out-edge back
