@@ -19,9 +19,18 @@
 
 use ash::vk;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 /// The blob, inside the directory Kotlin hands over.
 const FILE_NAME: &str = "pipelines.bin";
+
+/// Distinguishes the temp files of caches that are live at the same time.
+///
+/// Restarts at zero in each process deliberately. It only has to separate *concurrent* writers,
+/// and starting over means the set of temp names stays tiny and is reused across launches — so a
+/// write that dies before its rename is overwritten by a later run rather than orphaned on disk
+/// forever, which an ever-increasing or handle-derived name would be.
+static NEXT_SLOT: AtomicU64 = AtomicU64::new(0);
 
 pub struct ShaderCache {
     /// Passed to every `create_graphics_pipelines` call. Null when the driver would not give us
@@ -33,6 +42,8 @@ pub struct ShaderCache {
     /// cache from one the driver has added entries to. Zero when the file was absent or rejected,
     /// so the first write always happens.
     on_disk: usize,
+    /// This cache's slot in [`NEXT_SLOT`], which names its temp file.
+    slot: u64,
 }
 
 impl ShaderCache {
@@ -79,7 +90,7 @@ impl ShaderCache {
         } else {
             blob.as_ref().map_or(0, |bytes| bytes.len())
         };
-        ShaderCache { handle, path, on_disk }
+        ShaderCache { handle, path, on_disk, slot: NEXT_SLOT.fetch_add(1, Ordering::Relaxed) }
     }
 
     pub fn handle(&self) -> vk::PipelineCache {
@@ -119,7 +130,13 @@ impl ShaderCache {
                 return;
             }
         }
-        let temp = path.with_extension("tmp");
+        // Unique per live cache rather than a fixed `pipelines.tmp`: two map surfaces means two
+        // `Renderer`s sharing one directory, and a shared temp path lets their writes interleave
+        // into a blob that is then renamed into place. A counter rather than the cache handle
+        // because those two `Renderer`s hold two separate `VkDevice`s, and a non-dispatchable
+        // handle is only unique within its own device — a driver numbering caches per-device
+        // would hand both of them the same value and the race would be back.
+        let temp = path.with_extension(format!("{}.tmp", self.slot));
         if std::fs::write(&temp, &data).is_ok() && std::fs::rename(&temp, path).is_ok() {
             self.on_disk = data.len();
         } else {
