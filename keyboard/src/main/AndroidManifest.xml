@@ -2,6 +2,17 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
     <uses-permission android:name="android.permission.VIBRATE" />
+    <!-- Dictation (long-press on enter). Requested at that point by VoicePermissionActivity,
+         never at startup: an IME cannot show a runtime permission dialog itself. -->
+    <uses-permission android:name="android.permission.RECORD_AUDIO" />
+
+    <!-- SpeechRecognizer.isRecognitionAvailable() and the bind behind it both need to see the
+         recognition service, which package visibility hides by default. -->
+    <queries>
+        <intent>
+            <action android:name="android.speech.RecognitionService" />
+        </intent>
+    </queries>
 
     <application
         android:allowBackup="true"
@@ -22,6 +33,15 @@
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
+
+        <!-- Invisible trampoline for the microphone prompt; see VoicePermissionActivity.
+             Deliberately not android:noHistory, which would finish it under the dialog. -->
+        <activity
+            android:name=".platform.VoicePermissionActivity"
+            android:excludeFromRecents="true"
+            android:exported="false"
+            android:launchMode="singleTop"
+            android:theme="@android:style/Theme.Translucent.NoTitleBar" />
 
         <service
             android:name=".ime.KeyboardService"

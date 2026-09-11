@@ -4,6 +4,7 @@ package com.vayunmathur.keyboard.ui
 
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.gestures.waitForUpOrCancellation
@@ -393,7 +394,12 @@ private object KeyPreviewPositionProvider : PopupPositionProvider {
     }
 }
 
-/** A functional key that only needs a tap (page toggles, comma/period, emoji, enter). */
+/**
+ * A functional key that only needs a tap (page toggles, comma/period, emoji, enter).
+ *
+ * [onLongClick] is optional and is the only extra gesture the key knows: unlike [CharKey]
+ * there is no popup to slide onto, so the press simply fires once the hold is long enough.
+ */
 @Composable
 fun RowScope.SpecialKey(
     height: Dp,
@@ -403,6 +409,8 @@ fun RowScope.SpecialKey(
     pressedContainerColor: Color = pressedKeyColor(),
     pressedContentColor: Color = MaterialTheme.colorScheme.onSurface,
     onClick: () -> Unit,
+    onLongClick: (() -> Unit)? = null,
+    onLongClickLabel: String? = null,
     content: @Composable () -> Unit,
 ) {
     val interaction = remember { MutableInteractionSource() }
@@ -411,7 +419,13 @@ fun RowScope.SpecialKey(
         modifier = Modifier
             .weight(weight)
             .height(height + KeyPadding * 2)
-            .clickable(interactionSource = interaction, indication = null, onClick = onClick)
+            .combinedClickable(
+                interactionSource = interaction,
+                indication = null,
+                onLongClickLabel = onLongClickLabel,
+                onLongClick = onLongClick,
+                onClick = onClick,
+            )
             .padding(KeyPadding)
             .clip(KeyShape)
             .background(if (pressed) pressedContainerColor else containerColor),

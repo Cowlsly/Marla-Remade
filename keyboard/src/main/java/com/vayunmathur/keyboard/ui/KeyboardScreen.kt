@@ -70,21 +70,37 @@ fun KeyboardScreen(state: KeyboardState, actions: ImeActions) {
     // Derived rather than read straight: the query changes on every keystroke of a search,
     // and only arriving at or leaving search should rearrange the keyboard.
     val searching by remember(state) { derivedStateOf { state.emojiQuery != null } }
+    val voice = state.voice
     Surface(color = MaterialTheme.colorScheme.surfaceContainer) {
         Column(
             modifier = Modifier
                 .fillMaxWidth()
                 .padding(bottom = bottomPad),
         ) {
-            if (searching) {
+            when {
+                // Dictation outranks everything else in the strip: it is the only thing up
+                // there that the user has to be able to see and stop.
+                voice != null -> {
+                    VoiceStrip(
+                        height = StripHeight,
+                        state = voice,
+                        onStop = actions::stopVoiceInput,
+                        onDismiss = actions::dismissVoice,
+                        onOpenSettings = actions::openVoiceSettings,
+                    )
+                    KeyPage(state, actions, keyHeight)
+                }
                 // Search borrows the ordinary letter keys rather than shipping a second
                 // keyboard: the query bar and the results sit on top of LettersPage, and the
                 // service routes keystrokes into the query while this is showing.
-                EmojiSearchStrip(state, actions)
-                LettersPage(state, actions, keyHeight)
-            } else {
-                Strip(state, actions)
-                KeyPage(state, actions, keyHeight)
+                searching -> {
+                    EmojiSearchStrip(state, actions)
+                    LettersPage(state, actions, keyHeight)
+                }
+                else -> {
+                    Strip(state, actions)
+                    KeyPage(state, actions, keyHeight)
+                }
             }
         }
     }
@@ -575,6 +591,10 @@ private fun RowScope.EnterKey(state: KeyboardState, actions: ImeActions, keyHeig
         pressedContainerColor = MaterialTheme.colorScheme.primaryContainer,
         pressedContentColor = MaterialTheme.colorScheme.onPrimaryContainer,
         onClick = actions::onEnter,
+        // Enter had no hold gesture of its own, and it is the one key that is present on
+        // every page, which is why dictation lives here (issue #678).
+        onLongClick = actions::onVoiceInput,
+        onLongClickLabel = stringResource(R.string.voice_input),
     ) {
         // A custom action carries an app-supplied label ("Join", "Post", ...) whose purpose
         // we can't map to an icon, so that one case stays textual; every standard action

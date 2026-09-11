@@ -2,13 +2,16 @@ package com.vayunmathur.keyboard.ime
 
 import android.content.ClipDescription
 import android.content.ClipboardManager
+import android.content.Intent
 import android.inputmethodservice.InputMethodService
 import android.media.AudioManager
+import android.net.Uri
 import android.os.Build
 import android.os.SystemClock
 import android.os.VibrationEffect
 import android.os.Vibrator
 import android.os.VibratorManager
+import android.provider.Settings
 import android.text.InputType
 import android.view.KeyEvent
 import android.view.View
@@ -37,6 +40,10 @@ import androidx.savedstate.SavedStateRegistry
 import androidx.savedstate.SavedStateRegistryController
 import androidx.savedstate.SavedStateRegistryOwner
 import androidx.savedstate.setViewTreeSavedStateRegistryOwner
+import com.vayunmathur.keyboard.platform.VoiceFailure
+import com.vayunmathur.keyboard.platform.VoiceInput
+import com.vayunmathur.keyboard.platform.VoicePermission
+import com.vayunmathur.keyboard.platform.VoicePermissionResult
 import com.vayunmathur.keyboard.ui.KeyboardScreen
 import com.vayunmathur.keyboard.util.ClipItem
 import com.vayunmathur.keyboard.util.ClipboardStore
@@ -53,6 +60,7 @@ import com.vayunmathur.library.ui.DynamicTheme
 import com.vayunmathur.library.util.DataStoreUtils
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
@@ -73,6 +81,12 @@ private const val DOUBLE_TAP_MS = 300L
 
 /** How long a freshly copied clip is offered in the strip before the chip gives up the slot. */
 private const val CLIP_CHIP_MS = 60_000L
+
+/** How long a dictation failure stays in the strip before it clears itself. */
+private const val VOICE_MESSAGE_MS = 6_000L
+
+/** How long a granted microphone still counts as "the user just asked for dictation". */
+private const val VOICE_GRANT_MS = 30_000L
 
 class KeyboardService : InputMethodService(),
     LifecycleOwner, ViewModelStoreOwner, SavedStateRegistryOwner, ImeActions {
@@ -131,6 +145,20 @@ class KeyboardService : InputMethodService(),
 
     private var vibrator: Vibrator? = null
 
+    private val voiceInput by lazy { VoiceInput(this) }
+
+    /** Clears a dictation failure from the strip after a while; cancelled by the next change. */
+    private var voiceMessageJob: Job? = null
+
+    /** True between [onWindowShown] and [onWindowHidden] — i.e. while there is a live field. */
+    private var windowShown = false
+
+    /**
+     * When the microphone was granted while the keyboard was away for the prompt, so
+     * dictation can pick up where it left off. Zero when nothing is waiting.
+     */
+    private var voiceGrantedAt = 0L
+
     /** This IME's id in the framework, resolved once from [InputMethodManager.getInputMethodList]. */
     private var imeId: String? = null
 
@@ -159,6 +187,7 @@ class KeyboardService : InputMethodService(),
         syncComposer()
         registerLayoutSubtypes()
         observeSettings()
+        scope.launch { VoicePermission.results.collect { onVoicePermissionResult(it) } }
     }
 
     /** Keep [KeyboardState.settings] in sync with DataStore so changes apply live. */
@@ -381,6 +410,15 @@ class KeyboardService : InputMethodService(),
         super.onWindowShown()
         lifecycleRegistry.currentState = Lifecycle.State.RESUMED
         updateBottomInset()
+        windowShown = true
+        // Resume the dictation the permission prompt interrupted — but only if the keyboard
+        // came straight back. Granting and then wandering off must not open the microphone
+        // the next time some unrelated field is tapped.
+        if (voiceGrantedAt != 0L) {
+            val resumed = SystemClock.uptimeMillis() - voiceGrantedAt < VOICE_GRANT_MS
+            voiceGrantedAt = 0L
+            if (resumed) beginListening()
+        }
     }
 
     /**
@@ -401,6 +439,7 @@ class KeyboardService : InputMethodService(),
 
     override fun onWindowHidden() {
         super.onWindowHidden()
+        windowShown = false
         // Keep the composition alive (STARTED, not DESTROYED) so re-showing is instant.
         lifecycleRegistry.currentState = Lifecycle.State.STARTED
     }
@@ -425,6 +464,9 @@ class KeyboardService : InputMethodService(),
         pendingComposition = ""
         before.invalidate()
         composer?.reset()
+        // There is no longer a field for a transcript to land in. A failure raised *after*
+        // this (the permission prompt is what took the field away) still shows on the way back.
+        if (kbState.voice != null) dismissVoice()
     }
 
     override fun onDestroy() {
@@ -433,6 +475,7 @@ class KeyboardService : InputMethodService(),
             getSystemService(ClipboardManager::class.java)?.removePrimaryClipChangedListener(it)
         }
         clipListener = null
+        voiceInput.destroy()
         store.clear()
         scope.cancel()
         super.onDestroy()
@@ -898,6 +941,124 @@ class KeyboardService : InputMethodService(),
     override fun dismissClipSuggestion() {
         chipClipId = 0L
         kbState.clipSuggestion = null
+    }
+
+    // --- Voice input ---
+
+    /**
+     * Long-press on enter. Pressing again while the microphone is live stops it, so the one
+     * gesture both starts and ends a dictation.
+     */
+    override fun onVoiceInput() {
+        feedback()
+        if (kbState.voice is VoiceState.Listening) {
+            stopVoiceInput()
+            return
+        }
+        // Checked up front rather than left to the recognizer: on a device with no
+        // recognition service there is nothing to bind to, and saying so is more use than
+        // a generic failure.
+        if (!voiceInput.isAvailable()) {
+            showVoiceFailure(VoiceFailure.UNAVAILABLE)
+            return
+        }
+        if (!VoicePermission.isGranted(this)) {
+            setVoiceState(null)
+            VoicePermission.request(this)
+            return
+        }
+        beginListening()
+    }
+
+    override fun stopVoiceInput() {
+        // stopListening, not cancel: the recognizer still reports the words it already has.
+        voiceInput.stop()
+        if (kbState.voice is VoiceState.Listening) setVoiceState(VoiceState.Transcribing)
+    }
+
+    override fun dismissVoice() {
+        voiceInput.cancel()
+        setVoiceState(null)
+    }
+
+    override fun openVoiceSettings() {
+        dismissVoice()
+        val intent = Intent(
+            Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
+            Uri.fromParts("package", packageName, null),
+        ).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        runCatching { startActivity(intent) }
+    }
+
+    private fun onVoicePermissionResult(result: VoicePermissionResult) {
+        when (result) {
+            // The prompt took the focus, which hid the keyboard along with the field. Wait
+            // for both back before listening, or the transcript would have nowhere to go.
+            VoicePermissionResult.GRANTED -> {
+                if (windowShown) beginListening() else voiceGrantedAt = SystemClock.uptimeMillis()
+            }
+            VoicePermissionResult.DENIED -> showVoiceFailure(VoiceFailure.PERMISSION_DENIED)
+            VoicePermissionResult.BLOCKED -> showVoiceFailure(VoiceFailure.PERMISSION_BLOCKED)
+        }
+    }
+
+    private fun beginListening() {
+        setVoiceState(VoiceState.Listening(""))
+        voiceInput.start(
+            // Dictate in the language the user chose to type in, which is a better guess
+            // than the device locale on a keyboard whose whole point is switching scripts.
+            languageTag = kbState.settings.activeLayout.id.substringBefore('_'),
+            onPartial = { partial ->
+                if (kbState.voice is VoiceState.Listening) {
+                    setVoiceState(VoiceState.Listening(partial))
+                }
+            },
+            onTranscribing = {
+                if (kbState.voice is VoiceState.Listening) setVoiceState(VoiceState.Transcribing)
+            },
+            onFinal = { text ->
+                setVoiceState(null)
+                commitVoiceText(text)
+            },
+            onFailure = ::showVoiceFailure,
+        )
+    }
+
+    /**
+     * Put a transcript into the field. Anything still composing is settled first — dictated
+     * text is finished text, not a continuation of the half-typed word — and `commitText`
+     * then replaces the selection, which is what dictating over selected text should do.
+     */
+    private fun commitVoiceText(text: String) {
+        val ic = currentInputConnection ?: return
+        finishComposition(ic)
+        commitCurrentWord(ic, autoCorrect = false)
+        // Read before committing: the mirror drops the selection as soon as it is told.
+        val replacedSelection = before.hasSelection
+        val needsSpace = !replacedSelection &&
+            textBeforeCursor().lastOrNull()?.isWhitespace() == false
+        commit(ic, if (needsSpace) " $text" else text)
+        // What surrounded the replaced selection is text we never saw.
+        if (replacedSelection) before.invalidate()
+        kbState.suggestions = emptyList()
+        updateAutoCapShift()
+    }
+
+    private fun showVoiceFailure(failure: VoiceFailure) {
+        setVoiceState(VoiceState.Failed(failure))
+    }
+
+    private fun setVoiceState(state: VoiceState?) {
+        voiceMessageJob?.cancel()
+        voiceMessageJob = null
+        kbState.voice = state
+        // A blocked microphone is the one failure that carries an action, so it waits to be
+        // read and dismissed instead of timing out from under the user's finger.
+        if (state !is VoiceState.Failed || state.failure == VoiceFailure.PERMISSION_BLOCKED) return
+        voiceMessageJob = scope.launch {
+            delay(VOICE_MESSAGE_MS)
+            if (kbState.voice == state) kbState.voice = null
+        }
     }
 
     // --- Emoji search ---

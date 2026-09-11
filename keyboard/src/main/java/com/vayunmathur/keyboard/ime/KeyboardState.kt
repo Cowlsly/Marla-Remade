@@ -3,6 +3,7 @@ package com.vayunmathur.keyboard.ime
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
+import com.vayunmathur.keyboard.platform.VoiceFailure
 import com.vayunmathur.keyboard.util.ClipItem
 import com.vayunmathur.keyboard.util.EmojiData
 import com.vayunmathur.keyboard.util.KeyboardPage
@@ -18,6 +19,21 @@ enum class EnterAction { RETURN, GO, SEARCH, SEND, NEXT, DONE, PREVIOUS }
  * use the dedicated numeric page instead (see [KeyboardState.basePage]).
  */
 enum class TextVariation { NORMAL, EMAIL, URL }
+
+/**
+ * What voice input is doing, or null when it is idle. An IME has no window of its own to put
+ * a dialog in, so dictation reports itself in the strip above the keys.
+ */
+sealed interface VoiceState {
+    /** Capturing audio; [partial] is the best transcript so far, which may be blank. */
+    data class Listening(val partial: String) : VoiceState
+
+    /** Capture is over and the recognizer is still working on it. */
+    data object Transcribing : VoiceState
+
+    /** The session ended with no text to commit. */
+    data class Failed(val failure: VoiceFailure) : VoiceState
+}
 
 /**
  * Compose-observable UI state owned by the IME service. The service mutates these fields in
@@ -85,6 +101,9 @@ class KeyboardState {
      * starts typing or enough time passes — it is an offer, not a permanent extra row.
      */
     var clipSuggestion by mutableStateOf<ClipItem?>(null)
+
+    /** Dictation progress or its last failure, shown in place of the strip. Null when idle. */
+    var voice by mutableStateOf<VoiceState?>(null)
 }
 
 /**
@@ -115,6 +134,18 @@ interface ImeActions {
     /** Dismiss the strip chip without deleting the clip behind it. */
     fun dismissClipSuggestion()
 
+    /** Start dictating, or stop and commit if it is already listening (long-press on enter). */
+    fun onVoiceInput()
+
+    /** Stop capturing and commit whatever has been heard so far. */
+    fun stopVoiceInput()
+
+    /** Clear the dictation strip, abandoning any session behind it. */
+    fun dismissVoice()
+
+    /** Open this app's system settings, the only way back from a blocked microphone. */
+    fun openVoiceSettings()
+
     companion object {
         /**
          * Does nothing. Lets `src/screenshotTest` render [
@@ -137,6 +168,10 @@ interface ImeActions {
             override fun deleteClip(item: ClipItem) {}
             override fun clearClips() {}
             override fun dismissClipSuggestion() {}
+            override fun onVoiceInput() {}
+            override fun stopVoiceInput() {}
+            override fun dismissVoice() {}
+            override fun openVoiceSettings() {}
         }
     }
 }

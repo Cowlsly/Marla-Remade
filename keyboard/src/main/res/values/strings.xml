@@ -17,4 +17,27 @@
     <string name="clear_clipboard">Clear all</string>
     <string name="clear_clipboard_history">Clear clipboard history</string>
     <string name="copied_text_shows_up_here">Copied text and images show up here</string>
+
+    <!-- Accessibility label for the long-press action on the keyboard's enter key, which starts dictation. -->
+    <string name="voice_input">Voice input</string>
+    <!-- Keyboard: shown in the strip above the keys while the microphone is recording speech. -->
+    <string name="voice_listening">Listening…</string>
+    <!-- Keyboard: shown in the strip above the keys after recording stops, while the speech is being turned into text. -->
+    <string name="voice_transcribing">Transcribing…</string>
+    <!-- Keyboard error in the strip above the keys: the device has no speech recognition app installed at all. -->
+    <string name="voice_unavailable">No speech recognition app installed</string>
+    <!-- Keyboard error in the strip above the keys: the user declined the microphone permission prompt. -->
+    <string name="voice_permission_denied">Voice input needs the microphone</string>
+    <!-- Keyboard error in the strip above the keys: the microphone permission was permanently denied, so it can only be granted in system settings. A settings button sits next to this text. -->
+    <string name="voice_permission_blocked">Allow the microphone in Settings</string>
+    <!-- Keyboard error in the strip above the keys: speech recognition needs a network connection and there is none. -->
+    <string name="voice_network">Voice input needs a connection</string>
+    <!-- Keyboard error in the strip above the keys: the recording contained no recognizable speech. -->
+    <string name="voice_no_speech">Didn\'t catch that</string>
+    <!-- Keyboard error in the strip above the keys: the speech recognizer is already busy with another request. -->
+    <string name="voice_busy">Speech recognizer is busy</string>
+    <!-- Keyboard error in the strip above the keys: the microphone could not be recorded from. -->
+    <string name="voice_audio_error">Couldn\'t record audio</string>
+    <!-- Keyboard error in the strip above the keys: dictation failed for a reason we cannot be more specific about. -->
+    <string name="voice_failed">Voice input failed</string>
 </resources>
