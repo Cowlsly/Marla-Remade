@@ -7,6 +7,7 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -21,6 +22,7 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
@@ -42,6 +44,7 @@ import com.vayunmathur.appstore.util.AppDetailActions
 import com.vayunmathur.appstore.util.AppDetailUiState
 import com.vayunmathur.appstore.util.AppStoreViewModel
 import com.vayunmathur.library.image.compose.AsyncImage
+import com.vayunmathur.library.image.compose.AsyncImageState
 import com.vayunmathur.library.ui.AppBarAlignment
 import com.vayunmathur.library.ui.AppScaffold
 import com.vayunmathur.library.ui.Button
@@ -297,18 +300,33 @@ private fun ScreenshotStrip(urls: List<String>) {
         horizontalArrangement = Arrangement.spacedBy(10.dp),
     ) {
         items(urls, key = { it }) { url ->
+            // The width has to be stated. AsyncImage draws its bitmap with matchParentSize, which
+            // contributes nothing to the measure pass, so an image given only a height resolves to
+            // zero wide and the strip is 220dp of nothing. Start at a phone screenshot's shape and
+            // switch to the real one once the bitmap has been decoded.
+            var ratio by remember(url) { mutableFloatStateOf(PORTRAIT_SCREENSHOT_RATIO) }
             AsyncImage(
                 model = url,
                 contentDescription = null,
                 modifier = Modifier
                     .height(220.dp)
+                    .aspectRatio(ratio)
                     .clip(RoundedCornerShape(12.dp))
                     .background(MaterialTheme.colorScheme.surfaceVariant),
                 contentScale = ContentScale.Fit,
+                onState = { state ->
+                    val size = (state as? AsyncImageState.Success)?.painter?.intrinsicSize
+                    if (size != null && size.width > 0f && size.height > 0f) {
+                        ratio = size.width / size.height
+                    }
+                },
             )
         }
     }
 }
+
+/** 9:16, the shape a phone screenshot is until its own is known. */
+private const val PORTRAIT_SCREENSHOT_RATIO = 9f / 16f
 
 /** Summary always, full description behind a toggle — most of them are very long. */
 @Composable
