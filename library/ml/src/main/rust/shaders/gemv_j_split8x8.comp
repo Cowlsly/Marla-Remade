@@ -1,0 +1,144 @@
+#version 450
+//! VARIANT J — 8x8 SPLIT WORKGROUP, 6 K-ITERATIONS. litert-analyst's design, and the dose point
+//! that makes G -> I -> J a curve rather than two isolated numbers.
+//!
+//! TEMPORARY probe shader for task 9. Source of truth is
+//! `analysis/gemv_probe/gemv_j_split8x8.comp`. See `gemv_a_control.comp` for why this copy
+//! exists and when to delete it.
+//!
+//! # Why this exists
+//!
+//! diff-analyst and litert-analyst independently flagged the same risk with variant I: **three
+//! iterations may be too few to produce an unambiguous signal**, partly because only two of the
+//! three have a successor to overlap with. A single point at 3 can be read as "the effect is
+//! small" when it is really "the dose was small".
+//!
+//! Adding J gives three points on the same axis with no new harness:
+//!
+//! | | iterations a lane | lanes | `ROWS` | predicted (litert-analyst) |
+//! | :--- | ---: | ---: | ---: | ---: |
+//! | **G** (production shape) | **1** | 48 of 64 | 2 | 2.77 GB/s — measured |
+//! | **I** (16-lane) | **3** | 16 of 16 | 2 | ~6.2 GB/s |
+//! | **J** (this) | **6** | 64 of 64 | 8 | higher again |
+//!
+//! **A monotonic rise across 1 -> 3 -> 6 is the evidence.** Any single point is not.
+//!
+//! # The design — don't put all 64 lanes on K
+//!
+//! My "you cannot K-loop 64 lanes over 48 blocks" was the right constraint but the wrong
+//! conclusion: shrinking the workgroup (variant I) is only one way out, and it costs 4x the
+//! threads. Splitting the workgroup on **two** indices keeps all 64:
+//!
+//!     k_lane    = lane & 7     (0..7)   -> each covers 6 of the 48 blocks
+//!     row_group = lane >> 3    (0..7)   -> each owns a different output channel
+//!
+//! 8 x 8 = 64 lanes, every one busy, every one running a 6-iteration K-loop. Unlike `ROWS 8`
+//! (variant H) the extra rows do not cost a lane its K-work; unlike variant I no threads are
+//! given up.
+//!
+//! Coverage check at `in_c = 1536`, 48 blocks: `base` = `k_lane*32`, `+256`, ... `+1280`, so
+//! lane `k` takes blocks `k, k+8, k+16, k+24, k+32, k+40` — 6 blocks x 8 lanes = 48 exactly once.
+//!
+//! # The reduction, and the bonus that is NOT taken here
+//!
+//! litert-analyst noted that 8 contiguous lanes sit inside one 16-wide Mali subgroup, so the
+//! cross-lane sum could be a subgroup shuffle with no shared memory and no `barrier()`. That is
+//! true and it is the right production choice — but it needs `subgroupClusteredAdd(v, 8)` and
+//! `GL_KHR_shader_subgroup_clustered`.
+//!
+//! **That support bit has now been measured and it IS present.** `subgroupSupportedOperations`
+//! is 1791 (0x6FF) on the Pixel 8 / Mali-G715, which sets CLUSTERED (0x40) along with BASIC,
+//! VOTE, ARITHMETIC, BALLOT, SHUFFLE, SHUFFLE_RELATIVE and QUAD, plus ROTATE and
+//! ROTATE_CLUSTERED. `subgroupSupportedStages` is 48, i.e. FRAGMENT | COMPUTE.
+//!
+//! It is still not used here, deliberately: J's job is to measure the K-depth, and swapping the
+//! reduction at the same time would confound the two. A plain `subgroupAdd` would be outright
+//! wrong — it sums the whole 16-wide subgroup, which spans *two* row_groups.
+//!
+//! So this uses shared memory, which is correct everywhere and keeps one `barrier()` — the same
+//! one the production kernel already pays. **If J wins, re-test with `subgroupClusteredAdd`;
+//! that is a further saving on top, not part of what J measures.**
+//!
+//! # Confound, stated
+//!
+//! `ROWS` rises with the K-depth (8 here vs 2 in G and I) because `row_group` count is
+//! `64 / k_lanes`. They are **structurally coupled** — at a fixed 64 lanes you cannot deepen the
+//! K-loop without widening the rows. That coupling is inherent to the production design too, so
+//! measuring the package is the honest thing; it just means J is not a clean single-axis probe.
+//! H (`ROWS 8`, 1 iteration) is the control that separates them: if H is flat and J rises, the
+//! K-depth is doing the work, not the rows.
+//!
+//! # Dispatch
+//!
+//! One workgroup per **eight** output channels: `count = out / 8` = 8,192, same as H. Bytes per
+//! workgroup are 4x G's, and there are 4x fewer workgroups, so the total swept is identical.
+
+#extension GL_EXT_shader_16bit_storage : require
+#extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
+#extension GL_KHR_shader_subgroup_basic : require
+#extension GL_KHR_shader_subgroup_arithmetic : require
+
+layout(local_size_x = 64) in;
+
+layout(set = 0, binding = 0) readonly buffer Source { uvec4 weights128[]; };
+layout(set = 0, binding = 1) buffer Sink { uint sink[]; };
+layout(set = 0, binding = 2) readonly buffer Acts { float16_t act[]; };
+
+layout(push_constant) uniform Push {
+    uint quads;
+    uint in_c;
+    uint count;
+};
+
+/// Lanes cooperating on one output channel. 48 blocks / 8 = 6 iterations at `in_c` 1536.
+#define K_LANES 8u
+/// Output channels a workgroup owns. `64 / K_LANES`.
+#define ROWS 8u
+#define I4_BLOCK 32u
+#define ACT_MASK 4095u
+
+/// `[row_group][k_lane]`, for the 8-way reduction that cannot be a plain `subgroupAdd`.
+shared float partial[ROWS][K_LANES];
+
+void main() {
+    uint tile = gl_WorkGroupID.y * gl_NumWorkGroups.x + gl_WorkGroupID.x;
+    if (tile >= count) {
+        return;
+    }
+    uint lane = gl_LocalInvocationID.x;
+    uint k_lane = lane & (K_LANES - 1u);
+    uint row_group = lane / K_LANES;
+    uint channel = tile * ROWS + row_group;
+    uint blocks = (in_c + I4_BLOCK - 1u) / I4_BLOCK;
+
+    float acc = 0.0;
+    // Six iterations at in_c 1536, against G's one. This is the whole variant.
+    for (uint base = k_lane * I4_BLOCK; base < in_c; base += K_LANES * I4_BLOCK) {
+        float scale = float(act[(channel * blocks + base / I4_BLOCK) & ACT_MASK]);
+        uvec4 packed = weights128[(channel * in_c + base) / 32u];
+        float total = 0.0;
+        for (uint word = 0u; word < 4u; word++) {
+            uint bits = packed[word];
+            for (uint n = 0u; n < 8u; n++) {
+                int code = bitfieldExtract(int(bits), int(n << 2u), 4);
+                total += float(code) * float(act[(base + word * 8u + n) & ACT_MASK]);
+            }
+        }
+        acc += total * scale;
+    }
+
+    // Shared memory, not `subgroupAdd`: a 16-wide subgroup spans two row_groups, so a plain
+    // subgroup sum would add two output channels together. See the header.
+    partial[row_group][k_lane] = acc;
+    barrier();
+    if (lane >= ROWS) {
+        return;
+    }
+    float total = 0.0;
+    for (uint i = 0u; i < K_LANES; i++) {
+        total += partial[lane][i];
+    }
+    if (floatBitsToUint(total) == 0xFFFFFFFFu) {
+        sink[0] = 1u;
+    }
+}

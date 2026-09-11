@@ -299,6 +299,10 @@ class CameraViewModel(private val app: Application) : AndroidViewModel(app) {
     private val sensorManager by lazy { app.getSystemService(Context.SENSOR_SERVICE) as SensorManager }
     // Dedicated single thread for portrait segmentation so main thread stays free for preview rendering.
     private val bokehExecutor: ExecutorService = Executors.newSingleThreadExecutor()
+    // Same for the photo stream. [PhotoAnalyzer] copies the Y plane, runs a ZXing decode and (in
+    // PHOTO) a toBitmap() per frame; on the main executor that only ran between UI frames, so
+    // KEEP_ONLY_LATEST dropped most of them and QR codes decoded only when main happened to be idle.
+    private val analysisExecutor: ExecutorService = Executors.newSingleThreadExecutor()
     // Bakes the same bokeh into the saved still. Separate from the preview's BokehAnalyzer, which is
     // owned by the composable and torn down with it; this one loads its model on the first capture.
     private val stillBokeh = StillBokehRenderer(app)
@@ -475,8 +479,9 @@ class CameraViewModel(private val app: Application) : AndroidViewModel(app) {
     }
 
     // Consecutive-frame counters backing the hysteresis + debounce in onLuminance().
-    private var lowLumaFrames = 0
-    private var highLumaFrames = 0
+    // Bumped on the analysis thread, zeroed from main by resetNightModeDetection().
+    @Volatile private var lowLumaFrames = 0
+    @Volatile private var highLumaFrames = 0
 
     private val _longExposureProgress = MutableStateFlow(0f)
     val longExposureProgress = _longExposureProgress.asStateFlow()
@@ -516,13 +521,24 @@ class CameraViewModel(private val app: Application) : AndroidViewModel(app) {
     private var imageCapture: ImageCapture? = null
     private var imageAnalysis: ImageAnalysis? = null
 
-    // The analyzer currently attached to imageAnalysis, so the night burst can swap in a temporary
-    // frame collector and restore the previous analyzer (PhotoAnalyzer) when it finishes.
-    private var currentAnalyzer: ImageAnalysis.Analyzer? = null
+    // The analyzer the UI wants running, kept across teardown/rebind. Every session bind re-attaches
+    // it via [attachDesiredAnalyzer], so a new ImageAnalysis is never left bare: the UI's attach
+    // effect is keyed on photoSessionActive, and that StateFlow conflates, so a false->true rebind
+    // inside one frame used to leave the analyzer detached until the next mode switch.
+    private var desiredAnalyzer: ImageAnalysis.Analyzer? = null
+    private var desiredAnalyzerExecutor: Executor? = null
 
     /** True once the photo session's use cases (incl. ImageAnalysis) are bound. */
     private val _photoSessionActive = MutableStateFlow(false)
     val photoSessionActive = _photoSessionActive.asStateFlow()
+
+    /**
+     * Whether the bound session actually carries an ImageAnalysis stream. False when the vendor
+     * NIGHT extension can't host concurrent analysis, which silently stops QR scanning, luminance
+     * sampling and Motion Photo; the viewfinder shows a notice so it isn't a mystery.
+     */
+    private val _analysisStreamActive = MutableStateFlow(false)
+    val analysisStreamActive = _analysisStreamActive.asStateFlow()
 
     /**
      * True while the live preview is bound with the CameraX NIGHT extension (plain
@@ -1402,6 +1418,7 @@ class CameraViewModel(private val app: Application) : AndroidViewModel(app) {
             readManualControlRanges()
             applyManualControls()
             boundCamera?.cameraInfo?.let { observeNightModeIndicator(it) }
+            onSessionBound()
             _photoSessionActive.value = true
             Log.d("NightPreview", "setupPhotoSession() SUCCESS photoActive=true surface=${_surfaceRequest.value?.resolution} nightIndicatorSupported=$nightIndicatorSupported")
             true
@@ -1492,6 +1509,7 @@ class CameraViewModel(private val app: Application) : AndroidViewModel(app) {
                     imageAnalysis = analysis
                     bindSession(provider, owner, nightSelector, preview, capture, analysis)
                 } else {
+                    Log.w("NightPreview", "setupNightPreviewSession() binding NIGHT without ImageAnalysis – QR scanning, luminance sampling and Motion Photo are off for this session")
                     imageAnalysis = null
                     bindSession(provider, owner, nightSelector, preview, capture)
                 }
@@ -1524,6 +1542,7 @@ class CameraViewModel(private val app: Application) : AndroidViewModel(app) {
                 observeExtensionStrength(it)
                 observeExtensionCameraState(it)
             }
+            onSessionBound()
             _nightPreviewActive.value = true
             _photoSessionActive.value = true
             Log.d("NightPreview", "setupNightPreviewSession() SUCCESS – nightPreviewActive=true photoSessionActive=true surfaceRequest=${_surfaceRequest.value?.resolution}")
@@ -1627,6 +1646,7 @@ class CameraViewModel(private val app: Application) : AndroidViewModel(app) {
                 restoreZoom(it.minZoomRatio, it.maxZoomRatio)
                 Log.d("NightPreview", "setupPortraitSession() after update levels=${_availableZoomLevels.value} ratio=${_zoomRatio.value}")
             }
+            onSessionBound()
             _photoSessionActive.value = true
             Log.d("NightPreview", "setupPanoramaSession() SUCCESS photoActive=true surface=${_surfaceRequest.value?.resolution}")
             true
@@ -1786,6 +1806,7 @@ class CameraViewModel(private val app: Application) : AndroidViewModel(app) {
             _sloMoSupported.value = true
             readManualControlRanges()
             applyManualControls()
+            onSessionBound()
             _photoSessionActive.value = true
             Log.d("NightPreview", "setupPortraitSession() SUCCESS photoActive=true surface=${_surfaceRequest.value?.resolution}")
             true
@@ -2080,11 +2101,12 @@ class CameraViewModel(private val app: Application) : AndroidViewModel(app) {
         highSpeedRecording = null
         try {
             imageAnalysis?.clearAnalyzer()
-            Log.d("NightPreview", "teardownSession() cleared analyzer previous=${currentAnalyzer?.javaClass?.simpleName}")
+            Log.d("NightPreview", "teardownSession() cleared analyzer previous=${desiredAnalyzer?.javaClass?.simpleName}")
         } catch (e: Exception) {
             Log.e("NightPreview", "teardownSession() clearAnalyzer failed (swallowed before)", e)
         }
-        currentAnalyzer = null
+        // desiredAnalyzer is deliberately kept: teardown runs on every rebind and the next bind
+        // re-attaches it. Only the UI clears it, when the effect that owns the analyzer disposes.
         sessionLifecycleOwner?.destroy()
         sessionLifecycleOwner = null
         try {
@@ -2100,6 +2122,7 @@ class CameraViewModel(private val app: Application) : AndroidViewModel(app) {
         highSpeedVideoCapture = null
         cameraProvider = null
         _photoSessionActive.value = false
+        _analysisStreamActive.value = false
         _nightPreviewActive.value = false
         _highSpeedActive.value = false
         _videoSessionActive.value = false
@@ -2154,22 +2177,42 @@ class CameraViewModel(private val app: Application) : AndroidViewModel(app) {
 
     /** Swaps the analyzer on the bound ImageAnalysis without rebinding. */
     fun setImageAnalyzer(analyzer: ImageAnalysis.Analyzer?) {
-        val analysis = imageAnalysis ?: return
-        currentAnalyzer = analyzer
-        if (analyzer == null) analysis.clearAnalyzer()
-        else analysis.setAnalyzer(ContextCompat.getMainExecutor(app), analyzer)
+        setImageAnalyzer(analyzer, ContextCompat.getMainExecutor(app))
     }
 
     fun setImageAnalyzer(analyzer: ImageAnalysis.Analyzer?, executor: Executor) {
-        val analysis = imageAnalysis ?: return
-        currentAnalyzer = analyzer
-        if (analyzer == null) analysis.clearAnalyzer()
-        else analysis.setAnalyzer(executor, analyzer)
+        desiredAnalyzer = analyzer
+        desiredAnalyzerExecutor = executor
+        attachDesiredAnalyzer()
     }
 
     /** Convenience for portrait bokeh – always runs off the dedicated bokeh thread. */
     fun setBokehAnalyzer(analyzer: ImageAnalysis.Analyzer?) {
         setImageAnalyzer(analyzer, bokehExecutor)
+    }
+
+    /** Convenience for the photo stream – always runs off the dedicated analysis thread. */
+    fun setPhotoAnalyzer(analyzer: ImageAnalysis.Analyzer?) {
+        setImageAnalyzer(analyzer, analysisExecutor)
+    }
+
+    /**
+     * Pushes [desiredAnalyzer] onto whatever ImageAnalysis is currently bound. A no-op while none
+     * is, which is why the desired analyzer survives teardown: the next successful bind calls this
+     * again and picks it back up.
+     */
+    private fun attachDesiredAnalyzer() {
+        val analysis = imageAnalysis ?: return
+        val analyzer = desiredAnalyzer
+        val executor = desiredAnalyzerExecutor
+        if (analyzer == null || executor == null) analysis.clearAnalyzer()
+        else analysis.setAnalyzer(executor, analyzer)
+    }
+
+    /** Publishes whether the session just bound has an analysis stream, and re-arms the analyzer. */
+    private fun onSessionBound() {
+        _analysisStreamActive.value = imageAnalysis != null
+        attachDesiredAnalyzer()
     }
 
     private fun startRecordingTimer() {
@@ -2709,7 +2752,7 @@ class CameraViewModel(private val app: Application) : AndroidViewModel(app) {
             }
             provider.unbindAll()
             imageAnalysis = null
-            currentAnalyzer = null
+            _analysisStreamActive.value = false
 
             val baseSelector = CameraSelector.Builder()
                 .requireLensFacing(_lensFacing.value)
@@ -3438,6 +3481,7 @@ class CameraViewModel(private val app: Application) : AndroidViewModel(app) {
     override fun onCleared() {
         unregisterLevelSensor()
         try { bokehExecutor.shutdown() } catch (_: Exception) {}
+        try { analysisExecutor.shutdown() } catch (_: Exception) {}
         try { stillBokeh.close() } catch (_: Exception) {}
     }
 }

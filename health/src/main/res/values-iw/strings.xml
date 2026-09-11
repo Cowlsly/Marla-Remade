@@ -32,7 +32,6 @@
     <string name="label_steps">צעדים</string>
     <string name="unit_steps">צעדים</string>
     <string name="nav_today">היום</string>
-    <string name="section_today_activity">היום</string>
     <string name="label_resting_heart_rate">דופק במנוחה</string>
     <string name="metric_body_fat">שומן בגוף</string>
     <string name="metric_body_water_mass">מסת מים בגוף</string>
@@ -40,12 +39,10 @@
     <string name="label_body_water_mass">מסת מים בגוף</string>
     <string name="log_body_metric">תיעוד <xliff:g id="metric" example="Weight">%1$s</xliff:g></string>
     <string name="nav_body">מדדי גוף</string>
-    <string name="nav_activity">פעילות</string>
     <string name="label_exercise">התעמלות</string>
     <string name="label_floors">קומות</string>
     <string name="metric_active_calories">קלוריות שנשרפו בפעילות</string>
     <string name="label_active">פעילות</string>
-    <string name="section_this_week">השבוע</string>
     <string name="section_last_night">מהלילה האחרון</string>
     <string name="section_latest_vitals">מדדים אחרונים</string>
     <string name="section_quick_stats">סטטיסטיקה מהירה</string>

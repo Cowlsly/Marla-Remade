@@ -17,16 +17,16 @@
         android:roundIcon="@mipmap/ic_launcher"
         android:supportsRtl="true"
         android:theme="@style/Theme.General">
-        <activity
-            android:configChanges="mcc|mnc|colorMode|density|fontScale|fontWeightAdjustment|keyboard|keyboardHidden|layoutDirection|navigation|orientation|screenLayout|screenSize|smallestScreenSize|touchscreen|uiMode"
-            android:name=".MainActivity"
-            android:exported="true"
-            android:theme="@style/Theme.General">
-            <intent-filter>
-                <action android:name="android.intent.action.MAIN" />
-                <category android:name="android.intent.category.LAUNCHER" />
-            </intent-filter>
-        </activity>
+        <!--
+          **No launcher activity, deliberately.** eSIMs are managed from Settings' own SIM screens,
+          which reach this app through [LuiActivity] below - the component the platform resolves.
+          A second icon in the launcher opened the same screen by a route nothing else uses, and an
+          eSIM manager is not an app a user goes looking for by name.
+
+          `MainActivity` existed only to carry that icon and has been removed with it; LuiActivity
+          shows the same `Navigation` composable and is reachable, which MainActivity would not
+          have been.
+        -->
 
         <!--
           The LUI the platform opens from Settings. Guarded by BIND_EUICC_SERVICE because

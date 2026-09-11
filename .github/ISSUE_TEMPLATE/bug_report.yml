@@ -12,6 +12,7 @@ body:
         - alchemist
         - appstore
         - astronomy
+        - auto
         - calculator
         - calendar
         - camera
@@ -36,7 +37,6 @@ body:
         - music
         - musicbrainz
         - notes
-        - nowplaying
         - office
         - openassistant
         - passwords

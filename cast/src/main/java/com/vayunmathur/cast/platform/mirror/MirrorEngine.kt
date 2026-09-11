@@ -139,7 +139,7 @@ class MirrorEngine(
     /** The negotiated codec, chosen against both ends' hardware before the stream was configured. */
     private val videoCodec: VideoCodec,
     /** The negotiated frame rate, which is the TV's cap rather than a fixed 30. */
-    private val frameRate: Int,
+    private val frameRate: Float,
     private val onDegraded: (MirrorDegradation) -> Unit,
     private val onStopped: (MirrorStopReason) -> Unit,
     /**
@@ -167,7 +167,6 @@ class MirrorEngine(
 
     private var transport: CastUdpTransport? = null
     private var capture: ScreenCapture? = null
-    private var systemDisplay: CastSystemDisplay? = null
     private var videoEncoder: VideoEncoder? = null
     private var audioEncoder: AudioStream? = null
 
@@ -269,14 +268,26 @@ class MirrorEngine(
                 // Same shape as ScreenCapture on purpose, but a system display rather than a
                 // mirror of the phone. The id is written back onto the source so the caller can
                 // publish it to the route - the framework will not go looking for it.
-                val desktop = CastSystemDisplay(appContext)
-                if (!desktop.start(surface, geometry, source.receiverId, source.supportedModes)) {
-                    encoder.release()
-                    desktop.release()
-                    return false
+                //
+                // **Reused when the source already has one**, which is what a re-negotiation after
+                // a resolution change looks like from here: the display is the user's desktop and
+                // survives the encoder being rebuilt around it. Only its surface moves.
+                val existing = source.display
+                if (existing != null) {
+                    if (!existing.attach(surface)) {
+                        encoder.release()
+                        return false
+                    }
+                } else {
+                    val desktop = CastSystemDisplay(appContext)
+                    if (!desktop.start(surface, geometry, source.receiverId, source.supportedModes)) {
+                        encoder.release()
+                        desktop.release()
+                        return false
+                    }
+                    source.display = desktop
+                    source.displayId = desktop.displayId
                 }
-                systemDisplay = desktop
-                source.displayId = desktop.displayId
             }
             is MirrorSource.Content -> contentSurface = surface
         }
@@ -528,16 +539,19 @@ class MirrorEngine(
                 }
             }
         }
-        // The display goes before the encoder: it is what is writing into the encoder's surface.
+        // The capture goes before the encoder: it is what is writing into the encoder's surface.
+        //
+        // **A `MirrorSource.SystemDisplay`'s display is deliberately not released here.** It
+        // belongs to the session rather than to this engine, so that re-negotiating a new
+        // resolution can rebuild the encoder underneath a desktop that stays exactly where it is.
+        // `CastController.stopEngine` releases it when the session itself ends.
         capture?.release()
-        systemDisplay?.release()
         videoEncoder?.release()
         audioEncoder?.release()
         transport?.close()
         // Only our own copy; the client's Binder-duplicated one is closed when the client goes away.
         runCatching { audioWriteEnd?.close() }
         capture = null
-        systemDisplay = null
         videoEncoder = null
         audioEncoder = null
         transport = null

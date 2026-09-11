@@ -1,0 +1,1472 @@
+[
+ {
+  "code": "143",
+  "name": "Adenovirus types 4 and 7",
+  "fullName": "Adenovirus, type 4 and type 7, live, oral",
+  "active": true
+ },
+ {
+  "code": "318",
+  "name": "Anthrax, post-exposure prophylaxis",
+  "fullName": "Anthrax vaccine, adsorbed, adjuvanted, post-exposure prophylaxis",
+  "active": true
+ },
+ {
+  "code": "24",
+  "name": "Anthrax, pre-exposure prophylaxis, post-exposure prophylaxis",
+  "fullName": "Anthrax vaccine, adsorbed, pre-exposure and post-exposure prophylaxis",
+  "active": true
+ },
+ {
+  "code": "19",
+  "name": "BCG",
+  "fullName": "Bacillus Calmette-Guerin vaccine",
+  "active": true
+ },
+ {
+  "code": "317",
+  "name": "Chikungunya live attenuated vaccine, 0.5 mL, PF",
+  "fullName": "Chikungunya, live attenuated vaccine, 0.5 mL, preservative free",
+  "active": true
+ },
+ {
+  "code": "329",
+  "name": "Chikungunya, VLP, recombinant, 0.8 mL, PF",
+  "fullName": "Chikungunya, virus-like particle (VLP), recombinant vaccine, 0.8 mL, preservative free",
+  "active": true
+ },
+ {
+  "code": "174",
+  "name": "cholera, live attenuated",
+  "fullName": "cholera, live attenuated",
+  "active": true
+ },
+ {
+  "code": "334",
+  "name": "COVID-19, mRNA, LNP-S, PF, 10 mcg/0.2 mL",
+  "fullName": "SARS-COV-2 (COVID-19) vaccine, mRNA, spike protein, LNP, preservative free, 10 mcg/0.2 mL dose",
+  "active": true
+ },
+ {
+  "code": "311",
+  "name": "COVID-19, mRNA, LNP-S, PF, 25 mcg/0.25 mL",
+  "fullName": "SARS-COV-2 (COVID-19) vaccine, mRNA, spike protein, LNP, preservative free, 25 mcg/0.25 mL dose",
+  "active": true
+ },
+ {
+  "code": "312",
+  "name": "COVID-19, mRNA, LNP-S, PF, 50 mcg/0.5 mL",
+  "fullName": "SARS-COV-2 (COVID-19) vaccine, mRNA, spike protein, LNP, preservative free, 50 mcg/0.5 mL dose",
+  "active": true
+ },
+ {
+  "code": "310",
+  "name": "COVID-19, mRNA, LNP-S, PF, tris-sucrose, 10 mcg/0.3 mL",
+  "fullName": "SARS-COV-2 (COVID-19) vaccine, mRNA, spike protein, LNP, preservative free, tris-sucrose, 10 mcg/0.3 mL dose",
+  "active": true
+ },
+ {
+  "code": "309",
+  "name": "COVID-19, mRNA, LNP-S, PF, tris-sucrose, 30 mcg/0.3 mL",
+  "fullName": "SARS-COV-2 (COVID-19) vaccine, mRNA, spike protein, LNP, preservative free, tris-sucrose, 30 mcg/0.3 mL dose",
+  "active": true
+ },
+ {
+  "code": "313",
+  "name": "COVID-19, subunit, rS-nanoparticle, adjuvanted, PF, 5 mcg/0.5 mL",
+  "fullName": "SARS-COV-2 (COVID-19) vaccine, subunit, recombinant spike protein-nanoparticle+Matrix-M1 Adjuvant, preservative free, 5 mcg/0.5 mL dose",
+  "active": true
+ },
+ {
+  "code": "56",
+  "name": "dengue fever tetravalent",
+  "fullName": "dengue fever vaccine, tetravalent",
+  "active": true
+ },
+ {
+  "code": "20",
+  "name": "DTaP",
+  "fullName": "diphtheria, tetanus toxoids and acellular pertussis vaccine",
+  "active": true
+ },
+ {
+  "code": "106",
+  "name": "DTaP, 5 pertussis antigens",
+  "fullName": "diphtheria, tetanus toxoids and acellular pertussis vaccine, 5 pertussis antigens",
+  "active": true
+ },
+ {
+  "code": "146",
+  "name": "DTaP,IPV,Hib,HepB",
+  "fullName": "Diphtheria and Tetanus Toxoids and Acellular Pertussis Adsorbed, Inactivated Poliovirus, Haemophilus b Conjugate (Meningococcal Protein Conjugate), and Hepatitis B (Recombinant) Vaccine.",
+  "active": true
+ },
+ {
+  "code": "110",
+  "name": "DTaP-Hep B-IPV",
+  "fullName": "DTaP-hepatitis B and poliovirus vaccine",
+  "active": true
+ },
+ {
+  "code": "120",
+  "name": "DTaP-Hib-IPV",
+  "fullName": "diphtheria, tetanus toxoids and acellular pertussis vaccine, Haemophilus influenzae type b conjugate, and poliovirus vaccine, inactivated (DTaP-Hib-IPV)",
+  "active": true
+ },
+ {
+  "code": "130",
+  "name": "DTaP-IPV",
+  "fullName": "Diphtheria, tetanus toxoids and acellular pertussis vaccine, and poliovirus vaccine, inactivated",
+  "active": true
+ },
+ {
+  "code": "204",
+  "name": "Ebola Zaire vaccine, live, recombinant, 1mL dose",
+  "fullName": "Ebola Zaire vaccine, live, recombinant, 1mL dose",
+  "active": true
+ },
+ {
+  "code": "52",
+  "name": "Hep A, adult",
+  "fullName": "hepatitis A vaccine, adult dosage",
+  "active": true
+ },
+ {
+  "code": "83",
+  "name": "Hep A, ped/adol, 2 dose",
+  "fullName": "hepatitis A vaccine, pediatric/adolescent dosage, 2 dose schedule",
+  "active": true
+ },
+ {
+  "code": "104",
+  "name": "Hep A-Hep B",
+  "fullName": "hepatitis A and hepatitis B vaccine",
+  "active": true
+ },
+ {
+  "code": "08",
+  "name": "Hep B, adolescent or pediatric",
+  "fullName": "hepatitis B vaccine, pediatric or pediatric/adolescent dosage",
+  "active": true
+ },
+ {
+  "code": "43",
+  "name": "Hep B, adult",
+  "fullName": "hepatitis B vaccine, adult dosage",
+  "active": true
+ },
+ {
+  "code": "44",
+  "name": "Hep B, high-dosage, dialysis or IC",
+  "fullName": "Hepatitis B vaccine (Hep B), high-dosage, dialysis or immunocompromised patient",
+  "active": true
+ },
+ {
+  "code": "189",
+  "name": "HepB-CpG",
+  "fullName": "Hepatitis B vaccine (recombinant), CpG adjuvanted",
+  "active": true
+ },
+ {
+  "code": "49",
+  "name": "Hib (PRP-OMP)",
+  "fullName": "Haemophilus influenzae type b vaccine, PRP-OMP conjugate",
+  "active": true
+ },
+ {
+  "code": "48",
+  "name": "Hib (PRP-T)",
+  "fullName": "Haemophilus influenzae type b vaccine, PRP-T conjugate",
+  "active": true
+ },
+ {
+  "code": "62",
+  "name": "HPV, quadrivalent",
+  "fullName": "human papilloma virus vaccine, quadrivalent",
+  "active": true
+ },
+ {
+  "code": "165",
+  "name": "HPV9",
+  "fullName": "Human Papillomavirus 9-valent vaccine",
+  "active": true
+ },
+ {
+  "code": "160",
+  "name": "Influenza A monovalent (H5N1), ADJUVANTED-2013",
+  "fullName": "Influenza A monovalent (H5N1), adjuvanted, National stockpile 2013",
+  "active": true
+ },
+ {
+  "code": "205",
+  "name": "Influenza, adjuvanted, quadrivalent, PF",
+  "fullName": "Influenza, adjuvanted, inactivated, quadrivalent, injectable, preservative free",
+  "active": true
+ },
+ {
+  "code": "168",
+  "name": "Influenza, adjuvanted, trivalent, PF",
+  "fullName": "Influenza, adjuvanted, inactivated, trivalent, injectable, preservative free",
+  "active": true
+ },
+ {
+  "code": "197",
+  "name": "Influenza, high-dose, quadrivalent, PF",
+  "fullName": "Influenza, high-dose, split virus, quadrivalent, injectable, preservative free",
+  "active": true
+ },
+ {
+  "code": "135",
+  "name": "Influenza, high-dose, trivalent, PF",
+  "fullName": "Influenza, high-dose, split virus, trivalent, injectable, preservative free",
+  "active": true
+ },
+ {
+  "code": "161",
+  "name": "Influenza, injectable,quadrivalent, preservative free, pediatric",
+  "fullName": "Influenza, injectable,quadrivalent, preservative free, pediatric",
+  "active": true
+ },
+ {
+  "code": "149",
+  "name": "Influenza, live, quadrivalent, intranasal",
+  "fullName": "Influenza, live, quadrivalent, intranasal",
+  "active": true
+ },
+ {
+  "code": "111",
+  "name": "Influenza, live, trivalent, intranasal, PF",
+  "fullName": "Influenza, live, trivalent, intranasal, preservative free",
+  "active": true
+ },
+ {
+  "code": "333",
+  "name": "Influenza, live, trivalent, intranasal, self/caregiver admin, PF",
+  "fullName": "Influenza, live, trivalent, intranasal, self or caregiver administered, preservative free",
+  "active": true
+ },
+ {
+  "code": "171",
+  "name": "Influenza, MDCK, quadrivalent, PF",
+  "fullName": "Influenza, Madin Darby Canine Kidney, subunit, quadrivalent, injectable, preservative free",
+  "active": true
+ },
+ {
+  "code": "186",
+  "name": "Influenza, MDCK, quadrivalent, preservative",
+  "fullName": "Influenza, Madin Darby Canine Kidney, subunit, quadrivalent, injectable, contains preservative",
+  "active": true
+ },
+ {
+  "code": "153",
+  "name": "Influenza, MDCK, trivalent, PF",
+  "fullName": "Influenza, Madin Darby Canine Kidney, subunit, trivalent, injectable, preservative free",
+  "active": true
+ },
+ {
+  "code": "320",
+  "name": "Influenza, MDCK, trivalent, preservative",
+  "fullName": "Influenza, Madin Darby Canine Kidney, subunit, trivalent, injectable, contains preservative",
+  "active": true
+ },
+ {
+  "code": "338",
+  "name": "Influenza, mRNA, trivalent, PF",
+  "fullName": "Influenza, mRNA lipid nanoparticle, trivalent, injectable, 0.38 mL dose, preservative-free",
+  "active": true
+ },
+ {
+  "code": "185",
+  "name": "Influenza, recombinant, quadrivalent, PF",
+  "fullName": "Influenza, recombinant, quadrivalent, injectable, preservative free",
+  "active": true
+ },
+ {
+  "code": "155",
+  "name": "Influenza, recombinant, trivalent, PF",
+  "fullName": "Influenza, recombinant, trivalent, injectable, preservative free",
+  "active": true
+ },
+ {
+  "code": "231",
+  "name": "influenza, Southern Hemisphere, high-dose, quadrivalent",
+  "fullName": "influenza, seasonal, Southern Hemisphere, high-dose, quadrivalent, 0.7mL dose, preservative free",
+  "active": true
+ },
+ {
+  "code": "337",
+  "name": "Influenza, Southern Hemisphere, high-dose, trivalent, PF",
+  "fullName": "Influenza, Southern Hemisphere, high-dose, split virus, trivalent, 0.5 mL, injectable, preservative free",
+  "active": true
+ },
+ {
+  "code": "200",
+  "name": "influenza, Southern Hemisphere, pediatric, preservative free",
+  "fullName": "influenza, seasonal, Southern Hemisphere, quadrivalent, pediatric 0.25mL dose, preservative free",
+  "active": true
+ },
+ {
+  "code": "201",
+  "name": "Influenza, Southern Hemisphere, quadrivalent, PF",
+  "fullName": "Influenza, seasonal, Southern Hemisphere, quadrivalent, 0.5 mL dose, preservative free",
+  "active": true
+ },
+ {
+  "code": "202",
+  "name": "influenza, Southern Hemisphere, quadrivalent, with preservative",
+  "fullName": "influenza, seasonal, Southern Hemisphere, quadrivalent, 0.5mL dose, with preservative",
+  "active": true
+ },
+ {
+  "code": "331",
+  "name": "Influenza, Southern Hemisphere, trivalent, PF",
+  "fullName": "Influenza, seasonal, Southern Hemisphere, trivalent, 0.5 mL dose, preservative free",
+  "active": true
+ },
+ {
+  "code": "150",
+  "name": "Influenza, split virus, quadrivalent, PF",
+  "fullName": "Influenza, split virus, quadrivalent, injectable, preservative free",
+  "active": true
+ },
+ {
+  "code": "158",
+  "name": "Influenza, split virus, quadrivalent, preservative",
+  "fullName": "Influenza, split virus, quadrivalent, injectable, contains preservative",
+  "active": true
+ },
+ {
+  "code": "140",
+  "name": "Influenza, split virus, trivalent, PF",
+  "fullName": "Influenza, split virus, trivalent, injectable, preservative free",
+  "active": true
+ },
+ {
+  "code": "141",
+  "name": "Influenza, split virus, trivalent, preservative",
+  "fullName": "Influenza, split virus, trivalent, injectable, contains preservative",
+  "active": true
+ },
+ {
+  "code": "321",
+  "name": "Influenza-avian, H5N8, monovalent, PF",
+  "fullName": "Influenza-avian, H5N8, viral-vector, monovalent, injectable, preservative free",
+  "active": true
+ },
+ {
+  "code": "322",
+  "name": "Influenza-avian, H5N8, monovalent, preservative",
+  "fullName": "Influenza-avian, H5N8, viral-vector, monovalent, injectable, contains preservative",
+  "active": true
+ },
+ {
+  "code": "10",
+  "name": "IPV",
+  "fullName": "poliovirus vaccine, inactivated",
+  "active": true
+ },
+ {
+  "code": "134",
+  "name": "Japanese Encephalitis IM",
+  "fullName": "Japanese Encephalitis vaccine for intramuscular administration",
+  "active": true
+ },
+ {
+  "code": "163",
+  "name": "meningococcal B, OMV",
+  "fullName": "meningococcal B vaccine, recombinant, OMV, adjuvanted",
+  "active": true
+ },
+ {
+  "code": "162",
+  "name": "meningococcal B, recombinant",
+  "fullName": "meningococcal B vaccine, fully recombinant",
+  "active": true
+ },
+ {
+  "code": "203",
+  "name": "meningococcal conjugate quadrivalent, MenACWY-TT (MCV4)",
+  "fullName": "meningococcal polysaccharide (groups A, C, Y, W-135) tetanus toxoid conjugate vaccine 0.5mL dose, preservative free",
+  "active": true
+ },
+ {
+  "code": "136",
+  "name": "Meningococcal MCV4O",
+  "fullName": "meningococcal oligosaccharide (groups A, C, Y and W-135) diphtheria toxoid conjugate vaccine (MCV4O)",
+  "active": true
+ },
+ {
+  "code": "114",
+  "name": "meningococcal MCV4P",
+  "fullName": "meningococcal polysaccharide (groups A, C, Y and W-135) diphtheria toxoid conjugate vaccine (MCV4P)",
+  "active": true
+ },
+ {
+  "code": "328",
+  "name": "Meningococcal oligosaccharide (MenACWY), (MenB), PF",
+  "fullName": "Meningococcal oligosaccharide conjugated (groups A, C, W, Y) and group B, 0.5 mL, preservative free",
+  "active": true
+ },
+ {
+  "code": "316",
+  "name": "Meningococcal polysaccharide (MenACWY-TT conjugate), (MenB), PF",
+  "fullName": "Meningococcal polysaccharide (groups A, C, Y, W) tetanus toxoid conjugate, meningococcal B recombinant vaccine, 0.5mL, preservative free",
+  "active": true
+ },
+ {
+  "code": "03",
+  "name": "MMR",
+  "fullName": "measles, mumps and rubella virus vaccine",
+  "active": true
+ },
+ {
+  "code": "94",
+  "name": "MMRV",
+  "fullName": "measles, mumps, rubella, and varicella virus vaccine",
+  "active": true
+ },
+ {
+  "code": "133",
+  "name": "Pneumococcal conjugate PCV 13",
+  "fullName": "pneumococcal conjugate vaccine, 13 valent",
+  "active": true
+ },
+ {
+  "code": "215",
+  "name": "Pneumococcal conjugate PCV15, polysaccharide CRM197 conjugate, adjuvant, PF",
+  "fullName": "Pneumococcal conjugate vaccine 15-valent (PCV15), polysaccharide CRM197 conjugate, adjuvant, preservative free",
+  "active": true
+ },
+ {
+  "code": "216",
+  "name": "Pneumococcal conjugate PCV20, polysaccharide CRM197 conjugate, adjuvant, PF",
+  "fullName": "Pneumococcal conjugate vaccine 20-valent (PCV20), polysaccharide CRM197 conjugate, adjuvant, preservative free",
+  "active": true
+ },
+ {
+  "code": "327",
+  "name": "Pneumococcal conjugate PCV21, polysaccharide CRM197 conjugate, PF",
+  "fullName": "Pneumococcal conjugate vaccine, 21 valent (PCV21), polysaccharide CRM197 conjugate, preservative free",
+  "active": true
+ },
+ {
+  "code": "33",
+  "name": "pneumococcal polysaccharide PPV23",
+  "fullName": "pneumococcal polysaccharide vaccine, 23 valent",
+  "active": true
+ },
+ {
+  "code": "175",
+  "name": "Rabies - IM Diploid cell culture",
+  "fullName": "Human Rabies vaccine from human diploid cell culture",
+  "active": true
+ },
+ {
+  "code": "176",
+  "name": "Rabies - IM fibroblast culture",
+  "fullName": "Human rabies vaccine from Chicken fibroblast culture",
+  "active": true
+ },
+ {
+  "code": "119",
+  "name": "rotavirus, monovalent",
+  "fullName": "rotavirus, live, monovalent vaccine",
+  "active": true
+ },
+ {
+  "code": "116",
+  "name": "rotavirus, pentavalent",
+  "fullName": "rotavirus, live, pentavalent vaccine",
+  "active": true
+ },
+ {
+  "code": "305",
+  "name": "RSV, bivalent, protein subunit RSVpreF, diluent reconstituted, 0.5 mL, PF",
+  "fullName": "Respiratory syncytial virus (RSV), vaccine, bivalent, protein subunit RSV prefusion F, diluent reconstituted, 0.5 mL, preservative free",
+  "active": true
+ },
+ {
+  "code": "332",
+  "name": "RSV, mAb, clesrovimab-cfor, 0.7 mL, neonate and infant, PF",
+  "fullName": "Respiratory syncytial virus (RSV), monoclonal antibody, IgG1κ, (clesrovimab-cfor), 0.7 mL, neonate and infant, preservative free",
+  "active": true
+ },
+ {
+  "code": "306",
+  "name": "RSV, mAb, nirsevimab-alip, 0.5 mL, neonate to 24 months",
+  "fullName": "Respiratory syncytial virus (RSV) monoclonal antibody, IgG1κ, (nirsevimab-alip), 0.5 mL, neonates and children to 24 months",
+  "active": true
+ },
+ {
+  "code": "307",
+  "name": "RSV, mAb, nirsevimab-alip, 1 mL, neonate to 24 months",
+  "fullName": "Respiratory syncytial virus (RSV) monoclonal antibody, IgG1κ, (nirsevimab-alip), 1 mL, neonates and children to 24 months",
+  "active": true
+ },
+ {
+  "code": "326",
+  "name": "RSV, mRNA, injectable, PF",
+  "fullName": "Respiratory syncytial virus (RSV), mRNA, injectable, preservative free",
+  "active": true
+ },
+ {
+  "code": "303",
+  "name": "RSV, recombinant, protein subunit RSVpreF, adjuvant reconstituted, 0.5 mL, PF",
+  "fullName": "Respiratory syncytial virus (RSV), vaccine, recombinant, protein subunit RSV prefusion F, adjuvant reconstituted, 0.5 mL, preservative free",
+  "active": true
+ },
+ {
+  "code": "09",
+  "name": "Td (adult), 2 Lf tetanus toxoid, preservative free, adsorbed",
+  "fullName": "tetanus and diphtheria toxoids, adsorbed, preservative free, for adult use (2 Lf of tetanus toxoid and 2 Lf of diphtheria toxoid)",
+  "active": true
+ },
+ {
+  "code": "113",
+  "name": "Td (adult), 5 Lf tetanus toxoid, preservative free, adsorbed",
+  "fullName": "tetanus and diphtheria toxoids, adsorbed, preservative free, for adult use (5 Lf of tetanus toxoid and 2 Lf of diphtheria toxoid)",
+  "active": true
+ },
+ {
+  "code": "196",
+  "name": "Td, adsorbed, preservative free, adult use, Lf unspecified",
+  "fullName": "tetanus and diphtheria toxoids, adsorbed, preservative free, for adult use, Lf unspecified",
+  "active": true
+ },
+ {
+  "code": "115",
+  "name": "Tdap",
+  "fullName": "tetanus toxoid, reduced diphtheria toxoid, and acellular pertussis vaccine, adsorbed",
+  "active": true
+ },
+ {
+  "code": "223",
+  "name": "Tick-borne encephalitis, inactivated, PF, 0.25mL",
+  "fullName": "Tick-borne encephalitis vaccine, inactivated, preservative free, 0.25mL dose",
+  "active": true
+ },
+ {
+  "code": "224",
+  "name": "Tick-borne encephalitis, inactivated, PF, 0.5mL",
+  "fullName": "Tick-borne encephalitis vaccine, inactivated, preservative free, 0.5mL dose",
+  "active": true
+ },
+ {
+  "code": "25",
+  "name": "typhoid, oral",
+  "fullName": "typhoid vaccine, live, oral",
+  "active": true
+ },
+ {
+  "code": "101",
+  "name": "typhoid, ViCPs",
+  "fullName": "typhoid Vi capsular polysaccharide vaccine",
+  "active": true
+ },
+ {
+  "code": "75",
+  "name": "Vaccinia (smallpox, monkeypox), live",
+  "fullName": "Vaccinia (smallpox, monkeypox) vaccine, live",
+  "active": true
+ },
+ {
+  "code": "206",
+  "name": "Vaccinia, smallpox monkeypox vaccine live, PF, SQ or ID injection",
+  "fullName": "Vaccinia, smallpox monkeypox vaccine, live attenuated, preservative free, subcutaneous or intradermal injection",
+  "active": true
+ },
+ {
+  "code": "21",
+  "name": "varicella",
+  "fullName": "varicella virus vaccine",
+  "active": true
+ },
+ {
+  "code": "37",
+  "name": "yellow fever live",
+  "fullName": "yellow fever vaccine live",
+  "active": true
+ },
+ {
+  "code": "183",
+  "name": "Yellow fever vaccine live - alt",
+  "fullName": "Yellow fever vaccine live - alternative formulation for vaccine shortage",
+  "active": true
+ },
+ {
+  "code": "187",
+  "name": "zoster recombinant",
+  "fullName": "zoster vaccine recombinant",
+  "active": true
+ },
+ {
+  "code": "54",
+  "name": "adenovirus, type 4",
+  "fullName": "adenovirus vaccine, type 4, live, oral",
+  "active": false
+ },
+ {
+  "code": "55",
+  "name": "adenovirus, type 7",
+  "fullName": "adenovirus vaccine, type 7, live, oral",
+  "active": false
+ },
+ {
+  "code": "82",
+  "name": "adenovirus, unspecified formulation",
+  "fullName": "adenovirus vaccine, unspecified formulation",
+  "active": false
+ },
+ {
+  "code": "319",
+  "name": "Anthrax vaccine, unspecified",
+  "fullName": "Anthrax vaccine, unspecified",
+  "active": false
+ },
+ {
+  "code": "173",
+  "name": "cholera, BivWC",
+  "fullName": "cholera, BivWC",
+  "active": false
+ },
+ {
+  "code": "26",
+  "name": "cholera, unspecified formulation",
+  "fullName": "cholera vaccine, unspecified formulation",
+  "active": false
+ },
+ {
+  "code": "172",
+  "name": "cholera, WC-rBS",
+  "fullName": "cholera, WC-rBS",
+  "active": false
+ },
+ {
+  "code": "516",
+  "name": "COV-2 COVID-19 Inactivated Non-US Vaccine Product (Minhai Biotechnology Co, KCONVAC)",
+  "fullName": "SARS-COV-2 COVID-19 Inactivated Non-US Vaccine Product (Minhai Biotechnology Co, KCONVAC)",
+  "active": false
+ },
+ {
+  "code": "518",
+  "name": "COVID-19 Inactivated, Non-US Vaccine (VLA2001, Valneva)",
+  "fullName": "SARS-COV-2 COVID-19 Inactivated, Non-US Vaccine (VLA2001, Valneva)",
+  "active": false
+ },
+ {
+  "code": "510",
+  "name": "COVID-19 IV Non-US Vaccine (BIBP, Sinopharm)",
+  "fullName": "SARS-COV-2 COVID-19 Inactivated Virus Non-US Vaccine Product (BIBP, Sinopharm)",
+  "active": false
+ },
+ {
+  "code": "511",
+  "name": "COVID-19 IV Non-US Vaccine (CoronaVac, Sinovac)",
+  "fullName": "SARS-COV-2 COVID-19 Inactivated Virus Non-US Vaccine Product (CoronaVac, Sinovac)",
+  "active": false
+ },
+ {
+  "code": "502",
+  "name": "COVID-19 IV Non-US Vaccine (COVAXIN)",
+  "fullName": "SARS-COV-2 COVID-19 Inactivated Virus Non-US Vaccine Product (COVAXIN)",
+  "active": false
+ },
+ {
+  "code": "501",
+  "name": "COVID-19 IV Non-US Vaccine (QAZCOVID-IN)",
+  "fullName": "SARS-COV-2 COVID-19 Inactivated Virus Non-US Vaccine Product (QAZCOVID-IN)",
+  "active": false
+ },
+ {
+  "code": "503",
+  "name": "COVID-19 LAV Non-US Vaccine (COVIVAC)",
+  "fullName": "SARS-COV-2 COVID-19 Live Attenuated Virus Non-US Vaccine Product (COVIVAC)",
+  "active": false
+ },
+ {
+  "code": "519",
+  "name": "COVID-19 mRNA, bivalent, original/Omicron BA.1, Non-US Vaccine (Spikevax Bivalent), Moderna",
+  "fullName": "SARS-COV-2 COVID-19 mRNA, bivalent, original/Omicron BA.1, Non-US Vaccine (Spikevax Bivalent), Moderna",
+  "active": false
+ },
+ {
+  "code": "520",
+  "name": "COVID-19 mRNA, bivalent, original/Omicron BA.1, Non-US Vaccine Product, Pfizer-BioNTech",
+  "fullName": "SARS-COV-2 COVID-19 mRNA, bivalent, original/Omicron BA.1, Non-US Vaccine Product (Comirnaty Bivalent), Pfizer-BioNTech",
+  "active": false
+ },
+ {
+  "code": "500",
+  "name": "COVID-19 Non-US Vaccine, UNSPECIFIED",
+  "fullName": "SARS-COV-2 (COVID-19) Non-US Vaccine, UNSPECIFIED",
+  "active": false
+ },
+ {
+  "code": "507",
+  "name": "COVID-19 PS Non-US Vaccine (Anhui Zhifei Longcom Biopharm + Inst of Micro, Chinese Acad of Sciences)",
+  "fullName": "SARS-COV-2 COVID-19 Protein Subunit Non-US Vaccine Product (Anhui Zhifei Longcom Biopharmaceutical + Institute of Microbiology, Chinese Academy of Sciences)",
+  "active": false
+ },
+ {
+  "code": "509",
+  "name": "COVID-19 PS Non-US Vaccine (EpiVacCorona)",
+  "fullName": "SARS-COV-2 COVID-19 Protein Subunit Non-US Vaccine Product (EpiVacCorona)",
+  "active": false
+ },
+ {
+  "code": "508",
+  "name": "COVID-19 PS Non-US Vaccine (Jiangsu Province Centers for Disease Control and Prevention)",
+  "fullName": "SARS-COV-2 COVID-19 Protein Subunit Non-US Vaccine Product (Jiangsu Province Centers for Disease Control and Prevention)",
+  "active": false
+ },
+ {
+  "code": "521",
+  "name": "COVID-19 SP, protein-based, adjuvanted (VidPrevtyn Beta), Sanofi-GSK",
+  "fullName": "SARS-COV-2 (COVID-19) vaccine SP, protein-based, adjuvanted, B.1.351 strain (VidPrevtyn Beta), Sanofi-GSK",
+  "active": false
+ },
+ {
+  "code": "212",
+  "name": "COVID-19 vaccine, vector-nr, rS-Ad26, PF, 0.5 mL",
+  "fullName": "SARS-COV-2 (COVID-19) vaccine, vector non-replicating, recombinant spike protein-Ad26, preservative free, 0.5 mL",
+  "active": false
+ },
+ {
+  "code": "210",
+  "name": "COVID-19 vaccine, vector-nr, rS-ChAdOx1, PF, 0.5 mL",
+  "fullName": "SARS-COV-2 (COVID-19) vaccine, vector non-replicating, recombinant spike protein-ChAdOx1, preservative free, 0.5 mL",
+  "active": false
+ },
+ {
+  "code": "506",
+  "name": "COVID-19 VVnr Non-US Vaccine (CanSino Biological Inc./Beijing Institute of Biotechnology",
+  "fullName": "SARS-COV-2 COVID-19 Viral Vector Non-replicating Non-US Vaccine Product (CONVIDECIA), CanSino Biological Inc./Beijing Institute of Biotechnology",
+  "active": false
+ },
+ {
+  "code": "504",
+  "name": "COVID-19 VVnr Non-US Vaccine (Sputnik Light)",
+  "fullName": "SARS-COV-2 COVID-19 Viral Vector Non-replicating Non-US Vaccine Product (Sputnik Light)",
+  "active": false
+ },
+ {
+  "code": "505",
+  "name": "COVID-19 VVnr Non-US Vaccine (Sputnik V)",
+  "fullName": "SARS-COV-2 COVID-19 Viral Vector Non-replicating Non-US Vaccine Product (Sputnik V)",
+  "active": false
+ },
+ {
+  "code": "230",
+  "name": "COVID-19, mRNA, LNP-S, bivalent, PF, 10 mcg/0.2 mL",
+  "fullName": "SARS-COV-2 (COVID-19) vaccine, mRNA, spike protein, LNP, bivalent, preservative free, 10 mcg/0.2 mL dose",
+  "active": false
+ },
+ {
+  "code": "301",
+  "name": "COVID-19, mRNA, LNP-S, bivalent, PF, 10 mcg/0.2 mL dose",
+  "fullName": "SARS-COV-2 (COVID-19) vaccine, mRNA, spike protein, LNP, bivalent, preservative free, 10 mcg/0.2 mL dose, tris-sucrose formulation",
+  "active": false
+ },
+ {
+  "code": "302",
+  "name": "COVID-19, mRNA, LNP-S, bivalent, PF, 3 mcg/0.2 mL dose",
+  "fullName": "SARS-COV-2 (COVID-19) vaccine, mRNA, spike protein, LNP, bivalent, preservative free, 3 mcg/0.2 mL dose, tris-sucrose formulation",
+  "active": false
+ },
+ {
+  "code": "300",
+  "name": "COVID-19, mRNA, LNP-S, bivalent, PF, 30 mcg/0.3 mL dose",
+  "fullName": "SARS-COV-2 (COVID-19) vaccine, mRNA, spike protein, LNP, bivalent, preservative free, 30 mcg/0.3 mL dose, tris-sucrose formulation",
+  "active": false
+ },
+ {
+  "code": "229",
+  "name": "COVID-19, mRNA, LNP-S, bivalent, PF, 50 mcg/0.5 mL or 25mcg/0.25 mL dose",
+  "fullName": "SARS-COV-2 (COVID-19) vaccine, mRNA, spike protein, LNP, bivalent, preservative free, 50 mcg/0.5 mL or 25 mcg/0.25 mL dose",
+  "active": false
+ },
+ {
+  "code": "218",
+  "name": "COVID-19, mRNA, LNP-S, PF, 10 mcg/0.2 mL dose, tris-sucrose",
+  "fullName": "SARS-COV-2 (COVID-19) vaccine, mRNA, spike protein, LNP, preservative free, 10 mcg/0.2mL dose, tris-sucrose formulation",
+  "active": false
+ },
+ {
+  "code": "207",
+  "name": "COVID-19, mRNA, LNP-S, PF, 100 mcg/0.5mL dose or 50 mcg/0.25mL dose",
+  "fullName": "SARS-COV-2 (COVID-19) vaccine, mRNA, spike protein, LNP, preservative free, 100 mcg/0.5mL dose or 50 mcg/0.25mL dose",
+  "active": false
+ },
+ {
+  "code": "219",
+  "name": "COVID-19, mRNA, LNP-S, PF, 3 mcg/0.2 mL dose, tris-sucrose",
+  "fullName": "SARS-COV-2 (COVID-19) vaccine, mRNA, spike protein, LNP, preservative free, 3 mcg/0.2mL dose, tris-sucrose formulation",
+  "active": false
+ },
+ {
+  "code": "208",
+  "name": "COVID-19, mRNA, LNP-S, PF, 30 mcg/0.3 mL dose",
+  "fullName": "SARS-COV-2 (COVID-19) vaccine, mRNA, spike protein, LNP, preservative free, 30 mcg/0.3mL dose",
+  "active": false
+ },
+ {
+  "code": "217",
+  "name": "COVID-19, mRNA, LNP-S, PF, 30 mcg/0.3 mL dose, tris-sucrose",
+  "fullName": "SARS-COV-2 (COVID-19) vaccine, mRNA, spike protein, LNP, preservative free, 30 mcg/0.3mL dose, tris-sucrose formulation",
+  "active": false
+ },
+ {
+  "code": "221",
+  "name": "COVID-19, mRNA, LNP-S, PF, 50 mcg/0.5 mL dose",
+  "fullName": "SARS-COV-2 (COVID-19) vaccine, mRNA, spike protein, LNP, preservative free, 50 mcg/0.5 mL dose",
+  "active": false
+ },
+ {
+  "code": "228",
+  "name": "COVID-19, mRNA, LNP-S, PF, pediatric 25 mcg/0.25 mL dose",
+  "fullName": "SARS-COV-2 (COVID-19) vaccine, mRNA, spike protein, LNP, preservative free, pediatric 25 mcg/0.25 mL dose",
+  "active": false
+ },
+ {
+  "code": "227",
+  "name": "COVID-19, mRNA, LNP-S, PF, pediatric 50 mcg/0.5 mL dose",
+  "fullName": "SARS-COV-2 (COVID-19) vaccine, mRNA, spike protein, LNP, preservative free, pediatric 50 mcg/0.5 mL dose",
+  "active": false
+ },
+ {
+  "code": "308",
+  "name": "COVID-19, mRNA, LNP-S, PF, tris-sucrose, 3 mcg/0.3 mL",
+  "fullName": "SARS-COV-2 (COVID-19) vaccine, mRNA, spike protein, LNP, preservative free, tris-sucrose, 3 mcg/0.3 mL dose",
+  "active": false
+ },
+ {
+  "code": "211",
+  "name": "COVID-19, subunit, rS-nanoparticle+Matrix-M1 Adjuvant, PF, 0.5 mL",
+  "fullName": "SARS-COV-2 (COVID-19) vaccine, subunit, recombinant spike protein-nanoparticle+Matrix-M1 Adjuvant, preservative free, 0.5mL dose",
+  "active": false
+ },
+ {
+  "code": "330",
+  "name": "Dengue fever, unspecified",
+  "fullName": "Dengue fever, unspecified formulation",
+  "active": false
+ },
+ {
+  "code": "28",
+  "name": "DT (pediatric)",
+  "fullName": "diphtheria and tetanus toxoids, adsorbed for pediatric use",
+  "active": false
+ },
+ {
+  "code": "195",
+  "name": "DT, IPV adsorbed",
+  "fullName": "Diphtheria, Tetanus, Poliomyelitis adsorbed",
+  "active": false
+ },
+ {
+  "code": "107",
+  "name": "DTaP, unspecified formulation",
+  "fullName": "diphtheria, tetanus toxoids and acellular pertussis vaccine, unspecified formulation",
+  "active": false
+ },
+ {
+  "code": "50",
+  "name": "DTaP-Hib",
+  "fullName": "DTaP-Haemophilus influenzae type b conjugate vaccine",
+  "active": false
+ },
+ {
+  "code": "132",
+  "name": "DTaP-IPV-HIB-HEP B, historical",
+  "fullName": "Historical diphtheria and tetanus toxoids and acellular pertussis, poliovirus, Haemophilus b conjugate and hepatitis B (recombinant) vaccine.",
+  "active": false
+ },
+ {
+  "code": "170",
+  "name": "DTAP/IPV/HIB - non-US",
+  "fullName": "non-US diphtheria, tetanus toxoids and acellular pertussis vaccine, Haemophilus influenzae type b conjugate, and poliovirus vaccine, inactivated (DTaP-Hib-IPV)",
+  "active": false
+ },
+ {
+  "code": "01",
+  "name": "DTP",
+  "fullName": "diphtheria, tetanus toxoids and pertussis vaccine",
+  "active": false
+ },
+ {
+  "code": "198",
+  "name": "DTP-hepB-Hib Pentavalent Non-US",
+  "fullName": "Diphtheria, pertussis, tetanus, hepatitis B, Haemophilus Influenza Type b, (Pentavalent)",
+  "active": false
+ },
+ {
+  "code": "22",
+  "name": "DTP-Hib",
+  "fullName": "DTP-Haemophilus influenzae type b conjugate vaccine",
+  "active": false
+ },
+ {
+  "code": "102",
+  "name": "DTP-Hib-Hep B",
+  "fullName": "DTP- Haemophilus influenzae type b conjugate and hepatitis b vaccine",
+  "active": false
+ },
+ {
+  "code": "214",
+  "name": "Ebola, unspecified",
+  "fullName": "Ebola, unspecified",
+  "active": false
+ },
+ {
+  "code": "169",
+  "name": "Hep A, live attenuated",
+  "fullName": "Hep A, live attenuated-IM",
+  "active": false
+ },
+ {
+  "code": "84",
+  "name": "Hep A, ped/adol, 3 dose",
+  "fullName": "hepatitis A vaccine, pediatric/adolescent dosage, 3 dose schedule",
+  "active": false
+ },
+ {
+  "code": "31",
+  "name": "Hep A, pediatric, unspecified formulation",
+  "fullName": "hepatitis A vaccine, pediatric dosage, unspecified formulation",
+  "active": false
+ },
+ {
+  "code": "85",
+  "name": "Hep A, unspecified formulation",
+  "fullName": "hepatitis A vaccine, unspecified formulation",
+  "active": false
+ },
+ {
+  "code": "193",
+  "name": "Hep A-Hep B, pediatric/adolescent",
+  "fullName": "hepatitis A and hepatitis B vaccine, pediatric/adolescent (non-US)",
+  "active": false
+ },
+ {
+  "code": "42",
+  "name": "Hep B, adolescent/high risk infant",
+  "fullName": "hepatitis B vaccine, adolescent/high risk infant dosage",
+  "active": false
+ },
+ {
+  "code": "45",
+  "name": "Hep B, unspecified formulation",
+  "fullName": "hepatitis B vaccine, unspecified formulation",
+  "active": false
+ },
+ {
+  "code": "220",
+  "name": "HepB recombinant, 3-antigen, Al(OH)3",
+  "fullName": "Hepatitis B vaccine (recombinant), 3-antigen, Al(OH)3 adjuvanted",
+  "active": false
+ },
+ {
+  "code": "47",
+  "name": "Hib (HbOC)",
+  "fullName": "Haemophilus influenzae type b vaccine, HbOC conjugate",
+  "active": false
+ },
+ {
+  "code": "46",
+  "name": "Hib (PRP-D)",
+  "fullName": "Haemophilus influenzae type b vaccine, PRP-D conjugate",
+  "active": false
+ },
+ {
+  "code": "17",
+  "name": "Hib, unspecified formulation",
+  "fullName": "Haemophilus influenzae type b vaccine, conjugate unspecified formulation",
+  "active": false
+ },
+ {
+  "code": "51",
+  "name": "Hib-Hep B",
+  "fullName": "Haemophilus influenzae type b conjugate and Hepatitis B vaccine",
+  "active": false
+ },
+ {
+  "code": "118",
+  "name": "HPV, bivalent",
+  "fullName": "human papilloma virus vaccine, bivalent",
+  "active": false
+ },
+ {
+  "code": "137",
+  "name": "HPV, unspecified formulation",
+  "fullName": "HPV, unspecified formulation",
+  "active": false
+ },
+ {
+  "code": "151",
+  "name": "influenza nasal, unspecified formulation",
+  "fullName": "influenza nasal, unspecified formulation",
+  "active": false
+ },
+ {
+  "code": "123",
+  "name": "influenza, H5N1-1203",
+  "fullName": "influenza virus vaccine, H5N1, A/Vietnam/1203/2004 (national stockpile)",
+  "active": false
+ },
+ {
+  "code": "166",
+  "name": "influenza, intradermal, quadrivalent, preservative free",
+  "fullName": "influenza, intradermal, quadrivalent, preservative free, injectable",
+  "active": false
+ },
+ {
+  "code": "144",
+  "name": "influenza, seasonal, intradermal, preservative free",
+  "fullName": "seasonal influenza, intradermal, preservative free",
+  "active": false
+ },
+ {
+  "code": "194",
+  "name": "Influenza, Southern Hemisphere",
+  "fullName": "influenza, Southern Hemisphere, unspecified formulation",
+  "active": false
+ },
+ {
+  "code": "15",
+  "name": "influenza, split (incl. purified surface antigen)",
+  "fullName": "influenza virus vaccine, split virus (incl. purified surface antigen)-retired CODE",
+  "active": false
+ },
+ {
+  "code": "88",
+  "name": "influenza, unspecified formulation",
+  "fullName": "influenza virus vaccine, unspecified formulation",
+  "active": false
+ },
+ {
+  "code": "16",
+  "name": "influenza, whole",
+  "fullName": "influenza virus vaccine, whole virus",
+  "active": false
+ },
+ {
+  "code": "323",
+  "name": "Influenza-avian, H5, unspecified formulation",
+  "fullName": "Influenza-avian, H5, unspecified formulation",
+  "active": false
+ },
+ {
+  "code": "39",
+  "name": "Japanese encephalitis SC",
+  "fullName": "Japanese Encephalitis Vaccine SC",
+  "active": false
+ },
+ {
+  "code": "129",
+  "name": "Japanese Encephalitis, unspecified formulation",
+  "fullName": "Japanese Encephalitis vaccine, unspecified formulation",
+  "active": false
+ },
+ {
+  "code": "66",
+  "name": "Lyme disease",
+  "fullName": "Lyme disease vaccine",
+  "active": false
+ },
+ {
+  "code": "04",
+  "name": "M/R",
+  "fullName": "measles and rubella virus vaccine",
+  "active": false
+ },
+ {
+  "code": "05",
+  "name": "measles",
+  "fullName": "measles virus vaccine",
+  "active": false
+ },
+ {
+  "code": "191",
+  "name": "meningococcal A polysaccharide (non-US)",
+  "fullName": "meningococcal A polysaccharide vaccine (non-US)",
+  "active": false
+ },
+ {
+  "code": "192",
+  "name": "meningococcal AC polysaccharide (non-US)",
+  "fullName": "meningococcal AC polysaccharide vaccine (non-US)",
+  "active": false
+ },
+ {
+  "code": "108",
+  "name": "meningococcal ACWY, unspecified formulation",
+  "fullName": "meningococcal ACWY vaccine, unspecified formulation",
+  "active": false
+ },
+ {
+  "code": "164",
+  "name": "meningococcal B, unspecified",
+  "fullName": "meningococcal B, unspecified formulation",
+  "active": false
+ },
+ {
+  "code": "103",
+  "name": "meningococcal C conjugate",
+  "fullName": "meningococcal C conjugate vaccine",
+  "active": false
+ },
+ {
+  "code": "148",
+  "name": "Meningococcal C/Y-HIB PRP",
+  "fullName": "Meningococcal Groups C and Y and Haemophilus b Tetanus Toxoid Conjugate Vaccine",
+  "active": false
+ },
+ {
+  "code": "147",
+  "name": "meningococcal MCV4, unspecified formulation",
+  "fullName": "Meningococcal, MCV4, unspecified conjugate formulation(groups A, C, Y and W-135)",
+  "active": false
+ },
+ {
+  "code": "32",
+  "name": "meningococcal MPSV4",
+  "fullName": "meningococcal polysaccharide vaccine (MPSV4)",
+  "active": false
+ },
+ {
+  "code": "167",
+  "name": "meningococcal, unknown serogroups",
+  "fullName": "meningococcal vaccine of unknown formulation and unknown serogroups",
+  "active": false
+ },
+ {
+  "code": "07",
+  "name": "mumps",
+  "fullName": "mumps virus vaccine",
+  "active": false
+ },
+ {
+  "code": "127",
+  "name": "Novel influenza-H1N1-09",
+  "fullName": "Novel influenza-H1N1-09, injectable",
+  "active": false
+ },
+ {
+  "code": "128",
+  "name": "Novel Influenza-H1N1-09, all formulations",
+  "fullName": "Novel influenza-H1N1-09, all formulations",
+  "active": false
+ },
+ {
+  "code": "125",
+  "name": "Novel Influenza-H1N1-09, nasal",
+  "fullName": "Novel Influenza-H1N1-09, live virus for nasal administration",
+  "active": false
+ },
+ {
+  "code": "126",
+  "name": "Novel influenza-H1N1-09, preservative-free",
+  "fullName": "Novel influenza-H1N1-09, preservative-free, injectable",
+  "active": false
+ },
+ {
+  "code": "179",
+  "name": "OPV ,monovalent, unspecified",
+  "fullName": "Non-US monovalent oral polio vaccine, unspecified formulation",
+  "active": false
+ },
+ {
+  "code": "178",
+  "name": "OPV bivalent",
+  "fullName": "Non-US bivalent oral polio vaccine (types 1 and 3)",
+  "active": false
+ },
+ {
+  "code": "02",
+  "name": "OPV, trivalent",
+  "fullName": "trivalent poliovirus vaccine, live, oral",
+  "active": false
+ },
+ {
+  "code": "182",
+  "name": "OPV, Unspecified",
+  "fullName": "Oral Polio Vaccine, Unspecified formulation",
+  "active": false
+ },
+ {
+  "code": "69",
+  "name": "parainfluenza-3",
+  "fullName": "parainfluenza-3 virus vaccine",
+  "active": false
+ },
+ {
+  "code": "177",
+  "name": "PCV10",
+  "fullName": "pneumococcal conjugate vaccine, 10 valent",
+  "active": false
+ },
+ {
+  "code": "11",
+  "name": "pertussis",
+  "fullName": "pertussis vaccine",
+  "active": false
+ },
+ {
+  "code": "23",
+  "name": "plague",
+  "fullName": "plague vaccine",
+  "active": false
+ },
+ {
+  "code": "100",
+  "name": "pneumococcal conjugate PCV 7",
+  "fullName": "pneumococcal conjugate vaccine, 7 valent",
+  "active": false
+ },
+ {
+  "code": "152",
+  "name": "Pneumococcal Conjugate, unspecified formulation",
+  "fullName": "Pneumococcal Conjugate, unspecified formulation",
+  "active": false
+ },
+ {
+  "code": "109",
+  "name": "pneumococcal, unspecified formulation",
+  "fullName": "pneumococcal vaccine, unspecified formulation",
+  "active": false
+ },
+ {
+  "code": "89",
+  "name": "polio, unspecified formulation",
+  "fullName": "poliovirus vaccine, unspecified formulation",
+  "active": false
+ },
+ {
+  "code": "324",
+  "name": "Poliovirus, inactivated, fractional-dose (fIPV)",
+  "fullName": "Poliovirus, inactivated, fractional-dose (fIPV)",
+  "active": false
+ },
+ {
+  "code": "40",
+  "name": "rabies, intradermal injection",
+  "fullName": "rabies vaccine, for intradermal injection",
+  "active": false
+ },
+ {
+  "code": "18",
+  "name": "rabies, intramuscular injection",
+  "fullName": "rabies vaccine, for intramuscular injection RETIRED CODE",
+  "active": false
+ },
+ {
+  "code": "90",
+  "name": "rabies, unspecified formulation",
+  "fullName": "rabies vaccine, unspecified formulation",
+  "active": false
+ },
+ {
+  "code": "315",
+  "name": "Respiratory syncytial virus (RSV) MAB, unspecified",
+  "fullName": "Respiratory syncytial virus (RSV) monoclonal antibody (MAB), unspecified",
+  "active": false
+ },
+ {
+  "code": "314",
+  "name": "Respiratory syncytial virus (RSV) vaccine, unspecified",
+  "fullName": "Respiratory syncytial virus (RSV) vaccine, unspecified",
+  "active": false
+ },
+ {
+  "code": "304",
+  "name": "Respiratory syncytial virus (RSV), unspecified",
+  "fullName": "Respiratory syncytial virus (RSV), unspecified",
+  "active": false
+ },
+ {
+  "code": "74",
+  "name": "rotavirus, tetravalent",
+  "fullName": "rotavirus, live, tetravalent vaccine",
+  "active": false
+ },
+ {
+  "code": "122",
+  "name": "rotavirus, unspecified formulation",
+  "fullName": "rotavirus vaccine, unspecified formulation",
+  "active": false
+ },
+ {
+  "code": "06",
+  "name": "rubella",
+  "fullName": "rubella virus vaccine",
+  "active": false
+ },
+ {
+  "code": "38",
+  "name": "rubella/mumps",
+  "fullName": "rubella and mumps virus vaccine",
+  "active": false
+ },
+ {
+  "code": "213",
+  "name": "SARS-COV-2 (COVID-19) vaccine, UNSPECIFIED",
+  "fullName": "SARS-COV-2 (COVID-19) vaccine, UNSPECIFIED",
+  "active": false
+ },
+ {
+  "code": "514",
+  "name": "SARS-COV-2 COVID-19 DNA Non-US Vaccine (Zydus Cadila, ZyCoV-D)",
+  "fullName": "SARS-COV-2 COVID-19 DNA Non-US Vaccine Product (Zydus Cadila, ZyCoV-D)",
+  "active": false
+ },
+ {
+  "code": "513",
+  "name": "SARS-COV-2 COVID-19 PS Non-US Vaccine (Anhui Zhifei Longcom, Zifivax)",
+  "fullName": "SARS-COV-2 COVID-19 Protein Subunit Non-US Vaccine Product (Anhui Zhifei Longcom, Zifivax)",
+  "active": false
+ },
+ {
+  "code": "517",
+  "name": "SARS-COV-2 COVID-19 PS Non-US Vaccine (Biological E Limited, Corbevax)",
+  "fullName": "SARS-COV-2 COVID-19 Protein Subunit Non-US Vaccine Product (Biological E Limited, Corbevax)",
+  "active": false
+ },
+ {
+  "code": "515",
+  "name": "SARS-COV-2 COVID-19 PS Non-US Vaccine (Medigen, MVC-COV1901)",
+  "fullName": "SARS-COV-2 COVID-19 Protein Subunit Non-US Vaccine Product (Medigen, MVC-COV1901)",
+  "active": false
+ },
+ {
+  "code": "512",
+  "name": "SARS-COV-2 COVID-19 VLP Non-US Vaccine (Medicago, Covifenz)",
+  "fullName": "SARS-COV-2 COVID-19 Virus Like Particle (VLP) Non-US Vaccine Product (Medicago, Covifenz)",
+  "active": false
+ },
+ {
+  "code": "138",
+  "name": "Td (adult)",
+  "fullName": "tetanus and diphtheria toxoids, not adsorbed, for adult use",
+  "active": false
+ },
+ {
+  "code": "139",
+  "name": "Td(adult) unspecified formulation",
+  "fullName": "Td(adult) unspecified formulation",
+  "active": false
+ },
+ {
+  "code": "35",
+  "name": "tetanus toxoid, adsorbed",
+  "fullName": "tetanus toxoid, adsorbed",
+  "active": false
+ },
+ {
+  "code": "142",
+  "name": "tetanus toxoid, not adsorbed",
+  "fullName": "tetanus toxoid, not adsorbed",
+  "active": false
+ },
+ {
+  "code": "112",
+  "name": "tetanus toxoid, unspecified formulation",
+  "fullName": "tetanus toxoid, unspecified formulation",
+  "active": false
+ },
+ {
+  "code": "77",
+  "name": "Tick-borne encephalitis vaccine (non-US)",
+  "fullName": "Tick-borne encephalitis vaccine (non-US)",
+  "active": false
+ },
+ {
+  "code": "222",
+  "name": "Tick-borne encephalitis, unspecified",
+  "fullName": "Tick-borne encephalitis vaccine, unspecified",
+  "active": false
+ },
+ {
+  "code": "78",
+  "name": "tularemia vaccine",
+  "fullName": "tularemia vaccine",
+  "active": false
+ },
+ {
+  "code": "190",
+  "name": "Typhoid conjugate vaccine (TCV)",
+  "fullName": "Typhoid conjugate vaccine (non-US)",
+  "active": false
+ },
+ {
+  "code": "41",
+  "name": "typhoid, parenteral",
+  "fullName": "typhoid vaccine, parenteral, other than acetone-killed, dried",
+  "active": false
+ },
+ {
+  "code": "53",
+  "name": "typhoid, parenteral, AKD (U.S. military)",
+  "fullName": "typhoid vaccine, parenteral, acetone-killed, dried (U.S. military)",
+  "active": false
+ },
+ {
+  "code": "91",
+  "name": "typhoid, unspecified formulation",
+  "fullName": "typhoid vaccine, unspecified formulation",
+  "active": false
+ },
+ {
+  "code": "131",
+  "name": "typhus, historical",
+  "fullName": "Historical record of a typhus vaccination",
+  "active": false
+ },
+ {
+  "code": "105",
+  "name": "vaccinia (smallpox) diluted",
+  "fullName": "vaccinia (smallpox) vaccine, diluted",
+  "active": false
+ },
+ {
+  "code": "325",
+  "name": "Vaccinia (smallpox, monkeypox), unspecified",
+  "fullName": "Vaccinia (smallpox, monkeypox), unspecified",
+  "active": false
+ },
+ {
+  "code": "81",
+  "name": "VEE, inactivated",
+  "fullName": "Venezuelan equine encephalitis, inactivated",
+  "active": false
+ },
+ {
+  "code": "80",
+  "name": "VEE, live",
+  "fullName": "Venezuelan equine encephalitis, live, attenuated",
+  "active": false
+ },
+ {
+  "code": "92",
+  "name": "VEE, unspecified formulation",
+  "fullName": "Venezuelan equine encephalitis vaccine, unspecified formulation",
+  "active": false
+ },
+ {
+  "code": "184",
+  "name": "Yellow fever, unspecified",
+  "fullName": "Yellow fever vaccine, unspecified formulation",
+  "active": false
+ },
+ {
+  "code": "121",
+  "name": "zoster live",
+  "fullName": "zoster vaccine, live",
+  "active": false
+ },
+ {
+  "code": "188",
+  "name": "zoster, unspecified formulation",
+  "fullName": "zoster vaccine, unspecified formulation",
+  "active": false
+ }
+]

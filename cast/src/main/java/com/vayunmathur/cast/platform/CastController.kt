@@ -1,9 +1,11 @@
 package com.vayunmathur.cast.platform
 
 import android.content.Context
+import android.hardware.display.DisplayManager
 import android.media.projection.MediaProjection
 import android.os.ParcelFileDescriptor
 import android.util.Log
+import android.view.Display
 import android.view.Surface
 import com.vayunmathur.cast.R
 import com.vayunmathur.cast.domain.CastDevice
@@ -12,6 +14,7 @@ import com.vayunmathur.cast.domain.ClientPhase
 import com.vayunmathur.cast.domain.ClientState
 import com.vayunmathur.cast.network.ControlSocket
 import com.vayunmathur.cast.platform.discovery.CastDiscoveryManager
+import com.vayunmathur.cast.platform.mirror.CaptureGeometry
 import com.vayunmathur.cast.platform.mirror.EncoderSupport
 import com.vayunmathur.cast.platform.mirror.MirrorConsentActivity
 import com.vayunmathur.cast.platform.mirror.MirrorDegradation
@@ -52,8 +55,19 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
+import kotlin.math.abs
+import kotlin.math.roundToInt
 
 private const val TAG = "CastController"
+
+/**
+ * How far apart two frame rates may be and still be the same mode.
+ *
+ * The framework reports a declared mode's rate back as the float it was given, and the panel's own
+ * numbers are 59.94006 and 23.976025, so exact equality is not something to compare on. Small
+ * enough that 59.94 and 60 stay distinct.
+ */
+private const val MODE_RATE_TOLERANCE = 0.2f
 
 /** What [CastController.startContentSession] managed. */
 sealed interface ContentSessionResult {
@@ -161,6 +175,36 @@ object CastController {
      * gone.
      */
     private var activeCodec: VideoCodec? = null
+
+    /**
+     * The desktop session's source, kept because its display outlives every [engine] built for it.
+     *
+     * Null for a mirroring or content session, which have no display of their own to preserve.
+     */
+    private var desktopSource: MirrorSource.SystemDisplay? = null
+
+    /**
+     * Watches the desktop display for the user choosing a different mode in Settings.
+     *
+     * There is no callback for "the user picked 1080p": the framework simply resizes the display
+     * and the owner is expected to notice. Nothing did, which is why the stream used to carry on
+     * at whatever geometry the session started with no matter what was selected.
+     */
+    private var displayListener: DisplayManager.DisplayListener? = null
+
+    /** Held alongside [displayListener], because unregistering needs the same service instance. */
+    private var displayManager: DisplayManager? = null
+
+    /**
+     * The geometry the running engine was built for, so a display change can be told from an echo.
+     *
+     * Our own re-negotiation resizes the display, which fires the very listener that started it.
+     * Without something to compare against, that is a loop.
+     */
+    private var activeGeometry: CaptureGeometry? = null
+
+    /** Serialises re-negotiations so two mode changes in quick succession cannot interleave. */
+    private var renegotiateJob: Job? = null
 
     private val _mirrorPhase = MutableStateFlow(MirrorPhase.Idle)
     val mirrorPhase: StateFlow<MirrorPhase> = _mirrorPhase.asStateFlow()
@@ -460,15 +504,38 @@ object CastController {
             // the H.264 reference. There is no H.264 fallback behind this - a phone or a TV without one
             // of the two hardware codecs is told which were missing and mirroring stops here.
             val (screenWidth, screenHeight) = MirrorGeometry.screenSize(appContext)
+            // Mirroring encodes the phone's screen, so the codec is chosen for that size. A desktop
+            // is composed at the TV's panel resolution, so choose the codec for the TV's largest
+            // mode instead: at 4K that excludes this phone's AV1 encoder (capped well below 4K) and
+            // selects H.265 (which reaches it), which is what lets the real panel resolutions reach
+            // the picker rather than an encoder-clamped one. Falls back to the screen size if
+            // nothing can encode the TV's largest, so a lower real mode still works.
+            val desktopMax = (source as? MirrorSource.SystemDisplay)?.let {
+                activeClient.displayModes.maxByOrNull { m -> m.width.toLong() * m.height }
+            }
             val codec = when (
-                val choice = chooseCodec(appContext, device, activeClient, screenWidth, screenHeight)
+                val choice = chooseCodec(
+                    appContext, device, activeClient,
+                    desktopMax?.width ?: screenWidth,
+                    desktopMax?.height ?: screenHeight,
+                )
             ) {
-                is CodecOutcome.Refused -> {
-                    Log.w(TAG, "refusing to mirror: ${choice.message}")
-                    abandonMirroring(appContext, projection, choice.message)
-                    return@launch
-                }
                 is CodecOutcome.Chosen -> choice
+                is CodecOutcome.Refused -> {
+                    val retry = if (desktopMax != null) {
+                        chooseCodec(appContext, device, activeClient, screenWidth, screenHeight)
+                    } else {
+                        choice
+                    }
+                    when (retry) {
+                        is CodecOutcome.Chosen -> retry
+                        is CodecOutcome.Refused -> {
+                            Log.w(TAG, "refusing to mirror: ${retry.message}")
+                            abandonMirroring(appContext, projection, retry.message)
+                            return@launch
+                        }
+                    }
+                }
             }
 
             if (source is MirrorSource.SystemDisplay) {
@@ -489,7 +556,7 @@ object CastController {
             } else {
                 MirrorGeometry.forDisplay(appContext, codec.selection)
             }
-            val frameRate = MirrorGeometry.frameRateFor(codec.selection.receiverLimits)
+            val frameRate = geometry.frameRate
             val outcome = mutex.withLock {
                 activeClient.configureStream(
                     width = geometry.width,
@@ -526,10 +593,15 @@ object CastController {
             ).apply { hexDump = verboseStreamLogging }
             engine = newEngine
             activeCodec = codec.codec
+            activeGeometry = geometry
             if (newEngine.start()) {
                 // The framework never discovers this display on its own - MediaRouterService
                 // only reads back an id the provider published. See CastSystemDisplay.
-                if (source is MirrorSource.SystemDisplay) onDisplayId(source.displayId)
+                if (source is MirrorSource.SystemDisplay) {
+                    desktopSource = source
+                    onDisplayId(source.displayId)
+                    watchDisplay(appContext, source)
+                }
                 _mirrorPhase.value = MirrorPhase.Mirroring
                 _sessionState.update {
                     it.copy(phase = ClientPhase.Streaming, negotiation = ready.negotiation)
@@ -605,7 +677,7 @@ object CastController {
             is CodecOutcome.Chosen -> choice
         }
         val geometry = MirrorGeometry.forContent(width, height, codec.selection)
-        val frameRate = MirrorGeometry.frameRateFor(codec.selection.receiverLimits)
+        val frameRate = geometry.frameRate
         val outcome = mutex.withLock {
             activeClient.configureStream(
                 width = geometry.width,
@@ -660,7 +732,10 @@ object CastController {
             audioWriteEnd = newEngine.audioWriteEnd,
             width = geometry.width,
             height = geometry.height,
-            frameRate = frameRate,
+            // Rounded, because `CastContract.KEY_GRANTED_FRAME_RATE` is an `Int` in a Bundle read
+            // by third-party SDK callers. The wire rate is a float so it can name one of the TV's
+            // panel modes exactly; an app drawing into a surface only needs the whole number.
+            frameRate = frameRate.roundToInt(),
             receiverName = activeClient.receiverName ?: device.friendlyName,
         )
     }
@@ -987,8 +1062,10 @@ object CastController {
             width = width,
             height = height,
             // The rate is a floor, not a target: a codec that cannot hold it is excluded rather than
-            // accepted at whatever it manages. Resolution is what yields.
-            frameRate = StreamConstants.VIDEO_MAX_FRAME_RATE,
+            // accepted at whatever it manages. Resolution is what yields. Deliberately the floor and
+            // not the ceiling - selecting against 60 would refuse H.265 at 4K on a phone whose
+            // encoder tops out below that, leaving no codec at all rather than a 30fps session.
+            frameRate = StreamConstants.VIDEO_MIN_FRAME_RATE,
             demoted = demoted,
         )
         return when (selection) {
@@ -1054,10 +1131,142 @@ object CastController {
         scope.launch { mutex.withLock { activeClient.sendPlaybackState(state) } }
     }
 
+    /**
+     * Follow the desktop display's mode, because the user changes it from Settings and not here.
+     *
+     * Android's external-display resolution picker calls straight into the framework: the display
+     * is resized and its mode replaced, and the app that owns it is told only through the ordinary
+     * `DisplayListener`. Nothing was listening, so the encoder and the TV kept running the
+     * geometry the session started at while the framework composed the desktop at the new one -
+     * the picker appeared to work and changed nothing that could be seen.
+     */
+    private fun watchDisplay(context: Context, source: MirrorSource.SystemDisplay) {
+        stopWatchingDisplay()
+        val displays = context.getSystemService(DisplayManager::class.java) ?: return
+        val listener = object : DisplayManager.DisplayListener {
+            override fun onDisplayAdded(displayId: Int) = Unit
+            override fun onDisplayRemoved(displayId: Int) = Unit
+            override fun onDisplayChanged(displayId: Int) {
+                if (displayId != source.displayId) return
+                val mode = displays.getDisplay(displayId)?.mode ?: return
+                onDesktopModeChanged(context, source, mode)
+            }
+        }
+        displays.registerDisplayListener(listener, null)
+        displayListener = listener
+        displayManager = displays
+    }
+
+    private fun stopWatchingDisplay() {
+        renegotiateJob?.cancel()
+        renegotiateJob = null
+        val listener = displayListener ?: return
+        displayListener = null
+        runCatching { displayManager?.unregisterDisplayListener(listener) }
+        displayManager = null
+    }
+
+    /**
+     * Re-negotiate the stream around a mode the user picked.
+     *
+     * **Everything except the display is rebuilt.** A `MediaCodec` cannot be resized, so the
+     * encoder and the RTP session have to go; the display cannot be, because it is the desktop -
+     * recreating it would destroy every window on it and hand out a new `displayId` that the
+     * Settings page the user is standing on no longer refers to. So the new encoder's surface is
+     * attached to the display that is already there.
+     *
+     * Ignores anything that is not actually a change, which is not an optimisation: our own resize
+     * fires this same listener, and without the guard each change would trigger the next.
+     */
+    private fun onDesktopModeChanged(
+        context: Context,
+        source: MirrorSource.SystemDisplay,
+        mode: Display.Mode,
+    ) {
+        val running = activeGeometry ?: return
+        val target = source.supportedModes.firstOrNull {
+            it.width == mode.physicalWidth &&
+                it.height == mode.physicalHeight &&
+                abs(it.frameRate - mode.refreshRate) <= MODE_RATE_TOLERANCE
+        } ?: return
+        if (target.width == running.width &&
+            target.height == running.height &&
+            abs(target.frameRate - running.frameRate) <= MODE_RATE_TOLERANCE
+        ) {
+            return
+        }
+        if (renegotiateJob?.isActive == true) return
+        renegotiateJob = scope.launch {
+            val activeClient = client ?: return@launch
+            val device = _device.value ?: return@launch
+            val codec = activeCodec ?: return@launch
+            Log.i(
+                TAG,
+                "the user chose ${target.width}x${target.height}@${target.frameRate}; " +
+                    "re-negotiating from ${running.width}x${running.height}@${running.frameRate}",
+            )
+            // Only the engine, so the display - and the desktop on it - stays exactly where it is.
+            engine?.stop()
+            engine = null
+            // `reconfigureStream`, not `configureStream`: the watch job is parked in a blocking
+            // read on this socket and would swallow the reply. See MirrorClient for the hand-off.
+            val outcome = mutex.withLock {
+                activeClient.reconfigureStream(
+                    width = target.width,
+                    height = target.height,
+                    frameRate = target.frameRate,
+                    bitRate = target.bitRate,
+                    videoCodec = codec,
+                    audio = true,
+                    video = true,
+                )
+            }
+            val ready = outcome as? HandshakeOutcome.Ready
+            if (ready == null) {
+                Log.w(TAG, "the TV would not agree the new mode: $outcome")
+                abandonMirroring(
+                    context,
+                    null,
+                    context.getString(R.string.cast_mirror_negotiation_failed),
+                )
+                return@launch
+            }
+            val newEngine = MirrorEngine(
+                context = context,
+                source = source,
+                receiverHost = device.host,
+                negotiation = ready.negotiation,
+                geometry = target,
+                videoCodec = codec,
+                frameRate = target.frameRate,
+                onDegraded = { _degradation.value = it },
+                onStopped = { reason -> onEngineStopped(context, reason) },
+                onCodecConfig = { csd -> sendCodecConfig(activeClient, csd) },
+            ).apply { hexDump = verboseStreamLogging }
+            engine = newEngine
+            activeGeometry = target
+            if (!newEngine.start()) {
+                engine = null
+                activeGeometry = null
+                return@launch
+            }
+            _sessionState.update {
+                it.copy(phase = ClientPhase.Streaming, negotiation = ready.negotiation)
+            }
+        }
+    }
+
     private fun stopEngine() {
+        stopWatchingDisplay()
+        desktopSource?.let {
+            it.display?.release()
+            it.display = null
+        }
+        desktopSource = null
         engine?.stop()
         engine = null
         activeCodec = null
+        activeGeometry = null
         // The served session's other half. An open HTTPS port outliving the session it belonged to
         // would serve a token that is no longer anybody's.
         proxy?.stop()

@@ -1,0 +1,212 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools">
+    <!--
+      Everything this app holds arrives with the SYSTEM_SUPERVISION role, which the platform
+      grants to whichever package `config_systemSupervision` names - see the pin and the list of
+      what it costs in vendor/modern-apps/rro/MaosFrameworkResRRO/res/values/config.xml. A role
+      grants only what the manifest requests, which is why the two below are declared: without
+      them the role holds them back.
+
+      Neither belongs in privapp-permissions-modern-apps.xml. They are `signature|role` and
+      `internal|role` rather than `signature|privileged`, this app is not a priv-app, and an
+      entry there that does not match the manifest is boot-fatal under
+      ro.control_privapp_permissions=enforce.
+    -->
+    <!-- Lets us call SupervisionManager.setPolicy/getPolicies, which is how a decision reaches
+         the platform at all. -->
+    <uses-permission android:name="android.permission.MANAGE_SUPERVISION" />
+    <!-- Reads per-app foreground time so a daily cap can resume mid-day after a reboot instead
+         of handing back a fresh budget. This is an appop, not a role grant: it is declared here
+         but the permission half is signature|privileged and we are not a priv-app, so the op
+         stays at MODE_DEFAULT (denied) until we set it ourselves - see UsageAccess. -->
+    <uses-permission android:name="android.permission.PACKAGE_USAGE_STATS"
+        tools:ignore="ProtectedPermissions" />
+    <!-- Lets UsageAccess set the usage-stats app-op on our own uid, which is the only way this
+         app can read foreground time (see above). Part of the SYSTEM_SUPERVISION role's grant,
+         gated upstream on android.permission.flags.supervision_role_enabled - ENABLED on this
+         build. Managing app ops is inherent to what a supervision app does, but it is a broad
+         permission and is taken only for that one op on our own uid. -->
+    <uses-permission android:name="android.permission.MANAGE_APP_OPS_MODES"
+        tools:ignore="ProtectedPermissions" />
+    <!-- Re-arms the bedtime alarm and the usage observers after a restart. Both are boot-scoped,
+         so without this a reboot silently ends supervision. -->
+    <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
+    <!-- Bedtime is a promise about a specific minute, so the alarm has to be exact. -->
+    <uses-permission android:name="android.permission.SCHEDULE_EXACT_ALARM" />
+    <!-- The app-limits and bedtime screens list launchable apps to choose between. -->
+    <uses-permission android:name="android.permission.QUERY_ALL_PACKAGES"
+        tools:ignore="QueryAllPackagesPermission" />
+
+    <!-- Not requested, deliberately: no INTERNET. Nothing here leaves the device - the schedule,
+         the caps and which apps they cover are all local, and there is no account to sync to. -->
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE"
+        tools:node="remove" />
+
+    <application
+        android:allowBackup="false"
+        android:dataExtractionRules="@xml/data_extraction_rules"
+        android:icon="@mipmap/ic_launcher"
+        android:label="@string/app_name"
+        android:roundIcon="@mipmap/ic_launcher"
+        android:supportsRtl="true"
+        android:theme="@style/Theme.General">
+        <!--
+          **No launcher activity.** Supervision is something a parent reaches through
+          Settings > Parental controls, which is where every control actually lives - this app
+          owns none of them. An icon would open a screen that could only say "go to Settings".
+
+          It is also how the platform expects a supervision app to behave: the role is
+          `visible="false"` in roles.xml, and Settings resolves this app by role rather than by
+          anything the user launches.
+        -->
+
+        <!--
+          The service Settings binds to, and the reason the Parental controls entry exists at all.
+
+          `SupervisionHelper.hasNecessarySupervisionComponent` queries `config_systemSupervision`
+          for exactly this action; when nothing answers it,
+          `TopLevelSupervisionPreferenceController` reports UNSUPPORTED_ON_DEVICE and the whole
+          feature is hidden - which is why parental controls appeared to be missing from the OS
+          rather than merely switched off.
+
+          `exported` is true because the caller is Settings, in another process. The service
+          checks who is calling; see SupervisionMessengerService.
+        -->
+        <service
+            android:name=".service.SupervisionMessengerService"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.app.supervision.action.SUPERVISION_MESSENGER_SERVICE" />
+            </intent-filter>
+        </service>
+
+        <!--
+          The service the platform binds, and the reason policy changes reach us at all.
+
+          `AppBindingService` registers `SupervisionAppServiceFinder` unconditionally and it is
+          enabled by default, so the system was already looking for this on our package and
+          logging a failure. It keeps the connection in the foreground and rebinds after a
+          backoff if we die.
+
+          `BIND_SUPERVISION_APP_SERVICE` is required by the upstream contract - the platform will
+          not bind a service that anything else could bind.
+        -->
+        <service
+            android:name=".service.SafeFamilyAppService"
+            android:exported="true"
+            android:permission="android.permission.BIND_SUPERVISION_APP_SERVICE">
+            <intent-filter>
+                <action android:name="android.app.action.SUPERVISION_APP_SERVICE" />
+            </intent-filter>
+        </service>
+
+        <!--
+          The parental-control features themselves.
+
+          AOSP ships no bedtime or app-limit UI: SupervisionDashboardScreen declares an EMPTY
+          preference group and nothing in the tree fills it. Rows appear only for activities
+          tagged with the supervision category below, which DashboardFragmentRegistry maps to
+          SupervisionDashboardFragment. These two meta-data tags are therefore the entire reason
+          Parental controls has anything in it.
+
+          Still no launcher entry: these are reached from Settings, and an icon would be a second
+          route to a screen that only makes sense in that context.
+        -->
+        <activity
+            android:name=".ui.BedtimeActivity"
+            android:configChanges="mcc|mnc|colorMode|density|fontScale|fontWeightAdjustment|keyboard|keyboardHidden|layoutDirection|navigation|orientation|screenLayout|screenSize|smallestScreenSize|touchscreen|uiMode"
+            android:exported="true"
+            android:label="@string/bedtime_title"
+            android:permission="android.permission.MANAGE_SUPERVISION"
+            android:theme="@style/Theme.General">
+            <intent-filter>
+                <action android:name="com.vayunmathur.safefamily.action.BEDTIME" />
+                <category android:name="android.intent.category.DEFAULT" />
+            </intent-filter>
+            <meta-data
+                android:name="com.android.settings.category"
+                android:value="com.android.settings.category.ia.supervision" />
+            <meta-data
+                android:name="com.android.settings.summary"
+                android:resource="@string/bedtime_summary" />
+        </activity>
+
+        <activity
+            android:name=".ui.AppLimitsActivity"
+            android:configChanges="mcc|mnc|colorMode|density|fontScale|fontWeightAdjustment|keyboard|keyboardHidden|layoutDirection|navigation|orientation|screenLayout|screenSize|smallestScreenSize|touchscreen|uiMode"
+            android:exported="true"
+            android:label="@string/limits_title"
+            android:permission="android.permission.MANAGE_SUPERVISION"
+            android:theme="@style/Theme.General">
+            <intent-filter>
+                <action android:name="com.vayunmathur.safefamily.action.APP_LIMITS" />
+                <category android:name="android.intent.category.DEFAULT" />
+            </intent-filter>
+            <meta-data
+                android:name="com.android.settings.category"
+                android:value="com.android.settings.category.ia.supervision" />
+            <meta-data
+                android:name="com.android.settings.summary"
+                android:resource="@string/limits_summary" />
+        </activity>
+
+        <!--
+          Where Settings sends the user for "app settings" of a supervision app. Without an
+          activity answering this, `createSupervisionAppPreference` throws IllegalStateException
+          and the app never appears under "Apps managing this device". Bedtime is the most useful
+          landing point, so it is an alias rather than a third screen.
+        -->
+        <activity-alias
+            android:name=".ui.ManageAlias"
+            android:exported="true"
+            android:label="@string/app_name"
+            android:permission="android.permission.MANAGE_SUPERVISION"
+            android:targetActivity=".ui.BedtimeActivity">
+            <intent-filter>
+                <action android:name="android.settings.MANAGE_SUPERVISION_APP_SETTINGS" />
+                <category android:name="android.intent.category.DEFAULT" />
+            </intent-filter>
+        </activity-alias>
+
+        <!-- Fired by UsageStatsService when an app spends its daily budget. Not exported: the
+             PendingIntent we hand the platform is what delivers it. -->
+        <receiver
+            android:name=".receiver.LimitReachedReceiver"
+            android:exported="false" />
+
+        <!-- The next bedtime boundary. Re-armed each time it fires. -->
+        <receiver
+            android:name=".receiver.BedtimeReceiver"
+            android:exported="false" />
+
+        <receiver
+            android:name=".receiver.BootReceiver"
+            android:exported="true"
+            android:permission="android.permission.BIND_SUPERVISION_APP_SERVICE">
+            <intent-filter>
+                <action android:name="android.intent.action.BOOT_COMPLETED" />
+                <action android:name="android.intent.action.LOCKED_BOOT_COMPLETED" />
+            </intent-filter>
+        </receiver>
+
+        <!--
+          The second half of the availability test. `getSupervisionAppInstallActivityInfo` looks
+          for this action so Settings can show the entry *before* supervision has been set up -
+          on a device where the supervision app still has to be installed, this is the row's
+          destination. Ours is already installed, so it hands straight over to the platform's own
+          setup flow rather than duplicating it.
+        -->
+        <activity
+            android:name=".ui.SetupActivity"
+            android:configChanges="mcc|mnc|colorMode|density|fontScale|fontWeightAdjustment|keyboard|keyboardHidden|layoutDirection|navigation|orientation|screenLayout|screenSize|smallestScreenSize|touchscreen|uiMode"
+            android:exported="true"
+            android:launchMode="singleTask"
+            android:theme="@style/Theme.General">
+            <intent-filter>
+                <action android:name="android.app.supervision.action.INSTALL_SUPERVISION_APP" />
+                <category android:name="android.intent.category.DEFAULT" />
+            </intent-filter>
+        </activity>
+    </application>
+</manifest>

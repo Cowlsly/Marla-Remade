@@ -1,0 +1,207 @@
+// Google Automotive Link control channel.
+//
+// Field numbers, wire types and cardinality were recovered from the protobuf-lite
+// RawMessageInfo descriptors in the Android Auto APK (analysis/maauto/dump_protos.py) and are
+// exact. Message and field NAMES are not in the APK -- they follow the public aasdk/openauto
+// naming, which uses the same field numbers.
+//
+// proto2 throughout, because the originals are proto2: `required` and explicit presence are
+// load-bearing here, and a head unit will reject a message missing a required field.
+
+syntax = "proto2";
+
+package gal;
+
+import "gal/services.proto";
+
+option java_package = "com.vayunmathur.auto.protocol.gal";
+option java_multiple_files = true;
+
+// ---- enums ----
+
+// Recovered verbatim from the APK's Java enums, values included.
+enum MessageStatus {
+  STATUS_SUCCESS = 0;
+  STATUS_UNSOLICITED_MESSAGE = 1;
+  STATUS_NO_COMPATIBLE_VERSION = -1;
+  STATUS_CERTIFICATE_ERROR = -2;
+  STATUS_AUTHENTICATION_FAILURE = -3;
+  STATUS_INVALID_SERVICE = -4;
+  STATUS_INVALID_CHANNEL = -5;
+  STATUS_INVALID_PRIORITY = -6;
+  STATUS_INTERNAL_ERROR = -7;
+  STATUS_MEDIA_CONFIG_MISMATCH = -8;
+  STATUS_INVALID_SENSOR = -9;
+  STATUS_BLUETOOTH_PAIRING_DELAYED = -10;
+  STATUS_BLUETOOTH_UNAVAILABLE = -11;
+  STATUS_BLUETOOTH_INVALID_ADDRESS = -12;
+  STATUS_BLUETOOTH_INVALID_PAIRING_METHOD = -13;
+  STATUS_BLUETOOTH_INVALID_AUTH_DATA = -14;
+  STATUS_BLUETOOTH_AUTH_DATA_MISMATCH = -15;
+  STATUS_BLUETOOTH_HFP_ANOTHER_CONNECTION = -16;
+  STATUS_BLUETOOTH_HFP_CONNECTION_FAILURE = -17;
+  STATUS_KEYCODE_NOT_BOUND = -18;
+  STATUS_RADIO_INVALID_STATION = -19;
+  STATUS_INVALID_INPUT = -20;
+  STATUS_RADIO_STATION_PRESETS_NOT_SUPPORTED = -21;
+  STATUS_RADIO_COMM_ERROR = -22;
+  STATUS_AUTHENTICATION_FAILURE_CERT_NOT_YET_VALID = -23;
+  STATUS_AUTHENTICATION_FAILURE_CERT_EXPIRED = -24;
+  STATUS_PING_TIMEOUT = -25;
+  STATUS_CAR_PROPERTY_SET_REQUEST_FAILED = -26;
+  STATUS_CAR_PROPERTY_LISTENER_REGISTRATION_FAILED = -27;
+  STATUS_COMMAND_NOT_SUPPORTED = -250;
+  STATUS_FRAMING_ERROR = -251;
+  STATUS_UNEXPECTED_MESSAGE = -253;
+  STATUS_BUSY = -254;
+  STATUS_OUT_OF_MEMORY = -255;
+}
+
+enum ByeByeReason {
+  USER_SELECTION = 1;
+  DEVICE_SWITCH = 2;
+  NOT_SUPPORTED = 3;
+  NOT_CURRENTLY_SUPPORTED = 4;
+  PROBE_SUPPORTED = 5;
+  WIRELESS_PROJECTION_DISABLED = 6;
+  POWER_DOWN = 7;
+  USER_PROFILE_SWITCH = 8;
+}
+
+enum AudioFocusRequestType {
+  AUDIO_FOCUS_GAIN = 1;
+  AUDIO_FOCUS_GAIN_TRANSIENT = 2;
+  AUDIO_FOCUS_GAIN_TRANSIENT_MAY_DUCK = 3;
+  AUDIO_FOCUS_RELEASE = 4;
+}
+
+enum AudioFocusState {
+  AUDIO_FOCUS_STATE_INVALID = 0;
+  AUDIO_FOCUS_STATE_GAIN = 1;
+  AUDIO_FOCUS_STATE_GAIN_TRANSIENT = 2;
+  AUDIO_FOCUS_STATE_LOSS = 3;
+  AUDIO_FOCUS_STATE_LOSS_TRANSIENT_CAN_DUCK = 4;
+  AUDIO_FOCUS_STATE_LOSS_TRANSIENT = 5;
+  AUDIO_FOCUS_STATE_GAIN_MEDIA_ONLY = 6;
+  AUDIO_FOCUS_STATE_GAIN_TRANSIENT_GUIDANCE_ONLY = 7;
+}
+
+enum NavigationFocusType {
+  NAV_FOCUS_NATIVE = 1;
+  NAV_FOCUS_PROJECTED = 2;
+}
+
+// ---- messages ----
+
+// Control message 5. Sent by the PHONE. Only sent once version negotiation reaches >= 1.6.
+message ServiceDiscoveryRequest {
+  optional bytes field1 = 1;
+  optional bytes field2 = 2;
+  optional bytes field3 = 3;
+  optional string field4 = 4;
+  // Build.MODEL, prefixed with Build.MANUFACTURER when not already prefixed.
+  optional string device_name = 5;
+  optional bytes field6 = 6;
+}
+
+// Control message 6. Sent by the HEAD UNIT: it advertises, we consume.
+message ServiceDiscoveryResponse {
+  repeated Service services = 1;
+  optional string head_unit_name = 2;
+  optional string car_model = 3;
+  optional string car_year = 4;
+  optional string car_serial = 5;
+  optional int32 driver_position = 6;
+  optional string headunit_make = 7;
+  optional string headunit_model = 8;
+  optional string headunit_software_build = 9;
+  optional string headunit_software_version = 10;
+  optional bool can_play_native_media_during_vr = 11;
+  optional int32 field13 = 13;
+  optional string field14 = 14;
+  optional bool hide_clock = 15;
+  optional bytes field17 = 17;
+  // Fields 12 and 16 are absent from this build.
+}
+
+// The service id doubles as the channel id. Exactly one of the payload fields is set;
+// which one tells you what the service is.
+message Service {
+  required int32 id = 1;
+  optional SensorSourceService sensor_source = 2;
+  optional MediaSinkService media_sink = 3;
+  optional InputSourceService input_source = 4;
+  optional MediaSourceService media_source = 5;
+  optional BluetoothService bluetooth = 6;
+  optional bytes radio = 7;
+  optional NavigationStatusService navigation_status = 8;
+  optional bytes media_playback_status = 9;
+  optional bytes phone_status = 10;
+  optional bytes media_browser = 11;
+  optional VendorExtensionService vendor_extension = 12;
+  optional bytes notification = 13;
+  optional WifiProjectionService wifi_projection = 14;
+  optional bytes field15 = 15;
+  optional bytes field16 = 16;
+  optional bytes field17 = 17;
+  optional bytes field18 = 18;
+}
+
+// Control message 26: hot-add or replace one service after the initial discovery.
+message ServiceDiscoveryUpdate {
+  optional Service service = 1;
+}
+
+// Control message 7. Note the order: priority first, then the service id. `priority` is
+// sint32 because the control channel opens itself at -128.
+message ChannelOpenRequest {
+  required sint32 priority = 1;
+  required int32 service_id = 2;
+}
+
+// Control message 4.
+message AuthComplete {
+  required int32 status = 1;
+}
+
+// Control message 11.
+message PingRequest {
+  required int64 timestamp = 1;
+  optional bool bug_report = 2;
+  optional bytes field3 = 3;
+}
+
+// Control message 12.
+message PingResponse {
+  required int64 timestamp = 1;
+  optional bytes field2 = 2;
+}
+
+// Control message 15.
+message ByeByeRequest {
+  required ByeByeReason reason = 1;
+}
+
+// Control message 16. Genuinely empty.
+message ByeByeResponse {}
+
+// Control message 18.
+message AudioFocusRequestMessage {
+  required AudioFocusRequestType request = 1;
+}
+
+// Control message 19.
+message AudioFocusNotification {
+  required AudioFocusState state = 1;
+  optional bool unsolicited = 2;
+}
+
+// Control message 14.
+message NavigationFocusNotification {
+  required NavigationFocusType focus = 1;
+}
+
+// Control message 24.
+message CallAvailabilityStatus {
+  optional bool call_available = 1;
+}

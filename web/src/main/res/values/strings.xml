@@ -124,4 +124,6 @@
     <string name="cleartext_blocked_message">%1$s was requested over plain HTTP. Unencrypted connections are only allowed to devices on your local network.</string>
     <string name="local_network_title">Allow local network access?</string>
     <string name="local_network_message">%1$s looks like a device on your network. Android needs local network permission before this page can load.</string>
+    <!-- Page shown in place of a site blocked by the supervision web content filter. Contains inline HTML, not a plain string. -->
+    <string name="content_filter_blocked_html"><![CDATA[<!DOCTYPE html><html><head><meta name="viewport" content="width=device-width,initial-scale=1"><style>body{font-family:sans-serif;margin:0;display:flex;align-items:center;justify-content:center;min-height:100vh;background:#111;color:#eee}main{max-width:22rem;padding:2rem;text-align:center}h1{font-size:1.25rem;font-weight:600;margin:0 0 .5rem}p{margin:0;opacity:.7;line-height:1.5}</style></head><body><main><h1>Site blocked</h1><p>Web content filtering is switched on for this device. Ask whoever set up parental controls if you think this is a mistake.</p></main></body></html>]]></string>
 </resources>

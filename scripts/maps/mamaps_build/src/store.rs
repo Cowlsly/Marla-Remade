@@ -1800,6 +1800,64 @@ mod tests {
         }
     }
 
+    /// **The `--reuse-store` path, which nothing covered at all.** A reused run rebuilds its
+    /// `Store` from the index alone, and the marking-convention grid rides in there — so a grid
+    /// that did not survive the round trip would leave the reused build drawing every road
+    /// right-hand and white. No error, no missing feature, no failing test: just the wrong
+    /// markings across a whole country, distinguishable from a correct build only by looking at
+    /// it. `Conventions`' own byte round trip is tested beside the grid; this is the wiring, which
+    /// is where the offsets can drift.
+    #[test]
+    fn a_reused_store_index_carries_the_marking_conventions() {
+        let path = temp("reuse_index");
+        let mut sink = Sink::create(&path).expect("create");
+        let road = Class::line(dict::LAYER_ROADS, schema::kind("highway"), 0);
+        sink.push(&road, &Geometry::Lines(vec![vec![(-120.0, 35.0), (-119.5, 35.5)]]))
+            .expect("push");
+        let store = sink.finish(&path).expect("finish");
+
+        let mut grid = crate::schema::boundaries::Conventions::default();
+        grid.add(
+            "JP",
+            &[vec![vec![
+                (130.0, 30.0),
+                (145.0, 30.0),
+                (145.0, 45.0),
+                (130.0, 45.0),
+                (130.0, 30.0),
+            ]]],
+        );
+        let store = store.with_conventions(grid);
+
+        // Built by hand rather than through `Provenance::of`, which would need a source `.pbf` on
+        // disk to stat. Every field distinct, so a misread offset cannot land on a matching value.
+        let provenance = Provenance {
+            source_len: 1234,
+            source_mtime: 5678,
+            layers: 0b101,
+            coastline: true,
+            transit_routes: false,
+            graph: true,
+        };
+        let index = store.save_index(provenance, 99).expect("save the index");
+        let (reopened, features) = Store::open(&path, provenance).expect("reopen");
+
+        assert_eq!(features, 99, "the feature count the build id derives from");
+        let (x, y) = tile_build::geom::project(137.0, 37.0, 14);
+        assert_eq!(
+            reopened.conventions().at_tile(14, x as u64, y as u64),
+            tilecodec::mamaps::body::MarkingConvention { left_hand: true, yellow_centre: true },
+            "a reused store fell back to right-hand and white",
+        );
+        // The grid trails the chunk index, so a wrong offset for it means a wrong offset for
+        // everything before it too. Asserted together rather than trusting the grid alone.
+        assert_eq!(reopened.len(), store.len());
+        assert_eq!(reopened.bbox(), store.bbox());
+
+        let _ = std::fs::remove_file(&index);
+        let _ = std::fs::remove_file(&path);
+    }
+
     #[test]
     fn features_written_come_back_in_order_with_their_geometry() {
         let path = temp("roundtrip");

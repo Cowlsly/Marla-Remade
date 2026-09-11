@@ -76,14 +76,11 @@
     <string name="log_hydration">Добавить воду</string>
     <string name="log_meal">Добавить еду</string>
     <string name="nav_today">Сегодня</string>
-    <string name="nav_activity">Активность</string>
     <string name="nav_nutrition">Питание</string>
     <string name="nav_body">Тело</string>
     <string name="section_latest_vitals">Последние измерения</string>
     <string name="section_last_night">Прошлой ночью</string>
     <string name="section_quick_stats">Сводка</string>
-    <string name="section_today_activity">Сегодня</string>
-    <string name="section_this_week">На этой неделе</string>
     <string name="label_exercise">Тренировка</string>
     <string name="no_workouts">Нет записанных тренировок</string>
     <string name="view_full_breakdown">Посмотреть весь состав</string>

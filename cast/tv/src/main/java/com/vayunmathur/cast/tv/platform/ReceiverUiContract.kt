@@ -49,6 +49,14 @@ sealed interface ReceiverPhase {
          * now-playing screen instead - a black surface over silence would look like a fault.
          */
         val hasVideo: Boolean = true,
+        /**
+         * Frames per second the sender is encoding at, or 0 when there is no encoded video.
+         *
+         * From `StreamConfig.frameRate`, and carried this far because `MirrorActivity` switches
+         * the panel to the mode that matches the stream - which needs the rate as well as the
+         * size, since this screen offers 3840x2160 at eight different rates.
+         */
+        val frameRate: Float = 0f,
     ) : ReceiverPhase {
         /**
          * Who to name on screen: the app if there is one, otherwise the phone.

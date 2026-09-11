@@ -83,7 +83,9 @@ class HandshakeTest {
             StreamConfig(
                 width = 1440,
                 height = 3120,
-                frameRate = 30,
+                // Fractional on purpose: it is the case an `Int` used to eat, and the reason the
+                // protocol moved to 9.
+                frameRate = 29.97f,
                 bitRate = 12_000_000,
                 audio = true,
                 video = true,
@@ -96,7 +98,7 @@ class HandshakeTest {
             StreamConfig(
                 width = 1920,
                 height = 1080,
-                frameRate = 60,
+                frameRate = 59.94f,
                 bitRate = 12_000_000,
                 audio = true,
                 video = true,
@@ -142,7 +144,7 @@ class HandshakeTest {
                 StreamConfig(
                     width = 1920,
                     height = 1080,
-                    frameRate = 30,
+                    frameRate = 30f,
                     bitRate = 6_000_000,
                     audio = false,
                     video = true,
@@ -406,7 +408,7 @@ class HandshakeTest {
         val config = StreamConfig(
             width = 1440,
             height = 3120,
-            frameRate = 30,
+            frameRate = 30f,
             bitRate = 12_000_000,
             audio = true,
             video = true,

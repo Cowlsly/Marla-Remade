@@ -1,0 +1,49 @@
+#version 450
+//! VARIANT B — CONTROL + INT4 UNPACK. Shallow prefetch, unpack ALU, no activation stream.
+//!
+//! TEMPORARY probe shader for task 9. Source of truth is
+//! `analysis/gemv_probe/gemv_b_unpack.comp`. See `gemv_a_control.comp` for why this copy
+//! exists and when to delete it.
+//!
+//! Differs from variant A in exactly one respect: each loaded `uvec4` is unpacked into its
+//! 32 signed nibbles and each is accumulated. Same load width, same access pattern, same
+//! workgroup size, same one-load-in-flight structure.
+//!
+//! `A - B` is therefore the cost of the unpack alone: `bitfieldExtract` + `int -> float` +
+//! an add, 32 times per 16 bytes. It deliberately does NOT include the activation fetch or
+//! the multiply — variant C adds those — so that the two halves of the 160-ops-per-16-bytes
+//! figure can be attributed separately.
+//!
+//! `bitfieldExtract` on a **signed** int sign-extends, matching `int4_at` in
+//! `shaders/common.glsl:216-219`. The accumulator is float, matching `conv_vec_int4.comp`,
+//! which accumulates in fp32 even though the operands are 4-bit and fp16.
+
+layout(local_size_x = 64) in;
+
+layout(set = 0, binding = 0) readonly buffer Source { uvec4 data[]; };
+layout(set = 0, binding = 1) buffer Sink { uint sink[]; };
+
+layout(push_constant) uniform Push {
+    uint quads;
+};
+
+void main() {
+    uint lane = gl_GlobalInvocationID.x;
+    uint stride = gl_NumWorkGroups.x * 64u;
+    float total = 0.0;
+    for (uint at = lane; at < quads; at += stride) {
+        uvec4 packed = data[at];
+        // Exactly the unpack loop of `conv_vec_int4.comp:110-115`, minus the activation.
+        for (uint word = 0u; word < 4u; word++) {
+            uint bits = packed[word];
+            for (uint n = 0u; n < 8u; n++) {
+                int code = bitfieldExtract(int(bits), int(n << 2u), 4);
+                total += float(code);
+            }
+        }
+    }
+    // As variant A: a condition that cannot fire, so the loop is live but the store is not.
+    if (floatBitsToUint(total) == 0xFFFFFFFFu) {
+        sink[0] = 1u;
+    }
+}

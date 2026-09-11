@@ -6,8 +6,8 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.viewModels
+import androidx.lifecycle.lifecycleScope
 import com.vayunmathur.library.ui.IconBodySystem
-import com.vayunmathur.library.ui.IconDirectionsWalk
 import com.vayunmathur.library.ui.IconFavorite
 import com.vayunmathur.library.ui.IconFire
 import androidx.compose.foundation.layout.fillMaxSize
@@ -53,11 +53,27 @@ import androidx.health.connect.client.records.WheelchairPushesRecord
 import com.vayunmathur.library.util.MorphPage
 import com.vayunmathur.library.util.NavKey
 import com.vayunmathur.health.data.HealthRepository
-import com.vayunmathur.health.ui.ActivityPage
+import com.vayunmathur.health.data.ReferenceCatalog
+import com.vayunmathur.health.platform.MedicalViewModel
+import com.vayunmathur.health.platform.MedicalViewModelFactory
+import com.vayunmathur.health.platform.PersonalHealthRecords
+import com.vayunmathur.health.ui.AboutYouPage
+import com.vayunmathur.health.ui.AddAllergyPage
+import com.vayunmathur.health.ui.AddConditionPage
+import com.vayunmathur.health.ui.AddLabResultPage
+import com.vayunmathur.health.ui.AddMedicationPage
+import com.vayunmathur.health.ui.AddVaccinationPage
+import com.vayunmathur.health.ui.AllergiesPage
 import com.vayunmathur.health.ui.BarChartDetails
 import com.vayunmathur.health.ui.BodyPage
+import com.vayunmathur.health.ui.CatalogPickerPage
+import com.vayunmathur.health.ui.ConditionsPage
 import com.vayunmathur.health.ui.ExerciseDetailsPage
 import com.vayunmathur.health.ui.HealthMetricConfig
+import com.vayunmathur.health.ui.LabResultsPage
+import com.vayunmathur.health.ui.MedicationPage
+import com.vayunmathur.health.ui.RecordsPage
+import com.vayunmathur.health.ui.VaccinationsPage
 
 import com.vayunmathur.health.ui.NutritionDetailsPage
 import com.vayunmathur.health.ui.NutritionPage
@@ -70,11 +86,18 @@ import com.vayunmathur.health.util.HealthSyncWorker
 import com.vayunmathur.health.util.HealthViewModel
 import com.vayunmathur.health.util.HealthViewModelFactory
 import com.vayunmathur.library.ui.DynamicTheme
+import com.vayunmathur.library.ui.IconHistory
+import com.vayunmathur.library.ui.IconMedication
 import com.vayunmathur.library.ui.PermissionWall
 import com.vayunmathur.library.ui.Surface
+import com.vayunmathur.library.ui.dialog.DatePickerDialog
+import com.vayunmathur.library.ui.dialog.TimePickerDialogContent
+import com.vayunmathur.library.util.DialogPage
 import com.vayunmathur.library.util.MainNavigation
 import com.vayunmathur.library.util.SiblingPage
 import com.vayunmathur.library.util.rememberNavBackStack
+import kotlinx.datetime.LocalDate
+import kotlinx.datetime.LocalTime
 import kotlinx.serialization.Serializable
 
 val CLASSES = setOf(
@@ -114,6 +137,9 @@ class MainActivity : ComponentActivity() {
     private val healthViewModel: HealthViewModel by viewModels {
         HealthViewModelFactory(application, HealthRepository.get(this))
     }
+    private val medicalViewModel: MedicalViewModel by viewModels {
+        MedicalViewModelFactory(application, HealthRepository.get(this))
+    }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -122,6 +148,11 @@ class MainActivity : ComponentActivity() {
         val repository = HealthRepository.get(this)
         HealthAPI.init(healthConnectClient, this, repository)
         FoodDatabase.init(this)
+        ReferenceCatalog.init(this)
+        // Unpacking is half a second of decompression and disk write. Do it now, in the background,
+        // rather than the first time the user opens a picker and waits for it.
+        ReferenceCatalog.warmUp(lifecycleScope)
+        PersonalHealthRecords.init(this, healthConnectClient)
         setContent {
             DynamicTheme {
                 var hasPermissions by remember { mutableStateOf(false) }
@@ -133,6 +164,11 @@ class MainActivity : ComponentActivity() {
                     }
                 )
 
+                val requestMedicalPermissions = rememberLauncherForActivityResult(
+                    contract = PermissionController.createRequestPermissionResultContract(),
+                    onResult = { /* Refusal is fine — the medical screens fall back to local data. */ }
+                )
+
                 LaunchedEffect(Unit) {
                     hasPermissions = healthConnectClient.permissionController.getGrantedPermissions().containsAll(PERMISSIONS)
                 }
@@ -141,7 +177,19 @@ class MainActivity : ComponentActivity() {
                     LaunchedEffect(Unit) {
                         HealthSyncWorker.enqueue(this@MainActivity)
                     }
-                    Navigation(healthViewModel)
+                    // FHIR record access is requested separately and is allowed to fail. It only
+                    // exists on Android 15 with an updated Health Connect module, so folding it
+                    // into PERMISSIONS above would gate the whole app on something most supported
+                    // devices cannot grant; the medical screens work from Room without it.
+                    LaunchedEffect(Unit) {
+                        if (PersonalHealthRecords.isAvailable() &&
+                            !healthConnectClient.permissionController.getGrantedPermissions()
+                                .containsAll(PersonalHealthRecords.PERMISSIONS)
+                        ) {
+                            requestMedicalPermissions.launch(PersonalHealthRecords.PERMISSIONS)
+                        }
+                    }
+                    Navigation(healthViewModel, medicalViewModel)
                 } else {
                     // Health Connect has its own permission contract, which is
                     // why this passes onRequest rather than using the runtime
@@ -172,9 +220,6 @@ sealed interface Route: NavKey {
     data object Today: Route
 
     @Serializable
-    data object Activity: Route
-
-    @Serializable
     data object Body: Route
 
     @Serializable
@@ -197,10 +242,81 @@ sealed interface Route: NavKey {
 
     @Serializable
     data object ExerciseDetails: Route
+
+    @Serializable
+    data object Records: Route
+
+    @Serializable
+    data object Vaccinations: Route
+
+    @Serializable
+    data object Allergies: Route
+
+    @Serializable
+    data object Conditions: Route
+
+    @Serializable
+    data object LabResults: Route
+
+    @Serializable
+    data object AboutYou: Route
+
+    @Serializable
+    data object Medication: Route
+
+    /** The vaccination form. A null [id] adds a new record; otherwise it edits that one. */
+    @Serializable
+    data class EditVaccination(val id: String? = null): Route
+
+    /** The medication form. A null [id] adds a new record; otherwise it edits that one. */
+    @Serializable
+    data class EditMedication(val id: String? = null): Route
+
+    /** The allergy form. A null [id] adds a new record; otherwise it edits that one. */
+    @Serializable
+    data class EditAllergy(val id: String? = null): Route
+
+    /** The condition form. A null [id] adds a new record; otherwise it edits that one. */
+    @Serializable
+    data class EditCondition(val id: String? = null): Route
+
+    /** The lab result form. A null [id] adds a new record; otherwise it edits that one. */
+    @Serializable
+    data class EditLabResult(val id: String? = null): Route
+
+    /**
+     * The searchable reference-data picker. [ingredient] narrows
+     * [com.vayunmathur.health.ui.CatalogKind.MedicationProduct] to one drug and is unused otherwise.
+     *
+     * Carries no result key: the picker writes straight into the ViewModel's draft, because this is
+     * a full-screen destination and the form underneath is not composed while it is open.
+     */
+    @Serializable
+    data class CatalogPicker(
+        val kind: com.vayunmathur.health.ui.CatalogKind,
+        val ingredient: String? = null,
+    ): Route
+
+    /**
+     * The shared date picker, hosted here so the medical forms can reach it.
+     *
+     * [allowClear] adds a Clear button and changes the result type to `DateSelection`; set it for
+     * any field that is allowed to have no date.
+     */
+    @Serializable
+    data class MedicalDatePicker(
+        val key: String,
+        val initialDate: LocalDate,
+        val allowClear: Boolean = false,
+    ): Route
+
+    /** The shared time picker, for dose reminder times. */
+    @Serializable
+    data class MedicalTimePicker(val key: String, val initialTime: LocalTime): Route
 }
 
 @Composable
-fun Navigation(viewModel: HealthViewModel) {
+fun Navigation(viewModel: HealthViewModel, medicalViewModel: MedicalViewModel) {
     val backStack = rememberNavBackStack<Route>(Route.Today)
     MainNavigation(
         backStack = backStack,
@@ -213,10 +329,6 @@ fun Navigation(viewModel: HealthViewModel) {
                         Route.Today,
                     ) { IconFavorite() },
                     com.vayunmathur.library.util.BottomBarItem(
-                        stringResource(R.string.nav_activity),
-                        Route.Activity,
-                    ) { IconDirectionsWalk() },
-                    com.vayunmathur.library.util.BottomBarItem(
                         stringResource(R.string.nav_nutrition),
                         Route.NutritionDetails,
                     ) { IconFire() },
@@ -224,6 +336,14 @@ fun Navigation(viewModel: HealthViewModel) {
                         stringResource(R.string.nav_body),
                         Route.Body,
                     ) { IconBodySystem() },
+                    com.vayunmathur.library.util.BottomBarItem(
+                        stringResource(R.string.nav_medication),
+                        Route.Medication,
+                    ) { IconMedication() },
+                    com.vayunmathur.library.util.BottomBarItem(
+                        stringResource(R.string.nav_records),
+                        Route.Records,
+                    ) { IconHistory() },
                 ),
                 currentPage = backStack.last()
             )
@@ -231,9 +351,6 @@ fun Navigation(viewModel: HealthViewModel) {
     ) {
         entry<Route.Today>(metadata = SiblingPage()) {
             TodayPage(backStack, viewModel)
-        }
-        entry<Route.Activity>(metadata = SiblingPage()) {
-            ActivityPage(backStack, viewModel)
         }
         entry<Route.Body>(metadata = SiblingPage()) {
             BodyPage(backStack, viewModel)
@@ -258,6 +375,51 @@ fun Navigation(viewModel: HealthViewModel) {
         }
         entry<Route.ExerciseDetails>(metadata = MorphPage()) {
             ExerciseDetailsPage(backStack, viewModel)
+        }
+        entry<Route.Records>(metadata = SiblingPage()) {
+            RecordsPage(backStack, medicalViewModel)
+        }
+        entry<Route.Medication>(metadata = SiblingPage()) {
+            MedicationPage(backStack, medicalViewModel)
+        }
+        entry<Route.Vaccinations> {
+            VaccinationsPage(backStack, medicalViewModel)
+        }
+        entry<Route.Allergies> {
+            AllergiesPage(backStack, medicalViewModel)
+        }
+        entry<Route.Conditions> {
+            ConditionsPage(backStack, medicalViewModel)
+        }
+        entry<Route.LabResults> {
+            LabResultsPage(backStack, medicalViewModel)
+        }
+        entry<Route.AboutYou> {
+            AboutYouPage(backStack, medicalViewModel)
+        }
+        entry<Route.EditVaccination> {
+            AddVaccinationPage(backStack, medicalViewModel)
+        }
+        entry<Route.EditMedication> {
+            AddMedicationPage(backStack, medicalViewModel)
+        }
+        entry<Route.EditAllergy> {
+            AddAllergyPage(backStack, medicalViewModel)
+        }
+        entry<Route.EditCondition> {
+            AddConditionPage(backStack, medicalViewModel)
+        }
+        entry<Route.EditLabResult> {
+            AddLabResultPage(backStack, medicalViewModel)
+        }
+        entry<Route.CatalogPicker> {
+            CatalogPickerPage(backStack, medicalViewModel, it)
+        }
+        entry<Route.MedicalDatePicker>(metadata = DialogPage()) {
+            DatePickerDialog(backStack, it.key, it.initialDate, allowClear = it.allowClear)
+        }
+        entry<Route.MedicalTimePicker>(metadata = DialogPage()) {
+            TimePickerDialogContent(backStack, it.key, it.initialTime)
         }
     }
 }

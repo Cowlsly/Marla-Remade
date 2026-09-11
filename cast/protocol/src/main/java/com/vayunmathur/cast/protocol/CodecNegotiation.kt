@@ -84,7 +84,7 @@ object CodecNegotiation {
         receiver: DecoderLimits,
         width: Int,
         height: Int,
-        frameRate: Int,
+        frameRate: Float,
         demoted: Set<VideoCodec> = emptySet(),
     ): CodecSelection {
         for (codec in PREFERENCE) {

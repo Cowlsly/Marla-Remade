@@ -165,7 +165,15 @@ fun TextTranslatePage(
         actions = object : TextTranslateActions {
             override fun setSource(code: String) = viewModel.setSource(code)
             override fun setTarget(code: String) = viewModel.setTarget(code)
-            override fun swap() = viewModel.swap()
+            // Swap the text along with the languages, so the translation becomes the
+            // thing being translated. The debounced effect below then re-translates it.
+            override fun swap() {
+                if (sourceLang == Languages.AUTO.code) return
+                val previousInput = inputText
+                inputText = outputText
+                outputText = previousInput
+                viewModel.swap()
+            }
             override fun setInput(text: String) {
                 inputText = text
             }

@@ -41,6 +41,24 @@ use super::context::Context;
 use super::pipeline::{Pipelines, MAX_WORKGROUPS_PER_DIM, WORKGROUP};
 use super::segment::Segments;
 
+/// TEMPORARY instrumentation.
+#[cfg(target_os = "android")]
+fn tlog(message: &str) {
+    #[link(name = "log")]
+    extern "C" {
+        fn __android_log_write(priority: i32, tag: *const u8, text: *const u8) -> i32;
+    }
+    let tag = b"ModelRunner\0";
+    let mut text: Vec<u8> = message.as_bytes().to_vec();
+    text.push(0);
+    unsafe {
+        let _ = __android_log_write(6, tag.as_ptr(), text.as_ptr());
+    }
+}
+
+#[cfg(not(target_os = "android"))]
+fn tlog(_message: &str) {}
+
 /// Values a recorded command buffer reads from memory rather than from its own recording.
 ///
 /// # Why this exists
@@ -182,6 +200,7 @@ impl Net {
         let staging = Buffer::staging(&context, staging_bytes)?;
         let params = Buffer::step_params(&context, StepParams::BYTES)?;
 
+        let staged = std::time::Instant::now();
         let pipelines = Pipelines::new(
             &context,
             arena.buffer,
@@ -190,6 +209,7 @@ impl Net {
             params.buffer,
             segments.all(),
         )?;
+        tlog(&format!("TIMING pipelines {:.0} ms", staged.elapsed().as_secs_f64() * 1000.0));
 
         // `RESET_COMMAND_BUFFER`, so a net can re-record without reallocating.
         let pool_info = vk::CommandPoolCreateInfo::default()
@@ -219,13 +239,26 @@ impl Net {
             output_scratch: vec![0u16; output_elems],
         };
 
+        let staged = std::time::Instant::now();
         net.upload_weights(weights)?;
+        tlog(&format!(
+            "TIMING upload {} MB in {:.0} ms",
+            weights_bytes / (1024 * 1024),
+            staged.elapsed().as_secs_f64() * 1000.0
+        ));
         net.command_buffer = net.allocate_command_buffer()?;
         net.fence = net.create_fence()?;
         // Written before the first record so a shader reading it never sees uninitialised
         // memory, even on a plan that never calls `set_params`.
         net.set_params(StepParams::default())?;
+        let staged = std::time::Instant::now();
         net.record()?;
+        tlog(&format!(
+            "TIMING record {:.0} ms for {} ops, arena {} KB",
+            staged.elapsed().as_secs_f64() * 1000.0,
+            net.plan.ops.len(),
+            arena_bytes / 1024
+        ));
         Ok(net)
     }
 
@@ -321,10 +354,26 @@ impl Net {
         // A `record` that fails leaves the command buffer part-written, and submitting that is
         // not something a later caller may be allowed to do. There is no way back — both of its
         // failure modes are device loss or host OOM — so the net is retired instead.
+        let staged = std::time::Instant::now();
         if let Err(e) = self.record() {
             self.poisoned = true;
             return Err(e);
         }
+        tlog(&format!(
+            "TIMING rebuild-record {:.0} ms for {} ops, arena {} KB, dispatches {}, invocations {}",
+            staged.elapsed().as_secs_f64() * 1000.0,
+            self.plan.ops.len(),
+            self.arena.size / 1024,
+            self.plan.ops.iter().filter(|o| matches!(o, Op::Dispatch { .. })).count(),
+            self.plan
+                .ops
+                .iter()
+                .map(|o| match o {
+                    Op::Dispatch { invocations, .. } => *invocations as u64,
+                    _ => 0,
+                })
+                .sum::<u64>()
+        ));
         Ok(())
     }
 
@@ -518,7 +567,7 @@ impl Net {
                         device.cmd_bind_descriptor_sets(
                             buffer,
                             vk::PipelineBindPoint::COMPUTE,
-                            self.pipelines.layout,
+                            self.pipelines.layout(),
                             0,
                             &[set],
                             &[],
@@ -526,7 +575,7 @@ impl Net {
                         let push = self.segments.rebase(segment, kind, &push);
                         device.cmd_push_constants(
                             buffer,
-                            self.pipelines.layout,
+                            self.pipelines.layout(),
                             vk::ShaderStageFlags::COMPUTE,
                             0,
                             push_bytes(&push),
@@ -574,10 +623,13 @@ impl Net {
                 // A zero-length range is not a barrier at all, and a shape this could not read
                 // is a plan bug rather than something to guess around - so fall back to the
                 // whole arena, which is always correct if slower.
+                // A dispatch only needs a compute-to-compute dependency; a copy is the only op
+                // here that writes through the transfer stage.
+                let transfer = matches!(*op, Op::Copy { .. });
                 if size == 0 || offset + size > self.arena.size {
                     self.barrier(buffer);
                 } else {
-                    self.barrier_over(buffer, offset, size);
+                    self.barrier_masked(buffer, offset, size, transfer);
                 }
             }
 
@@ -652,14 +704,48 @@ impl Net {
     ///
     /// `buffer` must be inside a `begin`/`end` pair, and the range must be inside the arena.
     unsafe fn barrier_over(&self, buffer: vk::CommandBuffer, offset: u64, size: u64) {
+        // SAFETY: as the compute-only form, which this widens to cover a transfer on either side.
+        unsafe { self.barrier_masked(buffer, offset, size, true) }
+    }
+
+    /// [`Net::barrier_over`], optionally without the transfer stage on either side.
+    ///
+    /// A dispatch's dependency on the dispatch before it is `SHADER_WRITE` to `SHADER_READ`
+    /// across `COMPUTE_SHADER`, and naming `TRANSFER` as well makes the driver order the op
+    /// against the transfer queue too. Only an [`Op::Copy`] and the input and output copies need
+    /// that, and they are a handful of the ops in a plan against one barrier per dispatch.
+    ///
+    /// # Safety
+    ///
+    /// As [`Net::barrier_over`].
+    unsafe fn barrier_masked(
+        &self,
+        buffer: vk::CommandBuffer,
+        offset: u64,
+        size: u64,
+        transfer: bool,
+    ) {
+        let stages = if transfer {
+            vk::PipelineStageFlags::COMPUTE_SHADER | vk::PipelineStageFlags::TRANSFER
+        } else {
+            vk::PipelineStageFlags::COMPUTE_SHADER
+        };
+        let src_access = if transfer {
+            vk::AccessFlags::SHADER_WRITE | vk::AccessFlags::TRANSFER_WRITE
+        } else {
+            vk::AccessFlags::SHADER_WRITE
+        };
+        let dst_access = if transfer {
+            vk::AccessFlags::SHADER_READ
+                | vk::AccessFlags::SHADER_WRITE
+                | vk::AccessFlags::TRANSFER_READ
+                | vk::AccessFlags::TRANSFER_WRITE
+        } else {
+            vk::AccessFlags::SHADER_READ | vk::AccessFlags::SHADER_WRITE
+        };
         let barrier = vk::BufferMemoryBarrier::default()
-            .src_access_mask(vk::AccessFlags::SHADER_WRITE | vk::AccessFlags::TRANSFER_WRITE)
-            .dst_access_mask(
-                vk::AccessFlags::SHADER_READ
-                    | vk::AccessFlags::SHADER_WRITE
-                    | vk::AccessFlags::TRANSFER_READ
-                    | vk::AccessFlags::TRANSFER_WRITE,
-            )
+            .src_access_mask(src_access)
+            .dst_access_mask(dst_access)
             .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
             .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
             .buffer(self.arena.buffer)

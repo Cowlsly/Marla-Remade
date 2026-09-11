@@ -24,7 +24,20 @@ use modelrunner::vulkan::run::StepParams;
 use modelrunner::weights::{graph, Weights};
 
 /// The cache these examples record against: the top tier, so a long prompt fits.
-const TIER: u32 = gemma4::MAX_CONTEXT;
+///
+/// `GEMMA4_TIER` overrides it. Needed because a `.maml` carries rotary tables sized for the
+/// `MAX_CONTEXT` it was converted at, and the current source says 16,384 while the weights on
+/// the test device were converted at 2,048 — which fails at load with
+/// `tensor 17 is [2048, 256], the forward pass wants [16384, 256]`. Overriding lets an older
+/// export be measured without a reconvert; it does not paper over anything, because a wrong
+/// value still fails loudly at the same check.
+fn tier() -> u32 {
+    std::env::var("GEMMA4_TIER")
+        .ok()
+        .and_then(|v| v.parse::<u32>().ok())
+        .filter(|v| *v > 0)
+        .unwrap_or(gemma4::MAX_CONTEXT)
+}
 
 fn main() {
     let mut args = std::env::args().skip(1);
@@ -142,16 +155,16 @@ fn generate(
     tokens: &mut Vec<u32>,
     limit: usize,
 ) -> Result<(f64, Vec<u32>), String> {
-    let mut net = Reshaped::new(Arc::clone(context), weights, gemma4::Mode::DecodeStep.at(TIER), |o, m| {
+    let mut net = Reshaped::new(Arc::clone(context), weights, gemma4::Mode::DecodeStep.at(tier()), |o, m| {
         gemma4::build(o, m)
     })?;
     let reader = embed.reader();
     let rotary = weights.reader();
     // The tables are read once rather than per step: 2048 rows of fp16 is a few megabytes and
     // re-reading them each token would dominate the measurement below.
-    let local = rotary.fp16(gemma4::ROTARY_LOCAL, &[gemma4::MAX_CONTEXT, gemma4::HEAD_DIM])?;
+    let local = rotary.fp16(gemma4::ROTARY_LOCAL, &[tier(), gemma4::HEAD_DIM])?;
     let global =
-        rotary.fp16(gemma4::ROTARY_GLOBAL, &[gemma4::MAX_CONTEXT, gemma4::GLOBAL_HEAD_DIM])?;
+        rotary.fp16(gemma4::ROTARY_GLOBAL, &[tier(), gemma4::GLOBAL_HEAD_DIM])?;
 
     let prompt_len = tokens.len();
     let started = Instant::now();
@@ -188,9 +201,9 @@ fn generate(
             place(&mut angles_global, &take(&global, gemma4::GLOBAL_HEAD_DIM), column, width);
         }
         let at = net.at(if batched {
-            gemma4::Mode::Prefill { tokens: width }.at(TIER)
+            gemma4::Mode::Prefill { tokens: width }.at(tier())
         } else {
-            gemma4::Mode::DecodeStep.at(TIER)
+            gemma4::Mode::DecodeStep.at(tier())
         })?;
         at.set_params(StepParams {
             prefix: base,
@@ -210,7 +223,7 @@ fn generate(
     let mut generated = 0;
     for step in fed..prompt_len + limit {
         let position = u32::try_from(step).map_err(|_| "a step past u32")?;
-        if position >= gemma4::MAX_CONTEXT {
+        if position >= tier() {
             break;
         }
         let token = tokens[step];
@@ -219,7 +232,7 @@ fn generate(
             let from = (position * width) as usize;
             table[from..from + width as usize].to_vec()
         };
-        let at = net.at(gemma4::Mode::DecodeStep.at(TIER))?;
+        let at = net.at(gemma4::Mode::DecodeStep.at(tier()))?;
         at.set_params(StepParams {
             prefix: position,
             window_start: position.saturating_sub(gemma4::WINDOW - 1),
@@ -285,7 +298,7 @@ fn run_chat(
     let mut net = match Reshaped::new(
         std::sync::Arc::clone(&context),
         weights,
-        gemma4::Mode::DecodeStep.at(TIER),
+        gemma4::Mode::DecodeStep.at(tier()),
         |o, m| gemma4::build(o, m),
     ) {
         Ok(net) => net,
@@ -294,8 +307,8 @@ fn run_chat(
     let reader = embed.reader();
     let rotary = weights.reader();
     let (local, global) = match (
-        rotary.fp16(gemma4::ROTARY_LOCAL, &[gemma4::MAX_CONTEXT, gemma4::HEAD_DIM]),
-        rotary.fp16(gemma4::ROTARY_GLOBAL, &[gemma4::MAX_CONTEXT, gemma4::GLOBAL_HEAD_DIM]),
+        rotary.fp16(gemma4::ROTARY_LOCAL, &[tier(), gemma4::HEAD_DIM]),
+        rotary.fp16(gemma4::ROTARY_GLOBAL, &[tier(), gemma4::GLOBAL_HEAD_DIM]),
     ) {
         (Ok(l), Ok(g)) => (l, g),
         _ => return println!("the rotary tables did not load"),
@@ -323,7 +336,7 @@ fn run_chat(
             let from = (position * gemma4::GLOBAL_HEAD_DIM) as usize;
             place(&mut ag, &global[from..from + gemma4::GLOBAL_HEAD_DIM as usize], column, width);
         }
-        let Ok(at) = net.at(gemma4::Mode::Prefill { tokens: width }.at(TIER)) else { return };
+        let Ok(at) = net.at(gemma4::Mode::Prefill { tokens: width }.at(tier())) else { return };
         let _ = at.set_params(StepParams {
             prefix: base,
             window_start: base.saturating_sub(gemma4::WINDOW - 1),
@@ -338,20 +351,38 @@ fn run_chat(
     let mut produced: Vec<u32> = Vec::new();
     let mut next = tokens[tokens.len() - 1];
     let mut first_token = None;
+    // Where the decode step's wall time actually goes.
+    //
+    // The measured step is 282 ms while the GPU's own gemv work accounts for roughly 71 ms
+    // (1.30 GB at the 18.4 GB/s a faithful probe of this kernel reaches), leaving ~211 ms
+    // unattributed. Before that is blamed on per-dispatch cost, note this loop does two large
+    // pieces of HOST work per token that no GPU probe models: `gemma4::gather` reads embedding
+    // rows out of a 1.55 GB mapped file, and the argmax scans 262,144 logits. Split them rather
+    // than assume.
+    let mut spent_gather = std::time::Duration::ZERO;
+    let mut spent_infer = std::time::Duration::ZERO;
+    let mut spent_argmax = std::time::Duration::ZERO;
     let decode_started = Instant::now();
     for step in 0..limit {
         let position = (fed + step) as u32;
+        let at_gather = Instant::now();
         let Ok((hidden, per_layer)) = gemma4::gather(&reader, next) else { break };
         let from = (position * gemma4::HEAD_DIM) as usize;
         let al = local[from..from + gemma4::HEAD_DIM as usize].to_vec();
         let from = (position * gemma4::GLOBAL_HEAD_DIM) as usize;
         let ag = global[from..from + gemma4::GLOBAL_HEAD_DIM as usize].to_vec();
-        let Ok(at) = net.at(gemma4::Mode::DecodeStep.at(TIER)) else { break };
+        spent_gather += at_gather.elapsed();
+
+        let at_infer = Instant::now();
+        let Ok(at) = net.at(gemma4::Mode::DecodeStep.at(tier())) else { break };
         let _ = at.set_params(StepParams {
             prefix: position,
             window_start: position.saturating_sub(gemma4::WINDOW - 1),
         });
         let Ok(out) = at.infer_raw_many(&[&hidden, &per_layer, &al, &ag]) else { break };
+        spent_infer += at_infer.elapsed();
+
+        let at_argmax = Instant::now();
         let mut best = (f32::NEG_INFINITY, 0u32);
         let mut base = 0u32;
         for split in out.iter().take(gemma4::HEAD_SPLITS) {
@@ -362,6 +393,8 @@ fn run_chat(
             }
             base += split.len() as u32;
         }
+        spent_argmax += at_argmax.elapsed();
+
         if first_token.is_none() {
             first_token = Some(first.elapsed());
         }
@@ -385,4 +418,19 @@ fn run_chat(
         decoded.as_secs_f64() * 1000.0 / produced.len().max(1) as f64
     );
     println!("  reply   {:?}", table.decode(&produced));
+    let steps = produced.len().max(1) as f64;
+    println!();
+    println!("  decode step breakdown, per token, over {} steps:", produced.len());
+    println!(
+        "    gather  {:6.1} ms   HOST: embedding rows from the 1.55 GB mapped file + rotary slices",
+        spent_gather.as_secs_f64() * 1000.0 / steps,
+    );
+    println!(
+        "    infer   {:6.1} ms   upload + submit + fence + readback (the only part with GPU in it)",
+        spent_infer.as_secs_f64() * 1000.0 / steps,
+    );
+    println!(
+        "    argmax  {:6.1} ms   HOST: scan of 262,144 logits",
+        spent_argmax.as_secs_f64() * 1000.0 / steps,
+    );
 }

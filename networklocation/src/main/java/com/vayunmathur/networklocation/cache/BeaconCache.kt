@@ -13,10 +13,16 @@ import androidx.sqlite.driver.AndroidSQLiteDriver
 import com.vayunmathur.networklocation.BeaconFix
 import com.vayunmathur.networklocation.BeaconId
 
-/** Stable string key for a beacon, used as the cache primary key. */
+/**
+ * Stable string key for a beacon, used as the cache primary key.
+ *
+ * The radio type is part of a cell's key for the same reason it is part of its store key: an
+ * LTE ECI and a GSM CID are the same number in the same network and area code, so leaving it
+ * out would let one tower's cached fix answer for the other.
+ */
 fun BeaconId.key(): String = when (this) {
     is BeaconId.Wifi -> "wifi:${bssid.lowercase()}"
-    is BeaconId.Cell -> "cell:$mcc:$mnc:$cellId:$tacOrLac"
+    is BeaconId.Cell -> "cell:${radio.wire}:$mcc:$mnc:$cellId:$tacOrLac"
 }
 
 @Entity(tableName = "beacon")

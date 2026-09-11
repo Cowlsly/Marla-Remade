@@ -44,7 +44,43 @@
     <uses-permission android:name="android.permission.health.WRITE_NUTRITION" />
     <uses-permission android:name="android.permission.health.READ_HEALTH_DATA_IN_BACKGROUND" />
 
+    <!--
+      Personal Health Record (FHIR) access, for the Medication and Medical History screens.
+
+      Deliberately kept out of the PERMISSIONS set MainActivity gates the whole app on: these are
+      only grantable on Android 15 with an updated Health Connect module, and requiring them up
+      front would put every older device behind a permission wall it can never pass. Both screens
+      work from the local database when these are absent.
+    -->
+    <uses-permission android:name="android.permission.health.WRITE_MEDICAL_DATA" />
+    <uses-permission android:name="android.permission.health.READ_MEDICAL_DATA_VACCINES" />
+    <uses-permission android:name="android.permission.health.READ_MEDICAL_DATA_MEDICATIONS" />
+    <uses-permission android:name="android.permission.health.READ_MEDICAL_DATA_ALLERGIES_INTOLERANCES" />
+    <uses-permission android:name="android.permission.health.READ_MEDICAL_DATA_CONDITIONS" />
+    <uses-permission android:name="android.permission.health.READ_MEDICAL_DATA_LABORATORY_RESULTS" />
+    <uses-permission android:name="android.permission.health.READ_MEDICAL_DATA_PREGNANCY" />
+    <uses-permission android:name="android.permission.health.READ_MEDICAL_DATA_SOCIAL_HISTORY" />
+    <uses-permission android:name="android.permission.health.READ_MEDICAL_DATA_PERSONAL_DETAILS" />
+
     <uses-permission android:name="com.vayunmathur.openassistant.permission.ACCESS_INFERENCE" />
+
+    <!--
+      Medication dose reminders.
+
+      Deliberately no SCHEDULE_EXACT_ALARM or USE_EXACT_ALARM: a dose reminder does not need to be
+      punctual to the second, so DoseScheduler uses setAndAllowWhileIdle. That keeps the app out of
+      the "Alarms & reminders" settings screen entirely.
+
+      USE_FULL_SCREEN_INTENT is auto-granted only to calling and alarm apps on Android 14+, which
+      this is not, so the schedule editor offers the user a way to grant it. Without it the reminder
+      still arrives, as a heads-up notification rather than a screen takeover.
+    -->
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <uses-permission android:name="android.permission.USE_FULL_SCREEN_INTENT" />
+    <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
+    <uses-permission android:name="android.permission.VIBRATE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK" />
 
     <queries>
         <package android:name="com.vayunmathur.openassistant" />
@@ -98,6 +134,38 @@
                 android:name="android.support.FILE_PROVIDER_PATHS"
                 android:resource="@xml/file_paths" />
         </provider>
+
+        <activity
+            android:name=".platform.DoseReminderActivity"
+            android:showWhenLocked="true"
+            android:turnScreenOn="true"
+            android:excludeFromRecents="true"
+            android:exported="false"
+            android:launchMode="singleInstance" />
+
+        <receiver
+            android:name=".platform.DoseReceiver"
+            android:exported="false" />
+
+        <receiver
+            android:name=".platform.DoseActionReceiver"
+            android:exported="false" />
+
+        <receiver
+            android:name=".platform.HealthBootReceiver"
+            android:exported="false">
+            <intent-filter>
+                <action android:name="android.intent.action.BOOT_COMPLETED" />
+                <action android:name="android.intent.action.MY_PACKAGE_REPLACED" />
+                <action android:name="android.intent.action.TIMEZONE_CHANGED" />
+                <action android:name="android.intent.action.TIME_SET" />
+            </intent-filter>
+        </receiver>
+
+        <service
+            android:name=".service.DoseSoundService"
+            android:foregroundServiceType="mediaPlayback"
+            android:exported="false" />
 
     </application>
 

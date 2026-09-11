@@ -56,6 +56,14 @@ health/src/main/assets/food.bin.br
 health/src/main/assets/food.bin.meta.json
 health/src/main/assets/staging.db
 
+# Medical catalogue asset — large binary, regenerate with scripts/generate_med_db.py.
+# Holds both the RxNorm medication and ICD-10-CM condition terminologies. The vaccine half of
+# that script writes health/src/main/assets/cvx.json, which is small enough to commit and is
+# deliberately not ignored.
+health/src/main/assets/catalog.db
+health/src/main/assets/catalog.db.br
+health/src/main/assets/catalog.db.meta.json
+
 # Compose preview screenshot rendering (common-conventions-preview-metadata). These PNGs
 # are an intermediate: the `metadata` task copies them into metadata_data/photos/<module>,
 # which is what is committed and what release.sh reads. Committing them too would store

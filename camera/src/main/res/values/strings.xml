@@ -84,6 +84,9 @@
     <string name="no_app_to_open_url">No app can open this link</string>
     <!-- QrResultOverlay: button to copy QR text to clipboard. Verb. -->
     <string name="copy_text">Copy</string>
+    <!-- CameraScreen overlay pill: the bound camera session has no analysis stream (some vendor
+         night extensions cannot host one), so the viewfinder cannot look for QR codes -->
+    <string name="qr_scanning_paused">QR scanning paused</string>
 
     <!-- Pro / manual controls -->
     <!-- CameraScreen: slider label for portrait blur/bokeh strength -->

@@ -28,15 +28,30 @@
 //!
 //! `p.weight` is a **32-bit word** offset, as in `conv_int8.comp`. `p.act_weight` holds the scale
 //! tensor as an fp16 element index, which is why `Act::PRelu` cannot ride along.
+//!
+//! # Why the staging step is deeper than the tile
+//!
+//! A tile is 16 x 16 outputs but the input channels are walked [`KSTEP`] at a time, not 16. The
+//! two barriers around the inner loop are the expensive part at Supertonic's shape: a wave stages,
+//! stalls the whole memory latency at the barrier, computes, and stalls again, with nothing to
+//! overlap either stall against. `analysis/dispatch_vs_bandwidth.md` measured that interaction as
+//! the dominant cost of this runtime's matrix kernels — the same arithmetic runs 7x faster when
+//! there is a stream to hide the latency under. Staging four steps' worth at once quarters the
+//! number of stalls for the same traffic and the same arithmetic.
 
 #include "common.glsl"
 
-/// Output channels and positions per workgroup, and input channels per staging step.
+/// Output channels and positions per workgroup.
 #define TILE 16u
 
-/// The staged blocks. `TILE * TILE` each, so 2 KB of shared memory at fp32.
-shared float weight_tile[TILE][TILE];
-shared float input_tile[TILE][TILE];
+/// Input channels staged per step. Independent of [`TILE`]: it changes how often the workgroup
+/// barriers, not which outputs it owns, so the host's tile count is unaffected.
+#define KSTEP 64u
+
+/// The staged blocks. `TILE * KSTEP` each, so 8 KB of shared memory at fp32 — inside the 16 KB
+/// `maxComputeSharedMemorySize` guarantees.
+shared float weight_tile[TILE][KSTEP];
+shared float input_tile[KSTEP][TILE];
 
 void main() {
     // The tile this workgroup owns. Uniform across the workgroup, so returning early cannot
@@ -57,29 +72,34 @@ void main() {
 
     float acc[2][2] = { { 0.0, 0.0 }, { 0.0, 0.0 } };
 
-    for (uint k0 = 0u; k0 < p.in_c; k0 += TILE) {
-        // Stage both blocks. 256 elements each, 64 invocations, so four apiece. Out-of-range
-        // entries are zeroed rather than skipped, which lets the inner loop run unguarded.
-        for (uint n = 0u; n < 4u; n++) {
+    for (uint k0 = 0u; k0 < p.in_c; k0 += KSTEP) {
+        // Stage both blocks. `TILE * KSTEP` elements each, 64 invocations, so sixteen apiece.
+        // Out-of-range entries are zeroed rather than skipped, which lets the inner loop run
+        // unguarded. The two blocks are indexed differently because they are shaped differently:
+        // the weights are `[TILE][KSTEP]` and the activations `[KSTEP][TILE]`. Both walk their
+        // fastest axis across consecutive invocations, so both stay coalesced.
+        for (uint n = 0u; n < TILE * KSTEP / 64u; n++) {
             uint slot = lid + n * 64u;
-            uint r = slot >> 4u;
-            uint c = slot & 15u;
 
-            uint channel = channel_base + r;
-            uint k_weight = k0 + c;
-            weight_tile[r][c] = (channel < p.out_c && k_weight < p.in_c)
+            uint wr = slot / KSTEP;
+            uint wc = slot % KSTEP;
+            uint channel = channel_base + wr;
+            uint k_weight = k0 + wc;
+            weight_tile[wr][wc] = (channel < p.out_c && k_weight < p.in_c)
                 ? float(int8_at(p.weight, channel * p.in_c + k_weight))
                 : 0.0;
 
-            uint k_input = k0 + r;
-            uint position = position_base + c;
-            input_tile[r][c] = (k_input < p.in_c && position < positions)
+            uint ir = slot / TILE;
+            uint ic = slot % TILE;
+            uint k_input = k0 + ir;
+            uint position = position_base + ic;
+            input_tile[ir][ic] = (k_input < p.in_c && position < positions)
                 ? float(arena[p.in0 + k_input * positions + position])
                 : 0.0;
         }
         barrier();
 
-        for (uint k = 0u; k < TILE; k++) {
+        for (uint k = 0u; k < KSTEP; k++) {
             float a0 = weight_tile[local_row][k];
             float a1 = weight_tile[local_row + 1u][k];
             float b0 = input_tile[k][local_col];

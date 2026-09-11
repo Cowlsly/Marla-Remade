@@ -51,7 +51,6 @@
     <string name="label_elevation">Höhe</string>
     <string name="label_floors">Stockwerke</string>
     <string name="label_distance">Distanz</string>
-    <string name="section_this_week">Diese Woche</string>
     <string name="label_heart_rate">Puls</string>
     <string name="label_sleep">Schlaf</string>
     <string name="label_hydration">Hydration</string>
@@ -86,11 +85,9 @@
     <string name="search_ingredient">Zutat suchen</string>
     <string name="log_hydration">Hydration</string>
     <string name="nav_today">Heute</string>
-    <string name="nav_activity">Aktivität</string>
     <string name="nav_nutrition">Ernährung</string>
     <string name="nav_body">Körper</string>
     <string name="section_latest_vitals">Letzte Vitalwerte</string>
     <string name="section_last_night">Letzte Nacht</string>
     <string name="section_quick_stats">Schnellstatistik</string>
-    <string name="section_today_activity">Heute</string>
 </resources>

@@ -97,14 +97,11 @@
     <string name="log_hydration">Zapsat napití</string>
     <string name="log_meal">Zapsat jídlo</string>
     <string name="nav_today">Dnes</string>
-    <string name="nav_activity">Aktivita</string>
     <string name="nav_nutrition">Výživa</string>
     <string name="nav_body">Tělo</string>
     <string name="section_latest_vitals">Nejnovější vitální funkce</string>
     <string name="section_last_night">Minulá noc</string>
     <string name="section_quick_stats">Rychlá statistika</string>
-    <string name="section_today_activity">Dnes</string>
-    <string name="section_this_week">Tento týden</string>
     <string name="label_exercise">Cvičení</string>
     <string name="no_workouts">Žádné zaznamenané cviky</string>
     <string name="log_body_metric">Zapsat <xliff:g id="metric" example="váha">%1$s</xliff:g></string>

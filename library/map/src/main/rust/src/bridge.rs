@@ -23,14 +23,14 @@ use crate::tile::cache::{RangeCache, DEFAULT_MAX_BYTES};
 use crate::tile::geometry::{self, TileMesh};
 use crate::tile::select::{self, TileId};
 use crate::tile::source::{
-    basemap_origin, CachingRangeReader, JniRangeFetcher, BASEMAP_ARCHIVE_URL,
+    basemap_origin, retry_delay_ms, CachingRangeReader, JniRangeFetcher, BASEMAP_ARCHIVE_URL,
 };
 use crate::vulkan::context::{ANativeWindow_acquire, ANativeWindow_fromSurface};
 use crate::vulkan::renderer::{Renderer, UserPuck};
 use jni::objects::{JClass, JFloatArray, JIntArray, JLongArray, JObject, JString};
 use jni::sys::{jboolean, jfloat, jint, jlong};
 use jni::JNIEnv;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::os::raw::c_void;
 use std::sync::mpsc::{Receiver, Sender};
 use std::sync::{Arc, Mutex};
@@ -137,6 +137,20 @@ struct MapHandle {
     /// Tiles the archive does not contain. Remembered so they are not re-requested every
     /// frame forever — most of a coastal viewport is ocean.
     absent: HashSet<u64>,
+    /// Tiles whose fetch or decode failed, as `key -> (consecutive failures, earliest retry)`.
+    ///
+    /// [`TileResult::Failed`] deliberately does not mark a tile [`TileResult::Absent`], so it
+    /// is tried again — but with nothing recording *when*, "again" meant on the very next
+    /// frame, and a tile that keeps failing was re-requested sixty times a second for as long
+    /// as it stayed visible. This is the missing half: the same retry, at
+    /// [`retry_delay_ms`](crate::tile::source::retry_delay_ms) intervals.
+    ///
+    /// `Instant`, not the camera's `time_seconds`, because that clock wraps hourly and a
+    /// deadline across a wrap would either fire an hour early or an hour late.
+    ///
+    /// Cleared per tile on success. Bounded in practice the same way [`absent`](Self::absent)
+    /// is: it holds one small entry per distinct tile that has actually failed this session.
+    retry: HashMap<u64, (u32, std::time::Instant)>,
     online: Arc<OnlineFlag>,
     /// Light or dark. Switching costs nothing: colour is a push constant and the layer set
     /// is identical, so no tile is re-tessellated or re-uploaded.
@@ -298,6 +312,7 @@ pub extern "system" fn Java_com_vayunmathur_library_map_MapNative_create<'l>(
         wanted: wanted_tx,
         in_flight: HashSet::new(),
         absent: HashSet::new(),
+        retry: HashMap::new(),
         online,
         palette: Palette::new(dark != 0, muted != 0),
         toggles,
@@ -547,7 +562,7 @@ pub extern "system" fn Java_com_vayunmathur_library_map_MapNative_render<'l>(
         density,
         bearing_deg: bearing as f64,
         pitch_deg: (pitch as f64).clamp(0.0, crate::camera::PITCH_MAX_DEG),
-        time_seconds: ((frame_time_nanos.rem_euclid(3_600_000_000_000)) as f64 / 1_000_000_000.0) as f32,
+        time_seconds: ((frame_time_nanos.rem_euclid(crate::camera::CLOCK_WRAP_NANOS)) as f64 / 1_000_000_000.0) as f32,
     };
     // Task-17 pick needs the frame's density for Dp→device-px; remember it.
     map.density = density;
@@ -562,6 +577,9 @@ pub extern "system" fn Java_com_vayunmathur_library_map_MapNative_render<'l>(
         match result {
             TileResult::Ready(mesh) => {
                 uploads += 1;
+                // It arrived, so whatever was failing has stopped. Anything else would leave a
+                // tile that recovered still carrying a ten-second backoff for the session.
+                map.retry.remove(&key);
                 if let Err(e) = map.renderer.upload(key, &mesh) {
                     log(&format!("uploading a tile failed: {e}"));
                 }
@@ -570,10 +588,19 @@ pub extern "system" fn Java_com_vayunmathur_library_map_MapNative_render<'l>(
             // tiles every frame for the life of the surface.
             TileResult::Absent => {
                 map.absent.insert(key);
+                map.retry.remove(&key);
             }
-            // Deliberately not recorded: clearing `in_flight` above is what lets it be
-            // tried again, which is the whole point of distinguishing this from `Absent`.
-            TileResult::Failed => {}
+            // Deliberately not recorded as absent: clearing `in_flight` above is what lets it
+            // be tried again, which is the whole point of distinguishing this from `Absent`.
+            // What is recorded is *when* — without a deadline the retry lands on the very next
+            // frame, so a tile that keeps failing is re-requested sixty times a second and the
+            // in-flight set never empties, which both storms the network and stops the
+            // on-demand frame loop ever idling.
+            TileResult::Failed => {
+                let attempts = map.retry.get(&key).map_or(0, |(n, _)| *n).saturating_add(1);
+                let wait = std::time::Duration::from_millis(retry_delay_ms(attempts));
+                map.retry.insert(key, (attempts, std::time::Instant::now() + wait));
+            }
         }
     }
 
@@ -596,16 +623,31 @@ pub extern "system" fn Java_com_vayunmathur_library_map_MapNative_render<'l>(
     let visible = select::visible(&camera, min_zoom, max_zoom);
     let keep: Vec<u64> =
         select::resident_set(&camera, min_zoom, max_zoom).iter().map(|t| t.key()).collect();
+    let now = std::time::Instant::now();
     for tile in &visible {
         let key = tile.key();
         if map.renderer.has_tile(key, generation)
             || map.absent.contains(&key)
+            // Still inside its backoff after a failure. Left in `retry` rather than removed
+            // here, so the attempt count keeps climbing if it fails again.
+            || map.retry.get(&key).is_some_and(|(_, at)| now < *at)
             || !map.in_flight.insert(key)
         {
             continue;
         }
         // A closed channel means every worker died; the map keeps drawing what it has.
         let _ = map.wanted.send(*tile);
+    }
+    // Drop backoffs for tiles that are no longer visible. Not just housekeeping: an entry whose
+    // deadline has passed but which nothing re-requests would make `nextFrameDelayMillis`
+    // answer "draw now" forever, spinning the on-demand loop at 60fps for a tile that is off
+    // screen. Only the visible set is ever fetched, so only the visible set may hold a backoff.
+    //
+    // Linear rather than a `HashSet` of the visible keys, deliberately: this runs per frame,
+    // `retry` is empty in the ordinary case (so the closure never runs), and a viewport is a
+    // couple of dozen tiles. Building a set here would allocate every frame to save nothing.
+    if !map.retry.is_empty() {
+        map.retry.retain(|key, _| visible.iter().any(|t| t.key() == *key));
     }
     map.renderer.retain(&keep, &visible, RESIDENT_TILE_CAP);
 
@@ -659,6 +701,51 @@ pub extern "system" fn Java_com_vayunmathur_library_map_MapNative_render<'l>(
             log(&format!("frame failed: {e}"));
             0
         }
+    }
+}
+
+/// How long the host may wait before the next frame: `0` to draw again now, a positive number
+/// of milliseconds to draw again then, or `-1` when nothing is pending at all.
+///
+/// The host renders on demand rather than every vsync, and asks this after each frame. It
+/// answers for the pending work the Kotlin side cannot see:
+///
+/// - **tiles in flight** \u2014 draw now. A worker finishing a tile only reaches the screen through
+///   [`render`](Java_com_vayunmathur_library_map_MapNative_render), which is what drains
+///   `finished` and uploads. Nothing calls back into Kotlin when one lands, so idling with
+///   requests outstanding leaves the map permanently missing whatever was still being fetched.
+///   This also covers the bounded drain (a burst larger than `UPLOADS_PER_FRAME` finishes over
+///   several frames, and the rest stay in `in_flight`) and the re-tessellation a layer toggle
+///   triggers \u2014 both keep keys in `in_flight`.
+/// - **the renderer's own pending work** \u2014 draw now. See [`Renderer::needs_frame`].
+/// - **a failed tile inside its retry backoff** \u2014 draw *then*. This is why the answer is a
+///   delay rather than a flag. A backed-off tile is deliberately not in `in_flight`, so
+///   nothing else here reports it, and without a deadline to wake on, a tile that failed while
+///   the camera was static would stay missing until the user happened to pan. Reporting the
+///   wait instead lets the host sleep exactly that long and then retry once, rather than
+///   either spinning through the backoff or never retrying at all.
+///
+/// Errs toward drawing throughout. A wasted frame costs one frame; a wrong `-1` freezes the
+/// map until the user touches it.
+#[no_mangle]
+pub extern "system" fn Java_com_vayunmathur_library_map_MapNative_nextFrameDelayMillis<'l>(
+    _env: JNIEnv<'l>,
+    _class: JClass<'l>,
+    handle: jlong,
+) -> jlong {
+    let Some(map) = handle_mut(handle) else { return -1 };
+    if !map.in_flight.is_empty() || map.renderer.needs_frame() {
+        return 0;
+    }
+    let now = std::time::Instant::now();
+    let soonest = map.retry.values().map(|(_, at)| *at).min();
+    match soonest {
+        // Already due but not yet re-requested: the fetch loop only runs inside a frame, so
+        // this asks for the frame that will issue it.
+        Some(at) if at <= now => 0,
+        // At least 1, so a sub-millisecond wait is never confused with "draw now".
+        Some(at) => (at - now).as_millis().max(1).min(jlong::MAX as u128) as jlong,
+        None => -1,
     }
 }
 

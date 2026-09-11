@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources xmlns:xliff="urn:oasis:names:tc:xliff:document:1.2">
+    <!-- Launcher and title. The product is a projection sender: it puts a driving-safe
+         interface on the car's screen. -->
+    <string name="app_name">Auto</string>
+
+    <!-- Heading of the card showing whether a head unit is connected. -->
+    <string name="connection">Connection</string>
+    <!-- Shown when no head unit is attached, over USB or wirelessly. -->
+    <string name="state_disconnected">Not connected to a car</string>
+    <!-- Shown while the USB or wireless link is being brought up and authenticated. -->
+    <string name="state_connecting">Connecting…</string>
+    <!-- Shown once the car has authenticated and projection is running. %1$s is the car's
+         name as it reported it, for example "Pioneer" or "Volkswagen". -->
+    <string name="state_projecting">Projecting to <xliff:g example="Pioneer" id="car">%1$s</xliff:g></string>
+    <!-- Shown when the link came up but the car refused to authenticate us. -->
+    <string name="state_rejected">The car would not accept this phone</string>
+
+    <!-- Explains that plugging in is all that is needed; there is nothing to configure. -->
+    <string name="connect_hint">Plug the phone into the car with a USB cable, or start Android Auto from the car\'s screen if it supports a wireless connection.</string>
+</resources>

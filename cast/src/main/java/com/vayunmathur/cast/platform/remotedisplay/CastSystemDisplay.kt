@@ -26,6 +26,25 @@ private const val FLAG_PUBLIC = 1 shl 0
 private const val FLAG_PRESENTATION = 1 shl 1
 
 /**
+ * `VIRTUAL_DISPLAY_FLAG_SUPPORTS_TOUCH`. **What makes the desktop usable at all.**
+ *
+ * Without it `VirtualDisplayAdapter` reports `DisplayDeviceInfo.TOUCH_NONE`, and
+ * `DisplayManagerService.getViewportType` answers `Optional.empty()` for anything that is not
+ * `TOUCH_INTERNAL`, `TOUCH_EXTERNAL` or `TOUCH_VIRTUAL` - logging "does not support input device
+ * matching" and creating no `DisplayViewport`. InputFlinger routes by viewport, so a display
+ * without one cannot receive input of any kind: not a tap, not a key, and not a mouse pointer.
+ * The desktop rendered perfectly and ignored everything.
+ *
+ * The `TOUCH_VIRTUAL` branch additionally requires a non-empty `uniqueId`, which [applyUniqueId]
+ * already supplies - so the two are a pair, and dropping either one silently removes input.
+ *
+ * Despite the name this is not about touchscreens. It is the switch that gives the display an
+ * input viewport; the pointer then reaches it through the display topology, which is what
+ * Settings calls "universal cursor".
+ */
+private const val FLAG_SUPPORTS_TOUCH = 1 shl 6
+
+/**
  * `VIRTUAL_DISPLAY_FLAG_TRUSTED`. Gated on `ADD_TRUSTED_DISPLAY`, which this app holds only by
  * being platform-signed. Lets the system place activities on the display, and is a precondition of
  * [FLAG_ALLOWS_CONTENT_MODE_SWITCH].
@@ -53,27 +72,22 @@ private const val FLAG_ALLOWS_CONTENT_MODE_SWITCH = 1 shl 17
 private const val FLAG_CONNECTION_PENDING = 1 shl 18
 
 /**
- * These are `@SystemApi` or public in `DisplayManager`, but three of them - `TRUSTED`,
- * `ALLOWS_CONTENT_MODE_SWITCH` and `CONNECTION_PENDING` - are not in the public SDK this module
- * compiles against, so they are spelled as literals. Bit positions verified against
- * `DisplayManager.java` (`PUBLIC` 1<<0, `PRESENTATION` 1<<1, `TRUSTED` 1<<10,
- * `ALLOWS_CONTENT_MODE_SWITCH` 1<<17, `CONNECTION_PENDING` 1<<18).
+ * These are `@SystemApi`, `@TestApi` or public in `DisplayManager`, but four of them - `TRUSTED`,
+ * `SUPPORTS_TOUCH`, `ALLOWS_CONTENT_MODE_SWITCH` and `CONNECTION_PENDING` - are not in the public
+ * SDK this module compiles against, so they are spelled as literals. Bit positions verified
+ * against `DisplayManager.java` (`PUBLIC` 1<<0, `PRESENTATION` 1<<1, `SUPPORTS_TOUCH` 1<<6,
+ * `TRUSTED` 1<<10, `ALLOWS_CONTENT_MODE_SWITCH` 1<<17, `CONNECTION_PENDING` 1<<18).
  *
  * `AUTO_MIRROR` and `OWN_CONTENT_ONLY` are deliberately absent and must stay absent: either one
  * causes the framework to silently drop `ALLOWS_CONTENT_MODE_SWITCH`, leaving an extend-only
  * display and a log line rather than an error.
  */
 private const val CAST_DISPLAY_FLAGS =
-    FLAG_PUBLIC or FLAG_PRESENTATION or FLAG_TRUSTED or FLAG_ALLOWS_CONTENT_MODE_SWITCH or
-        FLAG_CONNECTION_PENDING
+    FLAG_PUBLIC or FLAG_PRESENTATION or FLAG_SUPPORTS_TOUCH or FLAG_TRUSTED or
+        FLAG_ALLOWS_CONTENT_MODE_SWITCH or FLAG_CONNECTION_PENDING
 
 /** What the display is called, in Settings and in `dumpsys display`. */
 private const val DISPLAY_NAME = "cast"
-/**
- * Nominal refresh rate for a declared mode. `VirtualDisplayAdapter` rebuilds each declared mode at
- * the display's own refresh rate and reads only its width and height, so this value is not shown.
- */
-private const val DESKTOP_MODE_REFRESH_RATE = 60f
 
 /**
  * Namespaces the unique id so it cannot collide with another adapter's.
@@ -144,6 +158,10 @@ class CastSystemDisplay(context: Context) {
             )
                 .setFlags(CAST_DISPLAY_FLAGS)
                 .setSurface(surface)
+                // The rate frames are actually sent at, so the system composes at that rate rather
+                // than at 60 and having half of every second's work thrown away by the encoder.
+                // It is also the fallback rate for any mode that was not declared.
+                .setRequestedRefreshRate(geometry.frameRate.toFloat())
             builder.applySupportedModes(supportedModes)
             receiverId?.let { builder.applyUniqueId("$UNIQUE_ID_PREFIX$it") }
             display = displays.createVirtualDisplay(builder.build())
@@ -186,9 +204,9 @@ class CastSystemDisplay(context: Context) {
     /**
      * `VirtualDisplayConfig.Builder.setSupportedModes`, which is `@SystemApi` and
      * `@FlaggedApi(FLAG_VIRTUAL_DISPLAYS_SUPPORT_DESKTOP_MODE)` - not on the public SDK this module
-     * compiles against - hence reflection. Each [CaptureGeometry] becomes a `Display.Mode`; the
-     * framework re-creates each at the display's own refresh rate, reading only width and height,
-     * so Settings' resolution picker ends up offering exactly these sizes.
+     * compiles against - hence reflection. Each [CaptureGeometry] becomes a `Display.Mode` at the
+     * size and rate that geometry will actually be sent at, so Settings' resolution picker ends up
+     * offering exactly these.
      *
      * Best effort, and never fatal to the display: on a build without the framework change the
      * method is absent and the picker simply shows the single mode the display was created at,
@@ -197,7 +215,8 @@ class CastSystemDisplay(context: Context) {
     private fun VirtualDisplayConfig.Builder.applySupportedModes(modes: List<CaptureGeometry>) {
         if (modes.isEmpty()) return
         try {
-            val displayModes = modes.mapNotNull { buildDisplayMode(it.width, it.height) }
+            val displayModes =
+                modes.mapNotNull { buildDisplayMode(it.width, it.height, it.frameRate.toFloat()) }
             if (displayModes.isEmpty()) return
             VirtualDisplayConfig.Builder::class.java
                 .getMethod("setSupportedModes", List::class.java)
@@ -208,10 +227,10 @@ class CastSystemDisplay(context: Context) {
     }
 
     /**
-     * A `Display.Mode` for [width] x [height]. Its constructor is not on the public SDK, so it is
-     * reached reflectively; the refresh rate is nominal (see [DESKTOP_MODE_REFRESH_RATE]).
+     * A `Display.Mode` for [width] x [height] at [refreshRate]. Its constructor is not on the
+     * public SDK, so it is reached reflectively.
      */
-    private fun buildDisplayMode(width: Int, height: Int): Display.Mode? =
+    private fun buildDisplayMode(width: Int, height: Int, refreshRate: Float): Display.Mode? =
         try {
             Display.Mode::class.java
                 .getDeclaredConstructor(
@@ -220,11 +239,31 @@ class CastSystemDisplay(context: Context) {
                     Float::class.javaPrimitiveType,
                 )
                 .apply { isAccessible = true }
-                .newInstance(width, height, DESKTOP_MODE_REFRESH_RATE)
+                .newInstance(width, height, refreshRate)
         } catch (e: Throwable) {
             Log.w(TAG, "Display.Mode(int, int, float) unavailable; cannot declare ${width}x$height", e)
             null
         }
+
+    /**
+     * Point the existing display at a new encoder surface.
+     *
+     * What makes a mid-session resolution change survivable. The stream is re-negotiated around a
+     * fresh `MediaCodec`, and the display has to be handed that codec's input surface - but the
+     * display itself must not be recreated, or its id changes and every window on the desktop is
+     * destroyed along with the user's place in whatever they were doing.
+     *
+     * The size is left alone deliberately: the framework has already resized the display, which is
+     * what prompted the re-negotiation in the first place.
+     */
+    fun attach(surface: Surface): Boolean {
+        val current = display
+        if (current == null) {
+            Log.w(TAG, "asked to re-attach a surface with no display")
+            return false
+        }
+        return runCatching { current.surface = surface }.isSuccess
+    }
 
     fun release() {
         runCatching { display?.release() }

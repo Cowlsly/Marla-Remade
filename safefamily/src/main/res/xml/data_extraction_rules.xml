@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<data-extraction-rules>
+    <!--
+      Nothing to carry. This app stores no state of its own: supervision policy and the PIN live
+      in SupervisionService and the platform's credential storage, and both are per-device rather
+      than per-app. `allowBackup="false"` in the manifest already says so; this file exists
+      because the manifest references it.
+    -->
+    <cloud-backup />
+    <device-transfer />
+</data-extraction-rules>

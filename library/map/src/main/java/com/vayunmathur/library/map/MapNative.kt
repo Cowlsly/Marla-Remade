@@ -86,6 +86,32 @@ internal object MapNative {
     external fun resize(handle: Long, width: Int, height: Int)
 
     /**
+     * How long the host may wait before the next frame: `0` to draw again now, a positive
+     * number of milliseconds to draw again then, or `-1` when nothing is pending.
+     *
+     * [SurfaceMapRenderer] renders on demand rather than every vsync, and asks this after each
+     * frame. It reports the pending work that only the native side can see: tiles in flight (a
+     * worker finishing one reaches the screen only through [render], and nothing calls back
+     * when it lands), the bounded upload drain, the re-tessellation a [setLayers] toggle
+     * triggers, a swapchain still needing a rebuild, buffers waiting out their in-flight
+     * grace, and a LOD cross-fade partway up — all of which answer `0`.
+     *
+     * A **delay** rather than a boolean because of one case: a tile whose fetch failed is held
+     * back for a retry interval, and during that interval it is deliberately not in flight, so
+     * nothing else reports it. Without a deadline to wake on, a tile that failed while the
+     * camera was static would stay missing until the user happened to pan. A positive answer
+     * is the host's cue to sleep exactly that long and then draw one frame, rather than either
+     * spinning through the backoff or never retrying.
+     *
+     * Deliberately conservative: it answers `0` wherever it is unsure. A spurious frame costs
+     * one frame, whereas a spurious `-1` leaves the map frozen until the user next touches it.
+     *
+     * Cheap enough for the frame loop: a handful of `is_empty` checks, one pass over the
+     * resident tiles and one over any failed ones, no Vulkan calls and no allocation.
+     */
+    external fun nextFrameDelayMillis(handle: Long): Long
+
+    /**
      * Switch palette: light or dark, muted or not.
      *
      * Free: colour reaches the GPU as a push constant and the layer set is identical, so

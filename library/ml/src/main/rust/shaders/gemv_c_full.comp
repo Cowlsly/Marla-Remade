@@ -1,0 +1,61 @@
+#version 450
+//! VARIANT C — FULL DEQUANT. Variant B plus the fp16 activation fetch and the multiply.
+//!
+//! TEMPORARY probe shader for task 9. Source of truth is
+//! `analysis/gemv_probe/gemv_c_full.comp`. See `gemv_a_control.comp` for why this copy
+//! exists and when to delete it.
+//!
+//! This is `conv_vec_int4.comp`'s inner loop reproduced exactly, over the control's load
+//! structure. `C - B` is the cost of the activation stream: 32 scalar `float16_t` loads and
+//! 32 multiplies per 16 bytes of weights.
+//!
+//! # Why the activation buffer is small and indexed this way
+//!
+//! In the real kernel the activation vector is `in_c` elements — 3 KB at `in_c` 1536 — and
+//! every workgroup re-reads all of it (`conv_vec_int4.comp:44-47` accepts that cost
+//! deliberately). It is therefore cache-resident, and a probe that streamed a large
+//! activation buffer would measure DRAM traffic the real kernel does not pay.
+//!
+//! So the buffer is 4,096 `float16_t` (8 KB), and `abase` walks 128 distinct 32-element
+//! blocks. That keeps the access lane-varying and contiguous-within-block, as in the real
+//! kernel, while staying resident — which is the honest analogue.
+//!
+//! # Bytes accounting
+//!
+//! The reported GB/s counts only the 256 MB source sweep, never the activation reads. That
+//! matches how the real gemv's 3.37 GB/s is computed (`probe_gemv` divides by weight bytes
+//! only, `bridge.rs:3167`), so the numbers are directly comparable.
+
+#extension GL_EXT_shader_16bit_storage : require
+#extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
+
+layout(local_size_x = 64) in;
+
+layout(set = 0, binding = 0) readonly buffer Source { uvec4 data[]; };
+layout(set = 0, binding = 1) buffer Sink { uint sink[]; };
+layout(set = 0, binding = 2) readonly buffer Acts { float16_t act[]; };
+
+layout(push_constant) uniform Push {
+    uint quads;
+};
+
+void main() {
+    uint lane = gl_GlobalInvocationID.x;
+    uint stride = gl_NumWorkGroups.x * 64u;
+    float total = 0.0;
+    for (uint at = lane; at < quads; at += stride) {
+        uvec4 packed = data[at];
+        uint abase = (at & 127u) * 32u;
+        // `conv_vec_int4.comp:110-115`, verbatim in structure.
+        for (uint word = 0u; word < 4u; word++) {
+            uint bits = packed[word];
+            for (uint n = 0u; n < 8u; n++) {
+                int code = bitfieldExtract(int(bits), int(n << 2u), 4);
+                total += float(code) * float(act[abase + word * 8u + n]);
+            }
+        }
+    }
+    if (floatBitsToUint(total) == 0xFFFFFFFFu) {
+        sink[0] = 1u;
+    }
+}

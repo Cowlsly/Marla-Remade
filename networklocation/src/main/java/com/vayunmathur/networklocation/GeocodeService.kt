@@ -14,10 +14,10 @@ import java.util.Locale
  * framework via the `com.android.location.service.GeocodeProvider` action; the app must be the
  * configured geocode provider (config_geocoderProviderPackageName) and hold INSTALL_LOCATION_PROVIDER.
  *
- * The search itself runs in native Rust ([GeocoderNative]) over `geocoder.geodb`, which is
- * downloaded to device-protected storage rather than bundled (see [OfflineDatabases]). The
+ * The search itself runs in native Rust ([GeocoderNative]) over the geocoder database, which
+ * is downloaded to device-protected storage rather than bundled (see [OfflineDatabases]). The
  * provider contract: return null on success (results appended to `addrs`) or an error string.
- * Until the download lands there is no online fallback, so every request reports unavailable.
+ * There is no online fallback, so until the download lands every request reports unavailable.
  */
 class GeocodeService : Service() {
     private var pfd: ParcelFileDescriptor? = null
@@ -34,7 +34,9 @@ class GeocodeService : Service() {
             ): String? {
                 if (!ensureOpen()) return "geocoder database unavailable"
                 val flat = GeocoderNative.reverse(handle, latitude, longitude) ?: return null
-                if (flat.size >= GeocoderNative.FIELDS_PER_ADDRESS) addrs.add(flat.toAddress(0, params.locale))
+                if (flat.size >= GeocoderNative.FIELDS_PER_RESULT) {
+                    addrs.add(flat.toAddress(0, params.locale))
+                }
                 return null
             }
 
@@ -49,16 +51,27 @@ class GeocodeService : Service() {
                 addrs: MutableList<Address>,
             ): String? {
                 if (!ensureOpen()) return "geocoder database unavailable"
+                val limit = maxResults.coerceIn(1, 50)
                 val parts = locationName.split(",").map { it.trim() }.filter { it.isNotEmpty() }
-                if (parts.size < 4) return null
-                val country = parts[parts.size - 1]
-                val state = parts[parts.size - 2]
-                val city = parts[parts.size - 3]
-                val street = parts[parts.size - 4]
-                val flat = GeocoderNative.forward(
-                    handle, country, state, city, street, maxResults.coerceIn(1, 50),
-                ) ?: return null
-                val stride = GeocoderNative.FIELDS_PER_ADDRESS
+
+                // A fully structured query is answered from the address index, which is exact.
+                val flat = if (parts.size >= 4) {
+                    GeocoderNative.forward(
+                        handle,
+                        country = parts[parts.size - 1],
+                        state = parts[parts.size - 2],
+                        city = parts[parts.size - 3],
+                        street = parts[parts.size - 4],
+                        limit = limit,
+                    )
+                } else {
+                    // Anything else is treated as a feature name. v2 had no name column, so a
+                    // query like "Golden Gate Park" could not be answered at all and this
+                    // returned nothing.
+                    GeocoderNative.searchName(handle, parts.firstOrNull() ?: locationName.trim(), limit)
+                } ?: return null
+
+                val stride = GeocoderNative.FIELDS_PER_RESULT
                 var base = 0
                 while (base + stride <= flat.size && addrs.size < maxResults) {
                     addrs.add(flat.toAddress(base, params.locale))
@@ -120,20 +133,33 @@ class GeocodeService : Service() {
         super.onDestroy()
     }
 
-    /** A flat result slice `[lat, lon, house, street, city, state, country, postcode]` at [base]. */
+    /**
+     * One flat result slice at [base]:
+     * `[lat, lon, name, house, street, city, state, country, postcode, kind]`.
+     */
     private fun Array<String>.toAddress(base: Int, locale: Locale): Address {
         val a = Address(locale)
-        a.latitude = this[base].toDoubleOrNull() ?: 0.0
-        a.longitude = this[base + 1].toDoubleOrNull() ?: 0.0
-        val house = this[base + 2]
-        val street = this[base + 3]
-        val city = this[base + 4]
-        val state = this[base + 5]
-        val country = this[base + 6]
-        val postcode = this[base + 7]
-        val line = listOf(house, street).filter { it.isNotEmpty() }.joinToString(" ")
+        a.latitude = this[base + GeocoderNative.F_LAT].toDoubleOrNull() ?: 0.0
+        a.longitude = this[base + GeocoderNative.F_LON].toDoubleOrNull() ?: 0.0
+        val name = this[base + GeocoderNative.F_NAME]
+        val house = this[base + GeocoderNative.F_HOUSE]
+        val street = this[base + GeocoderNative.F_STREET]
+        val city = this[base + GeocoderNative.F_CITY]
+        val state = this[base + GeocoderNative.F_STATE]
+        val country = this[base + GeocoderNative.F_COUNTRY]
+        val postcode = this[base + GeocoderNative.F_POSTCODE]
+
+        // The first address line is what a user sees. A named feature leads with its name; a
+        // plain address leads with "<number> <street>".
+        val line = when {
+            name.isNotEmpty() -> name
+            else -> listOf(house, street).filter { it.isNotEmpty() }.joinToString(" ")
+        }
         if (line.isNotEmpty()) a.setAddressLine(0, line)
-        if (house.isNotEmpty()) a.featureName = house
+        // featureName is the framework's "what is this place called", so a POI or place name
+        // belongs there in preference to the house number.
+        val feature = name.ifEmpty { house }
+        if (feature.isNotEmpty()) a.featureName = feature
         if (street.isNotEmpty()) a.thoroughfare = street
         if (city.isNotEmpty()) a.locality = city
         if (state.isNotEmpty()) a.adminArea = state

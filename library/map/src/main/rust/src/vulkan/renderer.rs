@@ -918,6 +918,53 @@ impl Renderer {
         self.tiles.get(&key).is_some_and(|tile| tile.generation == generation)
     }
 
+    /// Whether another frame would do something this one did not — the renderer's half of
+    /// the host's on-demand frame loop (see `SurfaceMapRenderer`).
+    ///
+    /// The host drives frames only while something has changed, and none of the state below
+    /// is visible to it: it cannot see a swapchain that still needs rebuilding, buffers
+    /// waiting out their in-flight grace, or a cross-fade partway up. Answering `false` while
+    /// any of them holds stops the clock on work in progress, so each errs toward another
+    /// frame.
+    ///
+    /// Tiles still in flight are deliberately **not** here — that is `MapHandle::in_flight`,
+    /// which lives on the bridge side and is checked there.
+    ///
+    /// # `retiring` and `transients` are only safe wake reasons while nothing refills them
+    ///
+    /// Both hold GPU memory that a later frame frees in `collect_retired`, so draining them is
+    /// real work worth a frame. But that only holds while every push is a **one-off event** —
+    /// [`set_route`](Self::set_route) retiring the previous route mesh, or a tile being
+    /// evicted. A path that pushes once per *frame* turns this into a self-sustaining loop:
+    /// the vec refills as fast as it drains, so `needs_frame` never goes false and the map
+    /// pins at 60fps with nothing changing, which is the exact defect the on-demand loop
+    /// exists to remove.
+    ///
+    /// `draw_fill_batch` was such a path and is now on the [`ScratchRing`], the same
+    /// conversion `draw_symbol_batch` had — which is why a screenful of labels cannot pin the
+    /// loop. **Anything added here that draws every frame must suballocate from the ring
+    /// rather than push a transient**, or it will silently reintroduce this.
+    ///
+    /// Read after [`render`](Self::render), which is what makes the fade check exact:
+    /// `last_camera` is that frame's camera, so `time_seconds` is the clock the fade was just
+    /// evaluated against rather than a frame-old one.
+    pub fn needs_frame(&self) -> bool {
+        if self.needs_rebuild {
+            return true;
+        }
+        if !self.retiring.is_empty() || !self.transients.is_empty() {
+            return true;
+        }
+        let Some(now) = self.last_camera.map(|c| c.time_seconds) else {
+            // Nothing has been drawn yet, so there is nothing to compare a fade against and
+            // the first frame is owed regardless.
+            return true;
+        };
+        self.tiles.values().any(|tile| {
+            select::fade_in_progress(now, tile.uploaded_at, select::LOD_FADE_SECONDS)
+        })
+    }
+
     /// Upload a tile's geometry, replacing anything already resident for it.
     pub fn upload(&mut self, key: u64, mesh: &TileMesh) -> Result<(), String> {
         let mut layers = Vec::with_capacity(mesh.meshes.len());
@@ -1971,9 +2018,22 @@ impl Renderer {
         }
     }
 
-    /// Upload one transient vertex/index pair and draw it through the fill pipeline (colour from
-    /// the push constant, no descriptor set). The arrow twin of [`draw_symbol_batch`]; buffers
-    /// retire on the frames-in-flight grace count like every other transient.
+    /// Draw one batch through the fill pipeline (colour from the push constant, no descriptor
+    /// set), suballocating its vertices and indices from this frame's [`ScratchRing`].
+    ///
+    /// The arrow twin of [`draw_symbol_batch`], and now allocates the same way. It previously
+    /// created two `Buffer`s per call and pushed them onto [`Renderer::transients`] to retire
+    /// on the frames-in-flight grace count, which was merely wasteful while it was the symbol
+    /// path's twin — but it is called **once per batch per frame** from
+    /// [`record_arrows`](Self::record_arrows), and `transients` is a wake reason for the host's
+    /// on-demand frame loop (see [`needs_frame`](Self::needs_frame)). A vec refilled every
+    /// frame never drains, so the loop would wake itself forever and pin the map at 60fps with
+    /// nothing changing. The ring has no such feedback: it is reset wholesale against the
+    /// frame fence, so a draw leaves nothing behind for the next frame to notice.
+    ///
+    /// Off the drawn path today — `style::LANE_RENDERING` is false, so no arrows are built or
+    /// drawn — which is precisely why this had to be fixed now rather than when someone
+    /// switches lane rendering on and finds the phone hot again.
     unsafe fn draw_fill_batch(
         &mut self,
         command_buffer: vk::CommandBuffer,
@@ -1982,28 +2042,25 @@ impl Renderer {
         push: &Push,
         submitted: &mut usize,
     ) {
+        let frame_index = self.frame_index;
         let device = &self.context.device;
-        let Ok(vbuf) = Buffer::upload(
+        // Disjoint field borrows, for the same reason `draw_symbol_batch` takes them: cloning
+        // `ash::Device` copies its whole function-pointer table, and this is a per-draw path.
+        let Some((vbuf, voffset)) = self.scratch[frame_index].push(
             &self.context.instance,
             self.context.physical_device,
             device,
-            vk::BufferUsageFlags::VERTEX_BUFFER,
             vertices,
         ) else {
             return;
         };
-        let ibuf = match Buffer::upload(
+        let Some((ibuf, ioffset)) = self.scratch[frame_index].push(
             &self.context.instance,
             self.context.physical_device,
             device,
-            vk::BufferUsageFlags::INDEX_BUFFER,
             indices,
-        ) {
-            Ok(b) => b,
-            Err(_) => {
-                vbuf.destroy(device);
-                return;
-            }
+        ) else {
+            return;
         };
         device.cmd_bind_pipeline(command_buffer, vk::PipelineBindPoint::GRAPHICS, self.pipelines.fill);
         device.cmd_push_constants(
@@ -2013,11 +2070,10 @@ impl Renderer {
             0,
             push.as_bytes(),
         );
-        device.cmd_bind_vertex_buffers(command_buffer, 0, &[vbuf.buffer], &[0]);
-        device.cmd_bind_index_buffer(command_buffer, ibuf.buffer, 0, vk::IndexType::UINT32);
+        device.cmd_bind_vertex_buffers(command_buffer, 0, &[vbuf], &[voffset]);
+        device.cmd_bind_index_buffer(command_buffer, ibuf, ioffset, vk::IndexType::UINT32);
         device.cmd_draw_indexed(command_buffer, indices.len() as u32, 1, 0, 0, 0);
         *submitted += 1;
-        self.transients.push(TransientBuffers { vbuf, ibuf, frames: FRAMES_IN_FLIGHT });
     }
 
     /// Draw the DEM-displaced ground grid: each resident tile's terrain mesh, depth-tested so hills

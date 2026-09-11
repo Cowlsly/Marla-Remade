@@ -33,6 +33,7 @@ import com.vayunmathur.cast.tv.ui.CastTvTheme
 import com.vayunmathur.cast.tv.ui.NowPlayingScreen
 import com.vayunmathur.cast.tv.ui.PlaybackClock
 import com.vayunmathur.cast.tv.ui.TransportOverlay
+import kotlin.math.abs
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.collectLatest
@@ -81,6 +82,15 @@ class MirrorActivity : ComponentActivity(), SurfaceHolder.Callback {
      */
     private var frameWidth = 0
     private var frameHeight = 0
+
+    /**
+     * The panel mode the current session is being displayed in, so a redundant request is not
+     * re-issued on every state emission. `-1` when none has been asked for.
+     *
+     * A mode change blanks the screen for around a second, so asking for the mode that is already
+     * set is not merely wasteful - it is a visible fault.
+     */
+    private var requestedModeId = -1
 
     /** Whether the controls are on screen. Any key press reveals them; a timer takes them away. */
     private var overlayVisible by mutableStateOf(false)
@@ -145,7 +155,7 @@ class MirrorActivity : ComponentActivity(), SurfaceHolder.Callback {
             addView(overlayView(), FrameLayout.LayoutParams(MATCH_PARENT, MATCH_PARENT))
         }
         setContentView(container)
-        preferLargestDisplayMode()
+        matchDisplayModeTo(frameWidth, frameHeight, 0f)
         // The display-mode change above is asynchronous, and so is the first layout pass. Either one
         // finishing is a reason to redo the letterbox against the size the panel actually ended up.
         container.addOnLayoutChangeListener { _, left, top, right, bottom, oldLeft, oldTop, oldRight, oldBottom ->
@@ -170,6 +180,14 @@ class MirrorActivity : ComponentActivity(), SurfaceHolder.Callback {
                     // Activity is built, and this is the first moment the session is known for certain.
                     overlayPinned = !state.phase.hasVideo
                     if (overlayPinned) overlayVisible = true
+                    // Before the letterbox, because switching the panel changes the size the
+                    // letterbox is computed against - and the layout listener installed above will
+                    // recompute it once the switch lands.
+                    matchDisplayModeTo(
+                        state.phase.width,
+                        state.phase.height,
+                        state.phase.frameRate,
+                    )
                     fitToFrame(state.phase.width, state.phase.height)
                 } else {
                     finish()
@@ -477,30 +495,56 @@ class MirrorActivity : ComponentActivity(), SurfaceHolder.Callback {
     }
 
     /**
-     * Ask for the largest display mode the panel offers, best effort.
+     * Put the panel into the mode the sender is actually streaming, so nothing is rescaled.
      *
-     * **A no-op on the box this was written for**, which exposes exactly one mode (3840x2160 at
-     * 59.94 Hz), so there is nothing to choose and nothing changes. It is set anyway because a box
-     * that does offer a choice would otherwise be left on whatever mode the launcher happened to
-     * pick, and a mirror asking for the whole panel is the one case where the largest is right.
+     * **This used to ask for the largest mode and deliberately ignore refresh rate**, on the
+     * reasoning that a mirror wants the whole panel and that every rate a TV offers is close
+     * enough to a multiple of 30. Both halves stopped being true once the sender began composing a
+     * desktop for a mode the *user* picked: the largest mode is then the wrong one whenever they
+     * chose something smaller, and the rate is the point rather than a detail - this panel lists
+     * 3840x2160 at eight rates, and the sender has already refused the ones it cannot encode.
      *
-     * Deliberately does not filter by refresh rate: the source is 30 fps, every mode a TV offers is a
-     * multiple or near-multiple of that, and a mode switch mid-session blanks the panel for a second.
+     * Matching both means the decoded frame maps one-to-one onto the screen: no scaler in the
+     * path, and no cadence mismatch between a 30 fps stream and a 60 Hz panel.
+     *
+     * Falls back to the largest mode when the session's geometry is not known yet (this runs once
+     * from `onCreate`, before the first state emission) or when nothing matches - an older sender
+     * whose rate is 0, or a size the panel does not list.
      */
-    private fun preferLargestDisplayMode() {
+    private fun matchDisplayModeTo(width: Int, height: Int, frameRate: Float) {
         val modes = display?.supportedModes ?: return
         if (modes.size <= 1) return
-        val largest = modes.maxByOrNull { it.physicalWidth.toLong() * it.physicalHeight } ?: return
-        window.attributes = window.attributes.apply { preferredDisplayModeId = largest.modeId }
+        val exact = modes.firstOrNull { mode ->
+            mode.physicalWidth == width &&
+                mode.physicalHeight == height &&
+                frameRate > 0f &&
+                abs(mode.refreshRate - frameRate) <= RATE_TOLERANCE
+        }
+        val chosen = exact
+            ?: modes.maxByOrNull { it.physicalWidth.toLong() * it.physicalHeight }
+            ?: return
+        if (chosen.modeId == requestedModeId) return
+        requestedModeId = chosen.modeId
+        window.attributes = window.attributes.apply { preferredDisplayModeId = chosen.modeId }
         Log.i(
             TAG,
-            "asked for ${largest.physicalWidth}x${largest.physicalHeight} " +
-                "@ ${largest.refreshRate}Hz of ${modes.size} modes",
+            "asked for ${chosen.physicalWidth}x${chosen.physicalHeight} @ " +
+                "${chosen.refreshRate}Hz of ${modes.size} modes" +
+                if (exact == null) " (no mode matches ${width}x$height@$frameRate)" else "",
         )
     }
 
     private companion object {
         const val MATCH_PARENT = ViewGroup.LayoutParams.MATCH_PARENT
+
+        /**
+         * How far a panel mode's rate may sit from the stream's and still be that mode.
+         *
+         * The rate crosses the wire as a float and is compared against a value the panel reports
+         * as 59.94006, so exact equality is not something to rely on. Small enough that 59.94 and
+         * 60 - which are genuinely different modes on this screen - never match each other.
+         */
+        const val RATE_TOLERANCE = 0.2f
 
         /** No scrub in progress. A sentinel rather than a nullable, so the Compose state is primitive. */
         const val NO_SCRUB = -1L

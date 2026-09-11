@@ -67,14 +67,11 @@
     <string name="confirm">Confirmer</string>
     <string name="search_ingredient">Rechercher un ingrédient</string>
     <string name="nav_today">Aujourd\'hui</string>
-    <string name="nav_activity">Activité</string>
     <string name="nav_nutrition">Nutrition</string>
     <string name="nav_body">Corps</string>
     <string name="section_latest_vitals">Dernières données vitales</string>
     <string name="section_last_night">Hier soir</string>
     <string name="section_quick_stats">Chiffres clés</string>
-    <string name="section_today_activity">Aujourd\'hui</string>
-    <string name="section_this_week">Cette semaine</string>
     <string name="label_exercise">Exercice</string>
     <string name="no_workouts">Aucune séance d\'entraînement enregistrée</string>
     <string name="nutrition_breakdown">Composition nutritionnelle</string>

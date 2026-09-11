@@ -81,14 +81,11 @@
     <string name="unit_cal">cal</string>
     <string name="label_blood_pressure_unit">mmHg</string>
     <string name="nav_today">Dzisiaj</string>
-    <string name="nav_activity">Aktywność</string>
     <string name="nav_nutrition">Odżywianie</string>
     <string name="nav_body">Ciało</string>
     <string name="section_latest_vitals">Najnowsze parametry</string>
     <string name="section_last_night">Ostatnia noc</string>
     <string name="section_quick_stats">Krótkie statystyki</string>
-    <string name="section_today_activity">Dzisiaj</string>
-    <string name="section_this_week">W tym tygodniu</string>
     <string name="nutrition_breakdown">Podział składników odżywczych</string>
     <string name="recipes">Przepisy</string>
     <string name="ingredients">Składniki</string>

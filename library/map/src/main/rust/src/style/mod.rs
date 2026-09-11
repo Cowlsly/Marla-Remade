@@ -708,6 +708,15 @@ pub fn background(variant: Variant) -> u32 {
 /// Not a [`Toggle`]: those are a host-app opt-in the user sees. This is a release kill switch,
 /// so it is a `const` and flipping it is a code change.
 ///
+/// # Before turning this back on
+///
+/// Check that the frame loop can still idle. Turning this on re-enables
+/// [`crate::vulkan::renderer::Renderer::record_arrows`], which uploads a transient buffer per
+/// arrow batch per frame; if the on-demand loop still treats a non-empty transient list as
+/// "needs another frame", arrows re-arm it every frame and the map redraws forever with nothing
+/// moving. The switch being off is the only reason that is unreachable today, so it will surface
+/// as a battery regression the day the feature returns rather than as a failing test.
+///
 /// The tests that pin carriageway behaviour turn it on by reading
 /// [`layers_with_lane_rendering`] instead, so they keep asserting against the real style rather
 /// than being weakened to match the switch.

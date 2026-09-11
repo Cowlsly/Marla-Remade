@@ -1,0 +1,45 @@
+# Domains blocked when Settings > Parental controls > Web content filters >
+# "Try to block explicit sites" is on.
+#
+# ---------------------------------------------------------------------------
+# READ THIS BEFORE RELYING ON IT
+#
+# This is a BLOCKLIST, not a classifier. It blocks exactly what is listed here
+# and nothing else. The list below is a seed - a handful of unambiguous, very
+# high-traffic domains - and it is nowhere near sufficient on its own. A
+# determined child will route around it in under a minute.
+#
+# It exists so the switch does something real rather than nothing, and so the
+# mechanism is in place and testable. Treat replacing this file with a
+# maintained list as required work, not as an optional improvement.
+#
+# ---------------------------------------------------------------------------
+# FORMAT
+#
+# One registrable domain per line. Matching is on host suffix, so an entry
+# covers every subdomain: "example.com" blocks "www.example.com" and
+# "cdn.example.com". Do not include a scheme, a path, or a leading dot.
+# Blank lines and lines starting with # are ignored.
+#
+# Loaded once per process by AdultSites and held as a hash set, so length costs
+# memory but not lookup time. A list of a few hundred thousand entries is fine.
+#
+# To replace: drop in any newline-separated domain list. Host-file format
+# ("0.0.0.0 example.com") will NOT work - strip the address column first.
+# ---------------------------------------------------------------------------
+
+pornhub.com
+xvideos.com
+xnxx.com
+xhamster.com
+redtube.com
+youporn.com
+spankbang.com
+chaturbate.com
+onlyfans.com
+stripchat.com
+brazzers.com
+bongacams.com
+livejasmin.com
+tnaflix.com
+youjizz.com

@@ -557,7 +557,7 @@ Mitigation: record the upstream commit for both, in the form `third_party/betoco
 
 ---
 
-## 10. Release signing key
+## 10. Committed key material
 
 ### 10.1 `release_keystore.jks` is committed to the repository — High, pending confirmation
 
@@ -573,6 +573,42 @@ Mitigation: confirm what the committed keystore actually is. If it is not a thro
 key, treat it as disclosed — rotate it and follow key-compromise procedure. Either way, remove it
 from version control and have CI supply the keystore entirely from secrets, so no file at that path
 is ever tracked.
+
+### 10.2 Google's Android Auto client key is committed and shipped — Medium, with a hard expiry
+
+`auto/protocol/src/main/assets/gal/` holds three PEMs that are packaged into the MA Auto APK:
+
+| File | What it is |
+|---|---|
+| `client-cert.pem` | `O=CarService` leaf, issued by `O=Google Automotive Link` |
+| `client-key.pem` | the leaf's unencrypted PKCS#8 RSA-2048 private key |
+| `root.pem` | the Google Automotive Link root, used as the sole TLS trust anchor |
+
+Provenance: extracted from `com.google.android.projection.gearhead` 17.5.663214 by
+`analysis/maauto/extract_key.py`, which reproduces the app's own key derivation. Gearhead stores the
+key AES-encrypted, but the KDF's entire input — the two certificate PEMs and a static salt — ships in
+the same APK, so this is obfuscation rather than protection. Full write-up in
+`analysis/maauto/FINDINGS.md`.
+
+**This is not a secret being disclosed.** The same bytes are recoverable from every Android Auto
+installation, and the aasdk/openauto projects have shipped this credential publicly for years.
+Committing it reveals nothing that was not already public. Three real risks remain:
+
+- **It expires 2026-12-09 and cannot be renewed by us.** We do not hold the GAL root key, so no
+  replacement can be minted. When it lapses, head units will reject the handshake and projection
+  stops. Treat this as a scheduled outage, not a hypothetical.
+- **It is Google's key material, not ours.** Using it to authenticate to third-party hardware is a
+  licensing and terms question that this document does not attempt to answer.
+- **Google is moving to remote provisioning.** `rvg` prefers a certificate delivered through six
+  phenotype flags (cert, encrypted key, salt, each with a SHA-1 check) and only falls back to the
+  hardcoded one. If head units begin requiring the rotated certificate, the embedded credential
+  stops working before its notAfter date.
+
+Mitigation: keep `extract_key.py` working so the credential can be re-extracted from a newer
+gearhead; watch whether the phenotype path becomes mandatory; and treat the expiry as a dated
+dependency rather than something to discover in production. `GalCredentialTest` fails loudly if the
+shipped assets stop chaining or stop completing a handshake, but nothing currently fails on
+approaching expiry.
 
 ---
 
@@ -800,7 +836,6 @@ fallbacks, MTU 1280, and port 51820.
 - `:share` — LAN TCP plus mDNS/BLE.
 - `:photos` — holds `INTERNET` but has no host of its own; models ship in the APK.
 - `:music` — **no `INTERNET` permission**; no radio, lyrics or artwork APIs.
-- `:nowplaying` — `SongMatcher` is a stub; no AcoustID, no Shazam.
 - `:speech` — models bundled.
 - Fully offline: astronomy, clock, code, contacts, calendar, health, keyboard, launcher, logviewer,
   measure, things, tuner, setupwizard, camera (which *removes* `INTERNET`), and every game except

@@ -1,0 +1,80 @@
+#version 450
+#extension GL_EXT_control_flow_attributes : require
+//! VARIANT D — DEEP PREFETCH, LIGHT ALU. Variant A with 16 loads in flight instead of one.
+//!
+//! TEMPORARY probe shader for task 9. Source of truth is
+//! `analysis/gemv_probe/gemv_d_deep.comp`. See `gemv_a_control.comp` for why this copy
+//! exists and when to delete it.
+//!
+//! The GLSL analogue of ml_drift's `__wave Type weights_cache[16]` +
+//! `ucl::WaveLoad(weights_cache, ptr, offset, 16)`: a fixed-size local array filled by a
+//! constant-trip-count loop, so glslc unrolls it and issues all sixteen loads before the
+//! first is consumed. `DEPTH` is 16 to match the smaller of the two sizes recovered from
+//! `libLiteRtGpuAccelerator.so`.
+//!
+//! `D - A` is the value of memory-level parallelism at this access pattern, with the ALU
+//! held at one XOR per 16 bytes. If D is materially above A, prefetch depth is a real lever
+//! (H1). If D and A are the same, the control was already saturating the memory system with
+//! one load in flight and depth is not the differentiator.
+//!
+//! # The addresses are identical to variant A
+//!
+//! Lane `l` still visits `l, l+stride, l+2*stride, ...`. Only the batching changes: sixteen
+//! are issued together rather than one at a time. So any difference is prefetch depth and
+//! not a different access pattern.
+//!
+//! # Register pressure is the confound, and it is real
+//!
+//! `uvec4 cache[16]` is 64 vector registers per lane. On a Valhall part that will cut the
+//! number of resident warps, so D trades occupancy for loads-in-flight and the measurement
+//! is of the **net** of the two, not of prefetch depth alone. A D that is merely equal to A
+//! may be depth helping and occupancy hurting in equal measure. Noted rather than tuned
+//! around: a smaller DEPTH is the obvious follow-up if D is interesting.
+
+layout(local_size_x = 64) in;
+
+layout(set = 0, binding = 0) readonly buffer Source { uvec4 data[]; };
+layout(set = 0, binding = 1) buffer Sink { uint sink[]; };
+
+layout(push_constant) uniform Push {
+    uint quads;
+};
+
+// A literal `#define` rather than a `const uint`, so the array size and both trip counts are
+// textually constant and glslc has no excuse not to unroll. If variant D reads identically to
+// A, disassemble with `spirv-dis` and confirm the sixteen loads were actually batched before
+// concluding anything about prefetch depth.
+#define DEPTH 16
+
+void main() {
+    uint lane = gl_GlobalInvocationID.x;
+    uint stride = gl_NumWorkGroups.x * 64u;
+    uvec4 acc = uvec4(0u);
+
+    // Whole batches first, with no per-load bounds test — a branch between the loads would
+    // be exactly the thing that stops them being issued together.
+    uint iters = quads / stride;
+    uint batches = iters / uint(DEPTH);
+    uint at = lane;
+    for (uint b = 0u; b < batches; b++) {
+        uvec4 cache[DEPTH];
+        [[unroll]] for (uint d = 0u; d < uint(DEPTH); d++) {
+            cache[d] = data[at + d * stride];
+        }
+        [[unroll]] for (uint d = 0u; d < uint(DEPTH); d++) {
+            acc ^= cache[d];
+        }
+        at += uint(DEPTH) * stride;
+    }
+    // Tail, one at a time. At 256 MB and 2,048 workgroups this is empty — 16,777,216 quads
+    // over a stride of 131,072 is 128 iterations, exactly eight batches — but the loop is
+    // kept so the shader is correct at any size.
+    for (; at < quads; at += stride) {
+        acc ^= data[at];
+    }
+
+    uint folded = acc.x ^ acc.y ^ acc.z ^ acc.w;
+    if (folded == 0xFFFFFFFFu) {
+        sink[0] = folded;
+    }
+}

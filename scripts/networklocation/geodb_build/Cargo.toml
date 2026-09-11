@@ -1,0 +1,44 @@
+# Host-side builder for `geocoder-v3.geodb`, the offline reverse/forward geocoder database
+# that `:networklocation` reads.
+#
+# Replaces the `osmium tags-filter | osmium export | geocoder_gen.cpp` chain. That pipeline
+# needed osmium, g++, OpenMP, simdjson and POSIX mmap (so: WSL only), produced a **101 GB**
+# GeoJSONSeq intermediate on the way, and indexed address points and nothing else. This reads
+# the `.osm.pbf` natively through `osm_ingest`, holds no intermediate, and carries streets,
+# POIs and places as well as addresses.
+#
+# Deliberately DETACHED from the Android Rust workspace and from the other host tools'
+# workspaces (the empty [workspace] table at the bottom), exactly like `scripts/maps/osm_ingest`
+# and `scripts/maps/wikidesc`.
+[package]
+name = "geodb_build"
+version = "0.1.0"
+edition = "2021"
+publish = false
+license = "GPL-2.0-only"
+description = "OSM .osm.pbf -> geocoder-v3.geodb for :networklocation"
+
+[lib]
+name = "geodb_build"
+path = "src/lib.rs"
+
+[[bin]]
+name = "geodb_build"
+path = "src/bin/geodb_build.rs"
+
+[dependencies]
+# Native .osm.pbf reading, the three-pass relation->way->node ordering, the node coordinate
+# store, the ring assembler and the deterministic thread pool. Everything this crate does to a
+# PBF is done through it.
+osm_ingest = { path = "../../maps/osm_ingest" }
+
+# Block compression for the column store. The device reader decompresses with the pure-Rust
+# `ruzstd`, which has no encoder, so the writer needs a real zstd. This is a host tool that
+# never cross-compiles, so the C dependency stops here and does not reach the app.
+zstd = "0.13"
+
+[profile.release]
+opt-level = 3
+
+# Detach from the repo-root Android workspace and from the other host tools'.
+[workspace]

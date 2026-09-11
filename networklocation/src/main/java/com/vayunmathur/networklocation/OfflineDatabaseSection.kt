@@ -24,11 +24,11 @@ import com.vayunmathur.library.util.DataStoreUtils
  * Offline-database section of the provider's status screen: what is on disk, and a control to
  * fetch what is not.
  *
- * The download is user-initiated rather than automatic because it is several gigabytes, and
+ * The download is user-initiated rather than automatic because it is many gigabytes, and
  * unmetered-only so it never lands on a cellular bill. Nothing here gates the provider - the two
  * framework services keep running throughout, but with no store present every beacon lookup
- * misses, so no position is reported until `wifi.wpsdb` / `cells.wpsdb` arrive. Geocoding is
- * likewise unavailable until `geocoder.geodb` arrives.
+ * misses, so no position is reported until the beacon stores arrive. Geocoding is likewise
+ * unavailable until the geocoder database arrives.
  */
 @Composable
 fun OfflineDatabaseSection(modifier: Modifier = Modifier) {
@@ -61,10 +61,10 @@ fun OfflineDatabaseSection(modifier: Modifier = Modifier) {
         }
 
         Text(
-            "The offline databases are about 3.5 GB and are downloaded separately to keep the " +
-                "system image small. Until they are installed, positioning falls back to online " +
-                "lookups and geocoding is unavailable. Downloads only run on Wi-Fi and resume " +
-                "if interrupted.",
+            "The offline databases are large and are downloaded separately to keep the system " +
+                "image small. Until they are installed, positioning and geocoding are " +
+                "unavailable - nothing is looked up over the network. Downloads only run on " +
+                "Wi-Fi and resume if interrupted.",
             modifier = Modifier.padding(top = 8.dp),
             style = MaterialTheme.typography.bodyMedium,
         )
@@ -82,6 +82,9 @@ fun OfflineDatabaseSection(modifier: Modifier = Modifier) {
 
         Button(
             onClick = {
+                // Databases in a superseded format are dead weight - several gigabytes no reader
+                // will open again - so reclaim the space before pulling their replacements down.
+                OfflineDatabases.pruneStale(context)
                 ModelDownloadWorker.enqueueTo(
                     context = context,
                     models = databases.map { (name, label, purpose) ->
@@ -89,6 +92,7 @@ fun OfflineDatabaseSection(modifier: Modifier = Modifier) {
                             url = OfflineDatabases.urlFor(name),
                             fileName = name,
                             description = "$label — $purpose",
+                            sha256 = OfflineDatabases.sha256For(name),
                         )
                     },
                     targetDir = OfflineDatabases.dir(context),

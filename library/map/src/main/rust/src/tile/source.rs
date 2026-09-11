@@ -33,6 +33,41 @@ use tilecodec::stream::RangeReader;
 /// without the `pmtiles://` scheme prefix MapLibre needs to route it.
 pub const BASEMAP_PMTILES_URL: &str = "https://data.vayunmathur.com/v4.pmtiles";
 
+/// How long to wait before re-requesting a tile after its `attempts`th consecutive failure.
+///
+/// A failed tile **must** be retried — one transient error otherwise leaves a hole in the map
+/// for the rest of the session — but until now it was retried with no delay at all, which
+/// meant a tile that keeps failing was re-requested on every frame, sixty times a second, for
+/// as long as it stayed visible. With no network, or behind a captive portal, that is a
+/// request storm and a pinned CPU.
+///
+/// It also defeats on-demand rendering, which is the sharper consequence: the host stops
+/// drawing when nothing is changing, and "a tile is in flight" is one of the things that
+/// counts as changing. A tile that immediately re-enters the in-flight set on every frame
+/// means the set is never durably empty and the map never idles — the hot-phone bug, moved
+/// from sitting still to standing in a tunnel.
+///
+/// Doubles from [`RETRY_BASE_MS`] and saturates at [`RETRY_MAX_MS`], so a one-off blip costs
+/// a quarter of a second and a genuinely unreachable archive settles to a poll rather than a
+/// spin. `attempts` is 1 on the first failure; 0 is treated as 1.
+pub fn retry_delay_ms(attempts: u32) -> u64 {
+    let doublings = attempts.saturating_sub(1).min(RETRY_MAX_DOUBLINGS);
+    (RETRY_BASE_MS << doublings).min(RETRY_MAX_MS)
+}
+
+/// The wait after a first failure. Short enough that recovering from a blip is invisible.
+pub const RETRY_BASE_MS: u64 = 250;
+
+/// The ceiling the backoff saturates at. A tile still failing after this long is not coming
+/// back on its own, so anything longer only delays recovery once the network does return —
+/// and reconnecting pushes `setOnline`, which wakes the loop regardless of where the backoff
+/// had got to.
+pub const RETRY_MAX_MS: u64 = 10_000;
+
+/// Enough doublings to pass [`RETRY_MAX_MS`], bounded so the shift cannot overflow on a tile
+/// that has failed thousands of times.
+const RETRY_MAX_DOUBLINGS: u32 = 16;
+
 /// Where this renderer reads its tiles from.
 ///
 /// Planet cutover: now points at the live planet.mamaps uploaded to
@@ -283,6 +318,44 @@ mod tests {
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::sync::Arc;
+
+    /// The first failure waits, rather than re-requesting on the very next frame. Without this
+    /// a failing tile is asked for sixty times a second and the on-demand frame loop can never
+    /// idle, because the tile re-enters the in-flight set as fast as it leaves.
+    #[test]
+    fn the_first_failure_backs_off_rather_than_retrying_at_once() {
+        assert_eq!(retry_delay_ms(1), RETRY_BASE_MS);
+        assert!(RETRY_BASE_MS > 16, "a delay under one frame would not be a backoff at all");
+    }
+
+    /// Consecutive failures double, so an unreachable archive settles to a poll.
+    #[test]
+    fn consecutive_failures_double_the_wait() {
+        assert_eq!(retry_delay_ms(2), RETRY_BASE_MS * 2);
+        assert_eq!(retry_delay_ms(3), RETRY_BASE_MS * 4);
+        assert_eq!(retry_delay_ms(4), RETRY_BASE_MS * 8);
+    }
+
+    /// The wait saturates rather than growing without bound: a tile that has failed all
+    /// session must still recover promptly once the network returns.
+    #[test]
+    fn the_backoff_saturates_at_the_ceiling() {
+        assert_eq!(retry_delay_ms(1000), RETRY_MAX_MS);
+        assert_eq!(retry_delay_ms(u32::MAX), RETRY_MAX_MS, "no overflow on a huge attempt count");
+        for attempts in 1..200u32 {
+            assert!(retry_delay_ms(attempts) <= RETRY_MAX_MS, "{attempts} exceeded the ceiling");
+        }
+    }
+
+    /// Monotonic, and a zero attempt count is treated as the first failure rather than
+    /// shifting by -1 or returning no delay at all.
+    #[test]
+    fn the_backoff_is_monotonic_and_defends_a_zero_count() {
+        assert_eq!(retry_delay_ms(0), RETRY_BASE_MS);
+        for attempts in 1..200u32 {
+            assert!(retry_delay_ms(attempts) <= retry_delay_ms(attempts + 1));
+        }
+    }
 
     struct Fixture {
         dir: PathBuf,

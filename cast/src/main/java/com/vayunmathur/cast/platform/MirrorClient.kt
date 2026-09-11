@@ -36,8 +36,19 @@ import com.vayunmathur.cast.protocol.TvIdentity
 import com.vayunmathur.cast.protocol.VideoCodec
 import com.vayunmathur.cast.protocol.VideoCodecConfig
 import java.security.SecureRandom
+import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.withTimeoutOrNull
 
 private const val TAG = "MirrorClient"
+
+/**
+ * How long a mid-session `STREAM_CONFIG` waits for its answer.
+ *
+ * Far shorter than the socket's own read deadline on purpose. This is a resolution change with a
+ * user watching a blank screen, so failing fast and saying so beats holding the session open for a
+ * minute on the chance that a television is merely slow.
+ */
+private const val RECONFIGURE_TIMEOUT_MS = 5_000L
 
 /** Whether the TV took a content session, and why not if it did not. */
 sealed interface ContentOutcome {
@@ -102,6 +113,16 @@ class MirrorClient(
     private val transcript = Transcript()
 
     private var keys: SessionKeys? = null
+
+    /**
+     * A re-negotiation waiting for its `STREAM_READY`, or null when none is.
+     *
+     * Written from the coroutine calling [reconfigureStream] and read from the thread parked in
+     * [awaitEnd], hence `@Volatile`. It is the hand-off between the two: the reader cannot know a
+     * reply is wanted, and the requester cannot read it.
+     */
+    @Volatile
+    private var pendingStreamReady: CompletableDeferred<StreamReady>? = null
 
     /**
      * The transcript, frozen after `SEALED_SECRET`.
@@ -264,7 +285,7 @@ class MirrorClient(
     fun configureStream(
         width: Int,
         height: Int,
-        frameRate: Int,
+        frameRate: Float,
         bitRate: Int,
         videoCodec: VideoCodec,
         audio: Boolean,
@@ -296,6 +317,65 @@ class MirrorClient(
             return HandshakeOutcome.Failed(ClientFailure.StreamRefused)
         }
         Log.i(TAG, "streaming ${videoCodec.label} ${width}x$height to udp ${ready.udpPort}")
+        return HandshakeOutcome.Ready(Negotiation.of(config, ready, sessionKeys))
+    }
+
+    /**
+     * `STREAM_CONFIG` → `STREAM_READY` **while the session is already running**.
+     *
+     * Identical on the wire to [configureStream] and deliberately not folded into it, because the
+     * two differ in who reads the reply. Before a session starts, this object owns the socket and
+     * [configureStream] reads `STREAM_READY` itself. Once it is running, [awaitEnd] is the socket's
+     * single reader - a blocking read that a coroutine cancellation cannot interrupt - so a second
+     * `configureStream` would have its reply swallowed by the watcher's `else -> {}` and then block
+     * until its own read deadline. That is exactly what a resolution change looked like: the old
+     * stream stopped, the new one never started, and the television sat on its last frame.
+     *
+     * So the reply is *handed over* instead: [pendingStreamReady] is armed before the request goes
+     * out, and [awaitEnd] completes it on the way past.
+     */
+    suspend fun reconfigureStream(
+        width: Int,
+        height: Int,
+        frameRate: Float,
+        bitRate: Int,
+        videoCodec: VideoCodec,
+        audio: Boolean,
+        video: Boolean,
+    ): HandshakeOutcome {
+        val sessionKeys = keys ?: return protocolFailure()
+        val random = SecureRandom()
+        val config = StreamConfig(
+            width = width,
+            height = height,
+            frameRate = frameRate,
+            bitRate = bitRate,
+            audio = audio,
+            video = video,
+            audioSsrc = random.ssrc(StreamConstants.AUDIO_SSRC_MIN, StreamConstants.AUDIO_SSRC_MAX),
+            videoSsrc = random.ssrc(StreamConstants.VIDEO_SSRC_MIN, StreamConstants.VIDEO_SSRC_MAX),
+            videoCodec = videoCodec,
+        )
+        val waiter = CompletableDeferred<StreamReady>()
+        // Armed before the send, or a television that answers immediately would arrive at an
+        // unarmed watcher and be dropped by the very `else` branch this exists to route around.
+        pendingStreamReady = waiter
+        val sent = socket.send(config)
+        if (sent == null) {
+            pendingStreamReady = null
+            return HandshakeOutcome.Failed(ClientFailure.StreamRefused)
+        }
+        val ready = withTimeoutOrNull(RECONFIGURE_TIMEOUT_MS) { waiter.await() }
+        pendingStreamReady = null
+        if (ready == null) {
+            Log.w(TAG, "'$receiverName' did not answer a mid-session STREAM_CONFIG")
+            return HandshakeOutcome.Failed(ClientFailure.StreamRefused)
+        }
+        if (ready.udpPort !in 1..65535) {
+            Log.w(TAG, "the TV named udp port ${ready.udpPort}")
+            return HandshakeOutcome.Failed(ClientFailure.StreamRefused)
+        }
+        Log.i(TAG, "restreaming ${videoCodec.label} ${width}x$height to udp ${ready.udpPort}")
         return HandshakeOutcome.Ready(Negotiation.of(config, ready, sessionKeys))
     }
 
@@ -490,6 +570,18 @@ class MirrorClient(
                 // The echo of our own keep-alive. Nothing to do with it: having read it is the
                 // whole effect, because that is what pushed this socket's read deadline out.
                 is Ping -> {}
+                // Handed to whoever is re-negotiating rather than dropped. This branch is the
+                // whole reason `reconfigureStream` can exist: this loop owns the socket for the
+                // life of the session, so a reply read here is a reply nobody else can read.
+                is StreamReady -> {
+                    val waiter = pendingStreamReady
+                    if (waiter == null) {
+                        Log.w(TAG, "'$receiverName' sent STREAM_READY with nothing waiting for it")
+                    } else {
+                        pendingStreamReady = null
+                        waiter.complete(message)
+                    }
+                }
                 else -> {}
             }
         }

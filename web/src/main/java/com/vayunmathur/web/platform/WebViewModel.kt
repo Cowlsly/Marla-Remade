@@ -541,7 +541,10 @@ class WebViewModel(
 
     fun navigateActiveTab(input: String) {
         val active = activeTab ?: return
-        val dest = BrowserUtils.toNavigationUrl(input, searchEngine)
+        // Read live rather than from a cached field: a parent can turn search filtering on while
+        // the browser is open, and the next search should honour it.
+        val safeSearch = ContentFilters.filterSearchResults(context)
+        val dest = BrowserUtils.toNavigationUrl(input, searchEngine, safeSearch)
         noteNavigation(dest)
         markFreshNavigation(active.id)
         onTabUrlChange(active.id, dest)

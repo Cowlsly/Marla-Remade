@@ -13,10 +13,14 @@ import androidx.webkit.ScriptHandler
 import androidx.webkit.WebMessageCompat
 import androidx.webkit.WebViewCompat
 import androidx.webkit.WebViewFeature
+import com.vayunmathur.web.R
 import com.vayunmathur.web.domain.EffectiveShields
 import com.vayunmathur.web.domain.shields.UrlCleaner
+import com.vayunmathur.web.platform.AdultSites
+import com.vayunmathur.web.platform.ContentFilters
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
+import java.io.ByteArrayInputStream
 import kotlin.random.Random
 
 private const val TAG = "ShieldsWebViewClient"
@@ -90,8 +94,33 @@ open class ShieldsWebViewClient(
     // ---------------------------------------------------------------- network
 
     override fun shouldInterceptRequest(view: WebView, request: WebResourceRequest): WebResourceResponse? {
-        if (request.isForMainFrame) pageUrl = request.url.toString()
+        if (request.isForMainFrame) {
+            pageUrl = request.url.toString()
+            blockedByContentFilter(request)?.let { return it }
+        }
         return ShieldsRequestFilter.intercept(context, request, pageUrl, shieldsFor, onBlocked)
+    }
+
+    /**
+     * The supervision site filter, checked before shields and only on top-level navigation.
+     *
+     * Main-frame only, deliberately. A parental filter is about which pages a child can open;
+     * running the list against every subresource would multiply the cost by the number of
+     * requests on a page for no gain, and half-loading a blocked page is worse than not loading
+     * it. Returning a response rather than letting the load proceed means the block also covers
+     * URLs typed directly, redirects, and links from other apps.
+     */
+    private fun blockedByContentFilter(request: WebResourceRequest): WebResourceResponse? {
+        if (!ContentFilters.blockExplicitSites(context)) return null
+        val host = request.url.host ?: return null
+        if (!AdultSites.blocks(context, host)) return null
+        onBlocked(pageUrl, request.url.toString())
+        val body = context.getString(R.string.content_filter_blocked_html)
+        return WebResourceResponse(
+            "text/html",
+            "utf-8",
+            ByteArrayInputStream(body.toByteArray()),
+        )
     }
 
     // ------------------------------------------------------------- navigation

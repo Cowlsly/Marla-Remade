@@ -66,7 +66,7 @@ class VideoEncoder(
     private val codec: VideoCodec,
     private val width: Int,
     private val height: Int,
-    private val frameRate: Int,
+    private val frameRate: Float,
     private val bitRate: Int,
     /**
      * The codec configuration, for a codec that cannot carry it in-band.
@@ -120,7 +120,7 @@ class VideoEncoder(
                         android.media.MediaCodecInfo.CodecCapabilities.COLOR_FormatSurface,
                     )
                     setInteger(MediaFormat.KEY_BIT_RATE, bitRate)
-                    setInteger(MediaFormat.KEY_FRAME_RATE, frameRate)
+                    setFloat(MediaFormat.KEY_FRAME_RATE, frameRate)
                     // One second. A receiver that joins or loses sync recovers at the next IDR, and
                     // the RTCP path can ask for one sooner when it actually needs it.
                     setInteger(MediaFormat.KEY_I_FRAME_INTERVAL, 1)
@@ -133,7 +133,7 @@ class VideoEncoder(
                     // almost nothing.
                     setLong(
                         MediaFormat.KEY_REPEAT_PREVIOUS_FRAME_AFTER,
-                        1_000_000L / frameRate,
+                        (1_000_000.0 / frameRate).toLong(),
                     )
                     // **CBR where the encoder offers it, not VBR.** With VBR this encoder answered a
                     // 12 Mbit/s target with a measured 4.18 Mbit/s: it read a mostly-static screen as

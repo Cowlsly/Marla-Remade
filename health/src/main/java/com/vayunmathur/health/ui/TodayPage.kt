@@ -18,6 +18,7 @@ import com.vayunmathur.library.ui.ExperimentalMaterial3Api
 import com.vayunmathur.library.ui.IconBedtime
 import com.vayunmathur.library.ui.IconDirectionsWalk
 import com.vayunmathur.library.ui.IconFavorite
+import com.vayunmathur.library.ui.IconFire
 import com.vayunmathur.library.ui.IconLocationOn
 import com.vayunmathur.library.ui.MaterialTheme
 import com.vayunmathur.library.ui.Scaffold
@@ -90,6 +91,15 @@ fun TodayPage(backStack: NavBackStack<Route>, viewModel: HealthViewModel) {
     val hrMin by remember(dayStart, dayEnd) {
         viewModel.minInRange(RecordType.HeartRate, dayStart, dayEnd).map { it?.toLong() ?: 0L }
     }.collectAsState(0L)
+    val elevationToday by remember(dayStart, dayEnd) {
+        viewModel.sumInRange(RecordType.Elevation, dayStart, dayEnd)
+    }.collectAsState(0.0)
+    val wheelchairToday by remember(dayStart, dayEnd) {
+        viewModel.sumInRange(RecordType.Wheelchair, dayStart, dayEnd).map { it.toLong() }
+    }.collectAsState(0L)
+    val exerciseToday by remember(dayStart, dayEnd) {
+        viewModel.sumInRange(RecordType.Exercise, dayStart, dayEnd).map { it.toLong() }
+    }.collectAsState(0L)
 
     val metrics: MainPageMetrics by viewModel.mainPageMetrics.collectAsState()
 
@@ -107,11 +117,18 @@ fun TodayPage(backStack: NavBackStack<Route>, viewModel: HealthViewModel) {
             hydrationMl = hydrationToday,
             heartRateMin = hrMin,
             heartRateMax = hrMax,
+            elevationMeters = elevationToday,
+            wheelchairPushes = wheelchairToday,
+            exerciseMinutes = exerciseToday,
             metrics = metrics,
         ),
         actions = object : TodayActions {
             override fun openSleepDetails() {
                 backStack.add(Route.SleepDetails)
+            }
+
+            override fun openExerciseDetails() {
+                backStack.add(Route.ExerciseDetails)
             }
 
             override fun openMetric(config: HealthMetricConfig) {
@@ -213,7 +230,9 @@ fun TodayScreen(state: TodayUiState, actions: TodayActions) {
                 }
             }
 
-            // Quick stats
+            // Quick stats. Also carries what the standalone Activity page used to show, which is
+            // why active energy, elevation, wheelchair pushes and exercise are here rather than
+            // only in the rings above — each is the one route to its chart.
             item {
                 DashboardSection(
                     title = stringResource(R.string.section_quick_stats),
@@ -227,6 +246,16 @@ fun TodayScreen(state: TodayUiState, actions: TodayActions) {
                         leadingTint = colorFor(RecordType.Steps),
                         labelModifier = Modifier.sharedText("health-metric-label-STEPS"),
                         onClick = { actions.openMetric(HealthMetricConfig.STEPS) },
+                    )
+                    DashboardSectionDivider()
+                    MetricRow(
+                        label = stringResource(R.string.label_active),
+                        value = state.activeCalories.toString(),
+                        unit = stringResource(R.string.unit_cal),
+                        leadingIcon = { m, c -> IconFire(m, c) },
+                        leadingTint = colorFor(RecordType.CaloriesActive),
+                        labelModifier = Modifier.sharedText("health-metric-label-ACTIVE_CALORIES"),
+                        onClick = { actions.openMetric(HealthMetricConfig.ACTIVE_CALORIES) },
                     )
                     DashboardSectionDivider()
                     MetricRow(
@@ -247,6 +276,36 @@ fun TodayScreen(state: TodayUiState, actions: TodayActions) {
                         leadingTint = colorFor(RecordType.Floors),
                         labelModifier = Modifier.sharedText("health-metric-label-FLOORS"),
                         onClick = { actions.openMetric(HealthMetricConfig.FLOORS) },
+                    )
+                    DashboardSectionDivider()
+                    MetricRow(
+                        label = stringResource(R.string.label_elevation),
+                        value = state.elevationMeters.round(1).toString(),
+                        unit = stringResource(R.string.unit_m),
+                        leadingIcon = { m, c -> IconLocationOn(m, c) },
+                        leadingTint = colorFor(RecordType.Elevation),
+                        labelModifier = Modifier.sharedText("health-metric-label-ELEVATION"),
+                        onClick = { actions.openMetric(HealthMetricConfig.ELEVATION) },
+                    )
+                    DashboardSectionDivider()
+                    MetricRow(
+                        label = stringResource(R.string.label_wheelchair_pushes),
+                        value = state.wheelchairPushes.toString(),
+                        unit = stringResource(R.string.unit_pushes),
+                        leadingIcon = { m, c -> IconDirectionsWalk(m, c) },
+                        leadingTint = colorFor(RecordType.Wheelchair),
+                        labelModifier = Modifier.sharedText("health-metric-label-WHEELCHAIR_PUSHES"),
+                        onClick = { actions.openMetric(HealthMetricConfig.WHEELCHAIR_PUSHES) },
+                    )
+                    DashboardSectionDivider()
+                    MetricRow(
+                        label = stringResource(R.string.label_exercise),
+                        value = state.exerciseMinutes.toString(),
+                        unit = stringResource(R.string.unit_min),
+                        leadingIcon = { m, c -> IconDirectionsWalk(m, c) },
+                        leadingTint = colorFor(RecordType.Exercise),
+                        labelModifier = Modifier.sharedText("health-metric-label-EXERCISE"),
+                        onClick = { actions.openExerciseDetails() },
                     )
                     DashboardSectionDivider()
                     MetricRow(

@@ -20,20 +20,49 @@ enum class SearchEngine(
     val displayName: String,
     val searchUrl: String,
     val homepage: String,
+    /**
+     * The query parameter that forces this engine's strictest result filter, or null where the
+     * engine has no documented one.
+     *
+     * Null is not "no filtering needed" - it means this engine cannot be trusted to filter, and
+     * [safeSearchUrl] substitutes an engine that can rather than silently returning unfiltered
+     * results. Getting that wrong would be the worst kind of failure here: a parental control
+     * that reports itself on and does nothing.
+     */
+    val safeSearchParam: String? = null,
 ) {
-    GOOGLE("Google", "https://www.google.com/search?q=%s", "https://www.google.com"),
-    DUCKDUCKGO("DuckDuckGo", "https://duckduckgo.com/?q=%s", "https://duckduckgo.com"),
-    BING("Bing", "https://www.bing.com/search?q=%s", "https://www.bing.com"),
-    BRAVE("Brave", "https://search.brave.com/search?q=%s", "https://search.brave.com"),
+    GOOGLE("Google", "https://www.google.com/search?q=%s", "https://www.google.com", "safe=active"),
+    DUCKDUCKGO("DuckDuckGo", "https://duckduckgo.com/?q=%s", "https://duckduckgo.com", "kp=1"),
+    BING("Bing", "https://www.bing.com/search?q=%s", "https://www.bing.com", "adlt=strict"),
+    BRAVE("Brave", "https://search.brave.com/search?q=%s", "https://search.brave.com", "safesearch=strict"),
+    // Startpage's family filter is a stored preference rather than a documented query parameter,
+    // so it is left null instead of guessing at one.
     STARTPAGE("Startpage", "https://www.startpage.com/do/search?q=%s", "https://www.startpage.com"),
-    ECOSIA("Ecosia", "https://www.ecosia.org/search?q=%s", "https://www.ecosia.org"),
-    QWANT("Qwant", "https://www.qwant.com/?q=%s", "https://www.qwant.com");
+    ECOSIA("Ecosia", "https://www.ecosia.org/search?q=%s", "https://www.ecosia.org", "safesearch=1"),
+    QWANT("Qwant", "https://www.qwant.com/?q=%s", "https://www.qwant.com", "safesearch=2");
 
     fun buildQueryUrl(query: String): String =
         searchUrl.replace("%s", Uri.encode(query))
 
+    /**
+     * The query URL with this engine's strict filter applied.
+     *
+     * Falls back to [SAFE_FALLBACK] when this engine has no [safeSearchParam], because an engine
+     * that cannot filter must not be used while filtering is required.
+     */
+    fun safeSearchUrl(query: String): String {
+        val param = safeSearchParam ?: return SAFE_FALLBACK.safeSearchUrl(query)
+        val base = buildQueryUrl(query)
+        val separator = if (base.contains('?')) '&' else '?'
+        return "$base$separator$param"
+    }
+
     companion object {
         val DEFAULT = DUCKDUCKGO
+
+        /** Used when the selected engine has no strict-filter parameter of its own. */
+        val SAFE_FALLBACK = DUCKDUCKGO
+
         fun fromName(name: String): SearchEngine =
             entries.find { it.name == name } ?: DEFAULT
     }
@@ -76,7 +105,17 @@ object BrowserUtils {
     }
 
     /** Search or navigate using the selected engine. */
-    fun toNavigationUrl(input: String, searchEngine: SearchEngine): String {
+    fun toNavigationUrl(input: String, searchEngine: SearchEngine): String =
+        toNavigationUrl(input, searchEngine, safeSearch = false)
+
+    /**
+     * Search or navigate, optionally forcing the engine's strict result filter.
+     *
+     * [safeSearch] comes from `Settings.Secure.search_content_filters_enabled` via
+     * [com.vayunmathur.web.platform.ContentFilters]. It only affects the search branch - a
+     * typed URL is a typed URL, and the site filter is what governs those.
+     */
+    fun toNavigationUrl(input: String, searchEngine: SearchEngine, safeSearch: Boolean): String {
         val trimmed = input.trim()
         if (trimmed.isEmpty()) return searchEngine.homepage
         if (trimmed.startsWith("http://") || trimmed.startsWith("https://")) return trimmed
@@ -86,7 +125,11 @@ object BrowserUtils {
             val lan = LocalNetwork.isLanHostSyntactic(LocalNetwork.hostOf(trimmed))
             return if (lan) "http://$trimmed" else "https://$trimmed"
         }
-        return searchEngine.buildQueryUrl(trimmed)
+        return if (safeSearch) {
+            searchEngine.safeSearchUrl(trimmed)
+        } else {
+            searchEngine.buildQueryUrl(trimmed)
+        }
     }
 
     fun toNavigationUrl(input: String): String = toNavigationUrl(input, SearchEngine.DEFAULT)

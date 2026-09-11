@@ -10,15 +10,26 @@ import com.vayunmathur.cast.protocol.CodecSelection
 import com.vayunmathur.cast.protocol.DisplayMode
 import com.vayunmathur.cast.protocol.StreamConstants
 import com.vayunmathur.cast.protocol.VideoCodec
+import kotlin.math.hypot
+import kotlin.math.roundToInt
 
 private const val TAG = "MirrorGeometry"
 
-/** The frame size to encode, the density to mirror at, and the bitrate that size needs. */
+/**
+ * The frame size to encode, the density to compose at, the rate to send it at, and the bitrate
+ * that combination needs.
+ *
+ * [frameRate] is per-geometry rather than per-session because a panel offers each resolution at
+ * several rates - 3840x2160 at anything from 23.976 to 60 - and which of them this phone can
+ * actually encode depends on the size. It is a `Float` because those are the panel's own numbers
+ * and 59.94 is not 60.
+ */
 data class CaptureGeometry(
     val width: Int,
     val height: Int,
     val densityDpi: Int,
     val bitRate: Int,
+    val frameRate: Float,
 )
 
 /**
@@ -65,14 +76,20 @@ object MirrorGeometry {
     private const val DEFAULT_CONTENT_HEIGHT = 720
 
     /**
-     * The density a 1080p television is composed at, and the short edge that figure belongs to.
-     *
-     * `DENSITY_TV` (213) is the AOSP constant for the case, and it is what a 1280x720 panel wants.
-     * A 1080p screen is 1.5x that short edge, so the reference is scaled to match rather than
-     * leaving every larger panel rendering at 720p element sizes.
+     * The diagonal AOSP assumes for an external panel whose physical size it does not know, in
+     * inches - `DisplayDensityConfiguration.DEFAULT_DISPLAY_SIZE`. A cast receiver reports modes,
+     * not millimetres, so this branch of the platform's arithmetic is the one that applies.
      */
-    private const val TV_REFERENCE_DENSITY = 320
-    private const val TV_REFERENCE_SHORT_EDGE = 1080
+    private const val ASSUMED_PANEL_DIAGONAL_INCHES = 24.0
+
+    /**
+     * The physical touch target AOSP sizes an external display's density around (10.4 mm, here in
+     * inches), what that target is worth in dp, and the floor it will not go below. Together they
+     * are what turns an estimated pixel density into a logical one.
+     */
+    private const val TOUCH_TARGET_INCHES = 10.4 / 25.4
+    private const val TOUCH_TARGET_DP = 48.0
+    private const val MIN_EXTERNAL_DENSITY = 100
 
     /**
      * The phone's real screen size in pixels.
@@ -97,7 +114,11 @@ object MirrorGeometry {
         val (screenWidth, screenHeight) = screenSize(context)
 
         val (fittedWidth, fittedHeight) = chosen.receiverLimits.fit(screenWidth, screenHeight)
-        val frameRate = frameRateFor(chosen.receiverLimits)
+        val frameRate = frameRateFor(
+            limits = chosen.receiverLimits,
+            encoderFrameRate =
+                EncoderSupport.sustainableFrameRate(chosen.codec, fittedWidth, fittedHeight),
+        ) ?: StreamConstants.VIDEO_MIN_FRAME_RATE
         // 4:2:0 chroma subsampling cannot represent an odd width or height, and some encoders fail
         // outright rather than rounding for you. The frame rate goes in because it is the floor:
         // resolution is what gets given up to hold it.
@@ -119,6 +140,7 @@ object MirrorGeometry {
             // rendered for a notional tablet.
             densityDpi = metrics.densityDpi.takeIf { it > 0 } ?: DisplayMetrics.DENSITY_DEFAULT,
             bitRate = bitRate,
+            frameRate = frameRate,
         )
     }
 
@@ -139,7 +161,11 @@ object MirrorGeometry {
         val safeWidth = requestedWidth.takeIf { it > 0 } ?: DEFAULT_CONTENT_WIDTH
         val safeHeight = requestedHeight.takeIf { it > 0 } ?: DEFAULT_CONTENT_HEIGHT
         val (fittedWidth, fittedHeight) = chosen.receiverLimits.fit(safeWidth, safeHeight)
-        val frameRate = frameRateFor(chosen.receiverLimits)
+        val frameRate = frameRateFor(
+            limits = chosen.receiverLimits,
+            encoderFrameRate =
+                EncoderSupport.sustainableFrameRate(chosen.codec, fittedWidth, fittedHeight),
+        ) ?: StreamConstants.VIDEO_MIN_FRAME_RATE
         val (width, height) =
             EncoderSupport.clampToEncoder(chosen.codec, fittedWidth, fittedHeight, frameRate)
         val bitRate = bitRateFor(width, height, frameRate, chosen)
@@ -153,6 +179,7 @@ object MirrorGeometry {
             height = height,
             densityDpi = DisplayMetrics.DENSITY_DEFAULT,
             bitRate = bitRate,
+            frameRate = frameRate,
         )
     }
 
@@ -182,13 +209,17 @@ object MirrorGeometry {
     ): CaptureGeometry = desktopModes(context, chosen, modes).first()
 
     /**
-     * Every desktop resolution this phone can actually send, largest first.
+     * Every desktop mode this phone can actually send, largest and fastest first.
      *
-     * The first entry is what a desktop is composed at by default - the panel's biggest mode,
-     * fitted to the TV's decoder and then clamped to what this phone's *encoder* will emit (a 4K
-     * panel behind a 1080p-class encoder lands here). The rest are the smaller panel modes, each
-     * likewise encodable, and they are what fills Android's external-display resolution picker
-     * once they are declared on the virtual display via `VirtualDisplayConfig.setSupportedModes`.
+     * One entry per *panel mode*, not per resolution: a television offers 3840x2160 at eight
+     * different rates and 1280x720 at three, and each of those is a separate thing the user can
+     * choose in Settings. The first entry is what a desktop is composed at by default.
+     *
+     * **A mode the encoder cannot hold is left out rather than offered slowly.** The rate is not
+     * negotiable once the panel has been switched to match it, so offering 4K60 on a phone whose
+     * H.265 encoder measures 54fps there would put a 60 Hz panel in front of a 54 fps stream and
+     * call it a choice. Asking [EncoderSupport.sustainableFrameRate] first is what keeps the list
+     * honest, and it is also why 4K tops out at 50 on this device.
      *
      * Falls back to the single [forDisplay] geometry when the receiver advertised no modes (a
      * pre-version-8 television) or when nothing it offered is encodable - the old,
@@ -199,65 +230,118 @@ object MirrorGeometry {
         chosen: CodecSelection.Chosen,
         modes: List<DisplayMode>,
     ): List<CaptureGeometry> {
-        val frameRate = frameRateFor(chosen.receiverLimits)
-        val sizes = LinkedHashSet<Pair<Int, Int>>()
+        val geometries = LinkedHashMap<Triple<Int, Int, Float>, CaptureGeometry>()
         for (mode in modes) {
             val (fittedWidth, fittedHeight) = chosen.receiverLimits.fit(mode.width, mode.height)
+            // Asked before the clamp, so the *rate* yields to the panel's resolution rather than
+            // the other way round - a desktop exists to fill the screen it is on, and
+            // clampToEncoder would give up pixels to hold a rate we are free to lower instead.
+            val encoderRate =
+                EncoderSupport.sustainableFrameRate(chosen.codec, fittedWidth, fittedHeight)
+            val frameRate = frameRateFor(chosen.receiverLimits, mode.refreshRate, encoderRate)
+                ?: continue
             val (width, height) =
                 EncoderSupport.clampToEncoder(chosen.codec, fittedWidth, fittedHeight, frameRate)
-            if (width > 0 && height > 0) sizes.add(width to height)
-        }
-        val geometries = sizes
-            .map { (width, height) ->
+            if (width <= 0 || height <= 0) continue
+            geometries.putIfAbsent(
+                Triple(width, height, frameRate),
                 CaptureGeometry(
                     width = width,
                     height = height,
                     densityDpi = desktopDensityFor(width, height),
                     bitRate = bitRateFor(width, height, frameRate, chosen),
-                )
-            }
-            // Largest first: the sender composes at the head and the picker lists from the top.
-            .sortedByDescending { it.width.toLong() * it.height }
-        if (geometries.isEmpty()) {
+                    frameRate = frameRate,
+                ),
+            )
+        }
+        // Largest first, then fastest: the sender composes at the head and the picker lists from
+        // the top.
+        val ordered = geometries.values.sortedWith(
+            compareByDescending<CaptureGeometry> { it.width.toLong() * it.height }
+                .thenByDescending { it.frameRate },
+        )
+        if (ordered.isEmpty()) {
             Log.w(TAG, "the TV advertised no encodable panel modes; composing for the phone")
             return listOf(forDisplay(context, chosen))
         }
         Log.i(
             TAG,
-            "desktop: offering ${geometries.joinToString { "${it.width}x${it.height}" }} " +
-                "@ ${frameRate}fps${chosen.rateReasoning()}",
+            "desktop: offering " +
+                ordered.joinToString {
+                    "${it.width}x${it.height}@${it.frameRate} (${it.densityDpi}dpi)"
+                } + chosen.rateReasoning(),
         )
-        return geometries
+        return ordered
     }
 
     /**
      * The density to compose a desktop at.
      *
      * Explicitly not the phone's. A phone's ~420dpi describes a screen held at arm's length; used
-     * on a television it renders a desktop whose text and controls are sized for a hand, which on a
-     * 55-inch panel across a room is enormous and fits almost nothing on screen.
+     * on a television it renders a desktop whose text and controls are sized for a hand.
      *
-     * Scaled from the frame's own height against a 1080p reference at [TV_REFERENCE_DENSITY], so a
-     * 4K panel gets proportionally more density rather than four times as many equally-tiny
-     * elements - the same shape of arithmetic AOSP uses for external displays.
+     * **Nor is it a fraction of the frame.** Scaling density with resolution - the shape
+     * `LocalDisplayAdapter` used to use, and what this did - holds the *dp* workspace constant, so
+     * every panel from 720p to 4K composed the same ~960dp desktop and a 4K television got four
+     * times the pixels spent on the same handful of enormous elements.
+     *
+     * This is `DisplayDensityConfiguration.calculateBaseDensity`, restated: estimate the panel's
+     * physical pixel density, then pick the logical density that makes a 10.4 mm touch target come
+     * out at 48dp. A receiver reports modes rather than millimetres, so the unknown-physical-size
+     * branch applies and the estimate comes from [ASSUMED_PANEL_DIAGONAL_INCHES].
+     *
+     * **Restated rather than approximated on purpose.** `VirtualDisplayAdapter` re-derives density
+     * from the same function when the user picks a different resolution, so any difference between
+     * the two would show up as the desktop resizing itself the first time the picker is touched.
+     * The dp workspace comes out around 2450 wide at every resolution, which is the point: a
+     * resolution change is a change in sharpness, not in layout.
      */
     private fun desktopDensityFor(width: Int, height: Int): Int {
-        val shortEdge = minOf(width, height).takeIf { it > 0 } ?: return TV_REFERENCE_DENSITY
-        val scaled = TV_REFERENCE_DENSITY * shortEdge / TV_REFERENCE_SHORT_EDGE
-        return scaled.coerceIn(DisplayMetrics.DENSITY_LOW, DisplayMetrics.DENSITY_XXHIGH)
+        if (width <= 0 || height <= 0) return MIN_EXTERNAL_DENSITY
+        val pixelsPerInch =
+            hypot(width.toDouble(), height.toDouble()) / ASSUMED_PANEL_DIAGONAL_INCHES
+        val targetPixels = pixelsPerInch * TOUCH_TARGET_INCHES
+        val density = targetPixels * DisplayMetrics.DENSITY_DEFAULT / TOUCH_TARGET_DP
+        return density.roundToInt().coerceAtLeast(MIN_EXTERNAL_DENSITY)
     }
 
     /**
-     * The TV's cap for the chosen codec, or ours, whichever is lower.
+     * The rate to send a panel mode at, or null when this phone cannot hold it.
      *
-     * A TV that caps out below 30 fps lowers the session rather than being refused - it genuinely
-     * cannot go faster, and there is nothing to gain by declining to mirror to it. That is why the
-     * floor in `CodecNegotiation.choose` is enforced against the *sender's* envelope only.
+     * **Null rather than a slower rate, and that is the whole change.** While the panel ran at
+     * whatever it liked and we sent 30 into it, lowering the rate was the kind thing to do. Now
+     * the receiver switches the screen to exactly the rate named here, so a mode this phone cannot
+     * encode is not a mode to be delivered slowly - it is one that must not be offered, or the
+     * user picks 4K60 and gets a 60 Hz panel fed 54 fps.
+     *
+     * Three ceilings apply: ours ([StreamConstants.VIDEO_MAX_FRAME_RATE]), the TV's decoder, and
+     * this phone's encoder at this particular size ([encoderFrameRate], `0f` when unknown). The
+     * panel's rate is returned unchanged when it clears all three.
+     *
+     * [panelRefreshRate] is `0f` for a caller not composing for a panel at all - mirroring, and a
+     * pre-version-8 television - and then there is no mode to accept or reject and the lowest
+     * ceiling is the answer.
      */
-    fun frameRateFor(limits: CodecLimits): Int = minOf(
-        StreamConstants.VIDEO_MAX_FRAME_RATE,
-        limits.maxFrameRate.takeIf { it > 0 } ?: StreamConstants.VIDEO_MAX_FRAME_RATE,
-    )
+    fun frameRateFor(
+        limits: CodecLimits,
+        panelRefreshRate: Float = 0f,
+        encoderFrameRate: Float = 0f,
+    ): Float? {
+        val ceiling = minOf(
+            StreamConstants.VIDEO_MAX_FRAME_RATE,
+            limits.maxFrameRate.takeIf { it > 0 }?.toFloat()
+                ?: StreamConstants.VIDEO_MAX_FRAME_RATE,
+            encoderFrameRate.takeIf { it > 0f } ?: StreamConstants.VIDEO_MAX_FRAME_RATE,
+        )
+        if (panelRefreshRate <= 0f) return ceiling.takeIf { it > 0f }
+        // A shade of tolerance, because a measured encoder rate of 59.9 against a 59.94 panel mode
+        // is the same answer and refusing it would drop the mode a television is most likely to be
+        // running in.
+        return panelRefreshRate.takeIf { it <= ceiling + RATE_TOLERANCE }
+    }
+
+    /** How far apart two frame rates may be and still be the same rate. */
+    private const val RATE_TOLERANCE = 0.5f
 
     /**
      * How much of [BITS_PER_PIXEL] each codec actually needs for the same picture.
@@ -277,7 +361,7 @@ object MirrorGeometry {
     private fun bitRateFor(
         width: Int,
         height: Int,
-        frameRate: Int,
+        frameRate: Float,
         chosen: CodecSelection.Chosen,
     ): Int {
         val factor = efficiencyFactor(chosen.codec)

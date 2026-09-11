@@ -1,0 +1,93 @@
+#version 450
+#extension GL_EXT_control_flow_attributes : require
+//! VARIANT E — DEEP PREFETCH + FULL DEQUANT. Variant D's loads, variant C's arithmetic.
+//!
+//! TEMPORARY probe shader for task 9. Source of truth is
+//! `analysis/gemv_probe/gemv_e_deep_full.comp`. See `gemv_a_control.comp` for why this copy
+//! exists and when to delete it.
+//!
+//! The combination, and the variant that decides what to build. `E - C` is what deep
+//! prefetch is worth **once the ALU cost is present**, which is the only form of the
+//! question that matters: ml_drift's `WaveLoad` sits in a kernel that also dequantises, so
+//! a prefetch win measured against a no-ALU control would not transfer.
+//!
+//! Reading the 2x2:
+//!
+//! | | shallow | deep |
+//! | :--- | :--- | :--- |
+//! | light ALU | A | D |
+//! | full ALU  | C | E |
+//!
+//! * `C << A` and `E ~= C`  -> ALU-bound. H2. Cut dequant work; prefetch does not help.
+//! * `C << A` and `E >> C`  -> ALU exposes latency the control did not. H1 and H2 together:
+//!                             the arithmetic lengthens the dependency chain and depth hides
+//!                             it. Prefetch is the cheaper fix and should go first.
+//! * `C ~= A` and `D >> A`  -> not ALU at all; depth is the lever even without arithmetic.
+//! * `C ~= A` and `D ~= A`  -> neither hypothesis. The 6x lives somewhere neither of us has
+//!                             looked, and the difference must be in what
+//!                             `conv_vec_int4.comp` does that none of these five do:
+//!                             per-block scale fetches, the `ROWS` loop, `subgroupAdd`, the
+//!                             shared-memory reduction, or the dispatch shape itself.
+//!
+//! That last row is a real possible outcome and it is why all five run rather than just C.
+
+#extension GL_EXT_shader_16bit_storage : require
+#extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
+
+layout(local_size_x = 64) in;
+
+layout(set = 0, binding = 0) readonly buffer Source { uvec4 data[]; };
+layout(set = 0, binding = 1) buffer Sink { uint sink[]; };
+layout(set = 0, binding = 2) readonly buffer Acts { float16_t act[]; };
+
+layout(push_constant) uniform Push {
+    uint quads;
+};
+
+// See `gemv_d_deep.comp` for why this is a literal `#define`.
+#define DEPTH 16
+
+void main() {
+    uint lane = gl_GlobalInvocationID.x;
+    uint stride = gl_NumWorkGroups.x * 64u;
+    float total = 0.0;
+
+    uint iters = quads / stride;
+    uint batches = iters / uint(DEPTH);
+    uint at = lane;
+    for (uint b = 0u; b < batches; b++) {
+        uvec4 cache[DEPTH];
+        [[unroll]] for (uint d = 0u; d < uint(DEPTH); d++) {
+            cache[d] = data[at + d * stride];
+        }
+        // Consume phase: the whole of variant C's arithmetic, but against registers that
+        // were filled sixteen loads ago rather than one.
+        [[unroll]] for (uint d = 0u; d < uint(DEPTH); d++) {
+            uvec4 packed = cache[d];
+            uint abase = ((at + d * stride) & 127u) * 32u;
+            [[unroll]] for (uint word = 0u; word < 4u; word++) {
+                uint bits = packed[word];
+                [[unroll]] for (uint n = 0u; n < 8u; n++) {
+                    int code = bitfieldExtract(int(bits), int(n << 2u), 4);
+                    total += float(code) * float(act[abase + word * 8u + n]);
+                }
+            }
+        }
+        at += uint(DEPTH) * stride;
+    }
+    for (; at < quads; at += stride) {
+        uvec4 packed = data[at];
+        uint abase = (at & 127u) * 32u;
+        [[unroll]] for (uint word = 0u; word < 4u; word++) {
+            uint bits = packed[word];
+            [[unroll]] for (uint n = 0u; n < 8u; n++) {
+                int code = bitfieldExtract(int(bits), int(n << 2u), 4);
+                total += float(code) * float(act[abase + word * 8u + n]);
+            }
+        }
+    }
+
+    if (floatBitsToUint(total) == 0xFFFFFFFFu) {
+        sink[0] = 1u;
+    }
+}

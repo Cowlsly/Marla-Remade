@@ -15,14 +15,40 @@ import java.io.IOException
  *
  * Absence is a supported state, not an error: every reader treats a zero handle as "no data",
  * so beacon lookups miss and the geocoder reports itself unavailable.
+ *
+ * ## Filenames carry the format version
+ *
+ * A new database format gets a new filename rather than a version field the readers negotiate.
+ * The files are a cache of a published artifact, not user data, so there is nothing to migrate
+ * — an old file is simply a name nobody asks for, and [pruneStale] reclaims its multiple
+ * gigabytes. This keeps exactly one format alive in each reader.
  */
 object OfflineDatabases {
-    const val GEOCODER = "geocoder.geodb"
-    const val WIFI = "wifi.wpsdb"
-    const val CELL = "cells.wpsdb"
+    const val GEOCODER = "geocoder-v3.geodb"
+    const val WIFI = "wifi-v2.wpsdb"
+    const val CELL = "cells-v2.wpsdb"
 
-    private const val GEOCODER_URL = "https://data.vayunmathur.com/geocoder/geocoder.geodb"
+    /** Names shipped by earlier versions of the app, deleted on sight to reclaim space. */
+    private val SUPERSEDED = listOf("geocoder.geodb", "wifi.wpsdb", "cells.wpsdb")
+
+    private const val GEOCODER_URL = "https://data.vayunmathur.com/geocoder/$GEOCODER"
     private const val WPS_BASE_URL = "https://data.vayunmathur.com/wps/"
+
+    /**
+     * Expected SHA-256 of each published database, verified by `:library:downloadservice`
+     * after the transfer and refetched on mismatch.
+     *
+     * Presence alone is too weak a check: a store is several gigabytes fetched in resumable
+     * chunks, and a truncated file is non-empty, so without a checksum it reads as installed
+     * and then fails its magic check on every open, forever.
+     *
+     * A null hash means the download is accepted unverified. The beacon stores stay null until
+     * a crawl has been run and published.
+     */
+    fun sha256For(name: String): String? = when (name) {
+        GEOCODER -> "97284c7a1f7d07db4c448ce62c6f3b86cbf4d38293e6c4d4d8157a04394e9593"
+        else -> null
+    }
 
     /** Download source for [name], matching the mirror the DBs are published to. */
     fun urlFor(name: String): String = when (name) {
@@ -43,6 +69,14 @@ object OfflineDatabases {
 
     fun allPresent(context: Context): Boolean =
         listOf(GEOCODER, WIFI, CELL).all { isPresent(context, it) }
+
+    /** Delete databases in a format no reader understands any more. Safe to call repeatedly. */
+    fun pruneStale(context: Context) {
+        for (name in SUPERSEDED) {
+            val f = file(context, name)
+            if (f.isFile) f.delete()
+        }
+    }
 
     /**
      * Open [name] for the native readers, which take an fd plus a base offset. Assets lived at

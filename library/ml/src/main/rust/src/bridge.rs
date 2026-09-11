@@ -628,6 +628,18 @@ struct SupertonicNets<'a> {
     text: &'a mut Reshaped<u32>,
     sampler: &'a mut Reshaped<(u32, u32)>,
     vocoder: &'a mut Reshaped<u32>,
+    timing: Timing,
+}
+
+/// TEMPORARY instrumentation: where an utterance's time goes.
+#[derive(Default)]
+struct Timing {
+    reshape: f64,
+    duration: f64,
+    text: f64,
+    sampler: f64,
+    vocoder: f64,
+    sampler_calls: u32,
 }
 
 /// Positions per id tensor: `crate::nets::embed_lanes` writes two lanes, `lo + 2048 * hi`.
@@ -652,7 +664,10 @@ impl supertonic::Stages for SupertonicNets<'_> {
         // the character count without it.
         let sequence = positions("duration ids", lanes.len(), LANES)?;
         let chars = sequence.checked_sub(1).ok_or("a duration pass over only a sentence token")?;
+        let reshaping = std::time::Instant::now();
         let net = self.duration.at(chars)?;
+        self.timing.reshape += reshaping.elapsed().as_secs_f64() * 1000.0;
+        let running = std::time::Instant::now();
         // Two outputs, in `nets::supertonic_duration`'s declaration order: the sentence encoder's
         // hidden states, then the one value `seconds` exponentiates. Only the second is wanted here.
         // The first exists because it is what `scripts/ml/onnx_parity.py` probes for this graph — the
@@ -662,6 +677,7 @@ impl supertonic::Stages for SupertonicNets<'_> {
         // always returned two tensors, so every synthesis failed at the first stage with
         // "2 outputs, expected one" and no audio was ever produced.
         let out = net.infer_raw_many(&[lanes, style])?;
+        self.timing.duration += running.elapsed().as_secs_f64() * 1000.0;
         let [_encoded, log_seconds] = <[Vec<f32>; 2]>::try_from(out).map_err(|other| {
             format!("the duration predictor returned {} tensors, not two", other.len())
         })?;
@@ -675,8 +691,13 @@ impl supertonic::Stages for SupertonicNets<'_> {
 
     fn text(&mut self, lanes: &[f32], style: &[f32]) -> Result<Vec<f32>, String> {
         let chars = positions("text ids", lanes.len(), LANES)?;
+        let reshaping = std::time::Instant::now();
         let net = self.text.at(chars)?;
-        one_output(net.infer_raw_many(&[lanes, style])?)
+        self.timing.reshape += reshaping.elapsed().as_secs_f64() * 1000.0;
+        let running = std::time::Instant::now();
+        let out = one_output(net.infer_raw_many(&[lanes, style])?);
+        self.timing.text += running.elapsed().as_secs_f64() * 1000.0;
+        out
     }
 
     fn sampler(
@@ -691,10 +712,14 @@ impl supertonic::Stages for SupertonicNets<'_> {
     ) -> Result<Vec<f32>, String> {
         let frames = positions("a latent", latent.len(), supertonic_sampler::LATENT as usize)?;
         let chars = positions("a conditioning", text.len(), supertonic_sampler::TEXT as usize)?;
+        let reshaping = std::time::Instant::now();
         let net = self.sampler.at((frames, chars))?;
+        self.timing.reshape += reshaping.elapsed().as_secs_f64() * 1000.0;
+        let running = std::time::Instant::now();
+        self.timing.sampler_calls += 1;
         // Declaration order, which `infer_raw_many` checks each of against its own binding — the
         // seven are all fp16 planes and a swapped pair would be the right size.
-        one_output(net.infer_raw_many(&[
+        let out = one_output(net.infer_raw_many(&[
             latent,
             text,
             keys,
@@ -702,11 +727,16 @@ impl supertonic::Stages for SupertonicNets<'_> {
             shifts,
             query_angles,
             key_angles,
-        ])?)
+        ])?);
+        self.timing.sampler += running.elapsed().as_secs_f64() * 1000.0;
+        out
     }
 
     fn vocoder(&mut self, latent: &[f32], frames: u32) -> Result<Vec<f32>, String> {
+        let reshaping = std::time::Instant::now();
         let net = self.vocoder.at(frames)?;
+        self.timing.reshape += reshaping.elapsed().as_secs_f64() * 1000.0;
+        let running = std::time::Instant::now();
         // Two marshalling steps, both the host's job — `nets::supertonic_vocoder::build`'s own doc
         // says the input is "reinterpreted" and the output "read transposed", and the parity path in
         // `nets::reference` does both. Production did neither, which is what made the engine whine:
@@ -719,7 +749,9 @@ impl supertonic::Stages for SupertonicNets<'_> {
         //    at the frame rate rather than speech.
         let unpacked = supertonic_vocoder::unpack_latent(latent, frames as usize)?;
         let channelled = one_output(net.infer_raw(&unpacked)?)?;
-        Ok(supertonic_vocoder::interleave(&channelled))
+        let out = supertonic_vocoder::interleave(&channelled);
+        self.timing.vocoder += running.elapsed().as_secs_f64() * 1000.0;
+        Ok(out)
     }
 }
 
@@ -858,36 +890,40 @@ fn build_supertonic<'l>(
     // its file that no shader ever reads, so they are read here rather than uploaded.
     let conditioning = supertonic::Conditioning::read(sampler_weights.reader())?;
 
+    let device_at = std::time::Instant::now();
     let shared = context::shared()?;
+    log(&format!("TIMING device {:.0} ms", device_at.elapsed().as_secs_f64() * 1000.0));
+    let built = std::time::Instant::now();
+    let duration_net = Reshaped::streamed(
+        shared.clone(),
+        duration_weights.offsets(),
+        &duration_weights,
+        SMALLEST,
+        duration_plan,
+    )?;
+    log(&format!("TIMING dp net {:.0} ms", built.elapsed().as_secs_f64() * 1000.0));
+    let built = std::time::Instant::now();
+    let text_net =
+        Reshaped::streamed(shared.clone(), text_weights.offsets(), &text_weights, SMALLEST, text_plan)?;
+    log(&format!("TIMING ttl net {:.0} ms", built.elapsed().as_secs_f64() * 1000.0));
+    let built = std::time::Instant::now();
+    let sampler_net = Reshaped::streamed(
+        shared.clone(),
+        sampler_weights.offsets(),
+        &sampler_weights,
+        (SMALLEST, SMALLEST),
+        sampler_plan,
+    )?;
+    log(&format!("TIMING ve net {:.0} ms", built.elapsed().as_secs_f64() * 1000.0));
+    let built = std::time::Instant::now();
+    let vocoder_net =
+        Reshaped::streamed(shared, vocoder_weights.offsets(), &vocoder_weights, SMALLEST, vocoder_plan)?;
+    log(&format!("TIMING voc net {:.0} ms", built.elapsed().as_secs_f64() * 1000.0));
     let handle = SupertonicHandle {
-        duration: Reshaped::streamed(
-            shared.clone(),
-            duration_weights.offsets(),
-            &duration_weights,
-            SMALLEST,
-            duration_plan,
-        )?,
-        text: Reshaped::streamed(
-            shared.clone(),
-            text_weights.offsets(),
-            &text_weights,
-            SMALLEST,
-            text_plan,
-        )?,
-        sampler: Reshaped::streamed(
-            shared.clone(),
-            sampler_weights.offsets(),
-            &sampler_weights,
-            (SMALLEST, SMALLEST),
-            sampler_plan,
-        )?,
-        vocoder: Reshaped::streamed(
-            shared,
-            vocoder_weights.offsets(),
-            &vocoder_weights,
-            SMALLEST,
-            vocoder_plan,
-        )?,
+        duration: duration_net,
+        text: text_net,
+        sampler: sampler_net,
+        vocoder: vocoder_net,
         conditioning,
         indexer,
         voice,
@@ -1033,10 +1069,30 @@ fn speak_supertonic(
     // `synthesise` draws the starting latent once, after the duration predictor has settled the
     // frame count, so the generator has to be reachable from a `Fn` rather than pre-drawn.
     let noise = std::cell::RefCell::new(rng);
-    let mut nets = SupertonicNets { duration, text: encoder, sampler, vocoder };
-    supertonic::synthesise(&mut nets, conditioning, indexer, voice, text, language, &|count| {
-        noise.borrow_mut().normal(count)
-    })
+    let mut nets = SupertonicNets {
+        duration,
+        text: encoder,
+        sampler,
+        vocoder,
+        timing: Timing::default(),
+    };
+    let whole = std::time::Instant::now();
+    let out =
+        supertonic::synthesise(&mut nets, conditioning, indexer, voice, text, language, &|count| {
+            noise.borrow_mut().normal(count)
+        });
+    let t = &nets.timing;
+    log(&format!(
+        "TIMING utterance {:.0} ms: reshape {:.0}, duration {:.0}, text {:.0}, sampler {:.0} over {} calls, vocoder {:.0}",
+        whole.elapsed().as_secs_f64() * 1000.0,
+        t.reshape,
+        t.duration,
+        t.text,
+        t.sampler,
+        t.sampler_calls,
+        t.vocoder,
+    ));
+    out
 }
 
 /// Copy a Java `int[]` of ARGB pixels into `into`, checking it against `width` x `height`.

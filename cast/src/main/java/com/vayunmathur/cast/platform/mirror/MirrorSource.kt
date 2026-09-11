@@ -1,6 +1,7 @@
 package com.vayunmathur.cast.platform.mirror
 
 import android.media.projection.MediaProjection
+import com.vayunmathur.cast.platform.remotedisplay.CastSystemDisplay
 
 /**
  * What [MirrorEngine] is encoding.
@@ -71,6 +72,20 @@ sealed interface MirrorSource {
          * computes them from the TV's advertised modes and this phone's encoder limits.
          */
         var supportedModes: List<CaptureGeometry> = emptyList()
+            internal set
+
+        /**
+         * The virtual display itself, which **outlives any one [MirrorEngine]**.
+         *
+         * Held here rather than in the engine because a resolution change re-negotiates the
+         * stream: the encoder and the RTP transport are torn down and rebuilt, and if the display
+         * went with them the desktop's windows would be destroyed and its `displayId` would
+         * change - invalidating the very Settings page the user made the choice on. So the engine
+         * borrows it and re-points it at each new encoder surface, and only
+         * [com.vayunmathur.cast.platform.CastController] releases it, when the session really
+         * ends.
+         */
+        var display: CastSystemDisplay? = null
             internal set
     }
 

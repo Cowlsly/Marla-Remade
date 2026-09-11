@@ -14,6 +14,7 @@ object HealthColors {
     val Sleep = Color(0xFF5C6BC0)      // indigo
     val Nutrition = Color(0xFFFB8C00)  // orange
     val Hydration = Color(0xFF039BE5)  // blue
+    val Medical = Color(0xFF8E24AA)    // purple — vaccinations and medication
 }
 
 /** Macro accents used in NutritionPage. */

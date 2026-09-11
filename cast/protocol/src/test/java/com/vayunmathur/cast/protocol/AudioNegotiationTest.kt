@@ -167,7 +167,7 @@ class AudioNegotiationTest {
     private fun audioOnlyConfig() = StreamConfig(
         width = 0,
         height = 0,
-        frameRate = 0,
+        frameRate = 0f,
         bitRate = 0,
         audio = true,
         video = false,

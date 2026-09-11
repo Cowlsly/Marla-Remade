@@ -218,8 +218,6 @@
 
     <!-- MainActivity BottomNavBar: Today tab label. Noun -->
     <string name="nav_today">Today</string>
-    <!-- MainActivity BottomNavBar: Activity tab label. Noun -->
-    <string name="nav_activity">Activity</string>
     <!-- MainActivity BottomNavBar: Nutrition tab label. Noun -->
     <string name="nav_nutrition">Nutrition</string>
     <!-- MainActivity BottomNavBar: Body tab label. Noun -->
@@ -231,10 +229,6 @@
     <string name="section_last_night">Last night</string>
     <!-- TodayPage: Section header for quick stats mini-cards. Noun phrase -->
     <string name="section_quick_stats">Quick stats</string>
-    <!-- ActivityPage: Section header for today's activity rings/charts. Noun -->
-    <string name="section_today_activity">Today</string>
-    <!-- ActivityPage: Section header for this week's summary. Noun phrase -->
-    <string name="section_this_week">This week</string>
 
     <!-- ExerciseDetailsPage: Title for exercise section/details page. Noun -->
     <string name="label_exercise">Exercise</string>
@@ -305,4 +299,311 @@
     <!-- FoodLoggingDialogs: Label for servings count when recipe selected. Noun -->
     <string name="servings">Servings</string>
     <string name="kcal_2">kcal</string>
+
+    <!-- BottomNavBar: Tab for the medication log. Noun -->
+    <string name="nav_medication">Medication</string>
+    <!-- BottomNavBar: Tab for medical records, which contains the vaccination log. Noun, plural -->
+    <string name="nav_records">Records</string>
+
+    <!-- RecordsPage: Row opening the vaccination log. Noun, plural -->
+    <string name="vaccinations">Vaccinations</string>
+    <!-- RecordsPage: Row opening the allergy list. Noun, plural -->
+    <string name="allergies">Allergies</string>
+    <!-- RecordsPage: Row opening the diagnosis list. Noun, plural -->
+    <string name="conditions">Conditions</string>
+    <!-- RecordsPage: Supporting line under each category row, %1$d is a count of records -->
+    <plurals name="records_recorded">
+        <item quantity="one">%1$d record</item>
+        <item quantity="other">%1$d records</item>
+    </plurals>
+    <!-- RecordsPage: Shown on a category row that has no entries yet. Sentence -->
+    <string name="nothing_recorded">Nothing recorded yet</string>
+
+    <!-- VaccinationsPage / MedicationPage: Banner shown when the device cannot store FHIR records. Sentence -->
+    <string name="phr_unavailable">Health Connect on this device cannot store medical records, so these are kept in the app only.</string>
+
+    <!-- VaccinationsPage: Empty state title. Sentence -->
+    <string name="no_vaccinations">No vaccinations yet</string>
+    <!-- VaccinationsPage: Empty state body. Sentence -->
+    <string name="no_vaccinations_message">Add a vaccination to start a record you can keep and share.</string>
+    <!-- VaccinationsPage: FAB content description and add screen title. Verb phrase -->
+    <string name="add_vaccination">Add vaccination</string>
+    <!-- AddVaccinationPage: Title when changing an existing record. Verb phrase -->
+    <string name="edit_vaccination">Edit vaccination</string>
+    <!-- VaccinationsPage: Confirm deleting one vaccination, %1$s is the vaccine name. Sentence -->
+    <string name="delete_vaccination_confirm">Delete the record of %1$s?</string>
+    <!-- VaccinationsPage: Supporting line showing the CVX code, %1$s is the code. Noun phrase -->
+    <string name="cvx_code">CVX %1$s</string>
+
+    <!-- MedicationPage: Empty state title. Sentence -->
+    <string name="no_medications">No medications yet</string>
+    <!-- MedicationPage: Empty state body. Sentence -->
+    <string name="no_medications_message">Add a medication to keep track of what you take and when.</string>
+    <!-- MedicationPage: FAB content description and add screen title. Verb phrase -->
+    <string name="add_medication">Add medication</string>
+    <!-- AddMedicationPage: Title when changing an existing record. Verb phrase -->
+    <string name="edit_medication">Edit medication</string>
+    <!-- MedicationPage: Confirm deleting one medication, %1$s is the medication name. Sentence -->
+    <string name="delete_medication_confirm">Delete the record of %1$s?</string>
+    <!-- MedicationPage: Section heading above medications still being taken. Adjective -->
+    <string name="medication_current">Current</string>
+    <!-- MedicationPage: Section heading above medications no longer being taken. Adjective -->
+    <string name="medication_past">Past</string>
+    <!-- MedicationPage: Status shown on a medication still being taken. Adjective -->
+    <string name="medication_status_active">Taking</string>
+    <!-- MedicationPage: Status shown on a completed course. Adjective -->
+    <string name="medication_status_completed">Finished</string>
+    <!-- MedicationPage: Status shown on a medication that was stopped early. Adjective -->
+    <string name="medication_status_stopped">Stopped</string>
+
+    <!-- AddVaccinationPage / AddMedicationPage: Form section heading. Noun phrase -->
+    <string name="section_what">What</string>
+    <!-- AddVaccinationPage / AddMedicationPage: Form section heading. Noun -->
+    <string name="section_when">When</string>
+    <!-- AddVaccinationPage: Form section heading for optional clinical fields. Noun phrase -->
+    <string name="section_details">Details</string>
+    <!-- AddVaccinationPage: Form section heading for scanned cards. Noun, plural -->
+    <string name="section_attachments">Attachments</string>
+
+    <!-- AddVaccinationPage: Read-only field opening the vaccine picker. Noun -->
+    <string name="field_vaccine">Vaccine</string>
+    <!-- AddVaccinationPage: Placeholder in the vaccine field before one is chosen. Verb phrase -->
+    <string name="choose_a_vaccine">Choose a vaccine</string>
+    <!-- AddVaccinationPage: Date the vaccination was given. Noun phrase -->
+    <string name="field_date_given">Date given</string>
+    <!-- AddVaccinationPage: Manufacturer lot number printed on the vaccination card. Noun phrase -->
+    <string name="field_lot_number">Lot number</string>
+    <!-- AddVaccinationPage: Body site the injection was given in. Noun -->
+    <string name="field_site">Site</string>
+    <!-- AddVaccinationPage: Route of administration, for example intramuscular. Noun -->
+    <string name="field_route">Route</string>
+    <!-- AddVaccinationPage: Dose given, for example 0.5 mL. Noun -->
+    <string name="field_dose">Dose</string>
+    <!-- AddVaccinationPage: Clinic or clinician who gave the vaccination. Noun -->
+    <string name="field_performer">Given by</string>
+    <!-- AddVaccinationPage / AddMedicationPage: Free-text note. Noun -->
+    <string name="field_note">Note</string>
+    <!-- AddVaccinationPage: Button adding a PDF or photo of a vaccination card. Verb phrase -->
+    <string name="attach_file">Attach a PDF or photo</string>
+    <!-- AddVaccinationPage: Name used when the file picker reports no name for a file. Noun -->
+    <string name="attachment_untitled">Attachment</string>
+
+    <!-- AddMedicationPage: Read-only field opening the ingredient picker. Noun -->
+    <string name="field_medication">Medication</string>
+    <!-- AddMedicationPage: Placeholder in the medication field before one is chosen. Verb phrase -->
+    <string name="choose_a_medication">Choose a medication</string>
+    <!-- AddMedicationPage: Read-only field opening the strength and form picker. Noun phrase -->
+    <string name="field_strength_and_form">Strength and form</string>
+    <!-- AddMedicationPage: Placeholder before a strength is chosen. Verb phrase -->
+    <string name="choose_a_strength">Choose a strength and form</string>
+    <!-- AddMedicationPage: Date the user started taking the medication. Noun phrase -->
+    <string name="field_started">Started</string>
+    <!-- AddMedicationPage: Date the user stopped taking the medication. Noun phrase -->
+    <string name="field_ended">Ended</string>
+    <!-- AddMedicationPage: How much and how often, for example one tablet twice a day. Noun -->
+    <string name="field_dosage">Dosage</string>
+    <!-- AddMedicationPage: Label above the taking/finished/stopped selector. Noun -->
+    <string name="field_status">Status</string>
+
+    <!-- CatalogPickerPage: Search field placeholder, which doubles as the screen title. Verb phrase -->
+    <string name="search_vaccines">Search vaccines</string>
+    <!-- CatalogPickerPage: Search field placeholder when picking a medication. Verb phrase -->
+    <string name="search_medications">Search medications</string>
+    <!-- CatalogPickerPage: Search field placeholder when picking a strength and dose form. Verb phrase -->
+    <string name="search_strengths">Search strengths</string>
+    <!-- CatalogPickerPage: Empty state when a search matches nothing. Sentence -->
+    <string name="no_matches">Nothing matches that search</string>
+    <!-- CatalogPickerPage: Shown while the medication catalogue is being unpacked. Sentence -->
+    <string name="preparing_medication_catalog">Preparing the medication list…</string>
+    <!-- CatalogPickerPage: Shown when the medication catalogue is not bundled in this build. Sentence -->
+    <string name="medication_catalog_absent">This build has no medication list, so you can type a name instead.</string>
+    <!-- CatalogPickerPage: Action accepting the typed text rather than a catalogue entry, %1$s is what was typed -->
+    <string name="use_typed_name">Use “%1$s”</string>
+    <!-- CatalogPickerPage: Marks a vaccine code the CDC has retired. Adjective -->
+    <string name="cvx_retired">Retired code</string>
+    <!-- MedicationPage: A start and end date, %1$s is the start date and %2$s the end date -->
+    <string name="date_range"><xliff:g example="1 March 2026" id="start">%1$s</xliff:g> – <xliff:g example="4 April 2026" id="end">%2$s</xliff:g></string>
+
+    <!-- Notification channel for the alert when a medication dose is due. Noun phrase -->
+    <string name="channel_dose_reminder_name">Dose reminders</string>
+    <!-- Description of the dose reminder notification channel. Sentence -->
+    <string name="channel_dose_reminder_description">Alerts you when a medication is due.</string>
+    <!-- Notification channel for the ongoing notification while a reminder is sounding. Noun phrase -->
+    <string name="channel_dose_ringing_name">Reminder sounding</string>
+    <!-- Description of the sounding notification channel. Sentence -->
+    <string name="channel_dose_ringing_description">Shown while a dose reminder is going off.</string>
+
+    <!-- DoseReminderScreen and its notification: heading when a dose is due. Sentence -->
+    <string name="dose_due_title">Time to take</string>
+    <!-- DoseReminderScreen: button confirming the dose was taken. Verb -->
+    <string name="dose_taken">Taken</string>
+    <!-- DoseReminderScreen: button postponing the reminder. Verb -->
+    <string name="dose_snooze">Snooze</string>
+
+    <!-- AddMedicationPage: Form section heading for dose reminders. Noun, plural -->
+    <string name="section_reminders">Reminders</string>
+    <!-- AddMedicationPage: Switch turning dose reminders on. Noun phrase -->
+    <string name="remind_me">Remind me to take this</string>
+    <!-- AddMedicationPage: Label above the list of times of day a dose is due. Noun, plural -->
+    <string name="dose_times">Times of day</string>
+    <!-- AddMedicationPage: Label for how often the medication repeats. Noun -->
+    <string name="repeat_every">Repeat every</string>
+    <!-- AddMedicationPage: Repeat unit, shown next to a number, for example "every 3 days". Noun, plural -->
+    <string name="repeat_days">days</string>
+    <!-- AddMedicationPage: Repeat unit, shown next to a number, for example "every 2 weeks". Noun, plural -->
+    <string name="repeat_weeks">weeks</string>
+    <!-- AddMedicationPage: Label above the weekday selector. Noun, plural -->
+    <string name="on_these_days">On these days</string>
+    <!-- AddMedicationPage: Optional date the course of medication stops. Noun phrase -->
+    <string name="reminders_until">Until</string>
+    <!-- AddMedicationPage: Shown in the Until field when no end date is set. Noun -->
+    <string name="no_end_date">No end date</string>
+    <!-- AddMedicationPage: Warning that reminders cannot take over the screen without a permission. Sentence -->
+    <string name="full_screen_intent_needed">Reminders can only take over the screen once you allow full-screen notifications.</string>
+    <!-- AddMedicationPage: Button opening the system settings screen for that permission. Verb phrase -->
+    <string name="grant_full_screen">Allow</string>
+    <!-- MedicationPage: When the next dose is due, %1$s is a date and time -->
+    <string name="next_dose">Next dose <xliff:g example="Tomorrow 08:00" id="when">%1$s</xliff:g></string>
+
+    <!-- Weekday initials for the reminder day selector. Single letters, Sunday first -->
+    <string name="day_initial_sunday">S</string>
+    <string name="day_initial_monday">M</string>
+    <string name="day_initial_tuesday">T</string>
+    <string name="day_initial_wednesday">W</string>
+    <string name="day_initial_thursday">T</string>
+    <string name="day_initial_friday">F</string>
+    <string name="day_initial_saturday">S</string>
+
+    <!-- AllergiesPage: Empty state title. Sentence -->
+    <string name="no_allergies">No allergies recorded</string>
+    <!-- AllergiesPage: Empty state body. Sentence -->
+    <string name="no_allergies_message">Record an allergy so it travels with your health data.</string>
+    <!-- AllergiesPage: FAB and add screen title. Verb phrase -->
+    <string name="add_allergy">Add allergy</string>
+    <!-- AddAllergyPage: Title when changing an existing record. Verb phrase -->
+    <string name="edit_allergy">Edit allergy</string>
+    <!-- AllergiesPage: Confirm deleting one allergy, %1$s is the allergen name. Sentence -->
+    <string name="delete_allergy_confirm">Delete the record of %1$s?</string>
+    <!-- AddAllergyPage: What kind of thing the allergen is. Noun -->
+    <string name="field_allergy_category">Type</string>
+    <!-- AddAllergyPage: The substance itself. Noun -->
+    <string name="field_allergen">Allergen</string>
+    <!-- AddAllergyPage: Placeholder before an allergen is chosen. Verb phrase -->
+    <string name="choose_an_allergen">Choose a medication</string>
+    <!-- AddAllergyPage: How severe the reaction is. Noun -->
+    <string name="field_criticality">Severity</string>
+    <!-- AddAllergyPage: What happens on exposure, for example hives. Noun -->
+    <string name="field_reaction">Reaction</string>
+    <!-- AddAllergyPage: When the allergy was first noticed. Noun phrase -->
+    <string name="field_first_noticed">First noticed</string>
+    <!-- AddAllergyPage and AddConditionPage: Shown in an optional date field left empty. Sentence -->
+    <string name="not_recorded">Not recorded</string>
+    <!-- Allergy type: a drug allergy. Noun -->
+    <string name="allergy_category_medication">Medication</string>
+    <!-- Allergy type: a food allergy. Noun -->
+    <string name="allergy_category_food">Food</string>
+    <!-- Allergy type: pollen, dust and similar. Noun -->
+    <string name="allergy_category_environment">Environmental</string>
+    <!-- Allergy type: vaccines, blood products and similar. Adjective -->
+    <string name="allergy_category_biologic">Biologic</string>
+    <!-- Allergy severity: mild. Adjective -->
+    <string name="allergy_criticality_low">Low</string>
+    <!-- Allergy severity: could be life-threatening. Adjective -->
+    <string name="allergy_criticality_high">High</string>
+    <!-- Allergy severity when it has never been assessed. Adjective -->
+    <string name="allergy_criticality_unknown">Unknown</string>
+
+    <!-- ConditionsPage: Empty state title. Sentence -->
+    <string name="no_conditions">No conditions recorded</string>
+    <!-- ConditionsPage: Empty state body. Sentence -->
+    <string name="no_conditions_message">Record a diagnosis to keep your problem list with you.</string>
+    <!-- ConditionsPage: FAB and add screen title. Verb phrase -->
+    <string name="add_condition">Add condition</string>
+    <!-- AddConditionPage: Title when changing an existing record. Verb phrase -->
+    <string name="edit_condition">Edit condition</string>
+    <!-- ConditionsPage: Confirm deleting one condition, %1$s is the diagnosis. Sentence -->
+    <string name="delete_condition_confirm">Delete the record of %1$s?</string>
+    <!-- AddConditionPage: The diagnosis itself. Noun -->
+    <string name="field_condition">Condition</string>
+    <!-- AddConditionPage: Placeholder before a diagnosis is chosen. Verb phrase -->
+    <string name="choose_a_condition">Choose a condition</string>
+    <!-- AddConditionPage: When the condition was diagnosed. Verb, past tense -->
+    <string name="field_diagnosed">Diagnosed</string>
+    <!-- AddConditionPage: When the condition resolved. Verb, past tense -->
+    <string name="field_resolved">Resolved</string>
+    <!-- Condition status: ongoing. Adjective -->
+    <string name="condition_status_active">Active</string>
+    <!-- Condition status: came back after resolving. Noun -->
+    <string name="condition_status_recurrence">Recurrence</string>
+    <!-- Condition status: present but not currently causing symptoms. Noun -->
+    <string name="condition_status_remission">In remission</string>
+    <!-- Condition status: over. Adjective -->
+    <string name="condition_status_resolved">Resolved</string>
+
+    <!-- CatalogPickerPage: Search placeholder when picking an allergen. Verb phrase -->
+    <string name="search_allergens">Search medications</string>
+    <!-- CatalogPickerPage: Search placeholder when picking a diagnosis. Verb phrase -->
+    <string name="search_conditions">Search conditions</string>
+    <!-- CatalogPickerPage: Search placeholder when picking a lab test. Verb phrase -->
+    <string name="search_lab_tests">Search lab tests</string>
+
+    <!-- RecordsPage and LabResultsPage: The lab results log. Noun phrase, plural -->
+    <string name="lab_results">Lab results</string>
+    <!-- LabResultsPage: Empty state title. Sentence -->
+    <string name="no_lab_results">No lab results yet</string>
+    <!-- LabResultsPage: Empty state body. Sentence -->
+    <string name="no_lab_results_message">Record a test result to keep it with the rest of your history.</string>
+    <!-- LabResultsPage: FAB and add screen title. Verb phrase -->
+    <string name="add_lab_result">Add lab result</string>
+    <!-- AddLabResultPage: Title when changing an existing record. Verb phrase -->
+    <string name="edit_lab_result">Edit lab result</string>
+    <!-- LabResultsPage: Confirm deleting one result, %1$s is the test name. Sentence -->
+    <string name="delete_lab_confirm">Delete the record of %1$s?</string>
+    <!-- AddLabResultPage: Form section heading for the measured value. Noun -->
+    <string name="section_result">Result</string>
+    <!-- AddLabResultPage: The test that was run. Noun phrase -->
+    <string name="field_lab_test">Test</string>
+    <!-- AddLabResultPage: Placeholder before a test is chosen. Verb phrase -->
+    <string name="choose_a_lab_test">Choose a test</string>
+    <!-- AddLabResultPage: The measured value, which may be a number or a word. Noun -->
+    <string name="field_result">Result</string>
+    <!-- AddLabResultPage: Unit of measurement, for example mg/dL. Noun -->
+    <string name="field_unit">Unit</string>
+    <!-- AddLabResultPage: Bottom of the normal range for the test. Noun phrase -->
+    <string name="field_reference_low">Normal from</string>
+    <!-- AddLabResultPage: Top of the normal range for the test. Noun phrase -->
+    <string name="field_reference_high">Normal to</string>
+    <!-- AddLabResultPage: Date the sample was taken. Noun phrase -->
+    <string name="field_taken_on">Taken on</string>
+
+    <!-- RecordsPage and AboutYouPage: Screen of standing facts about the user. Noun phrase -->
+    <string name="about_you">About you</string>
+    <!-- RecordsPage: Overline on the About you row, distinguishing it from the logs. Noun phrase -->
+    <string name="about_you_overline">Current status</string>
+    <!-- AboutYouPage: Form section heading. Noun -->
+    <string name="section_pregnancy">Pregnancy</string>
+    <!-- AboutYouPage: Form section heading. Noun -->
+    <string name="section_smoking">Smoking</string>
+    <!-- AboutYouPage: Selector label for pregnancy status. Noun phrase -->
+    <string name="field_pregnancy_status">Status</string>
+    <!-- AboutYouPage: Estimated delivery date. Noun phrase -->
+    <string name="field_due_date">Due date</string>
+    <!-- AboutYouPage: Selector label for smoking status. Noun phrase -->
+    <string name="field_smoking_status">Status</string>
+    <!-- AboutYouPage: When the answer above was last given, %1$s is a date -->
+    <string name="recorded_on">Recorded <xliff:g example="4 March 2026" id="date">%1$s</xliff:g></string>
+    <!-- Pregnancy status: never answered. Adjective -->
+    <string name="pregnancy_unknown">Not answered</string>
+    <!-- Pregnancy status: currently pregnant. Adjective -->
+    <string name="pregnancy_pregnant">Pregnant</string>
+    <!-- Pregnancy status: not currently pregnant. Adjective phrase -->
+    <string name="pregnancy_not_pregnant">Not pregnant</string>
+    <!-- Smoking status: never answered. Adjective -->
+    <string name="smoking_unknown">Not answered</string>
+    <!-- Smoking status: has never smoked. Adverb -->
+    <string name="smoking_never">Never smoked</string>
+    <!-- Smoking status: used to smoke. Adjective -->
+    <string name="smoking_former">Former smoker</string>
+    <!-- Smoking status: currently smokes. Verb phrase -->
+    <string name="smoking_current">Currently smokes</string>
 </resources>

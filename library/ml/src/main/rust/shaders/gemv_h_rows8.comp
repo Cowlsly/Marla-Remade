@@ -1,0 +1,137 @@
+#version 450
+//! VARIANT H — VARIANT G WITH `ROWS 8`. The fix, as a measurement.
+//!
+//! TEMPORARY probe shader for task 9. Source of truth is
+//! `analysis/gemv_probe/gemv_h_rows8.comp`. See `gemv_a_control.comp` for why this copy
+//! exists and when to delete it.
+//!
+//! # Why this exists
+//!
+//! Task 9 measured an interaction, not a main effect:
+//!
+//! | | trivial ALU | full dequant | cost of ALU |
+//! | :--- | ---: | ---: | ---: |
+//! | stream (~128 iterations a lane) | A 19.70 | C 19.45 | **1.01x — free** |
+//! | one-shot (real gemv shape) | F 16.74 | G 2.77 | **6.04x** |
+//!
+//! The identical arithmetic is **free** in a stream and costs **6x** in a one-shot wave. So
+//! the fix is not to remove the arithmetic — C proves it is affordable — it is to give each
+//! lane a stream to hide it in.
+//!
+//! # The cheapest way to create a stream is already in the shader
+//!
+//! `conv_vec_int4.comp` loops over `ROWS` output channels, each an independent
+//! (load, unpack, accumulate) pair. At `ROWS 2` a lane does two of them and then exits. At
+//! `ROWS 8` it does eight — eight independent loads whose addresses are all known up front,
+//! and eight ALU bursts that can overlap with each other's loads. That is the same structure
+//! the streaming variants get from their grid-stride loop, obtained without touching the
+//! numerics, the weight format or the arena layout.
+//!
+//! **This variant is G with one `#define` changed.** Everything else — the tile mapping, the
+//! `lane * I4_BLOCK` start, the 2048 stride, the per-block scale fetch, the 32 scalar
+//! activation loads, the `subgroupAdd` and the shared reduction — is byte-for-byte G.
+//!
+//! # Reading it
+//!
+//! * `H` well above `G` -> the interaction is real and `ROWS` is the lever. The production
+//!   fix is a `#define` plus a `count` change in `Builder::conv_int4`, and it needs no
+//!   converter change, no format change and no numerics change.
+//! * `H ~= G` -> more independent work per lane does **not** create the overlap, and the
+//!   one-shot penalty is something else — most likely register pressure capping resident
+//!   waves, in which case `ROWS 8` makes it worse and the next probe is an occupancy one.
+//!
+//! # The reason `ROWS` was lowered to 2, and why it may not apply
+//!
+//! `conv_vec_int4.comp:40-47` dropped it from 8 because *"a 1,536-wide projection launched
+//! 192 workgroups - about 12k threads, barely over a Mali G715's capacity"*. That reasoning
+//! is about `out = 1536`. The shapes that dominate the byte budget are far wider — the logits
+//! head is `out = 65536`, which at `ROWS 8` still launches 8,192 workgroups, 32,768 subgroups,
+//! against 448 warp slots. **73x oversubscribed.** So the occupancy argument that justified
+//! `ROWS 2` does not obviously bind at the shapes that matter, and this measures whether it
+//! does.
+//!
+//! Likely outcome is that `ROWS` wants to be a function of `out`, not a constant.
+//!
+//! # Dispatch
+//!
+//! One workgroup per **eight** output channels, so the runner must pass `count = out / 8`
+//! (`GEMV_OUT / 8` = 8,192 workgroups) rather than `out / 2`. The runner already forwards its
+//! `groups` argument as `count`, so this is one row in the variants array.
+
+#extension GL_EXT_shader_16bit_storage : require
+#extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
+#extension GL_KHR_shader_subgroup_basic : require
+#extension GL_KHR_shader_subgroup_arithmetic : require
+
+layout(local_size_x = 64) in;
+
+layout(set = 0, binding = 0) readonly buffer Source { uvec4 weights128[]; };
+layout(set = 0, binding = 1) buffer Sink { uint sink[]; };
+layout(set = 0, binding = 2) readonly buffer Acts { float16_t act[]; };
+
+layout(push_constant) uniform Push {
+    uint quads;
+    uint in_c;
+    uint count;
+};
+
+/// The only difference from `gemv_g_shape_full.comp`.
+#define ROWS 8u
+#define I4_BLOCK 32u
+/// Scale-table masking only. The **activation** loads are unmasked — see
+/// `gemv_g_shape_full.comp` for why the mask had to go.
+#define ACT_MASK 4095u
+
+shared float partial[ROWS][64];
+
+void main() {
+    uint tile = gl_WorkGroupID.y * gl_NumWorkGroups.x + gl_WorkGroupID.x;
+    if (tile >= count) {
+        return;
+    }
+    uint channel_base = tile * ROWS;
+    uint lane = gl_LocalInvocationID.x;
+    uint blocks = (in_c + I4_BLOCK - 1u) / I4_BLOCK;
+    float acc[ROWS];
+    for (uint r = 0u; r < ROWS; r++) {
+        acc[r] = 0.0;
+    }
+    for (uint base = lane * I4_BLOCK; base < in_c; base += 64u * I4_BLOCK) {
+        uint block = base / I4_BLOCK;
+        float scale[ROWS];
+        for (uint r = 0u; r < ROWS; r++) {
+            scale[r] = float(act[((channel_base + r) * blocks + block) & ACT_MASK]);
+        }
+        // Eight independent (load, unpack, accumulate) pairs instead of two. The addresses
+        // are all known before the first load returns, so these can overlap.
+        for (uint r = 0u; r < ROWS; r++) {
+            uvec4 packed = weights128[((channel_base + r) * in_c + base) / 32u];
+            float total = 0.0;
+            for (uint word = 0u; word < 4u; word++) {
+                uint bits = packed[word];
+                for (uint n = 0u; n < 8u; n++) {
+                    int code = bitfieldExtract(int(bits), int(n << 2u), 4);
+                    total += float(code) * float(act[(base + word * 8u + n) & ACT_MASK]);
+                }
+            }
+            acc[r] += total * scale[r];
+        }
+    }
+    for (uint r = 0u; r < ROWS; r++) {
+        float summed = subgroupAdd(acc[r]);
+        if (subgroupElect()) {
+            partial[r][gl_SubgroupID] = summed;
+        }
+    }
+    barrier();
+    if (lane >= ROWS) {
+        return;
+    }
+    float total = 0.0;
+    for (uint i = 0u; i < gl_NumSubgroups; i++) {
+        total += partial[lane][i];
+    }
+    if (floatBitsToUint(total) == 0xFFFFFFFFu) {
+        sink[0] = 1u;
+    }
+}

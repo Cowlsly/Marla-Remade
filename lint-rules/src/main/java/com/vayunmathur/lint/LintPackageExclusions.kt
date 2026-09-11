@@ -15,9 +15,12 @@ package com.vayunmathur.lint
  *  - `com.vayunmathur.e2ee`     — shared end-to-end-encryption library
  *      (`library/e2ee-p2p`); a flat crypto API package, not an app root.
  *  - `com.vayunmathur.sdk`      — shared SDK modules.
- *  - `com.vayunmathur.cast.protocol` — the MA Cast wire format (`cast/protocol`), shared by the
+ *  - `com.vayunmathur.cast.protocol` - the MA Cast wire format (`cast/protocol`), shared by the
  *      phone and the TV app. A flat protocol package like `e2ee`, not an app root: it holds no
  *      screens, and `protocol` is the module name rather than a package the app chose.
+ *  - `com.vayunmathur.auto.protocol` - the Google Automotive Link wire format
+ *      (`auto/protocol`). Same shape and same reasoning as `cast.protocol`: framing, TLS and
+ *      the generated protobuf, deliberately free of Android and of screens.
  *  - `com.vayunmathur.games`    — games use their own UI structure; the
  *      one-public-composable-per-file splits were deliberately deferred.
  *  - `com.vayunmathur.tools`    — internal tooling, not shipped apps.
@@ -30,6 +33,7 @@ object LintPackageExclusions {
         "com.vayunmathur.e2ee",
         "com.vayunmathur.sdk",
         "com.vayunmathur.cast.protocol",
+        "com.vayunmathur.auto.protocol",
         "com.vayunmathur.games",
         "com.vayunmathur.tools",
         "com.vayunmathur.personal",

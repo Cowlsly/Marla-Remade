@@ -1,4 +1,7 @@
 <?xml version="1.0" encoding="utf-8"?>
 <paths>
     <cache-path name="pdf_images" path="." />
+    <!-- Vaccination card scans. Shared out read-only so an external viewer can open one;
+         see com.vayunmathur.health.platform.AttachmentStore. -->
+    <files-path name="medical_attachments" path="medical_attachments/" />
 </paths>

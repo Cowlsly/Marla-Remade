@@ -1,0 +1,109 @@
+#version 450
+//! VARIANT F — REAL KERNEL SHAPE, TRIVIAL ALU. The variant that tests lead's finding.
+//!
+//! TEMPORARY probe shader for task 9. Source of truth is
+//! `analysis/gemv_probe/gemv_f_shape.comp`. See `gemv_a_control.comp` for why this copy
+//! exists and when to delete it.
+//!
+//! # Why variants A-E do not test the thing that matters
+//!
+//! Every one of them grid-strides over 256 MB, so a lane runs ~128 iterations and has a
+//! continuous stream of work. `conv_vec_int4.comp` does not. At `p.in_c = 1536` and
+//! `I4_BLOCK = 32` its loop is
+//!
+//!     for (uint base = lane * 32u; base < 1536u; base += 2048u)
+//!
+//! so `base + 2048 >= 1536` on the first step and **the body runs exactly once**, while
+//! `lane * 32 < 1536` means **only lanes 0..47 enter it at all** — 16 of 64 idle. A wave's
+//! whole life is: issue two `uvec4` loads, stall the full memory latency, do 64 MACs, hit
+//! `barrier()`, exit. There is no second iteration to overlap the first's latency with.
+//!
+//! That is not a small detail. `in_c = 1536` covers q, k, v, the fused gate-up, the four
+//! logits splits and the per-layer projection — **about 902 MB of the 1,297 MB a decode
+//! step reads, 70% of the bytes.** (`o_proj` at 2048 also runs once but uses all 64 lanes;
+//! only `down` at 6144/12288 gets 3 and 6 iterations.)
+//!
+//! So A-E measure "dequant ALU inside a stream", which is a question nobody is asking.
+//! F and G measure the shape the real kernel actually has.
+//!
+//! # What F is
+//!
+//! `conv_vec_int4.comp`'s exact structure — same tile mapping, same `lane * I4_BLOCK` start,
+//! same 2048 stride, same two `uvec4` loads per lane, same `subgroupAdd`, same `barrier`,
+//! same shared reduction — with the 160-op dequant replaced by four ops. Everything about
+//! the *shape* is preserved and only the arithmetic is removed.
+//!
+//! Read against G (same shape, full arithmetic) and against A (full stream, trivial ALU):
+//!
+//! * `F ~= G ~= 3.4` and `A ~= 20`  -> the **shape** is the whole story. ALU is irrelevant,
+//!   and the fix is to give each lane a stream: more taps per lane, fewer lanes idle, or a
+//!   loop that actually iterates.
+//! * `F ~= 20`, `G ~= 3.4`          -> the **ALU** is the whole story after all.
+//! * `F ~= 8`, `G ~= 3.4`           -> both contribute, and their sizes say in what ratio.
+//!
+//! G should land on the ~3.4-4.0 GB/s already measured for `[65536, 1536]`. If it does not,
+//! F and G are not reproducing the real kernel and neither number means anything — G is the
+//! second anchor, exactly as A is the first.
+
+#extension GL_KHR_shader_subgroup_basic : require
+#extension GL_KHR_shader_subgroup_arithmetic : require
+
+layout(local_size_x = 64) in;
+
+layout(set = 0, binding = 0) readonly buffer Source { uvec4 weights128[]; };
+layout(set = 0, binding = 1) buffer Sink { uint sink[]; };
+
+layout(push_constant) uniform Push {
+    uint quads;
+    /// Taps per output channel. 1536 reproduces the shape 70% of the model's bytes have.
+    uint in_c;
+    /// Output tiles, i.e. `out_channels / ROWS`. One workgroup each, as `p.count`.
+    uint count;
+};
+
+#define ROWS 2u
+#define I4_BLOCK 32u
+
+shared float partial[ROWS][64];
+
+void main() {
+    uint tile = gl_WorkGroupID.y * gl_NumWorkGroups.x + gl_WorkGroupID.x;
+    if (tile >= count) {
+        return;
+    }
+    uint channel_base = tile * ROWS;
+    uint lane = gl_LocalInvocationID.x;
+    float acc[ROWS];
+    for (uint r = 0u; r < ROWS; r++) {
+        acc[r] = 0.0;
+    }
+    // Byte-for-byte the loop bounds of `conv_vec_int4.comp:75`. At in_c 1536 this runs once
+    // and lanes 48..63 skip it entirely - which is the point of the variant, not a bug.
+    for (uint base = lane * I4_BLOCK; base < in_c; base += 64u * I4_BLOCK) {
+        for (uint r = 0u; r < ROWS; r++) {
+            uvec4 packed = weights128[((channel_base + r) * in_c + base) / 32u];
+            // Four ops where the real kernel does ~160. The load, the address arithmetic and
+            // the loop structure are identical; only the consumption differs.
+            acc[r] += float(packed.x ^ packed.y ^ packed.z ^ packed.w);
+        }
+    }
+    // The reduction tail, unchanged from `conv_vec_int4.comp:159-176`, so the barrier and the
+    // cross-subgroup sync are paid here too.
+    for (uint r = 0u; r < ROWS; r++) {
+        float summed = subgroupAdd(acc[r]);
+        if (subgroupElect()) {
+            partial[r][gl_SubgroupID] = summed;
+        }
+    }
+    barrier();
+    if (lane >= ROWS) {
+        return;
+    }
+    float total = 0.0;
+    for (uint i = 0u; i < gl_NumSubgroups; i++) {
+        total += partial[lane][i];
+    }
+    if (floatBitsToUint(total) == 0xFFFFFFFFu) {
+        sink[0] = 1u;
+    }
+}

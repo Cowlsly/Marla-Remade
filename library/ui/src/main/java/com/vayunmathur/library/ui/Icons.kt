@@ -233,6 +233,9 @@ import androidx.compose.material.icons.filled.Upload
 import androidx.compose.material.icons.filled.VerifiedUser
 import androidx.compose.material.icons.filled.Videocam
 import androidx.compose.material.icons.filled.Vaccines
+import androidx.compose.material.icons.filled.Science
+import androidx.compose.material.icons.filled.PregnantWoman
+import androidx.compose.material.icons.filled.SmokingRooms
 import androidx.compose.material.icons.filled.Visibility
 import androidx.compose.material.icons.filled.VisibilityOff
 import androidx.compose.material.icons.filled.Warning
@@ -1566,6 +1569,21 @@ fun IconMedication(modifier: Modifier = Modifier, tint: Color = LocalContentColo
 @Composable
 fun IconVaccine(modifier: Modifier = Modifier, tint: Color = LocalContentColor.current) =
     AppIcon(Icons.Filled.Vaccines, "Vaccine", modifier, tint)
+
+/** Conical flask — laboratory results. */
+@Composable
+fun IconScience(modifier: Modifier = Modifier, tint: Color = LocalContentColor.current) =
+    AppIcon(Icons.Filled.Science, "Lab result", modifier, tint)
+
+/** Pregnancy status. */
+@Composable
+fun IconPregnancy(modifier: Modifier = Modifier, tint: Color = LocalContentColor.current) =
+    AppIcon(Icons.Filled.PregnantWoman, "Pregnancy", modifier, tint)
+
+/** Smoking status. Named for the question it answers, not for the glyph. */
+@Composable
+fun IconSmoking(modifier: Modifier = Modifier, tint: Color = LocalContentColor.current) =
+    AppIcon(Icons.Filled.SmokingRooms, "Smoking", modifier, tint)
 
 /** Heart on a monitor trace — medical records and vitals. */
 @Composable

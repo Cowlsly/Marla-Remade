@@ -31,6 +31,18 @@
         android:supportsRtl="true"
         android:theme="@style/Theme.General">
 
+        <!--
+          **Not a launcher activity.** An OTA client is something the user goes looking for in
+          Settings, under System > System update, rather than an app they open - so it answers
+          `android.settings.SYSTEM_UPDATE_SETTINGS` and shows no icon.
+
+          That action is exactly what `SystemUpdateRepository.getSystemUpdateIntent` resolves, with
+          `MATCH_SYSTEM_ONLY`; the preference is *removed* from the System screen when nothing
+          answers it, which is why the row was missing rather than merely inert. Being preinstalled
+          under /product satisfies the system-only match.
+
+          `exported` stays true because the caller is Settings, in another process.
+        -->
         <activity
             android:configChanges="mcc|mnc|colorMode|density|fontScale|fontWeightAdjustment|keyboard|keyboardHidden|layoutDirection|navigation|orientation|screenLayout|screenSize|smallestScreenSize|touchscreen|uiMode"
             android:name=".MainActivity"
@@ -38,8 +50,8 @@
             android:launchMode="singleTask"
             android:theme="@style/Theme.General">
             <intent-filter>
-                <action android:name="android.intent.action.MAIN" />
-                <category android:name="android.intent.category.LAUNCHER" />
+                <action android:name="android.settings.SYSTEM_UPDATE_SETTINGS" />
+                <category android:name="android.intent.category.DEFAULT" />
             </intent-filter>
         </activity>
 

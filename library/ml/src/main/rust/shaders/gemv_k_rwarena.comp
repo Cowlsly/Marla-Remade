@@ -1,0 +1,124 @@
+#version 450
+//! VARIANT K — VARIANT G WITH A READ-WRITE ARENA. Tests whether aliasing blocks load fusion.
+//!
+//! TEMPORARY probe shader. Source of truth is this file; see `gemv_a_control.comp` for why a
+//! copy lives in `shaders/` and when to delete it.
+//!
+//! # Why
+//!
+//! Removing `& ACT_MASK` from variant G took it from 2.64 to 18.5 GB/s — 7x — because the mask
+//! made `base + word*8 + n` no longer *provably consecutive*, so the compiler could not fuse 8
+//! scalar `float16_t` loads into one 16-byte vector load. The cost was never the `AND`; it was
+//! the fusion it prevented.
+//!
+//! That fixed probe is now **4x FASTER than production** (18.5 vs 4.61 GB/s end-to-end). So the
+//! real kernel has something the probe does not, and the obvious place to look is the same
+//! class: something that blocks the same fusion.
+//!
+//! **`common.glsl:38` declares the arena READ-WRITE:**
+//!
+//! ```glsl
+//! layout(std430, binding = 0) buffer Arena { float16_t arena[]; };   // no `readonly`
+//! ```
+//!
+//! and `conv_vec_int4.comp:179` stores into it:
+//!
+//! ```glsl
+//! arena[p.out_at + channel] = float16_t(activate(total + offset, p.act, channel));
+//! ```
+//!
+//! The activation loads at `:114` read **the same buffer** the shader writes. The compiler
+//! cannot prove the store does not alias the loads, so it may not fuse them — and may be forced
+//! to reload across the store. Every probe variant so far declared its activation buffer
+//! `readonly`, which hands the compiler a guarantee production does not have.
+//!
+//! # What K changes, and only this
+//!
+//! Byte-for-byte variant G, except:
+//!   * `Acts` loses `readonly`, matching `Arena`
+//!   * the result is stored back into that buffer, as `conv_vec_int4.comp:179` does
+//!
+//! The store targets `[in_c, in_c + 64)`, past the activation range, so it cannot corrupt the
+//! inputs — but the compiler cannot know that, which is exactly the point.
+//!
+//! # Reading it
+//!
+//! * `K ≈ G` (~18.5) -> aliasing is not the blocker; the production gap is elsewhere.
+//! * `K << G`, near production's ~4.6 -> **the read-write arena is blocking load fusion in the
+//!   shipped kernel**, and the fix is a `readonly` alias, a `restrict` qualifier, or a separate
+//!   binding for the input slice. That would be a large, cheap, real win.
+
+#extension GL_EXT_shader_16bit_storage : require
+#extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
+#extension GL_KHR_shader_subgroup_basic : require
+#extension GL_KHR_shader_subgroup_arithmetic : require
+
+layout(local_size_x = 64) in;
+
+layout(set = 0, binding = 0) readonly buffer Source { uvec4 weights128[]; };
+layout(set = 0, binding = 1) buffer Sink { uint sink[]; };
+/// **Not** `readonly` — this is the whole variant. Matches `common.glsl:38`.
+layout(set = 0, binding = 2) buffer Acts { float16_t act[]; };
+
+layout(push_constant) uniform Push {
+    uint quads;
+    uint in_c;
+    uint count;
+};
+
+#define ROWS 2u
+#define I4_BLOCK 32u
+/// Scale-table masking only, as in variant G.
+#define ACT_MASK 4095u
+
+shared float partial[ROWS][64];
+
+void main() {
+    uint tile = gl_WorkGroupID.y * gl_NumWorkGroups.x + gl_WorkGroupID.x;
+    if (tile >= count) {
+        return;
+    }
+    uint channel_base = tile * ROWS;
+    uint lane = gl_LocalInvocationID.x;
+    uint blocks = (in_c + I4_BLOCK - 1u) / I4_BLOCK;
+    float acc[ROWS];
+    for (uint r = 0u; r < ROWS; r++) {
+        acc[r] = 0.0;
+    }
+    for (uint base = lane * I4_BLOCK; base < in_c; base += 64u * I4_BLOCK) {
+        uint block = base / I4_BLOCK;
+        float scale[ROWS];
+        for (uint r = 0u; r < ROWS; r++) {
+            scale[r] = float(act[((channel_base + r) * blocks + block) & ACT_MASK]);
+        }
+        for (uint r = 0u; r < ROWS; r++) {
+            uvec4 packed = weights128[((channel_base + r) * in_c + base) / 32u];
+            float total = 0.0;
+            for (uint word = 0u; word < 4u; word++) {
+                uint bits = packed[word];
+                for (uint n = 0u; n < 8u; n++) {
+                    int code = bitfieldExtract(int(bits), int(n << 2u), 4);
+                    total += float(code) * float(act[base + word * 8u + n]);
+                }
+            }
+            acc[r] += total * scale[r];
+        }
+    }
+    for (uint r = 0u; r < ROWS; r++) {
+        float summed = subgroupAdd(acc[r]);
+        if (subgroupElect()) {
+            partial[r][gl_SubgroupID] = summed;
+        }
+    }
+    barrier();
+    if (lane >= ROWS) {
+        return;
+    }
+    float total = 0.0;
+    for (uint i = 0u; i < gl_NumSubgroups; i++) {
+        total += partial[lane][i];
+    }
+    // The store into the same buffer the activations came from, as the real kernel does. Past
+    // the activation range so the inputs stay intact - but the compiler cannot prove that.
+    act[in_c + lane] = float16_t(total);
+}

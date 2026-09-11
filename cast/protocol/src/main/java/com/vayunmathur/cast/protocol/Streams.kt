@@ -25,7 +25,21 @@ object StreamConstants {
     const val AUDIO_CHANNELS = 2
     const val AUDIO_BITRATE = 128_000
 
-    const val VIDEO_MAX_FRAME_RATE = 30
+    /**
+     * The rate a session aims for, and the rate a codec has to be able to hold to be chosen at all.
+     *
+     * **These are two different questions and used to be one number.** The floor is what
+     * `CodecNegotiation.choose` enforces against the sender's own encoder, because an encoder that
+     * silently under-delivers is worse than one that is refused. The ceiling is only an aspiration:
+     * each geometry settles at the highest rate the panel, the decoder and this phone's encoder all
+     * manage at that size, which is why 4K commonly lands at the floor while 1080p reaches the
+     * ceiling.
+     *
+     * Raising the ceiling to 60 raises the bitrate ask with it - the target is linear in frame rate
+     * - so a 4K session roughly doubles from ~15 to ~30 Mbit/s. That is the trade being made.
+     */
+    const val VIDEO_MAX_FRAME_RATE = 60f
+    const val VIDEO_MIN_FRAME_RATE = 30f
 
     /**
      * How long the receiver buffers before playing, in ms.

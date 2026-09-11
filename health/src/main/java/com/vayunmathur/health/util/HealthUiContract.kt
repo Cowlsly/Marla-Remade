@@ -32,6 +32,9 @@ data class TodayUiState(
     val hydrationMl: Double = 0.0,
     val heartRateMin: Long = 0L,
     val heartRateMax: Long = 0L,
+    val elevationMeters: Double = 0.0,
+    val wheelchairPushes: Long = 0L,
+    val exerciseMinutes: Long = 0L,
     val metrics: MainPageMetrics = MainPageMetrics(),
 )
 
@@ -42,6 +45,7 @@ data class TodayUiState(
  */
 interface TodayActions {
     fun openSleepDetails() {}
+    fun openExerciseDetails() {}
     fun openMetric(config: HealthMetricConfig) {}
 
     companion object {

@@ -74,7 +74,9 @@ object EncoderSupport {
                     codec = codec,
                     maxWidth = video.supportedWidths.upper,
                     maxHeight = video.supportedHeights.upper,
-                    maxFrameRate = video.sustainableFrameRate(width, height),
+                    // Truncated to the Int this envelope is expressed in, and truncated rather
+                    // than rounded so the cap is never advertised above what was measured.
+                    maxFrameRate = video.sustainableFrameRate(width, height).toInt(),
                     maxBitRate = video.bitrateRange.upper,
                 )
             }.getOrNull() ?: return@mapNotNull null
@@ -121,6 +123,22 @@ object EncoderSupport {
     }
 
     /**
+     * The rate [codec]'s hardware encoder actually holds at [width] x [height], or `0` when there
+     * is no encoder or no answer.
+     *
+     * The public face of [sustainableFrameRate], for callers deciding what rate to *ask* for rather
+     * than what size to send. [clampToEncoder] answers the opposite question - it treats the rate as
+     * fixed and gives up resolution - which is right for mirroring, where the rate was negotiated,
+     * and wrong for a desktop, where the panel's resolution is the point and the rate is what should
+     * yield. Asking here first is what stops a 4K desktop being stepped down to 1080p to chase 60fps.
+     */
+    fun sustainableFrameRate(codec: VideoCodec, width: Int, height: Int): Float {
+        val info = hardwareSurfaceEncoder(codec) ?: return 0f
+        val video = info.videoCapabilities(codec) ?: return 0f
+        return runCatching { video.sustainableFrameRate(width, height) }.getOrDefault(0f)
+    }
+
+    /**
      * Reduce [width] x [height] to something [codec]'s encoder will accept **at [frameRate]**.
      *
      * Native phone resolutions are not always encodable: `MediaCodec` advertises a maximum size, an
@@ -138,7 +156,12 @@ object EncoderSupport {
      * Returns the input unchanged when there is no encoder to ask, so the caller's own failure
      * handling stays the single place that deals with "this device cannot encode".
      */
-    fun clampToEncoder(codec: VideoCodec, width: Int, height: Int, frameRate: Int): Pair<Int, Int> {
+    fun clampToEncoder(
+        codec: VideoCodec,
+        width: Int,
+        height: Int,
+        frameRate: Float,
+    ): Pair<Int, Int> {
         val info = hardwareSurfaceEncoder(codec) ?: return width to height
         val video = info.videoCapabilities(codec) ?: return width to height
 
@@ -199,14 +222,18 @@ object EncoderSupport {
     private fun MediaCodecInfo.VideoCapabilities.realtime(
         width: Int,
         height: Int,
-        frameRate: Int,
+        frameRate: Float,
     ): Boolean = runCatching {
         achievableFrameRate(width, height)?.let { return@runCatching it >= frameRate }
         val points = supportedPerformancePoints
         if (points.isNullOrEmpty()) {
             areSizeAndRateSupported(width, height, frameRate.toDouble())
         } else {
-            val wanted = MediaCodecInfo.VideoCapabilities.PerformancePoint(width, height, frameRate)
+            val wanted = MediaCodecInfo.VideoCapabilities.PerformancePoint(
+                width,
+                height,
+                Math.ceil(frameRate.toDouble()).toInt(),
+            )
             points.any { it.covers(wanted) }
         }
     }.getOrDefault(false)
@@ -223,13 +250,13 @@ object EncoderSupport {
     private fun MediaCodecInfo.VideoCapabilities.sustainableFrameRate(
         width: Int,
         height: Int,
-    ): Int {
-        if (width <= 0 || height <= 0) return supportedFrameRates.upper.toInt()
-        achievableFrameRate(width, height)?.let { return it.toInt() }
+    ): Float {
+        if (width <= 0 || height <= 0) return supportedFrameRates.upper.toFloat()
+        achievableFrameRate(width, height)?.let { return it.toFloat() }
         runCatching { getSupportedFrameRatesFor(width, height).upper }.getOrNull()?.let {
-            return it.toInt()
+            return it.toFloat()
         }
-        return supportedFrameRates.upper.toInt()
+        return supportedFrameRates.upper.toFloat()
     }
 
     /**

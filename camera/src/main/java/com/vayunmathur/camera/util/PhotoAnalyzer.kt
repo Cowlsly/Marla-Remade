@@ -17,7 +17,11 @@ import com.google.zxing.common.HybridBinarizer
 /**
  * Combined PHOTO-stream analyzer. The ImageAnalysis use case can only host one analyzer, so this
  * reads the Y (luminance) plane once and both (1) samples average brightness for night-mode
- * detection and (2) runs the ZXing QR decode. Replaces the standalone [QrAnalyzer] in PHOTO mode.
+ * detection and (2) runs the ZXing QR decode.
+ *
+ * Runs on the ViewModel's dedicated analysis thread, not the main one: the decode plus the
+ * Motion-Photo frame copy cost tens of ms per frame, and under STRATEGY_KEEP_ONLY_LATEST that
+ * starved the analyzer of frames when it shared the main thread with preview rendering.
  *
  * When [onMotionFrame] is supplied it also emits a copy of each frame (bitmap + timestamp +
  * rotation) so the ViewModel can maintain a Motion-Photo ring buffer off this same stream.

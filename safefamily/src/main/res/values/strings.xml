@@ -1,0 +1,43 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources xmlns:xliff="urn:oasis:names:tc:xliff:document:1.2">
+    <!-- App name. Shown in app info and in Settings' list of supervision apps; there is still no launcher entry. -->
+    <string name="app_name">Safe Family</string>
+
+    <!-- Bedtime screen: title, also the label of its row in Settings > Parental controls. Noun. -->
+    <string name="bedtime_title">Bedtime</string>
+    <!-- One-line summary under the Bedtime row in Settings. -->
+    <string name="bedtime_summary">Make chosen apps unavailable overnight</string>
+    <!-- Bedtime screen: the main on/off switch. Verb phrase. -->
+    <string name="bedtime_enable">Use a bedtime schedule</string>
+    <!-- Bedtime screen: explanation under the main switch. -->
+    <string name="bedtime_enable_hint">The apps you choose below cannot be opened during the hours you set.</string>
+    <!-- Bedtime screen: row for the time the window opens. Noun phrase. -->
+    <string name="bedtime_start">Starts at</string>
+    <!-- Bedtime screen: row for the time the window closes. Noun phrase. -->
+    <string name="bedtime_end">Ends at</string>
+    <!-- Bedtime screen: heading above the day-of-week chips. Noun. -->
+    <string name="bedtime_days">Days</string>
+    <!-- Bedtime screen: heading above the list of apps the schedule covers. Noun. -->
+    <string name="bedtime_apps">Apps</string>
+    <!-- Bedtime screen: single-letter labels for the seven day chips, Monday first, comma separated. -->
+    <string name="bedtime_day_initials">M,T,W,T,F,S,S</string>
+
+    <!-- App limits screen: title, also the label of its row in Settings > Parental controls. Noun phrase. -->
+    <string name="limits_title">App limits</string>
+    <!-- One-line summary under the App limits row in Settings. -->
+    <string name="limits_summary">Set how long each app can be used per day</string>
+    <!-- App limits screen: heading of the explanatory row. Noun phrase. -->
+    <string name="limits_explainer">Daily time limits</string>
+    <!-- App limits screen: explanation of when a limit takes effect and when it resets. -->
+    <string name="limits_explainer_hint">An app stops opening once its time is used up, and becomes available again at midnight.</string>
+    <!-- App limits screen: shown for an app with no limit set, and as the option that removes one. -->
+    <string name="limits_none">No limit</string>
+
+    <!-- Shown in place of the app list while installed apps are still being read. -->
+    <string name="apps_loading">Loading apps…</string>
+
+    <!-- Dialog button that stores the chosen value. Verb. -->
+    <string name="save">Save</string>
+    <!-- Dialog button that discards the change. Verb. -->
+    <string name="cancel">Cancel</string>
+</resources>

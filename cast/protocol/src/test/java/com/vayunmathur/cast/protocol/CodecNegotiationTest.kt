@@ -30,7 +30,7 @@ class CodecNegotiationTest {
         receiver: List<CodecLimits>,
         width: Int = 1344,
         height: Int = 2992,
-        frameRate: Int = 30,
+        frameRate: Float = 30f,
         demoted: Set<VideoCodec> = emptySet(),
     ) = CodecNegotiation.choose(
         senderCodecs = sender,
@@ -132,7 +132,7 @@ class CodecNegotiationTest {
             choose(
                 sender = listOf(limits(VideoCodec.Av1, maxFrameRate = 24), limits(VideoCodec.Hevc)),
                 receiver = bothCodecs,
-                frameRate = 30,
+                frameRate = 30f,
             ),
         )
         assertEquals(VideoCodec.Hevc, chosen.codec)
@@ -147,7 +147,7 @@ class CodecNegotiationTest {
             choose(
                 sender = bothCodecs,
                 receiver = listOf(limits(VideoCodec.Av1, maxFrameRate = 24)),
-                frameRate = 30,
+                frameRate = 30f,
             ),
         )
         assertEquals(VideoCodec.Av1, chosen.codec)

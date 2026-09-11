@@ -12,6 +12,8 @@ class HealthRepository private constructor(context: Context) :
     RoomRepository<HealthDatabase>(context, HealthDatabase::class) {
 
     private val dao get() = db.healthDao()
+    private val medicalDao get() = db.medicalDao()
+    private val scheduleDao get() = db.scheduleDao()
 
     // ------------------------------------------------------------------
     // Flow passthroughs — keep DAO names so callers migrating off `HealthAPI.db.healthDao()` stay trivial
@@ -63,6 +65,65 @@ class HealthRepository private constructor(context: Context) :
     suspend fun insertRecipeIngredient(recipeIngredient: RecipeIngredient) = dao.insertRecipeIngredient(recipeIngredient)
     suspend fun deleteRecipeIngredient(recipeIngredient: RecipeIngredient) = dao.deleteRecipeIngredient(recipeIngredient)
     suspend fun getIngredientsForRecipe(recipeId: String): List<RecipeIngredient> = dao.getIngredientsForRecipe(recipeId)
+
+    // Medical history — vaccinations, medications and their attachments
+    suspend fun upsertVaccination(entry: VaccinationEntry) = medicalDao.upsertVaccination(entry)
+    suspend fun upsertVaccinations(entries: List<VaccinationEntry>) = medicalDao.upsertVaccinations(entries)
+    suspend fun deleteVaccination(entry: VaccinationEntry) = medicalDao.deleteVaccination(entry)
+    fun getVaccinationsFlow(): Flow<List<VaccinationEntry>> = medicalDao.getVaccinationsFlow()
+    suspend fun getVaccination(id: String): VaccinationEntry? = medicalDao.getVaccination(id)
+    suspend fun getMirroredVaccinations(): List<VaccinationEntry> = medicalDao.getMirroredVaccinations()
+
+    suspend fun upsertMedication(entry: MedicationEntry) = medicalDao.upsertMedication(entry)
+    suspend fun upsertMedications(entries: List<MedicationEntry>) = medicalDao.upsertMedications(entries)
+    suspend fun deleteMedication(entry: MedicationEntry) = medicalDao.deleteMedication(entry)
+    fun getMedicationsFlow(): Flow<List<MedicationEntry>> = medicalDao.getMedicationsFlow()
+    suspend fun getMedication(id: String): MedicationEntry? = medicalDao.getMedication(id)
+    suspend fun getMirroredMedications(): List<MedicationEntry> = medicalDao.getMirroredMedications()
+
+    suspend fun insertAttachment(attachment: MedicalAttachment) = medicalDao.insertAttachment(attachment)
+    suspend fun deleteAttachment(attachment: MedicalAttachment) = medicalDao.deleteAttachment(attachment)
+    fun getAttachmentsFlow(): Flow<List<MedicalAttachment>> = medicalDao.getAttachmentsFlow()
+    suspend fun getAttachmentsFor(vaccinationId: String): List<MedicalAttachment> =
+        medicalDao.getAttachmentsFor(vaccinationId)
+
+    // Dose schedules
+    suspend fun upsertSchedule(schedule: MedicationSchedule) = scheduleDao.upsertSchedule(schedule)
+    suspend fun deleteScheduleFor(medicationId: String) = scheduleDao.deleteScheduleFor(medicationId)
+    suspend fun getScheduleFor(medicationId: String): MedicationSchedule? =
+        scheduleDao.getScheduleFor(medicationId)
+    suspend fun getSchedule(id: String): MedicationSchedule? = scheduleDao.getSchedule(id)
+    fun getSchedulesFlow(): Flow<List<MedicationSchedule>> = scheduleDao.getSchedulesFlow()
+    suspend fun getEnabledSchedules(): List<MedicationSchedule> = scheduleDao.getEnabledSchedules()
+
+    // Allergies and conditions
+    suspend fun upsertAllergy(entry: AllergyEntry) = medicalDao.upsertAllergy(entry)
+    suspend fun upsertAllergies(entries: List<AllergyEntry>) = medicalDao.upsertAllergies(entries)
+    suspend fun deleteAllergy(entry: AllergyEntry) = medicalDao.deleteAllergy(entry)
+    fun getAllergiesFlow(): Flow<List<AllergyEntry>> = medicalDao.getAllergiesFlow()
+    suspend fun getAllergy(id: String): AllergyEntry? = medicalDao.getAllergy(id)
+
+    suspend fun upsertCondition(entry: ConditionEntry) = medicalDao.upsertCondition(entry)
+    suspend fun upsertConditions(entries: List<ConditionEntry>) = medicalDao.upsertConditions(entries)
+    suspend fun deleteCondition(entry: ConditionEntry) = medicalDao.deleteCondition(entry)
+    fun getConditionsFlow(): Flow<List<ConditionEntry>> = medicalDao.getConditionsFlow()
+    suspend fun getCondition(id: String): ConditionEntry? = medicalDao.getCondition(id)
+
+    // Lab results and the standing profile
+    suspend fun upsertLabResult(entry: LabResultEntry) = medicalDao.upsertLabResult(entry)
+    suspend fun upsertLabResults(entries: List<LabResultEntry>) = medicalDao.upsertLabResults(entries)
+    suspend fun deleteLabResult(entry: LabResultEntry) = medicalDao.deleteLabResult(entry)
+    fun getLabResultsFlow(): Flow<List<LabResultEntry>> = medicalDao.getLabResultsFlow()
+    suspend fun getLabResult(id: String): LabResultEntry? = medicalDao.getLabResult(id)
+
+    suspend fun upsertProfile(profile: HealthProfile) = medicalDao.upsertProfile(profile)
+    fun getProfileFlow(): Flow<HealthProfile?> = medicalDao.getProfileFlow()
+    suspend fun getProfile(): HealthProfile? = medicalDao.getProfile()
+
+    suspend fun upsertProfileAnswer(answer: ProfileAnswer) = medicalDao.upsertProfileAnswer(answer)
+    fun getProfileAnswersFlow(): Flow<List<ProfileAnswer>> = medicalDao.getProfileAnswersFlow()
+    suspend fun getProfileAnswer(loincCode: String): ProfileAnswer? =
+        medicalDao.getProfileAnswer(loincCode)
 
     /** Expose underlying [HealthDatabase] for call sites that need transactional access (prefer adding a method here instead). */
     internal val database: HealthDatabase get() = db

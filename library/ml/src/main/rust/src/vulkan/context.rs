@@ -37,6 +37,8 @@ use ash::Entry;
 use std::ffi::{c_char, CStr, CString};
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock, Weak};
 
+use super::pipeline::Shaders;
+
 /// The single highest-value thing owning Vulkan buys us: without it a wrong descriptor
 /// or a missing barrier is undefined behaviour that happens to work on one driver.
 /// Debug builds only — the layer is not on a user's device and costs real time.
@@ -78,6 +80,13 @@ pub struct Context {
     /// shared pool would have to be locked for the whole of a net's `record`, and a lock held
     /// that long by a net being built would stall a net that is merely submitting.
     queue_lock: Mutex<()>,
+    /// Every compute pipeline, compiled on first use and shared by every net on this device.
+    ///
+    /// A pipeline depends on its SPIR-V and its pipeline layout, and neither varies between
+    /// nets, so building them per net compiled the same 40 shaders once per net. Supertonic
+    /// holds four at once and paid ~450 ms a set for it, which was most of the delay between
+    /// the text-to-speech service being bound and it saying anything.
+    shaders: Mutex<Option<Arc<Shaders>>>,
 }
 
 /// The device limits the weights buffer has to fit inside, queried rather than assumed.
@@ -220,6 +229,7 @@ impl Context {
             queue_family_index,
             limits,
             queue_lock: Mutex::new(()),
+            shaders: Mutex::new(None),
         })
     }
 
@@ -302,6 +312,23 @@ impl Context {
         self.queue_lock.lock().unwrap_or_else(|e| e.into_inner())
     }
 
+    /// Every compute pipeline for this device, compiling them on the first call.
+    ///
+    /// Cheap after that, which is the point: the four Supertonic nets ask in turn while the
+    /// text-to-speech service is warming up, and only the first pays.
+    ///
+    /// A poisoned lock is recovered for the same reason [`Context::lock_queue`] recovers its
+    /// own — it guards a cache, not an invariant.
+    pub fn shaders(&self) -> Result<Arc<Shaders>, String> {
+        let mut guard = self.shaders.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(existing) = guard.as_ref() {
+            return Ok(existing.clone());
+        }
+        let built = Arc::new(Shaders::new(self)?);
+        *guard = Some(built.clone());
+        Ok(built)
+    }
+
     /// A memory type satisfying `flags` out of those `allowed` by a resource.
     pub fn memory_type(&self, allowed: u32, flags: vk::MemoryPropertyFlags) -> Option<u32> {
         // SAFETY: a plain property query on a device we created.
@@ -326,6 +353,12 @@ impl Drop for Context {
             let guard = self.lock_queue();
             let _ = self.device.device_wait_idle();
             drop(guard);
+            // After the wait and before the device goes: every net that held these is already
+            // dropped, because each holds an `Arc<Context>`.
+            if let Some(shaders) = self.shaders.get_mut().unwrap_or_else(|e| e.into_inner()).take()
+            {
+                shaders.destroy(&self.device);
+            }
             self.device.destroy_device(None);
             self.instance.destroy_instance(None);
         }

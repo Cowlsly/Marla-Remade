@@ -1,0 +1,117 @@
+#version 450
+//! VARIANT G — REAL KERNEL SHAPE, FULL DEQUANT. `conv_vec_int4.comp` reproduced.
+//!
+//! TEMPORARY probe shader for task 9. Source of truth is
+//! `analysis/gemv_probe/gemv_g_shape_full.comp`. See `gemv_a_control.comp` for why this copy
+//! exists and when to delete it.
+//!
+//! The second anchor. This is the real kernel's structure *and* its arithmetic: the same
+//! tile mapping, the same one-iteration loop at `in_c = 1536`, the same 16 idle lanes, the
+//! same per-block scale fetch, the same 32 scalar activation loads per `uvec4`, the same
+//! `subgroupAdd` and shared-memory reduction.
+//!
+//! **G must land on the 3.4-4.0 GB/s already measured for `[65536, 1536]`.** If it does not,
+//! F and G are not reproducing the real kernel and neither is evidence of anything. A is the
+//! anchor at the ceiling; G is the anchor at the floor.
+//!
+//! # The one deliberate deviation — NOW NARROWED, because it was distorting the result
+//!
+//! The **scale** table still comes from the shared fp16 buffer, masked into range. That is one
+//! `AND` per row per trip (2 per trip against 64 activation loads) and is negligible.
+//!
+//! The **activation** loads were also masked, and that was not negligible. `& ACT_MASK` on every
+//! access is **32 extra ALU ops per `uvec4`** on top of ~160 — a ~20% instruction increase
+//! injected into the exact loop this variant exists to measure. The real kernel has no such mask
+//! (`conv_vec_int4.comp:114` is a plain `arena[p.in0 + base + word * 8u + n]`).
+//!
+//! That deviation was originally judged harmless — "a mask is one ALU op and does not change the
+//! instruction mix meaningfully" — which was reasonable while we believed the kernel was
+//! bandwidth-bound. Once `A→F = 1.00x` and `F→G = 10.8x` established that this loop is
+//! ALU-bound, the assumption inverted: the mask lands precisely on the binding constraint.
+//! Measured consequence: production decode runs 1.6-1.8x faster than this probe.
+//!
+//! So the activation buffer is now sized to `in_c` by the runner, exactly as the real kernel's
+//! activation vector is (3 KB at `in_c` 1536, 24 KB at 12288), and the mask is gone. This both
+//! removes the 32 ops and reproduces the real cache footprint instead of a fixed 8 KB.
+
+#extension GL_EXT_shader_16bit_storage : require
+#extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
+#extension GL_KHR_shader_subgroup_basic : require
+#extension GL_KHR_shader_subgroup_arithmetic : require
+
+layout(local_size_x = 64) in;
+
+layout(set = 0, binding = 0) readonly buffer Source { uvec4 weights128[]; };
+layout(set = 0, binding = 1) buffer Sink { uint sink[]; };
+layout(set = 0, binding = 2) readonly buffer Acts { float16_t act[]; };
+
+layout(push_constant) uniform Push {
+    uint quads;
+    uint in_c;
+    uint count;
+};
+
+#define ROWS 2u
+#define I4_BLOCK 32u
+/// Masks the **scale** index only. The activation buffer is sized to `in_c` by the runner, so
+/// activation loads need no mask — which is the point, see the header.
+#define ACT_MASK 4095u
+
+shared float partial[ROWS][64];
+
+void main() {
+    uint tile = gl_WorkGroupID.y * gl_NumWorkGroups.x + gl_WorkGroupID.x;
+    if (tile >= count) {
+        return;
+    }
+    uint channel_base = tile * ROWS;
+    uint lane = gl_LocalInvocationID.x;
+    uint blocks = (in_c + I4_BLOCK - 1u) / I4_BLOCK;
+    float acc[ROWS];
+    for (uint r = 0u; r < ROWS; r++) {
+        acc[r] = 0.0;
+    }
+    for (uint base = lane * I4_BLOCK; base < in_c; base += 64u * I4_BLOCK) {
+        uint block = base / I4_BLOCK;
+        // The per-block scale fetch, one per row, as `conv_vec_int4.comp:77-80`.
+        float scale[ROWS];
+        for (uint r = 0u; r < ROWS; r++) {
+            scale[r] = float(act[((channel_base + r) * blocks + block) & ACT_MASK]);
+        }
+        for (uint r = 0u; r < ROWS; r++) {
+            uvec4 packed = weights128[((channel_base + r) * in_c + base) / 32u];
+            float total = 0.0;
+            // `conv_vec_int4.comp:110-116`, verbatim: 32 nibbles, 32 scalar fp16 activation
+            // loads, 32 FMAs. Note the activation index does not depend on `r`, exactly as in
+            // the real kernel - so if the compiler does not hoist it, both variants pay the
+            // same doubled load count and the comparison stays honest.
+            for (uint word = 0u; word < 4u; word++) {
+                uint bits = packed[word];
+                for (uint n = 0u; n < 8u; n++) {
+                    int code = bitfieldExtract(int(bits), int(n << 2u), 4);
+                    // Unmasked, matching `conv_vec_int4.comp:114`. The runner guarantees the
+                    // buffer holds at least `in_c` elements.
+                    total += float(code) * float(act[base + word * 8u + n]);
+                }
+            }
+            acc[r] += total * scale[r];
+        }
+    }
+    for (uint r = 0u; r < ROWS; r++) {
+        float summed = subgroupAdd(acc[r]);
+        if (subgroupElect()) {
+            partial[r][gl_SubgroupID] = summed;
+        }
+    }
+    barrier();
+    if (lane >= ROWS) {
+        return;
+    }
+    float total = 0.0;
+    for (uint i = 0u; i < gl_NumSubgroups; i++) {
+        total += partial[lane][i];
+    }
+    if (floatBitsToUint(total) == 0xFFFFFFFFu) {
+        sink[0] = 1u;
+    }
+}

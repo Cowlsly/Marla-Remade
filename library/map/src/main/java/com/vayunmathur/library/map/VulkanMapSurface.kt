@@ -8,6 +8,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
@@ -125,6 +126,28 @@ internal fun VulkanMapSurface(
             lifecycleOwner.lifecycle.removeObserver(observer)
             renderer.stop()
         }
+    }
+
+    // The renderer draws on demand rather than every vsync, and it *pulls* its camera out of
+    // the CameraState inside its frame callback — so nothing would otherwise tell it that a
+    // gesture, a fling, `animateTo` or a layout pass has moved the camera while the loop is
+    // idle, and the map would sit still under the user's finger.
+    //
+    // Deliberately a snapshotFlow over the state rather than a call at each mutation site:
+    // pan, pinch, tilt, quick-zoom, double-tap zoom, `animateTo` and `setViewport` all write
+    // these two properties and nothing else, so observing the properties covers every one of
+    // them — including any added later, which naming the call sites would not.
+    //
+    // The cost is that the first frame of an interaction can be one frame late, where the pull
+    // was immediate. The renderer's idle grace then holds the loop open for the rest of the
+    // gesture, so it is one frame at the start of a movement and never during it.
+    LaunchedEffect(host, cameraState) {
+        snapshotFlow { cameraState.position }.collect { renderer.invalidate() }
+    }
+    // Separately, because a viewport change is rare and a camera change is per-frame: keeping
+    // them apart means the hot path compares one reference rather than allocating a pair.
+    LaunchedEffect(host, cameraState) {
+        snapshotFlow { cameraState.viewportDp }.collect { renderer.invalidate() }
     }
 
     // Following the system theme costs nothing: the layer set is identical between

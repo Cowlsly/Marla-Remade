@@ -1,0 +1,121 @@
+// Google Automotive Link service descriptors -- the payloads a head unit puts inside each
+// Service entry of its discovery response.
+//
+// Field numbers recovered from the APK's protobuf-lite descriptors and exact; names follow
+// aasdk/openauto. See gal/control.proto for the provenance note.
+
+syntax = "proto2";
+
+package gal;
+
+option java_package = "com.vayunmathur.auto.protocol.gal";
+option java_multiple_files = true;
+
+enum MediaCodecType {
+  MEDIA_CODEC_AUDIO_PCM = 1;
+  MEDIA_CODEC_AUDIO_AAC_LC = 2;
+  MEDIA_CODEC_VIDEO_H264_BP = 3;
+  MEDIA_CODEC_AUDIO_AAC_LC_ADTS = 4;
+  MEDIA_CODEC_VIDEO_VP9 = 5;
+  MEDIA_CODEC_VIDEO_AV1 = 6;
+  MEDIA_CODEC_VIDEO_H265 = 7;
+}
+
+enum VideoResolution {
+  VIDEO_800x480 = 1;
+  VIDEO_1280x720 = 2;
+  VIDEO_1920x1080 = 3;
+  VIDEO_2560x1440 = 4;
+  VIDEO_3840x2160 = 5;
+  VIDEO_720x1280 = 6;
+  VIDEO_1080x1920 = 7;
+  VIDEO_1440x2560 = 8;
+  VIDEO_2160x3840 = 9;
+}
+
+// All three are `required`: a head unit that omits one is malformed, and protobuf-lite will
+// refuse to build it, which is the behaviour we want.
+message AudioConfiguration {
+  required uint32 sampling_rate = 1;
+  required uint32 number_of_bits = 2;
+  required uint32 number_of_channels = 3;
+}
+
+message VideoConfiguration {
+  optional VideoResolution codec_resolution = 1;
+  optional int32 frame_rate = 2;
+  optional uint32 width_margin = 3;
+  optional uint32 height_margin = 4;
+  optional uint32 density = 5;
+  optional uint32 field6 = 6;
+  optional uint32 field8 = 8;
+  optional uint32 field9 = 9;
+  optional int32 field10 = 10;
+  optional bytes field11 = 11;
+  // Field 7 is absent from this build.
+}
+
+// Carries both audio and video sinks; which one it is depends on the codec type.
+message MediaSinkService {
+  optional MediaCodecType available_type = 1;
+  optional int32 audio_type = 2;
+  repeated AudioConfiguration audio_configs = 3;
+  repeated VideoConfiguration video_configs = 4;
+  optional uint32 available_while_in_call = 6;
+  optional int32 field7 = 7;
+  optional int32 field8 = 8;
+  optional int32 field9 = 9;
+  // Field 5 is absent from this build.
+}
+
+// The car's microphone. The phone receives this audio and acks it.
+message MediaSourceService {
+  optional MediaCodecType available_type = 1;
+  optional AudioConfiguration audio_config = 2;
+}
+
+message TouchConfig {
+  required int32 width = 1;
+  required int32 height = 2;
+  optional int32 type = 3;
+}
+
+message InputSourceService {
+  repeated int32 keycodes_supported = 1 [packed = true];
+  repeated TouchConfig touchscreen = 2;
+  repeated TouchConfig touchpad = 3;
+  repeated int32 feedback_events_supported = 4;
+  optional uint32 field5 = 5;
+}
+
+message Sensor {
+  required int32 type = 1;
+}
+
+message SensorSourceService {
+  repeated Sensor sensors = 1;
+  optional uint32 location_characterization = 2;
+  repeated int32 fuel_types = 3;
+  repeated int32 ev_connector_types = 4;
+}
+
+message BluetoothService {
+  required string car_address = 1;
+  repeated int32 supported_pairing_methods = 2 [packed = true];
+}
+
+message NavigationStatusService {
+  required int32 minimum_interval_ms = 1;
+  required int32 type = 2;
+  optional bytes image_options = 3;
+}
+
+message VendorExtensionService {
+  required string name = 1;
+  repeated string package_allowlist = 2;
+  optional bytes data = 3;
+}
+
+message WifiProjectionService {
+  optional string car_wifi_bssid = 1;
+}

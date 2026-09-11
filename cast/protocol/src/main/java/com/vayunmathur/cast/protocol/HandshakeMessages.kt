@@ -58,8 +58,15 @@ import kotlinx.serialization.json.Json
  * still parses - but the version moves anyway, because a receiver that advertises nothing is
  * indistinguishable from a panel that enumerated no modes, and silently falling back to phone
  * geometry is the failure this exists to remove.
+ *
+ * 9 makes a frame rate a real number. [StreamConfig.frameRate] was an `Int`, which cannot tell
+ * 59.94 from 60 or 23.976 from 24 - and a television advertises those as *separate panel modes*,
+ * so rounding collapsed pairs of genuine choices into one. Version 8 only ever offered the fastest
+ * mode per resolution, so the distinction had nowhere to show; now that every native mode is
+ * offered and the receiver switches its panel to match the stream, the rate has to survive the
+ * trip exactly or the mode it names cannot be found again on the other side.
  */
-const val PROTOCOL_VERSION = 8
+const val PROTOCOL_VERSION = 9
 
 /** The mDNS service type the TV registers and the phone browses for. */
 const val MACAST_SERVICE_TYPE = "_macast._tcp"
@@ -157,6 +164,12 @@ data class TvIdentity(
      * surface the screen then has to scale back down. Empty when the receiver enumerated nothing,
      * which the sender treats as "fall back to the phone's geometry" rather than as a failure -
      * mirroring is unaffected either way, because it deliberately sends the phone's own shape.
+     *
+     * **Every native mode, not one per resolution.** This used to be collapsed by size with the
+     * fastest rate kept, on the reasoning that two modes differing only in refresh rate are one
+     * choice as far as a desktop is concerned. They are not: the panel presents them differently,
+     * and a phone whose encoder cannot hold 60 at 4K can still hold 50 there. Collapsing hid every
+     * rate the user might actually have wanted.
      */
     val displayModes: List<DisplayMode> = emptyList(),
 ) : ControlMessage
@@ -164,9 +177,10 @@ data class TvIdentity(
 /**
  * One mode the television's panel can display.
  *
- * [refreshRate] is carried because two modes can share a resolution and differ only in rate, and
- * dropping it would make them collide when the sender picks. It is not currently used to drive the
- * encoder's frame rate, which stays negotiated through [CodecLimits.maxFrameRate].
+ * [refreshRate] is what distinguishes two modes that share a resolution, and is carried exactly -
+ * a panel really does list 59.94 and 60 separately, and rounding them together would offer one
+ * choice where the screen has two. It is also what the sender sets its encoder to and what the
+ * receiver switches the panel to, so the same number has to mean the same thing at both ends.
  */
 @Serializable
 data class DisplayMode(
@@ -296,7 +310,7 @@ data class CodecLimits(
     }
 
     /** Whether this envelope takes exactly [width] x [height] at [frameRate]. */
-    fun admits(width: Int, height: Int, frameRate: Int): Boolean =
+    fun admits(width: Int, height: Int, frameRate: Float): Boolean =
         width in 1..maxWidth && height in 1..maxHeight && frameRate <= maxFrameRate
 }
 
@@ -366,7 +380,15 @@ data class PairFailed(
 data class StreamConfig(
     val width: Int,
     val height: Int,
-    val frameRate: Int,
+    /**
+     * Frames per second, and the reason this protocol is at version 9.
+     *
+     * A `Float` because it names one of the receiver's own panel modes, which are 23.976, 29.97
+     * and 59.94 as often as they are whole numbers. The receiver looks its panel mode up by this
+     * value and switches the screen to it, so an `Int` here would not merely lose precision - it
+     * would name a mode that does not exist.
+     */
+    val frameRate: Float,
     val bitRate: Int,
     val audio: Boolean,
     val video: Boolean,

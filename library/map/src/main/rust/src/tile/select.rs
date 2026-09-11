@@ -177,6 +177,29 @@ pub fn lod_fade_alpha(now: f32, uploaded_at: f32, duration: f32) -> f32 {
     ((now - uploaded_at) / duration).clamp(0.0, 1.0)
 }
 
+/// Whether a tile stamped `uploaded_at` is still inside its cross-fade, and so would draw
+/// differently on the next frame even from an identical camera.
+///
+/// This is what stops the on-demand frame loop idling mid-fade and freezing a tile at
+/// half opacity. It is deliberately **not** `lod_fade_alpha(..) < 1.0`: the fade is gated on
+/// a resident ancestor (see [`tile_lod_alpha`]) and this is not, so it answers "is this tile
+/// young enough that the fade *could* be running" rather than "is it running". Erring that
+/// way costs a few frames on a tile that was never going to fade; erring the other way stops
+/// the clock on one that was.
+///
+/// The elapsed time is taken **modulo [`CLOCK_WRAP_SECONDS`]**, because the shared clock wraps
+/// hourly (see [`Camera::time_seconds`](crate::camera::Camera::time_seconds)). A plain
+/// subtraction is not merely imprecise across a wrap, it is wrong in the worst direction: a
+/// tile stamped at 3599.5 against a clock that has just wrapped to 0.0 gives -3599.5, which is
+/// below any sane `duration`, so the window would read as open and pin the frame loop awake
+/// for the remaining hour — the exact thing on-demand rendering exists to prevent.
+pub fn fade_in_progress(now: f32, uploaded_at: f32, duration: f32) -> bool {
+    if duration <= 0.0 {
+        return false;
+    }
+    (now - uploaded_at).rem_euclid(crate::camera::CLOCK_WRAP_SECONDS) < duration
+}
+
 /// Whether a coarser ancestor of `key` (up to [`ANCESTOR_DEPTH`] levels up) is currently
 /// resident, and so is drawn underneath as an opaque stand-in.
 ///
@@ -357,6 +380,78 @@ mod tests {
             tile_lod_alpha(lone.key(), now, now, LOD_FADE_SECONDS, &resident),
             1.0,
             "no ancestor underneath — draw opaque, never fade over the background",
+        );
+    }
+
+    /// The fade window is open for exactly as long as the fade runs, so the on-demand frame
+    /// loop keeps drawing across it and stops once the tile has settled. A tile frozen at
+    /// half opacity is what this prevents.
+    #[test]
+    fn the_fade_window_is_open_for_exactly_the_fade() {
+        let uploaded_at = 100.0;
+        let d = LOD_FADE_SECONDS;
+        assert!(fade_in_progress(uploaded_at, uploaded_at, d), "open at upload");
+        assert!(fade_in_progress(uploaded_at + d * 0.5, uploaded_at, d), "open halfway");
+        // The instant the ramp reaches 1.0 there is nothing left to animate.
+        assert!(!fade_in_progress(uploaded_at + d, uploaded_at, d), "shut when opaque");
+        assert!(!fade_in_progress(uploaded_at + d * 10.0, uploaded_at, d), "shut long after");
+    }
+
+    /// The window is open wherever the opacity ramp is still moving. Checked against
+    /// [`lod_fade_alpha`] rather than restated, because the two drifting apart is exactly how
+    /// the loop would idle mid-fade.
+    #[test]
+    fn the_fade_window_covers_every_frame_the_opacity_is_still_ramping() {
+        let uploaded_at = 42.0;
+        let d = LOD_FADE_SECONDS;
+        for step in 0..40 {
+            let now = uploaded_at + d * step as f32 / 20.0;
+            if lod_fade_alpha(now, uploaded_at, d) < 1.0 {
+                assert!(
+                    fade_in_progress(now, uploaded_at, d),
+                    "opacity is {} at {now} but the window says settled",
+                    lod_fade_alpha(now, uploaded_at, d),
+                );
+            }
+        }
+    }
+
+    /// A clock that reads before the stamp is the hourly wrap of the shared clock, and the
+    /// elapsed time has to be taken modulo the period. Getting this wrong does not cost a few
+    /// frames — it holds the frame loop open for the rest of the hour, which is the whole
+    /// defect on-demand rendering exists to fix.
+    #[test]
+    fn a_wrapped_clock_measures_the_real_elapsed_time() {
+        let d = LOD_FADE_SECONDS;
+        // Uploaded 0.5s ago in real time, across a wrap: the fade has finished.
+        assert!(
+            !fade_in_progress(0.0, 3599.5, d),
+            "0.5s elapsed across the wrap is past a 0.3s fade — the loop must be allowed to idle",
+        );
+        // Uploaded 0.1s ago in real time, across a wrap: still fading.
+        assert!(fade_in_progress(0.0, 3599.9, d), "0.1s elapsed across the wrap is mid-fade");
+        // The far side of the wrap must not read as an hour of pending work.
+        assert!(
+            !fade_in_progress(1.0, 2000.0, d),
+            "a stamp far behind the clock must not pin the loop awake",
+        );
+    }
+
+    /// A disabled fade animates nothing, so it must never hold the frame loop open — that
+    /// would be a permanent 60fps with no visible change.
+    #[test]
+    fn a_disabled_fade_never_holds_the_loop_open() {
+        assert!(!fade_in_progress(10.0, 10.0, 0.0));
+        assert!(!fade_in_progress(10.0, 10.0, -1.0));
+    }
+
+    /// The wrap period the fade window measures against has to be the one the bridge actually
+    /// reduces the clock by, or every elapsed time across a wrap is wrong by the difference.
+    #[test]
+    fn the_clock_period_matches_the_bridges_reduction() {
+        assert_eq!(
+            crate::camera::CLOCK_WRAP_SECONDS,
+            crate::camera::CLOCK_WRAP_NANOS as f32 / 1_000_000_000.0,
         );
     }
 

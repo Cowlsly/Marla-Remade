@@ -60,12 +60,32 @@ pub struct Camera {
     pub pitch_deg: f64,
     /// Seconds since an arbitrary epoch, forwarded from the host's per-frame `frameTimeNanos`.
     ///
+    /// **Bounded to `[0, `[`CLOCK_WRAP_SECONDS`]`)` and wraps** — see [`CLOCK_WRAP_NANOS`] for
+    /// why. Anything measuring an elapsed time against it has to take the difference modulo
+    /// the period, or a stamp taken just before a wrap reads as an hour in the future.
+    ///
     /// Not part of the projection — it never enters a matrix, so it changes no camera test —
     /// but it rides on the camera because it is the other thing that arrives exactly once per
     /// frame. The renderer forwards it to shaders through the `Push.misc.w` slot; the animated
     /// workstreams (dash phase, LOD morph, vehicles) read it there.
     pub time_seconds: f32,
 }
+
+/// The period [`Camera::time_seconds`] is reduced modulo, in nanoseconds.
+///
+/// The host's `frameTimeNanos` is a boot-relative clock that grows without bound, and
+/// `time_seconds` is an `f32` with ~7 significant digits — so after a long uptime the raw
+/// value would quantise to tens of milliseconds and coarsen every animation that reads it.
+/// Reducing it first keeps the resolution; the cost is that the clock wraps, which every
+/// reader has to allow for.
+pub const CLOCK_WRAP_NANOS: i64 = 3_600_000_000_000;
+
+/// [`CLOCK_WRAP_NANOS`] in seconds: the period of [`Camera::time_seconds`].
+///
+/// An elapsed time against that clock is `(now - then).rem_euclid(CLOCK_WRAP_SECONDS)`. A
+/// plain subtraction is wrong across a wrap, and wrong by an entire period rather than
+/// slightly — which reads as a stamp an hour in the future rather than a moment in the past.
+pub const CLOCK_WRAP_SECONDS: f32 = 3600.0;
 
 /// A point in Web Mercator world pixels at some zoom.
 #[derive(Clone, Copy, Debug, PartialEq)]

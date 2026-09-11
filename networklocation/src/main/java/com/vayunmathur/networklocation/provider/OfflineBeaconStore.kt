@@ -4,23 +4,24 @@ import android.content.Context
 import android.os.ParcelFileDescriptor
 import com.vayunmathur.networklocation.BeaconFix
 import com.vayunmathur.networklocation.BeaconId
+import com.vayunmathur.networklocation.BeaconKeys
 import com.vayunmathur.networklocation.OfflineDatabases
 import com.vayunmathur.networklocation.WpsStoreNative
 
 /**
- * Offline beacon → coordinate resolver over the two WPSDB stores (`wifi.wpsdb`,
- * `cells.wpsdb`), read by [WpsStoreNative] (native Rust reader) from device-protected
- * storage — see [OfflineDatabases]. They are downloaded rather than bundled, the same as
+ * Offline beacon → coordinate resolver over the two WPSDB stores
+ * ([OfflineDatabases.WIFI], [OfflineDatabases.CELL]), read by [WpsStoreNative] (native Rust
+ * reader) from device-protected storage. They are downloaded rather than bundled, the same as
  * the offline geocoder in `GeocodeService`.
  *
  * Degrades gracefully: if a store has not been downloaded or the native library did not
- * load, the corresponding handle stays 0 and every lookup misses, so the provider falls back
- * to pure-online behaviour and a DB-less dev build still works. A store that arrives later is
- * picked up on the next lookup ([reopenIfArrived]) rather than at the next process start.
+ * load, the corresponding handle stays 0 and every lookup misses, so no position is reported
+ * and a DB-less dev build still works. There is no online fallback. A store that arrives
+ * later is picked up on the next lookup ([reopenIfArrived]) rather than at the next process
+ * start.
  *
- * The 48-bit MAC packing and 64-bit cell-key packing here MUST stay byte-for-byte identical
- * to `wtfps-experiment/store.py` (`parse_mac` / `pack_cell`), which builds the stores — see
- * FORMAT.md "Cell key packing".
+ * Key packing lives in [BeaconKeys] and must stay identical to the builder in
+ * `scripts/networklocation/wps_harvest`.
  */
 class OfflineBeaconStore(context: Context) {
     private val appContext = context.applicationContext
@@ -83,9 +84,10 @@ class OfflineBeaconStore(context: Context) {
             if (wifiHandle == 0L) return emptyMap()
             val out = HashMap<BeaconId.Wifi, BeaconFix>()
             for (id in bssids) {
-                val key = parseMac(id.bssid) ?: continue
-                val r = WpsStoreNative.lookup(wifiHandle, key) ?: continue
-                if (r.size >= 2) out[id] = BeaconFix(id, r[0], r[1], OFFLINE_ACCURACY_METERS)
+                val key = BeaconKeys.parseMac(id.bssid) ?: continue
+                if (BeaconKeys.isRandomizedMac(key)) continue
+                val r = WpsStoreNative.lookup(wifiHandle, 0L, key) ?: continue
+                if (r.size >= 3) out[id] = BeaconFix(id, r[0], r[1], accuracyOf(r[2]))
             }
             return out
         }
@@ -99,8 +101,12 @@ class OfflineBeaconStore(context: Context) {
             if (cellHandle == 0L) return emptyMap()
             val out = HashMap<BeaconId.Cell, BeaconFix>()
             for (id in cells) {
-                val r = WpsStoreNative.lookup(cellHandle, packCell(id)) ?: continue
-                if (r.size >= 2) out[id] = BeaconFix(id, r[0], r[1], OFFLINE_ACCURACY_METERS)
+                val r = WpsStoreNative.lookup(
+                    cellHandle,
+                    BeaconKeys.cellKeyHi(id),
+                    BeaconKeys.cellKeyLo(id),
+                ) ?: continue
+                if (r.size >= 3) out[id] = BeaconFix(id, r[0], r[1], accuracyOf(r[2]))
             }
             return out
         }
@@ -132,33 +138,17 @@ class OfflineBeaconStore(context: Context) {
     }
 
     private companion object {
-        // The stores quantize coordinates to a ~20 m global grid (see quantize.py); use a
-        // fixed accuracy radius matching that precision for every offline fix.
-        const val OFFLINE_ACCURACY_METERS = 20.0
+        /**
+         * Radius used when the store holds a record but no accuracy for it (the source did
+         * not report one, signalled by a negative value from the native reader).
+         *
+         * Deliberately pessimistic. The solver weights every beacon by the inverse of this —
+         * see `six_sigma_squared` in `jni.rs` and the inlier test in `lib.rs` — so guessing
+         * low would let an unmeasured beacon outvote measured ones.
+         */
+        const val UNKNOWN_ACCURACY_METERS = 100.0
 
-        // Cell key packing — MUST match store.pack_cell:
-        //   key = (mcc<<54) | (mnc<<44) | (tac<<28) | (cellId & 0x0FFFFFFF)
-        //   mcc:10 | mnc:10 | tac:16 | cellId:28  (= 64 bits)
-        // 5G NCI cell ids (36-bit) are truncated to 28 bits; LTE/UMTS/GSM fit.
-        const val CID_MASK = 0x0FFF_FFFFL
-
-        fun packCell(id: BeaconId.Cell): Long =
-            ((id.mcc.toLong() and 0x3FF) shl 54) or
-                ((id.mnc.toLong() and 0x3FF) shl 44) or
-                ((id.tacOrLac.toLong() and 0xFFFF) shl 28) or
-                (id.cellId.toLong() and CID_MASK)
-
-        /** Parse "aa:bb:cc:dd:ee:ff" to a 48-bit key (mirrors store.parse_mac); null if bad. */
-        fun parseMac(bssid: String): Long? {
-            val parts = bssid.split(":")
-            if (parts.size != 6) return null
-            var v = 0L
-            for (p in parts) {
-                val b = p.toIntOrNull(16) ?: return null
-                if (b < 0 || b > 0xFF) return null
-                v = (v shl 8) or b.toLong()
-            }
-            return v
-        }
+        fun accuracyOf(stored: Double): Double =
+            if (stored < 0.0) UNKNOWN_ACCURACY_METERS else stored
     }
 }

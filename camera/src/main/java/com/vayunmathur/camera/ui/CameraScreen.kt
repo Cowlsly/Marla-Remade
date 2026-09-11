@@ -232,6 +232,7 @@ fun CameraScreen(
     }
     val highSpeedActive by viewModel.highSpeedActive.collectAsState()
     val photoSessionActive by viewModel.photoSessionActive.collectAsState()
+    val analysisStreamActive by viewModel.analysisStreamActive.collectAsState()
     // Whether to offer the NIGHT extension. Reactive: the ViewModel recomputes it on lens/mode
     // change (off-main; support probe + weekly failure cache) AND flips it false immediately if a
     // night bind fails, so a broken extender (GrapheneOS/Pixel) stops engaging night after one try.
@@ -330,8 +331,9 @@ fun CameraScreen(
     }
 
     // Analyzer selection for the photo modes. Keyed on photoSessionActive so the analyzer is
-    // re-applied to the freshly-bound ImageAnalysis after every (re)bind (mode switch / flip).
-    LaunchedEffect(cameraMode, photoSessionActive) {
+    // re-applied to the freshly-bound ImageAnalysis after every (re)bind (mode switch / flip), and
+    // on lensFacing to match the DisposableEffect below, which detaches on a flip.
+    LaunchedEffect(cameraMode, photoSessionActive, lensFacing) {
         when {
             cameraMode == CameraMode.SLOW_MO -> {
                 maskBitmap = null
@@ -354,7 +356,7 @@ fun CameraScreen(
                     }
                     else -> {
                         maskBitmap = null
-                        viewModel.setImageAnalyzer(
+                        viewModel.setPhotoAnalyzer(
                             PhotoAnalyzer(
                                 onLuminance = { viewModel.onLuminance(it) },
                                 onQrDetected = { viewModel.setQrResult(it) },
@@ -403,8 +405,13 @@ fun CameraScreen(
             }
         } else null
         onDispose {
-            viewModel.setImageAnalyzer(null)
-            analyzer?.close()
+            // Only detach what this effect attached. It also keys on lensFacing, which the
+            // analyzer-selection effect above does not, so an unconditional clear stripped
+            // PhotoAnalyzer off the photo stream on every camera flip.
+            if (analyzer != null) {
+                viewModel.setImageAnalyzer(null)
+                analyzer.close()
+            }
             // Post recycle to avoid racing with graphicsLayer reading maskBitmap
             mainHandler.post {
                 maskBitmap?.let { bmp ->
@@ -737,6 +744,22 @@ fun CameraScreen(
                             modifier = Modifier
                                 .align(Alignment.TopCenter)
                                 .padding(top = 56.dp)
+                                .background(Color(0x66000000), RoundedCornerShape(12.dp))
+                                .padding(horizontal = 10.dp, vertical = 4.dp)
+                        )
+                    }
+
+                    // Some vendor NIGHT extensions can't host a concurrent ImageAnalysis stream, so
+                    // the session binds without one and QR codes stop being read. Say so rather than
+                    // letting the scanner look broken.
+                    if (isPhotoType && photoSessionActive && !analysisStreamActive) {
+                        Text(
+                            text = stringResource(R.string.qr_scanning_paused),
+                            color = Color.White,
+                            fontSize = 12.sp,
+                            modifier = Modifier
+                                .align(Alignment.TopCenter)
+                                .padding(top = 84.dp)
                                 .background(Color(0x66000000), RoundedCornerShape(12.dp))
                                 .padding(horizontal = 10.dp, vertical = 4.dp)
                         )

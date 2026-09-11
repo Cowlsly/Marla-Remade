@@ -476,7 +476,7 @@ object ReceiverController {
             when (val first = configured.message) {
                 is StreamConfig -> {
                     startStreaming(channel, keys, first, greeting.senderName)
-                    mirrorSession(channel, first, greeting.senderName)
+                    mirrorSession(channel, keys, first, greeting.senderName)
                     return
                 }
                 is ContentSession -> {
@@ -514,9 +514,13 @@ object ReceiverController {
      */
     private suspend fun mirrorSession(
         channel: ControlChannel,
+        keys: SessionKeys,
         config: StreamConfig,
         senderName: String,
     ) {
+        // The session's *current* configuration, which is no longer fixed for its lifetime: the
+        // phone re-negotiates when the user picks a different resolution or refresh rate.
+        var current = config
         while (true) {
             val next = channel.receive() ?: break
             when (val message = next.message) {
@@ -524,7 +528,23 @@ object ReceiverController {
                     Log.i(TAG, "'$senderName' said goodbye")
                     return
                 }
-                is VideoCodecConfig -> onVideoCodecConfig(message, config)
+                // **A second STREAM_CONFIG re-arms the session rather than being ignored.**
+                // Silently dropping it here - which `else` used to do - left the phone waiting
+                // for a STREAM_READY that never came while it had already stopped sending, so a
+                // resolution change showed up as the picture freezing on its last frame. The old
+                // decoder and socket go first: they are sized and bound for the geometry being
+                // replaced.
+                is StreamConfig -> {
+                    Log.i(
+                        TAG,
+                        "'$senderName' is switching to ${message.width}x${message.height} " +
+                            "@ ${message.frameRate}fps",
+                    )
+                    endMedia()
+                    startStreaming(channel, keys, message, senderName)
+                    current = message
+                }
+                is VideoCodecConfig -> onVideoCodecConfig(message, current)
                 is PlaybackState -> onPlaybackState(message)
                 // What the encoded picture is of. Names no resource - nothing is being served here -
                 // so the gate in `ReceiverUiState.nowPlayingForCurrentItem` passes it straight
@@ -905,6 +925,7 @@ object ReceiverController {
                     width = config.width,
                     height = config.height,
                     appLabel = config.appLabel,
+                    frameRate = config.frameRate,
                 ),
             )
         }
@@ -945,6 +966,10 @@ object ReceiverController {
         channel: ControlChannel,
     ) {
         var decoder: VideoDecoder? = null
+        // The surface [decoder] was built against, so a *replacement* surface can be told from the
+        // same one. Compared by identity: a new Surface for the same SurfaceView is a different
+        // object, and that is exactly the case this exists to catch.
+        var decoderSurface: Surface? = null
         // Hoisted into a local because the property comes from another module, where Kotlin will not
         // smart-cast it - and every use below is inside a branch that has already established there
         // is video.
@@ -983,16 +1008,27 @@ object ReceiverController {
         try {
             while (currentCoroutineContext().isActive) {
                 val activeSurface = surface
+                // **Identity, not nullity.** A panel mode switch destroys the `SurfaceView`'s
+                // surface and hands back a *different* one, frequently with no null in between -
+                // `MirrorActivity.surfaceChanged` says as much, and re-attaches for that reason.
+                // Testing only for null left the decoder drawing into a surface that had already
+                // been torn down: the picture froze, the television asked for key frame after key
+                // frame, and nothing recovered until a re-negotiation rebuilt this whole loop.
+                // Switching the panel to match the stream made that the common case rather than a
+                // rotation-only curiosity.
+                val stale = decoder
+                if (stale != null && activeSurface !== decoderSurface) {
+                    stale.release()
+                    decoder = null
+                    decoderSurface = null
+                    // Whatever is queued was scheduled for a decoder that no longer exists, and
+                    // its replacement can decode nothing until it has been given a key frame.
+                    playout.clear()
+                    media.requestKeyFrame(StreamKind.Video)
+                }
                 if (activeSurface == null) {
-                    val stale = decoder
-                    if (stale != null) {
-                        stale.release()
-                        decoder = null
-                        // Whatever is queued was scheduled for a decoder that no longer exists, and
-                        // its replacement can decode nothing until it has been given a key frame.
-                        playout.clear()
-                        media.requestKeyFrame(StreamKind.Video)
-                    }
+                    // Nothing to draw on yet, or the surface has just gone. Either way the decoder
+                    // above is already released and there is nothing to build against.
                 } else if (decoder == null && negotiation.hasVideo && videoCodec != null) {
                     // Only consulted for a codec that needs it. An H.265 session finds its parameter
                     // sets in the stream, and installing a `csd-0` it was not expecting would fail the
@@ -1035,6 +1071,7 @@ object ReceiverController {
                         val started = VideoDecoder(activeSurface, videoCodec)
                         if (started.start(config.width, config.height, codecConfig)) {
                             decoder = started
+                            decoderSurface = activeSurface
                             Log.i(TAG, "decoder up; the picture starts at the next key frame")
                         } else {
                             _state.update {

@@ -79,14 +79,11 @@
     <string name="unit_cal">cal</string>
     <string name="label_blood_pressure_unit">mmHg</string>
     <string name="nav_today">Oggi</string>
-    <string name="nav_activity">Attività</string>
     <string name="nav_nutrition">Alimentazione</string>
     <string name="nav_body">Corpo</string>
     <string name="section_latest_vitals">Ultimi parametri vitali</string>
     <string name="section_last_night">Ultima notte</string>
     <string name="section_quick_stats">Statistiche rapide</string>
-    <string name="section_today_activity">Oggi</string>
-    <string name="section_this_week">Questa settimana</string>
     <string name="search">Cerca</string>
     <string name="label_mindfulness">Mindfulness</string>
     <string name="nutrition_breakdown">Dettaglio valori nutrizionali</string>

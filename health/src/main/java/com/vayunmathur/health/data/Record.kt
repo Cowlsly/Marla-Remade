@@ -347,13 +347,20 @@ interface HealthDao {
 }
 
 @Database(
-    entities = [Record::class, Ingredient::class, Recipe::class, ServingUnit::class, RecipeIngredient::class],
-    version = 5,
+    entities = [
+        Record::class, Ingredient::class, Recipe::class, ServingUnit::class, RecipeIngredient::class,
+        VaccinationEntry::class, MedicationEntry::class, MedicalAttachment::class,
+        MedicationSchedule::class, AllergyEntry::class, ConditionEntry::class,
+        LabResultEntry::class, HealthProfile::class, ProfileAnswer::class,
+    ],
+    version = 10,
     exportSchema = false
 )
 @ColumnTypeConverters(Converters::class)
 abstract class HealthDatabase : RoomDatabase() {
     abstract fun healthDao(): HealthDao
+    abstract fun medicalDao(): MedicalDao
+    abstract fun scheduleDao(): ScheduleDao
 
     companion object : com.vayunmathur.library.util.DatabaseMigrations {
         override val migrations = listOf(
@@ -364,6 +371,166 @@ abstract class HealthDatabase : RoomDatabase() {
                 it.execSQL("ALTER TABLE Record ADD COLUMN exercise_segmentsJson TEXT")
                 it.execSQL("ALTER TABLE Record ADD COLUMN exercise_lapsJson TEXT")
                 it.execSQL("ALTER TABLE Record ADD COLUMN exercise_hasRoute INTEGER NOT NULL DEFAULT 0")
+            },
+            Migration(5, 6) {
+                it.execSQL(
+                    """
+                    CREATE TABLE IF NOT EXISTS VaccinationEntry (
+                        id TEXT NOT NULL PRIMARY KEY,
+                        cvxCode TEXT,
+                        displayName TEXT NOT NULL,
+                        occurredAt INTEGER NOT NULL,
+                        lotNumber TEXT,
+                        site TEXT,
+                        route TEXT,
+                        doseQuantity TEXT,
+                        performer TEXT,
+                        note TEXT,
+                        fhirResourceId TEXT,
+                        dataSourceId TEXT
+                    )
+                    """.trimIndent()
+                )
+                it.execSQL("CREATE INDEX IF NOT EXISTS index_VaccinationEntry_occurredAt ON VaccinationEntry (occurredAt)")
+                it.execSQL(
+                    """
+                    CREATE TABLE IF NOT EXISTS MedicationEntry (
+                        id TEXT NOT NULL PRIMARY KEY,
+                        rxcui TEXT,
+                        displayName TEXT NOT NULL,
+                        strength TEXT,
+                        doseForm TEXT,
+                        status TEXT NOT NULL,
+                        startedAt INTEGER NOT NULL,
+                        endedAt INTEGER,
+                        dosageText TEXT,
+                        note TEXT,
+                        fhirResourceId TEXT,
+                        dataSourceId TEXT
+                    )
+                    """.trimIndent()
+                )
+                it.execSQL("CREATE INDEX IF NOT EXISTS index_MedicationEntry_startedAt ON MedicationEntry (startedAt)")
+                it.execSQL(
+                    """
+                    CREATE TABLE IF NOT EXISTS MedicalAttachment (
+                        id TEXT NOT NULL PRIMARY KEY,
+                        vaccinationId TEXT NOT NULL,
+                        fileName TEXT NOT NULL,
+                        displayName TEXT NOT NULL,
+                        mimeType TEXT NOT NULL,
+                        sizeBytes INTEGER NOT NULL,
+                        importedAt INTEGER NOT NULL
+                    )
+                    """.trimIndent()
+                )
+                it.execSQL("CREATE INDEX IF NOT EXISTS index_MedicalAttachment_vaccinationId ON MedicalAttachment (vaccinationId)")
+            },
+            Migration(6, 7) {
+                it.execSQL(
+                    """
+                    CREATE TABLE IF NOT EXISTS MedicationSchedule (
+                        id TEXT NOT NULL PRIMARY KEY,
+                        medicationId TEXT NOT NULL,
+                        enabled INTEGER NOT NULL DEFAULT 1,
+                        times TEXT NOT NULL DEFAULT '',
+                        repeatUnit TEXT NOT NULL DEFAULT 'Daily',
+                        interval INTEGER NOT NULL DEFAULT 1,
+                        daysOfWeek INTEGER NOT NULL DEFAULT 0,
+                        anchorDate INTEGER NOT NULL,
+                        endDate INTEGER
+                    )
+                    """.trimIndent()
+                )
+                it.execSQL(
+                    "CREATE UNIQUE INDEX IF NOT EXISTS index_MedicationSchedule_medicationId " +
+                        "ON MedicationSchedule (medicationId)"
+                )
+            },
+            Migration(7, 8) {
+                it.execSQL(
+                    """
+                    CREATE TABLE IF NOT EXISTS AllergyEntry (
+                        id TEXT NOT NULL PRIMARY KEY,
+                        rxcui TEXT,
+                        displayName TEXT NOT NULL,
+                        category TEXT NOT NULL DEFAULT 'Medication',
+                        criticality TEXT NOT NULL DEFAULT 'Unknown',
+                        reaction TEXT,
+                        onsetAt INTEGER,
+                        recordedAt INTEGER NOT NULL,
+                        note TEXT,
+                        fhirResourceId TEXT,
+                        dataSourceId TEXT
+                    )
+                    """.trimIndent()
+                )
+                it.execSQL("CREATE INDEX IF NOT EXISTS index_AllergyEntry_recordedAt ON AllergyEntry (recordedAt)")
+                it.execSQL(
+                    """
+                    CREATE TABLE IF NOT EXISTS ConditionEntry (
+                        id TEXT NOT NULL PRIMARY KEY,
+                        icd10Code TEXT,
+                        displayName TEXT NOT NULL,
+                        status TEXT NOT NULL DEFAULT 'Active',
+                        onsetAt INTEGER NOT NULL,
+                        resolvedAt INTEGER,
+                        note TEXT,
+                        fhirResourceId TEXT,
+                        dataSourceId TEXT
+                    )
+                    """.trimIndent()
+                )
+                it.execSQL("CREATE INDEX IF NOT EXISTS index_ConditionEntry_onsetAt ON ConditionEntry (onsetAt)")
+            },
+            Migration(8, 9) {
+                it.execSQL(
+                    """
+                    CREATE TABLE IF NOT EXISTS LabResultEntry (
+                        id TEXT NOT NULL PRIMARY KEY,
+                        loincCode TEXT,
+                        displayName TEXT NOT NULL,
+                        value REAL,
+                        valueText TEXT,
+                        unit TEXT,
+                        referenceLow REAL,
+                        referenceHigh REAL,
+                        takenAt INTEGER NOT NULL,
+                        note TEXT,
+                        fhirResourceId TEXT,
+                        dataSourceId TEXT
+                    )
+                    """.trimIndent()
+                )
+                it.execSQL("CREATE INDEX IF NOT EXISTS index_LabResultEntry_takenAt ON LabResultEntry (takenAt)")
+                it.execSQL(
+                    """
+                    CREATE TABLE IF NOT EXISTS HealthProfile (
+                        id TEXT NOT NULL PRIMARY KEY,
+                        pregnancyStatus TEXT NOT NULL DEFAULT 'Unknown',
+                        dueDate INTEGER,
+                        pregnancyRecordedAt INTEGER,
+                        pregnancyFhirId TEXT,
+                        smokingStatus TEXT NOT NULL DEFAULT 'Unknown',
+                        smokingRecordedAt INTEGER,
+                        smokingFhirId TEXT,
+                        dataSourceId TEXT
+                    )
+                    """.trimIndent()
+                )
+            },
+            Migration(9, 10) {
+                it.execSQL(
+                    """
+                    CREATE TABLE IF NOT EXISTS ProfileAnswer (
+                        loincCode TEXT NOT NULL PRIMARY KEY,
+                        answerCode TEXT NOT NULL,
+                        recordedAt INTEGER NOT NULL,
+                        fhirResourceId TEXT,
+                        dataSourceId TEXT
+                    )
+                    """.trimIndent()
+                )
             }
         )
     }
@@ -381,4 +548,26 @@ class Converters {
 
     @ColumnTypeConverter
     fun fromTS(timestamp: Long): kotlin.time.Instant = kotlin.time.Instant.fromEpochMilliseconds(timestamp)
+
+    /** Dose times, stored as comma-separated seconds-since-midnight. */
+    @ColumnTypeConverter
+    fun fromIntList(value: List<Int>): String = value.joinToString(",")
+
+    @ColumnTypeConverter
+    fun toIntList(value: String): List<Int> =
+        if (value.isBlank()) emptyList() else value.split(",").mapNotNull { it.trim().toIntOrNull() }
+
+    @ColumnTypeConverter
+    fun fromLocalDate(date: kotlinx.datetime.LocalDate): Long = date.toEpochDays()
+
+    @ColumnTypeConverter
+    fun toLocalDate(days: Long): kotlinx.datetime.LocalDate =
+        kotlinx.datetime.LocalDate.fromEpochDays(days)
+
+    @ColumnTypeConverter
+    fun fromLocalDateNullable(date: kotlinx.datetime.LocalDate?): Long? = date?.toEpochDays()
+
+    @ColumnTypeConverter
+    fun toLocalDateNullable(days: Long?): kotlinx.datetime.LocalDate? =
+        days?.let { kotlinx.datetime.LocalDate.fromEpochDays(it) }
 }

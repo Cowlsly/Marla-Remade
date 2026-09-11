@@ -18,6 +18,8 @@
 //! or a shader fails, so these `include_bytes!` cannot silently become stubs the way
 //! `games/voxels` does. An asset can be absent at run time; a `&'static [u8]` cannot.
 
+use std::sync::Arc;
+
 use ash::vk;
 
 use crate::nets::{Kind, Push};
@@ -143,19 +145,20 @@ pub const WORKGROUP: u32 = 64;
 /// floor unconditionally rather than querying the device keeps one code path.
 pub const MAX_WORKGROUPS_PER_DIM: u32 = 65_535;
 
-/// Every compute pipeline, plus the layout and descriptor sets they share.
-pub struct Pipelines {
+/// Every compute pipeline, and the two layouts they share.
+///
+/// One per **device**, not one per net. Nothing here depends on a net's buffers: a pipeline is
+/// its SPIR-V and its pipeline layout, and every net declares the same five bindings and the same
+/// [`Push`] block. Compiling them per net cost Supertonic four times over — 40 shaders × 4 nets at
+/// ~450 ms a set, which was most of the time between the TTS service binding and it saying
+/// anything. [`Context::shaders`] builds this once and hands out an [`Arc`].
+pub struct Shaders {
     /// Shared by all of them, so a bind never invalidates push constants.
     pub layout: vk::PipelineLayout,
-    /// One set per weights segment: arena at binding 0, that segment of the weights at 1 and 2.
-    ///
-    /// Almost always exactly one. A second appears only when the weights are larger than
-    /// `maxStorageBufferRange`, which today means SMaLL-100 on a device reporting the guaranteed
-    /// minimum. Every set points at the same arena and the same weights buffer; they differ only
-    /// in the weights descriptor's `(offset, range)`. See [`super::segment`].
-    pub descriptor_sets: Vec<vk::DescriptorSet>,
+    /// What every net's descriptor sets are allocated from. Sets allocated from one layout are
+    /// compatible with a pipeline built against an identical one, which is what lets this be
+    /// shared while the sets that point at each net's arena stay per-net.
     descriptor_layout: vk::DescriptorSetLayout,
-    descriptor_pool: vk::DescriptorPool,
     conv: vk::Pipeline,
     conv_transpose: vk::Pipeline,
     maxpool: vk::Pipeline,
@@ -196,6 +199,19 @@ pub struct Pipelines {
     mul_scalar: vk::Pipeline,
     clamp: vk::Pipeline,
     rmsnorm: vk::Pipeline,
+}
+
+/// One net's descriptor sets, over the device-wide [`Shaders`].
+pub struct Pipelines {
+    shaders: Arc<Shaders>,
+    /// One set per weights segment: arena at binding 0, that segment of the weights at 1 and 2.
+    ///
+    /// Almost always exactly one. A second appears only when the weights are larger than
+    /// `maxStorageBufferRange`, which today means SMaLL-100 on a device reporting the guaranteed
+    /// minimum. Every set points at the same arena and the same weights buffer; they differ only
+    /// in the weights descriptor's `(offset, range)`. See [`super::segment`].
+    pub descriptor_sets: Vec<vk::DescriptorSet>,
+    descriptor_pool: vk::DescriptorPool,
 }
 
 impl Pipelines {
@@ -240,13 +256,15 @@ impl Pipelines {
         params: vk::Buffer,
         segments: &[Segment],
     ) -> Result<Pipelines, String> {
+        let shaders = context.shaders()?;
         // SAFETY: every handle created below is destroyed by `Pipelines::destroy`, or on
         // the failure path here before returning.
-        unsafe { Self::create(context, arena, arena_size, weights, params, segments) }
+        unsafe { Self::create(context, shaders, arena, arena_size, weights, params, segments) }
     }
 
     unsafe fn create(
         context: &Context,
+        shaders: Arc<Shaders>,
         arena: vk::Buffer,
         arena_size: vk::DeviceSize,
         weights: vk::Buffer,
@@ -257,53 +275,8 @@ impl Pipelines {
         if segments.is_empty() {
             return Err("a net needs at least one weights segment".into());
         }
-
-        let bindings = [
-            vk::DescriptorSetLayoutBinding::default()
-                .binding(0)
-                .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
-                .descriptor_count(1)
-                .stage_flags(vk::ShaderStageFlags::COMPUTE),
-            vk::DescriptorSetLayoutBinding::default()
-                .binding(1)
-                .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
-                .descriptor_count(1)
-                .stage_flags(vk::ShaderStageFlags::COMPUTE),
-            // The weights again, viewed as 32-bit words so int8 tensors can be unpacked
-            // without `VK_KHR_8bit_storage`. Same buffer as binding 1; see `common.glsl`.
-            vk::DescriptorSetLayoutBinding::default()
-                .binding(2)
-                .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
-                .descriptor_count(1)
-                .stage_flags(vk::ShaderStageFlags::COMPUTE),
-            // The weights a third time, as `uvec4`.
-            //
-            // A gemv reading one 32-bit word at a time reaches 4.7 GB/s on a Tensor G4 while a
-            // shader reading the same bytes as `uvec4` reaches 19.6 - four times the bytes per
-            // load instruction, and very nearly four times the throughput. Same buffer, same
-            // memory; only the width of each fetch differs.
-            vk::DescriptorSetLayoutBinding::default()
-                .binding(4)
-                .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
-                .descriptor_count(1)
-                .stage_flags(vk::ShaderStageFlags::COMPUTE),
-            // Per-step values the host rewrites without re-recording. See
-            // [`super::buffers::Buffer::step_params`] for why this cannot be a push constant.
-            vk::DescriptorSetLayoutBinding::default()
-                .binding(3)
-                .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
-                .descriptor_count(1)
-                .stage_flags(vk::ShaderStageFlags::COMPUTE),
-        ];
-        let descriptor_layout = device
-            .create_descriptor_set_layout(
-                &vk::DescriptorSetLayoutCreateInfo::default().bindings(&bindings),
-                None,
-            )
-            .map_err(|e| format!("create_descriptor_set_layout {e:?}"))?;
-
+        let descriptor_layout = shaders.descriptor_layout;
         let mut cleanup = Cleanup::new(device);
-        cleanup.descriptor_layout = Some(descriptor_layout);
 
         let count = u32::try_from(segments.len()).map_err(|_| "too many weights segments")?;
         let pool_sizes = [vk::DescriptorPoolSize::default()
@@ -396,17 +369,97 @@ impl Pipelines {
         }
         device.update_descriptor_sets(&writes, &[]);
 
+        cleanup.disarm();
+        Ok(Pipelines { shaders, descriptor_sets, descriptor_pool })
+    }
+
+    /// The pipeline layout every net binds through, owned by [`Shaders`].
+    pub fn layout(&self) -> vk::PipelineLayout {
+        self.shaders.layout
+    }
+
+    /// The pipeline a plan's [`Kind`] wants.
+    pub fn for_kind(&self, kind: Kind) -> vk::Pipeline {
+        self.shaders.for_kind(kind)
+    }
+
+    /// # Safety
+    ///
+    /// The device must be idle.
+    pub unsafe fn destroy(&self, device: &ash::Device) {
+        // The sets are freed with their pool. The pipelines and both layouts belong to
+        // `Shaders`, which outlives every net through the `Arc` above.
+        device.destroy_descriptor_pool(self.descriptor_pool, None);
+    }
+}
+
+impl Shaders {
+    /// Compile every shader and build the two layouts. Called once per device.
+    pub fn new(context: &Context) -> Result<Shaders, String> {
+        // SAFETY: every handle created below is destroyed by `Shaders::destroy`, or on the
+        // failure path here before returning.
+        unsafe { Self::create(context) }
+    }
+
+    unsafe fn create(context: &Context) -> Result<Shaders, String> {
+        let device = &context.device;
+        let bindings = [
+            vk::DescriptorSetLayoutBinding::default()
+                .binding(0)
+                .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
+                .descriptor_count(1)
+                .stage_flags(vk::ShaderStageFlags::COMPUTE),
+            vk::DescriptorSetLayoutBinding::default()
+                .binding(1)
+                .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
+                .descriptor_count(1)
+                .stage_flags(vk::ShaderStageFlags::COMPUTE),
+            // The weights again, viewed as 32-bit words so int8 tensors can be unpacked
+            // without `VK_KHR_8bit_storage`. Same buffer as binding 1; see `common.glsl`.
+            vk::DescriptorSetLayoutBinding::default()
+                .binding(2)
+                .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
+                .descriptor_count(1)
+                .stage_flags(vk::ShaderStageFlags::COMPUTE),
+            // The weights a third time, as `uvec4`.
+            //
+            // A gemv reading one 32-bit word at a time reaches 4.7 GB/s on a Tensor G4 while a
+            // shader reading the same bytes as `uvec4` reaches 19.6 - four times the bytes per
+            // load instruction, and very nearly four times the throughput. Same buffer, same
+            // memory; only the width of each fetch differs.
+            vk::DescriptorSetLayoutBinding::default()
+                .binding(4)
+                .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
+                .descriptor_count(1)
+                .stage_flags(vk::ShaderStageFlags::COMPUTE),
+            // Per-step values the host rewrites without re-recording. See
+            // [`super::buffers::Buffer::step_params`] for why this cannot be a push constant.
+            vk::DescriptorSetLayoutBinding::default()
+                .binding(3)
+                .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
+                .descriptor_count(1)
+                .stage_flags(vk::ShaderStageFlags::COMPUTE),
+        ];
+        let descriptor_layout = device
+            .create_descriptor_set_layout(
+                &vk::DescriptorSetLayoutCreateInfo::default().bindings(&bindings),
+                None,
+            )
+            .map_err(|e| format!("create_descriptor_set_layout {e:?}"))?;
+
+        let mut cleanup = Cleanup::new(device);
+        cleanup.descriptor_layout = Some(descriptor_layout);
+
         let push_range = vk::PushConstantRange::default()
             .stage_flags(vk::ShaderStageFlags::COMPUTE)
             .offset(0)
             .size(std::mem::size_of::<Push>() as u32);
-        // **One** set layout, not one per segment. `layouts` above is a repeat of the same
-        // layout because `allocate_descriptor_sets` wants one entry per set it allocates, but a
-        // pipeline layout entry declares a distinct *bound set index*, and `record` only ever
-        // binds one set, at index 0. Passing the repeat here declared `segments.len()` sets:
-        // harmless on a desktop reporting 32, but `maxBoundDescriptorSets` is only guaranteed to
-        // be 4, and NLLB at the guaranteed `maxStorageBufferRange` needs ten windows — so the
-        // pipeline layout would fail to create on exactly the devices segmenting exists for.
+        // **One** set layout, not one per segment. A pipeline layout entry declares a distinct
+        // *bound set index*, and `record` only ever binds one set, at index 0. Declaring one per
+        // segment was harmless on a desktop reporting 32, but `maxBoundDescriptorSets` is only
+        // guaranteed to be 4, and NLLB at the guaranteed `maxStorageBufferRange` needs ten
+        // windows — so the pipeline layout would fail to create on exactly the devices
+        // segmenting exists for.
         let layout = device
             .create_pipeline_layout(
                 &vk::PipelineLayoutCreateInfo::default()
@@ -483,11 +536,9 @@ impl Pipelines {
         };
 
         cleanup.disarm();
-        Ok(Pipelines {
+        Ok(Shaders {
             layout,
-            descriptor_sets,
             descriptor_layout,
-            descriptor_pool,
             conv,
             conv_transpose,
             maxpool,
@@ -625,8 +676,6 @@ impl Pipelines {
             device.destroy_pipeline(pipeline, None);
         }
         device.destroy_pipeline_layout(self.layout, None);
-        // The set is freed with its pool.
-        device.destroy_descriptor_pool(self.descriptor_pool, None);
         device.destroy_descriptor_set_layout(self.descriptor_layout, None);
     }
 }

@@ -1,0 +1,43 @@
+#version 450
+//! VARIANT A — CONTROL. Byte-for-byte the body of `shaders/probe_ssbo.comp`.
+//!
+//! TEMPORARY probe shader for task 9. Source of truth is
+//! `analysis/gemv_probe/gemv_a_control.comp`; this copy exists only because `build.rs`
+//! compiles `shaders/*.comp` and direct `glslc` invocation is unavailable in this
+//! environment. Not referenced by `pipeline.rs::SPIRV`, so it is compiled but not shipped.
+//! Delete both this and the other four `gemv_*.comp` when the experiment is done.
+//!
+//! One XOR per 16 bytes, one load in flight per lane. This is the shader that measured
+//! ~20 GB/s on the G715, and it is reproduced here rather than reused so that all five
+//! variants run through the identical harness. If A does not land on ~20 GB/s, the
+//! harness differs from `imageprobe::compare` and nothing else in the set is comparable.
+//!
+//! The accumulator is xored rather than added so no arithmetic can be strength-reduced
+//! away, and is written out under a condition that never fires so the loop cannot be
+//! eliminated as dead.
+
+layout(local_size_x = 64) in;
+
+layout(set = 0, binding = 0) readonly buffer Source { uvec4 data[]; };
+layout(set = 0, binding = 1) buffer Sink { uint sink[]; };
+// Binding 2 (activations) is declared in the descriptor set layout for every variant so
+// one layout serves all five. A shader that does not use it simply does not declare it,
+// which is legal.
+
+layout(push_constant) uniform Push {
+    /// `uvec4`s in the source.
+    uint quads;
+};
+
+void main() {
+    uint lane = gl_GlobalInvocationID.x;
+    uint stride = gl_NumWorkGroups.x * 64u;
+    uvec4 acc = uvec4(0u);
+    for (uint at = lane; at < quads; at += stride) {
+        acc ^= data[at];
+    }
+    uint folded = acc.x ^ acc.y ^ acc.z ^ acc.w;
+    if (folded == 0xFFFFFFFFu) {
+        sink[0] = folded;
+    }
+}

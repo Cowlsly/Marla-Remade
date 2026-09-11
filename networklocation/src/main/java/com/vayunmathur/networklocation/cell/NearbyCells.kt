@@ -1,6 +1,5 @@
 package com.vayunmathur.networklocation.cell
 
-import android.content.Context
 import android.telephony.CellIdentityGsm
 import android.telephony.CellIdentityLte
 import android.telephony.CellIdentityNr
@@ -11,7 +10,9 @@ import android.telephony.CellInfoLte
 import android.telephony.CellInfoNr
 import android.telephony.CellInfoWcdma
 import android.telephony.TelephonyManager
+import android.content.Context
 import com.vayunmathur.networklocation.BeaconId
+import com.vayunmathur.networklocation.RadioType
 
 /**
  * Reads nearby cell towers from [TelephonyManager]. Only towers with a full,
@@ -35,21 +36,38 @@ class NearbyCells(context: Context) {
     }
 
     private fun CellIdentityLte.toCell(): BeaconId.Cell? =
-        build(mccString?.toIntOrNull(), mncString?.toIntOrNull(), ci, tac)
+        build(mccString?.toIntOrNull(), mncString?.toIntOrNull(), RadioType.LTE, ci.toLong(), tac)
 
     private fun CellIdentityGsm.toCell(): BeaconId.Cell? =
-        build(mccString?.toIntOrNull(), mncString?.toIntOrNull(), cid, lac)
+        build(mccString?.toIntOrNull(), mncString?.toIntOrNull(), RadioType.GSM, cid.toLong(), lac)
 
     private fun CellIdentityWcdma.toCell(): BeaconId.Cell? =
-        build(mccString?.toIntOrNull(), mncString?.toIntOrNull(), cid, lac)
+        build(mccString?.toIntOrNull(), mncString?.toIntOrNull(), RadioType.UMTS, cid.toLong(), lac)
 
+    // nci is a 36-bit NCI and stays a Long; narrowing it to Int silently drops the top bits
+    // and makes distinct gNB cells collide.
     private fun CellIdentityNr.toCell(): BeaconId.Cell? =
-        build(mccString?.toIntOrNull(), mncString?.toIntOrNull(), nci.toInt(), tac)
+        build(mccString?.toIntOrNull(), mncString?.toIntOrNull(), RadioType.NR, nci, tac)
 
-    private fun build(mcc: Int?, mnc: Int?, cellId: Int, areaCode: Int): BeaconId.Cell? {
+    private fun build(
+        mcc: Int?,
+        mnc: Int?,
+        radio: RadioType,
+        cellId: Long,
+        areaCode: Int,
+    ): BeaconId.Cell? {
         if (mcc == null || mnc == null) return null
-        if (cellId == CellInfo.UNAVAILABLE || areaCode == CellInfo.UNAVAILABLE) return null
+        if (cellId == CellInfo.UNAVAILABLE.toLong() || cellId == CellInfo.UNAVAILABLE_LONG) {
+            return null
+        }
+        if (areaCode == CellInfo.UNAVAILABLE) return null
         if (cellId <= 0) return null
-        return BeaconId.Cell(mcc = mcc, mnc = mnc, cellId = cellId, tacOrLac = areaCode)
+        return BeaconId.Cell(
+            mcc = mcc,
+            mnc = mnc,
+            radio = radio,
+            cellId = cellId,
+            tacOrLac = areaCode,
+        )
     }
 }

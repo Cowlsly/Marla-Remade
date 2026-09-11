@@ -3,6 +3,7 @@ package com.vayunmathur.networklocation.wifi
 import android.content.Context
 import android.net.wifi.WifiManager
 import com.vayunmathur.networklocation.BeaconId
+import com.vayunmathur.networklocation.BeaconKeys
 
 /**
  * Reads nearby WiFi access points from the platform's last scan. As a privileged
@@ -17,9 +18,19 @@ class NearbyWifi(context: Context) {
         val results = runCatching { wifiManager?.scanResults }.getOrNull() ?: return emptyList()
         return results
             .mapNotNull { it.BSSID }
-            .filter { it.isNotBlank() && it != NULL_BSSID }
+            .filter { it.isNotBlank() && it != NULL_BSSID && isFixedAp(it) }
             .distinct()
             .map { BeaconId.Wifi(it) }
+    }
+
+    /**
+     * Drop locally-administered and multicast addresses, which the store builder also
+     * excludes: they are randomized or virtual and do not identify a fixed access point, so
+     * they can never resolve.
+     */
+    private fun isFixedAp(bssid: String): Boolean {
+        val mac = BeaconKeys.parseMac(bssid) ?: return false
+        return !BeaconKeys.isRandomizedMac(mac)
     }
 
     private companion object {

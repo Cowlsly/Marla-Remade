@@ -1,0 +1,56 @@
+# Host-side builder for the offline WPSDB beacon stores that `:networklocation` reads.
+#
+# Replaces `wtfps-experiment/store.py`, which lived outside the repo and is gone. That was
+# the app's only unresolved-provenance dependency (see SUPPLY_CHAIN_RISKS.md): the shipped
+# stores were built by code nobody could inspect. This crate is that code, in the tree.
+#
+# Deliberately DETACHED from the Android Rust workspace (the empty [workspace] table at the
+# bottom), exactly like `scripts/maps/osm_ingest` and `scripts/maps/gtfs_ingest`: these are
+# host binaries, so `cargo build` here never pulls the aarch64-android toolchain or the app
+# crates' lints.
+#
+# `ureq` is the one dependency that breaks the other host tools' "pure Rust, no C toolchain"
+# bar, via rustls' `ring` backend. It is allowed here because this crate never cross-compiles
+# - `wps_crawl` is a build-box tool that talks HTTPS, and the alternative is shelling out to
+# curl once per request, which is not viable for a crawler. Nothing that ships to a device
+# depends on this crate.
+[package]
+name = "wps_harvest"
+version = "0.1.0"
+edition = "2021"
+publish = false
+license = "GPL-2.0-only"
+description = "Build the offline wifi/cell WPSDB beacon stores for :networklocation"
+
+[lib]
+name = "wps_harvest"
+path = "src/lib.rs"
+
+[[bin]]
+name = "wps_seed"
+path = "src/bin/wps_seed.rs"
+
+[[bin]]
+name = "wps_crawl"
+path = "src/bin/wps_crawl.rs"
+
+[[bin]]
+name = "wps_build"
+path = "src/bin/wps_build.rs"
+
+[[bin]]
+name = "wps_extract"
+path = "src/bin/wps_extract.rs"
+
+[dependencies]
+# HTTPS for the gs-loc client. rustls rather than the platform stack so a build box needs no
+# system OpenSSL, and webpki-roots so it needs no system trust store either.
+ureq = { version = "3", default-features = false, features = ["rustls"] }
+
+[dev-dependencies]
+
+[profile.release]
+opt-level = 3
+
+# Detach from both the repo-root Android workspace and the other host tools'.
+[workspace]

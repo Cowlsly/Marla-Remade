@@ -104,12 +104,42 @@ class SurfaceMapRenderer(
     private var handle = 0L
     private var widthPx = 0
     private var heightPx = 0
-    private var frameCallback: Choreographer.FrameCallback? = null
+
+    /**
+     * One callback for the life of the renderer, posted and re-posted rather than rebuilt.
+     * [posted] carries the "is it installed" state that the identity of a per-run callback
+     * object used to.
+     */
+    private val frameCallback = Choreographer.FrameCallback { frameTimeNanos -> onVsync(frameTimeNanos) }
+    private var posted = false
+
+    /** Whether the posted callback is scheduled for later rather than the next vsync. */
+    private var postedDelayed = false
+
+    /**
+     * [System.nanoTime] when something last changed what the next frame would draw.
+     *
+     * The loop keeps drawing until [IDLE_GRACE_NANOS] after this, rather than stopping on the
+     * frame after the last change — see [stillChanging].
+     */
+    private var lastChangeNanos = System.nanoTime()
+
+    /**
+     * The camera and viewport the last frame was actually drawn from, so a change that reaches
+     * the renderer without passing through a setter is still noticed. The Compose path *pulls*
+     * its camera out of [composeCamera] inside [renderFrame] and nothing tells us when a
+     * gesture or animation moves it, so this is the backstop under the push channel
+     * `VulkanMapSurface` installs.
+     */
+    private var lastPosition: CameraPosition? = null
+    private var lastWidthDp = 0f
+    private var lastHeightDp = 0f
 
     /**
      * Where the map is looking, and which way is up. Read once per frame on the main
      * thread, so a host may write it as often as it likes — a camera animation running at
-     * 60 Hz costs nothing beyond the assignment.
+     * 60 Hz costs the assignment plus an [invalidate], which is a timestamp and an
+     * already-posted check.
      *
      * [CameraPosition.bearing] rotates the map for heading-up navigation. It is only
      * usable through this property: the Compose path takes its camera from a
@@ -118,6 +148,10 @@ class SurfaceMapRenderer(
      * Ignored while [composeCamera] is set, which is the Compose path only.
      */
     var camera: CameraPosition = CameraPosition()
+        set(value) {
+            field = value
+            invalidate()
+        }
 
     /**
      * Compose reads its camera out of a [CameraState] inside the frame callback, so that a
@@ -125,8 +159,17 @@ class SurfaceMapRenderer(
      * later. Setting this makes the loop take both the camera and the dp viewport from that
      * state (skipping any frame whose viewport is not measured yet) instead of from [camera]
      * and the attached surface size.
+     *
+     * Because this is a *pull*, a host that sets it must also push: nothing here observes the
+     * [CameraState], so a gesture or animation moving it while the loop is idle would go
+     * unnoticed. [VulkanMapSurface] calls [invalidate] from a `snapshotFlow` over the camera
+     * for exactly that reason.
      */
     internal var composeCamera: CameraState? = null
+        set(value) {
+            field = value
+            invalidate()
+        }
 
     /**
      * Whether this surface is drawing, or why it is not.
@@ -230,6 +273,9 @@ class SurfaceMapRenderer(
         if (handle != 0L) detachSurface()
         this.widthPx = widthPx
         this.heightPx = heightPx
+        // A new native renderer has drawn nothing, so the previous surface's snapshot must not
+        // let the camera diff conclude the first frame changed nothing.
+        lastPosition = null
         if (!MapNative.isAvailable) {
             Log.e(TAG, "libmap_renderer.so did not load; the map will not draw")
             renderState = MapRenderState.Unavailable(MapRenderState.Reason.RendererLibraryMissing)
@@ -254,6 +300,9 @@ class SurfaceMapRenderer(
         applyVehicles()
         renderState = MapRenderState.Rendering
         syncFrameLoop()
+        // The whole deferred set was just replayed into a brand-new native renderer, and the
+        // resident set is empty, so this surface owes a frame whatever the loop was doing.
+        invalidate()
     }
 
     /** Tell the renderer the attached surface is now [widthPx] x [heightPx] pixels. */
@@ -261,6 +310,7 @@ class SurfaceMapRenderer(
         this.widthPx = widthPx
         this.heightPx = heightPx
         if (handle != 0L) MapNative.resize(handle, widthPx, heightPx)
+        invalidate()
     }
 
     /**
@@ -286,6 +336,9 @@ class SurfaceMapRenderer(
     fun start() {
         started = true
         syncFrameLoop()
+        // A host coming back on screen owes a frame: the surface may have been recreated, and
+        // anything pushed while stopped never reached a frame.
+        invalidate()
     }
 
     /**
@@ -347,6 +400,15 @@ class SurfaceMapRenderer(
             heightDp = heightPx / density
             bearing = position.bearing.toFloat()
         }
+        // The backstop for a camera that moved without telling us: the Compose path pulls its
+        // camera out of a CameraState here, and a gesture that somehow reached it without
+        // waking the loop would otherwise draw one frame and settle mid-movement.
+        if (position != lastPosition || widthDp != lastWidthDp || heightDp != lastHeightDp) {
+            lastPosition = position
+            lastWidthDp = widthDp
+            lastHeightDp = heightDp
+            lastChangeNanos = System.nanoTime()
+        }
         val drawn = MapNative.render(
             handle,
             position.target.longitude.toFloat(),
@@ -365,27 +427,87 @@ class SurfaceMapRenderer(
     }
 
     private fun syncFrameLoop() {
-        val shouldRun = started && handle != 0L
-        if (shouldRun) {
-            if (frameCallback != null) return
-            val callback = object : Choreographer.FrameCallback {
-                override fun doFrame(frameTimeNanos: Long) {
-                    if (handle == 0L) {
-                        if (frameCallback === this) frameCallback = null
-                        return
-                    }
-                    renderFrame(frameTimeNanos)
-                    // Re-post only while still the installed callback: detachSurface() and
-                    // stop() null this out, and a callback already dispatched for this frame
-                    // cannot be un-posted by removeFrameCallback.
-                    if (frameCallback === this) Choreographer.getInstance().postFrameCallback(this)
-                }
-            }
-            frameCallback = callback
-            Choreographer.getInstance().postFrameCallback(callback)
-        } else {
-            frameCallback?.let { Choreographer.getInstance().removeFrameCallback(it) }
-            frameCallback = null
+        if (started && handle != 0L) requestFrame() else cancelFrame()
+    }
+
+    /**
+     * Ask for a frame because something changed, and re-arm the idle grace.
+     *
+     * The renderer draws **on demand**, not every vsync: rendering a still map at 60 Hz did
+     * full Vulkan work on the main thread for an identical picture, which is what made the
+     * device hot. Every setter here calls this, and so must anything outside that mutates what
+     * the renderer would draw. It is public and cheap for that reason — a host that is unsure
+     * whether a change is already covered should call it, because the cost of a wasted frame
+     * is one frame and the cost of a missed one is a map that has silently stopped updating.
+     *
+     * Main thread, like everything else here. Idempotent within a frame.
+     */
+    fun invalidate() {
+        lastChangeNanos = System.nanoTime()
+        requestFrame()
+    }
+
+    private fun requestFrame() {
+        if (!started || handle == 0L) return
+        if (posted) {
+            // Already scheduled for the next vsync — nothing to do.
+            if (!postedDelayed) return
+            // Scheduled for *later*, for work that was not urgent when it was posted. Something
+            // has changed since, so pull it forward rather than making a camera move wait out a
+            // retry backoff that can be seconds long.
+            Choreographer.getInstance().removeFrameCallback(frameCallback)
+        }
+        posted = true
+        postedDelayed = false
+        Choreographer.getInstance().postFrameCallback(frameCallback)
+    }
+
+    /**
+     * Ask for one frame [delayMillis] from now, for work that is pending but not yet due —
+     * today, a failed tile waiting out its retry backoff.
+     *
+     * Posting it immediately would spin through the whole backoff at 60fps, and not posting it
+     * at all would leave the tile missing until the user happened to move the camera. Any
+     * [invalidate] in the meantime supersedes it.
+     */
+    private fun requestFrameDelayed(delayMillis: Long) {
+        if (posted || !started || handle == 0L) return
+        posted = true
+        postedDelayed = true
+        Choreographer.getInstance().postFrameCallbackDelayed(frameCallback, delayMillis)
+    }
+
+    private fun cancelFrame() {
+        if (!posted) return
+        Choreographer.getInstance().removeFrameCallback(frameCallback)
+        posted = false
+        postedDelayed = false
+    }
+
+    private fun onVsync(frameTimeNanos: Long) {
+        // Cleared first, so a re-entrant invalidate() from a setter called inside onFrame()
+        // schedules the next frame rather than being swallowed as already-posted.
+        posted = false
+        postedDelayed = false
+        // stop() and detachSurface() cannot un-post a callback Choreographer has already
+        // dispatched for this frame, so the predicate is re-checked here rather than trusted.
+        if (!started || handle == 0L) return
+        val drawn = renderFrame(frameTimeNanos)
+        // A frame that did not present has not shown the change that asked for it: the
+        // swapchain was rebuilt, or the viewport is not measured yet. Either way, try again.
+        if (!drawn) {
+            requestFrame()
+            return
+        }
+        if (System.nanoTime() - lastChangeNanos < IDLE_GRACE_NANOS || !regionResolved) {
+            requestFrame()
+            return
+        }
+        // Nothing local is changing, so the native side decides: draw now, draw later, or stop.
+        val delay = MapNative.nextFrameDelayMillis(handle)
+        when {
+            delay == 0L -> requestFrame()
+            delay > 0L -> requestFrameDelayed(delay)
         }
     }
 
@@ -394,6 +516,7 @@ class SurfaceMapRenderer(
         this.dark = dark
         this.muted = muted
         if (handle != 0L) MapNative.setPalette(handle, dark, muted)
+        invalidate()
     }
 
     /**
@@ -406,6 +529,7 @@ class SurfaceMapRenderer(
             MapNative.setLayers(handle, options.poi, options.transit, options.poiKinds.joinToString(","))
             MapNative.setTrafficEnabled(handle, options.traffic)
         }
+        invalidate()
     }
 
     /**
@@ -421,12 +545,14 @@ class SurfaceMapRenderer(
     fun setTrafficSpeeds(ids: LongArray, argbColors: IntArray) {
         this.trafficSpeeds = ids to argbColors
         applyTraffic()
+        invalidate()
     }
 
     /** Clear the live-traffic overlay so it draws nothing until the next [setTrafficSpeeds]. */
     fun clearTraffic() {
         this.trafficSpeeds = null
         applyTraffic()
+        invalidate()
     }
 
     /**
@@ -436,6 +562,7 @@ class SurfaceMapRenderer(
     fun setOnline(online: Boolean) {
         this.online = online
         if (handle != 0L) MapNative.setOnline(handle, online)
+        invalidate()
     }
 
     /**
@@ -445,6 +572,7 @@ class SurfaceMapRenderer(
     fun setUserPuck(puck: UserPuck?) {
         this.userPuck = puck
         applyUserPuck()
+        invalidate()
     }
 
     /**
@@ -456,6 +584,7 @@ class SurfaceMapRenderer(
     fun setMarkers(markers: List<MapMarker>) {
         this.markers = markers
         applyMarkers()
+        invalidate()
     }
 
     /**
@@ -470,6 +599,7 @@ class SurfaceMapRenderer(
     fun setVehicles(vehicles: List<MapMarker>) {
         this.vehicles = vehicles
         applyVehicles()
+        invalidate()
     }
 
     /**
@@ -496,6 +626,7 @@ class SurfaceMapRenderer(
         this.regionProbe = mask
         this.regionResolved = false
         applyRegionMask()
+        invalidate()
     }
 
     /**
@@ -515,6 +646,7 @@ class SurfaceMapRenderer(
         this.routeSegments = points?.let { listOf(RouteSegment(it, DEFAULT_ROUTE_COLOR)) }
         this.routeStyle = style
         applyRoute()
+        invalidate()
     }
 
     /**
@@ -530,6 +662,7 @@ class SurfaceMapRenderer(
         this.routeSegments = overlay?.segments
         this.routeStyle = overlay?.style ?: RouteStyle()
         applyRoute()
+        invalidate()
     }
 
     /**
@@ -693,6 +826,18 @@ class SurfaceMapRenderer(
     private companion object {
         const val TAG = "SurfaceMapRenderer"
         const val CACHE_DIR_NAME = "vectortilecache"
+
+        /**
+         * How long the frame loop keeps running after the last change it noticed.
+         *
+         * The renderer stops drawing when nothing is changing, so the cost of failing to
+         * notice a change is a map that has frozen — far worse than the frames this wastes.
+         * A quarter of a second is long enough to cover an invalidation that arrives a frame
+         * or two late (the `snapshotFlow` push channel is one such) and short enough that an
+         * idle map settles to zero frames while the user is still looking at it. It costs
+         * nothing during an interaction, where every frame re-arms it.
+         */
+        val IDLE_GRACE_NANOS = java.util.concurrent.TimeUnit.MILLISECONDS.toNanos(250)
 
         /**
          * The fill the single-colour [setRoute] convenience paints: the car's `#1A73E8`,

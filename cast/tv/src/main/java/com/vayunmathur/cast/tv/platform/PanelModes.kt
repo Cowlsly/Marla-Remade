@@ -31,18 +31,19 @@ object PanelModes {
         }
         val modes = display.supportedModes
             .filter { it.physicalWidth > 0 && it.physicalHeight > 0 }
-            // Two modes differing only in refresh rate are one choice as far as a desktop is
-            // concerned, and the sender picks by area - so collapse them and keep the fastest.
-            .groupBy { it.physicalWidth to it.physicalHeight }
-            .map { (size, sameSize) ->
-                DisplayMode(
-                    width = size.first,
-                    height = size.second,
-                    refreshRate = sameSize.maxOf { it.refreshRate },
-                )
-            }
-            .sortedByDescending { it.area }
-        Log.i(TAG, "panel offers ${modes.joinToString { "${it.width}x${it.height}" }}")
+            .map { DisplayMode(it.physicalWidth, it.physicalHeight, it.refreshRate) }
+            // On the full mode rather than on the size. **This used to collapse by resolution and
+            // keep the fastest rate**, on the reasoning that two modes differing only in refresh
+            // rate are one choice as far as a desktop is concerned. They are not: this panel
+            // offers 3840x2160 at eight rates, the sender's encoder can hold some of them and not
+            // others, and collapsing threw away every choice but one per size. The de-duplication
+            // stays because a panel may genuinely list the same mode twice.
+            .distinct()
+            .sortedWith(compareByDescending<DisplayMode> { it.area }.thenByDescending { it.refreshRate })
+        Log.i(
+            TAG,
+            "panel offers ${modes.joinToString { "${it.width}x${it.height}@${it.refreshRate}" }}",
+        )
         return modes
     }
 }

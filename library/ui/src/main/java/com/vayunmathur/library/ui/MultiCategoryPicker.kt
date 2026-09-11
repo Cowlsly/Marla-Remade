@@ -1,5 +1,6 @@
 package com.vayunmathur.library.ui
 
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -46,33 +47,14 @@ fun <T> MultiCategoryPicker(
     val interactionSource = remember { MutableInteractionSource() }
 
     Box(modifier.fillMaxWidth()) {
-        OutlinedTextFieldDefaults.DecorationBox(
-            value = selected.joinToString { itemLabel(it) },
-            innerTextField = {
-                FlowRow(
-                    horizontalArrangement = Arrangement.spacedBy(8.dp),
-                    verticalArrangement = Arrangement.spacedBy(8.dp),
-                    modifier = Modifier.fillMaxWidth(),
-                ) {
-                    selected.forEach { item ->
-                        InputChip(
-                            selected = false,
-                            onClick = { onRemove(item) },
-                            label = { Text(itemLabel(item)) },
-                            trailingIcon = { IconRemoveCircle(modifier = Modifier.size(18.dp)) },
-                            modifier = chipModifier(item),
-                        )
-                    }
-                }
-            },
-            enabled = true,
-            singleLine = false,
-            visualTransformation = VisualTransformation.None,
+        CategoryChipField(
+            label = label,
+            selected = selected,
+            itemLabel = itemLabel,
+            onRemove = onRemove,
             interactionSource = interactionSource,
-            isError = false,
-            label = { Text(label) },
             trailingIcon = { IconArrowDropDown() },
-            contentPadding = PaddingValues(horizontal = 16.dp, vertical = 12.dp),
+            chipModifier = chipModifier,
         )
 
         // Above the chips so the whole field opens the menu, but the chips' own remove taps still win
@@ -101,4 +83,88 @@ fun <T> MultiCategoryPicker(
             }
         }
     }
+}
+
+/**
+ * The same field, but for values that come from somewhere other than a fixed list.
+ *
+ * Tapping it calls [onAddClick] instead of opening a menu, so the caller can push a picker screen or
+ * a dialog. Everything else — the outline, the floating label, the chips, the remove taps — is
+ * identical, which is the point: a value that happens to be produced by a time picker rather than
+ * chosen from a set should not look like a different kind of control.
+ */
+@Composable
+fun <T> MultiCategoryPicker(
+    label: String,
+    selected: List<T>,
+    itemLabel: (T) -> String,
+    onAddClick: () -> Unit,
+    onRemove: (T) -> Unit,
+    modifier: Modifier = Modifier,
+    trailingIcon: @Composable () -> Unit = { IconAdd() },
+    chipModifier: @Composable (T) -> Modifier = { Modifier },
+) {
+    val interactionSource = remember { MutableInteractionSource() }
+
+    Box(modifier.fillMaxWidth()) {
+        CategoryChipField(
+            label = label,
+            selected = selected,
+            itemLabel = itemLabel,
+            onRemove = onRemove,
+            interactionSource = interactionSource,
+            trailingIcon = trailingIcon,
+            chipModifier = chipModifier,
+        )
+        Box(
+            Modifier
+                .matchParentSize()
+                .clickable(
+                    interactionSource = interactionSource,
+                    indication = null,
+                    onClick = onAddClick,
+                )
+        )
+    }
+}
+
+/** The shared field body: outline, floating label and the chips that stand in for its text. */
+@Composable
+private fun <T> CategoryChipField(
+    label: String,
+    selected: List<T>,
+    itemLabel: (T) -> String,
+    onRemove: (T) -> Unit,
+    interactionSource: MutableInteractionSource,
+    trailingIcon: @Composable () -> Unit,
+    chipModifier: @Composable (T) -> Modifier,
+) {
+    OutlinedTextFieldDefaults.DecorationBox(
+        value = selected.joinToString { itemLabel(it) },
+        innerTextField = {
+            FlowRow(
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                verticalArrangement = Arrangement.spacedBy(8.dp),
+                modifier = Modifier.fillMaxWidth(),
+            ) {
+                selected.forEach { item ->
+                    InputChip(
+                        selected = false,
+                        onClick = { onRemove(item) },
+                        label = { Text(itemLabel(item)) },
+                        trailingIcon = { IconRemoveCircle(modifier = Modifier.size(18.dp)) },
+                        modifier = chipModifier(item),
+                    )
+                }
+            }
+        },
+        enabled = true,
+        singleLine = false,
+        visualTransformation = VisualTransformation.None,
+        interactionSource = interactionSource,
+        isError = false,
+        label = { Text(label) },
+        trailingIcon = trailingIcon,
+        contentPadding = PaddingValues(horizontal = 16.dp, vertical = 12.dp),
+    )
 }
