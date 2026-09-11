@@ -33,7 +33,24 @@
     <string name="clear">Clear</string>
     <string name="delete_digit">Delete digit</string>
     <string name="contacts">Contacts</string>
-    <string name="duration_seconds">%1$d sec</string>
+    <!-- Call log row: the seconds part of a call's duration, abbreviated. %1$d = whole seconds -->
+    <plurals name="duration_seconds">
+        <item quantity="one">%1$d sec</item>
+        <item quantity="other">%1$d sec</item>
+    </plurals>
+    <!-- Call log row: the minutes part of a call's duration, abbreviated. %1$d = whole minutes -->
+    <plurals name="duration_minutes">
+        <item quantity="one">%1$d min</item>
+        <item quantity="other">%1$d min</item>
+    </plurals>
+    <!-- Call log row: the hours part of a call's duration, abbreviated. %1$d = whole hours -->
+    <plurals name="duration_hours">
+        <item quantity="one">%1$d hr</item>
+        <item quantity="other">%1$d hr</item>
+    </plurals>
+    <!-- Call log row: joins the two units of a duration, e.g. "5 min" and "12 sec".
+         %1$s = coarser unit, %2$s = finer unit -->
+    <string name="duration_two_units">%1$s %2$s</string>
     <string name="missed_call">Missed</string>
     <string name="incoming_call">Incoming</string>
     <string name="outgoing_call">Outgoing</string>
