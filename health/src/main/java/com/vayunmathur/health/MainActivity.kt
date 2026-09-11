@@ -10,6 +10,7 @@ import com.vayunmathur.library.ui.IconBodySystem
 import com.vayunmathur.library.ui.IconDirectionsWalk
 import com.vayunmathur.library.ui.IconFavorite
 import com.vayunmathur.library.ui.IconFire
+import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -70,6 +71,7 @@ import com.vayunmathur.health.util.HealthViewModel
 import com.vayunmathur.health.util.HealthViewModelFactory
 import com.vayunmathur.library.ui.DynamicTheme
 import com.vayunmathur.library.ui.PermissionWall
+import com.vayunmathur.library.ui.Surface
 import com.vayunmathur.library.util.MainNavigation
 import com.vayunmathur.library.util.SiblingPage
 import com.vayunmathur.library.util.rememberNavBackStack
@@ -144,13 +146,20 @@ class MainActivity : ComponentActivity() {
                     // Health Connect has its own permission contract, which is
                     // why this passes onRequest rather than using the runtime
                     // permission helper.
-                    PermissionWall(
-                        title = stringResource(R.string.grant_permissions),
-                        actionLabel = stringResource(R.string.grant_permissions),
-                        onRequest = { requestPermissions.launch(PERMISSIONS) },
-                        rationale = stringResource(R.string.grant_permissions_rationale),
-                        icon = { IconFavorite() },
-                    )
+                    //
+                    // The Surface is load-bearing: PermissionWall draws no background of its
+                    // own, and this is the one screen here that is not inside a scaffold, so
+                    // without it the window background shows through and the screen stays
+                    // light in dark mode.
+                    Surface(Modifier.fillMaxSize()) {
+                        PermissionWall(
+                            title = stringResource(R.string.grant_permissions),
+                            actionLabel = stringResource(R.string.grant_permissions),
+                            onRequest = { requestPermissions.launch(PERMISSIONS) },
+                            rationale = stringResource(R.string.grant_permissions_rationale),
+                            icon = { IconFavorite() },
+                        )
+                    }
                 }
             }
         }
