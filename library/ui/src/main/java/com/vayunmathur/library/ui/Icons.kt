@@ -41,6 +41,7 @@ import androidx.compose.material.icons.filled.TurnSharpRight
 import androidx.compose.material.icons.filled.TurnSlightLeft
 import androidx.compose.material.icons.filled.TurnSlightRight
 import androidx.compose.material.icons.filled.UTurnLeft
+import androidx.compose.material.icons.filled.UTurnRight
 import androidx.compose.material.icons.filled.WbCloudy
 import androidx.compose.material.icons.filled.ChangeHistory
 import androidx.compose.material.icons.filled.ChatBubbleOutline
@@ -231,6 +232,7 @@ import androidx.compose.material.icons.filled.Unarchive
 import androidx.compose.material.icons.filled.Upload
 import androidx.compose.material.icons.filled.VerifiedUser
 import androidx.compose.material.icons.filled.Videocam
+import androidx.compose.material.icons.filled.Vaccines
 import androidx.compose.material.icons.filled.Visibility
 import androidx.compose.material.icons.filled.VisibilityOff
 import androidx.compose.material.icons.filled.Warning
@@ -282,6 +284,7 @@ import androidx.compose.ui.graphics.vector.path
 import androidx.compose.ui.unit.dp
 import com.vayunmathur.library.util.NavBackStack
 import com.vayunmathur.library.util.NavKey
+import kotlin.math.sqrt
 
 /**
  * App-facing icon set. Every shared icon is rendered from `material-icons-extended`
@@ -1024,6 +1027,13 @@ fun IconTurnSharpRight(modifier: Modifier = Modifier, tint: Color = LocalContent
 fun IconUTurn(modifier: Modifier = Modifier, tint: Color = LocalContentColor.current) =
     AppIcon(Icons.Filled.UTurnLeft, "U-turn", modifier, tint)
 
+// Left and right U-turns are a real geometric distinction the router already
+// draws, not an RTL mirror — an RTL locale in a right-hand-traffic country
+// still turns left — so this is a separate glyph rather than AutoMirrored.
+@Composable
+fun IconUTurnRight(modifier: Modifier = Modifier, tint: Color = LocalContentColor.current) =
+    AppIcon(Icons.Filled.UTurnRight, "U-turn right", modifier, tint)
+
 @Composable
 fun IconStraight(modifier: Modifier = Modifier, tint: Color = LocalContentColor.current) =
     AppIcon(Icons.Filled.Straight, "Straight", modifier, tint)
@@ -1069,6 +1079,13 @@ private const val LANE_STROKE_WIDTH = 2.2f
 /** Where the branches leave the shaft. Every branch starts here so they fan out together. */
 private const val LANE_FORK_Y = 15f
 
+/** Where the shaft stops on a through lane, leaving room for its head above. */
+private const val LANE_THROUGH_TOP = 7f
+
+// One size for every head, through and branch alike.
+private const val LANE_HEAD_LENGTH = 4.6f
+private const val LANE_HEAD_HALF_WIDTH = 3.1f
+
 private enum class LaneBranch { LEFT, SLIGHT_LEFT, RIGHT, SLIGHT_RIGHT }
 
 private fun ImageVector.Builder.laneStroke(pathBuilder: PathBuilder.() -> Unit) =
@@ -1080,19 +1097,48 @@ private fun ImageVector.Builder.laneStroke(pathBuilder: PathBuilder.() -> Unit) 
         pathBuilder = pathBuilder,
     )
 
-/** Arrowhead as a filled triangle: the tip plus the two base corners. */
+/**
+ * Arrowhead at ([baseX], [baseY]) pointing along the unit vector
+ * ([dirX], [dirY]). Every head is built from the one size pair, so the through
+ * head and the branch heads cannot drift apart — an oversized through head
+ * reads as "straight on is the important one" when the movements are equal.
+ */
 private fun ImageVector.Builder.laneHead(
-    tipX: Float,
-    tipY: Float,
-    baseAx: Float,
-    baseAy: Float,
-    baseBx: Float,
-    baseBy: Float,
+    baseX: Float,
+    baseY: Float,
+    dirX: Float,
+    dirY: Float,
 ) = path(fill = SolidColor(Color.Black)) {
-    moveTo(tipX, tipY)
-    lineTo(baseAx, baseAy)
-    lineTo(baseBx, baseBy)
+    // Base corners are the base point offset along the normal, so the head is
+    // square to its own direction whatever angle the branch leaves at.
+    val normalX = -dirY * LANE_HEAD_HALF_WIDTH
+    val normalY = dirX * LANE_HEAD_HALF_WIDTH
+    moveTo(baseX + dirX * LANE_HEAD_LENGTH, baseY + dirY * LANE_HEAD_LENGTH)
+    lineTo(baseX + normalX, baseY + normalY)
+    lineTo(baseX - normalX, baseY - normalY)
     close()
+}
+
+/**
+ * One branch: a quadratic leaving the shaft at the fork for ([endX], [endY])
+ * via ([controlX], [controlY]), plus its head. The head direction is the
+ * curve's exit tangent — control-to-end for a quadratic — so it is aligned by
+ * construction rather than by hand-solved coordinates.
+ */
+private fun ImageVector.Builder.laneBranch(
+    controlX: Float,
+    controlY: Float,
+    endX: Float,
+    endY: Float,
+) {
+    laneStroke {
+        moveTo(LANE_SHAFT_X, LANE_FORK_Y)
+        quadTo(controlX, controlY, endX, endY)
+    }
+    val runX = endX - controlX
+    val runY = endY - controlY
+    val length = sqrt(runX * runX + runY * runY)
+    laneHead(endX, endY, runX / length, runY / length)
 }
 
 private fun laneVector(
@@ -1111,39 +1157,15 @@ private fun laneVector(
     // the fork so the branches are the only thing carrying a head.
     builder.laneStroke {
         moveTo(LANE_SHAFT_X, 21f)
-        verticalLineTo(if (through) 7f else LANE_FORK_Y)
+        verticalLineTo(if (through) LANE_THROUGH_TOP else LANE_FORK_Y)
     }
-    if (through) builder.laneHead(LANE_SHAFT_X, 2f, 15.2f, 7.4f, 8.8f, 7.4f)
+    if (through) builder.laneHead(LANE_SHAFT_X, LANE_THROUGH_TOP, 0f, -1f)
     branches.forEach { branch ->
         when (branch) {
-            LaneBranch.RIGHT -> {
-                builder.laneStroke {
-                    moveTo(LANE_SHAFT_X, LANE_FORK_Y)
-                    quadTo(LANE_SHAFT_X, 9.5f, 18f, 9.5f)
-                }
-                builder.laneHead(22f, 9.5f, 18f, 6.5f, 18f, 12.5f)
-            }
-            LaneBranch.LEFT -> {
-                builder.laneStroke {
-                    moveTo(LANE_SHAFT_X, LANE_FORK_Y)
-                    quadTo(LANE_SHAFT_X, 9.5f, 6f, 9.5f)
-                }
-                builder.laneHead(2f, 9.5f, 6f, 12.5f, 6f, 6.5f)
-            }
-            LaneBranch.SLIGHT_RIGHT -> {
-                builder.laneStroke {
-                    moveTo(LANE_SHAFT_X, LANE_FORK_Y)
-                    quadTo(LANE_SHAFT_X, 10.5f, 16.5f, 7.5f)
-                }
-                builder.laneHead(20.2f, 5f, 18.2f, 10f, 14.8f, 5f)
-            }
-            LaneBranch.SLIGHT_LEFT -> {
-                builder.laneStroke {
-                    moveTo(LANE_SHAFT_X, LANE_FORK_Y)
-                    quadTo(LANE_SHAFT_X, 10.5f, 7.5f, 7.5f)
-                }
-                builder.laneHead(3.8f, 5f, 5.8f, 10f, 9.2f, 5f)
-            }
+            LaneBranch.RIGHT -> builder.laneBranch(LANE_SHAFT_X, 9.5f, 18f, 9.5f)
+            LaneBranch.LEFT -> builder.laneBranch(LANE_SHAFT_X, 9.5f, 6f, 9.5f)
+            LaneBranch.SLIGHT_RIGHT -> builder.laneBranch(LANE_SHAFT_X, 10.5f, 16.5f, 7.5f)
+            LaneBranch.SLIGHT_LEFT -> builder.laneBranch(LANE_SHAFT_X, 10.5f, 7.5f, 7.5f)
         }
     }
     return builder.build()
@@ -1539,6 +1561,11 @@ fun IconShield(modifier: Modifier = Modifier, tint: Color = LocalContentColor.cu
 @Composable
 fun IconMedication(modifier: Modifier = Modifier, tint: Color = LocalContentColor.current) =
     AppIcon(Icons.Filled.Medication, "Medication", modifier, tint)
+
+/** Syringe — immunisations and the vaccination log. */
+@Composable
+fun IconVaccine(modifier: Modifier = Modifier, tint: Color = LocalContentColor.current) =
+    AppIcon(Icons.Filled.Vaccines, "Vaccine", modifier, tint)
 
 /** Heart on a monitor trace — medical records and vitals. */
 @Composable

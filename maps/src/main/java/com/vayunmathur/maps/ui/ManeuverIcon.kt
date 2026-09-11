@@ -20,6 +20,7 @@ import com.vayunmathur.library.ui.IconTurnSharpRight
 import com.vayunmathur.library.ui.IconTurnSlightLeft
 import com.vayunmathur.library.ui.IconTurnSlightRight
 import com.vayunmathur.library.ui.IconUTurn
+import com.vayunmathur.library.ui.IconUTurnRight
 import com.vayunmathur.maps.R
 import com.vayunmathur.maps.util.RouteService.API.Maneuver
 
@@ -31,7 +32,7 @@ fun Maneuver.iconContent(): (@Composable (Modifier, Color) -> Unit)? = when (thi
     Maneuver.TURN_LEFT -> { m, t -> IconTurnLeft(m, t) }
     Maneuver.TURN_SLIGHT_RIGHT -> { m, t -> IconTurnSlightRight(m, t) }
     Maneuver.TURN_SHARP_RIGHT -> { m, t -> IconTurnSharpRight(m, t) }
-    Maneuver.UTURN_RIGHT -> { m, t -> IconUTurn(m, t) }
+    Maneuver.UTURN_RIGHT -> { m, t -> IconUTurnRight(m, t) }
     Maneuver.TURN_RIGHT -> { m, t -> IconTurnRight(m, t) }
     Maneuver.STRAIGHT -> { m, t -> IconStraight(m, t) }
     Maneuver.RAMP_LEFT -> { m, t -> IconRampLeft(m, t) }

@@ -1383,6 +1383,101 @@ mod tests {
         authored_ramp(json)
     }
 
+    /// The ramps whose width tracks a fixed **ground** width above the zoom upstream stops at.
+    ///
+    /// `basemap.json` clamps these at their last stop — z18 for most, z20 for a few — because a
+    /// MapLibre style is written for a camera that stops there. Ours does not: the renderer
+    /// overzooms to [`MAX_ZOOM`], and a clamped ramp holds its Dp width while the ground halves
+    /// under it, so a road 3.9 m wide at z18 is 0.24 m wide at z22. The carriageway surface used
+    /// to cover that whole range, but [`super::LANE_RENDERING`] is off for release and drops it,
+    /// leaving these layers as the only thing drawing a road at z16+. Above the clamp each stop
+    /// doubles, which is the rate the ground shrinks, so the road keeps the width it had there.
+    ///
+    /// Enumerated layer by layer and property by property rather than matched by a rule over
+    /// ids: this is the only place the flat style is allowed to say more about a line's width
+    /// than the authored file does, so it has to be a list a reader can check. Every other
+    /// property on these layers, and every property on every other layer, stays pinned.
+    ///
+    /// A casing carries both halves. `gap_width` is the clear span the fill sits in and `width`
+    /// is the thickness of each band beside it, so extending one without the other would leave
+    /// the outline stranded inside a road sixteen times wider than the gap it was drawn around.
+    ///
+    /// `roads-rail` is deliberately absent: it is not a road, and a rail line is a symbol whose
+    /// width says "there is a railway here" rather than how wide the track is.
+    const FIXED_GROUND_WIDTH: &[(&str, &str, f64)] = &[
+        ("roads-minor-casing", "width", 18.0),
+        ("roads-minor-casing", "gap_width", 18.0),
+        ("roads-major-casing", "width", 18.0),
+        ("roads-major-casing", "gap_width", 18.0),
+        ("roads-highway-casing", "width", 20.0),
+        ("roads-highway-casing", "gap_width", 18.0),
+        ("roads-link-casing", "width", 18.0),
+        ("roads-link-casing", "gap_width", 18.0),
+        ("roads-bridges-highway-casing", "width", 20.0),
+        ("roads-bridges-highway-casing", "gap_width", 18.0),
+        ("roads-bridges-major-casing", "width", 18.0),
+        ("roads-bridges-major-casing", "gap_width", 18.0),
+        ("roads-bridges-minor-casing", "width", 18.0),
+        ("roads-bridges-minor-casing", "gap_width", 18.0),
+        ("roads-bridges-link-casing", "width", 18.0),
+        ("roads-bridges-link-casing", "gap_width", 18.0),
+        ("roads-bridges-other-casing", "width", 20.0),
+        ("roads-bridges-other-casing", "gap_width", 20.0),
+        ("roads-path", "width", 20.0),
+        ("roads-minor", "width", 18.0),
+        ("roads-major", "width", 18.0),
+        ("roads-highway", "width", 18.0),
+        ("roads-link", "width", 18.0),
+        ("roads-bridges-highway", "width", 18.0),
+        ("roads-bridges-major", "width", 18.0),
+        ("roads-bridges-minor", "width", 18.0),
+        ("roads-bridges-link", "width", 18.0),
+        ("roads-bridges-other", "width", 20.0),
+        ("roads-minor-service", "width", 18.0),
+    ];
+
+    /// The zoom [`FIXED_GROUND_WIDTH`] tabulates for a ramp, or `None` if it is not one.
+    fn fixed_ground_width_anchor(id: &str, property: &str) -> Option<f64> {
+        FIXED_GROUND_WIDTH
+            .iter()
+            .find(|(layer, prop, _)| *layer == id && *prop == property)
+            .map(|(_, _, anchor)| *anchor)
+    }
+
+    /// An authored ramp carrying the doubling tail the flat file is expected to add to it.
+    ///
+    /// Extended here, from the authored ramp, rather than hand-copied into `basemap.json`: that
+    /// file is a vendored copy of Protomaps' style, and writing our stops into it would both
+    /// falsify the copy and leave this comparison checking one hand transcription against
+    /// another — which is the failure the cross-check exists to catch. Reading upstream and
+    /// applying one stated rule keeps every value below the clamp pinned to the source, and
+    /// makes the values above it a consequence of a rule rather than 80 more typed numbers.
+    fn extended_to_fixed_ground_width(id: &str, property: &str, authored: &Ramp) -> Ramp {
+        let Some(anchor) = fixed_ground_width_anchor(id, property) else {
+            return authored.clone();
+        };
+        let last = authored.stops[authored.stops.len() - 1].0;
+        // Catches a vendor refresh that moves the clamp: upstream deciding a road grows until
+        // z19 would otherwise be silently overwritten by a tail anchored at the old zoom.
+        assert_eq!(
+            anchor,
+            last.max(18.0),
+            "`{id}`'s {property} is tabulated as extending from z{anchor}, but basemap.json \
+             clamps it at z{last} — upstream moved and the table has to move with it",
+        );
+        let value = authored.at(anchor);
+        let mut stops = authored.stops.clone();
+        if last < anchor {
+            stops.push((anchor, value));
+        }
+        let mut zoom = anchor + 1.0;
+        while zoom <= MAX_ZOOM as f64 {
+            stops.push((zoom, value * 2.0f32.powf((zoom - anchor) as f32)));
+            zoom += 1.0;
+        }
+        Ramp { base: authored.base, stops }
+    }
+
     /// **The mitigation for the one risk this module has a history of.** Hand-transcribing
     /// `basemap.json` failed twice before, so every value that exists in both files is compared
     /// here and divergence fails a build rather than being noticed on a screenshot.
@@ -1463,10 +1558,13 @@ mod tests {
                         .and_then(|p| p.get("line-width"))
                         .is_some();
                     if authored_has_width && layer.toggle != Some(Toggle::Transit) {
+                        let width =
+                            extended_to_fixed_ground_width(&layer.id, "width", &width);
                         assert_ramps_agree(&layer.id, "width", &layer.width, &width);
                     }
                     let gap = authored_property(&authored, "line-gap-width")
                         .unwrap_or_else(|| Ramp::constant(0.0));
+                    let gap = extended_to_fixed_ground_width(&layer.id, "gap_width", &gap);
                     assert_ramps_agree(&layer.id, "gap_width", &layer.gap_width, &gap);
                 }
                 LayerKind::Symbol => {
@@ -1519,18 +1617,62 @@ mod tests {
         }
     }
 
+    /// Above its clamp a road's stroke doubles with every zoom, which is what holds the road a
+    /// fixed width **on the ground** while the ground halves under it.
+    ///
+    /// A ratio against a tolerance rather than an equality on the values: the stops are `f32`
+    /// and are read back through the ramp's exponential interpolation, so asserting an exact
+    /// number would be a test that passes by luck and fails on a rounding change. The ratio is
+    /// also the property that actually matters — it is what "fixed ground width" *means*, and
+    /// it stays true no matter what the anchor value is or which layer carries it.
+    #[test]
+    fn a_road_stroke_doubles_with_every_zoom_above_its_clamp() {
+        for (id, property, anchor) in FIXED_GROUND_WIDTH {
+            let layer = find(id);
+            let ramp = match *property {
+                "width" => &layer.width,
+                "gap_width" => &layer.gap_width,
+                other => panic!("`{id}` is tabulated with an unknown property `{other}`"),
+            };
+            let mut zoom = *anchor;
+            while zoom + 1.0 <= MAX_ZOOM as f64 {
+                let (lower, upper) = (ramp.at(zoom), ramp.at(zoom + 1.0));
+                assert!(
+                    lower > 0.0,
+                    "`{id}`'s {property} is 0 at z{zoom}, so it has no width to double",
+                );
+                let ratio = upper / lower;
+                assert!(
+                    (ratio - 2.0).abs() < 1e-3,
+                    "`{id}`'s {property} goes {lower} -> {upper} across z{zoom}..z{}, a ratio of \
+                     {ratio} where holding a fixed ground width needs 2",
+                    zoom + 1.0,
+                );
+                zoom += 1.0;
+            }
+        }
+    }
+
     /// Two ramps must agree at every tenth of a zoom, not merely stop for stop.
     ///
     /// Comparing evaluated values rather than the stop lists is what lets a constant and a
     /// one-stop ramp compare equal, and it is also the thing that actually matters: a stop
     /// written at a different zoom with a compensating value is still the same paint.
     fn assert_ramps_agree(id: &str, property: &str, flat: &Ramp, authored: &Ramp) {
+        let anchor = fixed_ground_width_anchor(id, property);
         for tenth in 0..=(MAX_ZOOM as u32 * 10) {
             let zoom = tenth as f64 / 10.0;
             let (ours, theirs) = (flat.at(zoom), authored.at(zoom));
+            // Above the clamp the expected value is upstream's *extended* by
+            // `FIXED_GROUND_WIDTH`, not something `basemap.json` states, and saying otherwise
+            // would send whoever reads this looking for a stop that is not there.
+            let source = match anchor {
+                Some(anchor) if zoom > anchor => "basemap.json extended to a fixed ground width",
+                _ => "basemap.json",
+            };
             assert!(
                 (ours - theirs).abs() < 1e-5,
-                "`{id}`'s {property} is {ours} at z{zoom} where basemap.json says {theirs}",
+                "`{id}`'s {property} is {ours} at z{zoom} where {source} says {theirs}",
             );
         }
     }

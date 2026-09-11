@@ -245,11 +245,15 @@
       "forbid_details": ["service"],
       "light": "#e0e0e0",
       "dark": "#111318",
-      "width": { "interpolate": "exponential", "base": 1.6, "stops": [[12, 0], [12.5, 1]] },
+      "width": {
+        "interpolate": "exponential",
+        "base": 1.6,
+        "stops": [[12, 0], [12.5, 1], [18, 1], [19, 2], [20, 4], [21, 8], [22, 16]]
+      },
       "gap_width": {
         "interpolate": "exponential",
         "base": 1.6,
-        "stops": [[11, 0], [12.5, 0.5], [15, 2], [18, 11]]
+        "stops": [[11, 0], [12.5, 0.5], [15, 2], [18, 11], [19, 22], [20, 44], [21, 88], [22, 176]]
       }
     },
     {
@@ -261,11 +265,15 @@
       "forbid_flags": ["bridge", "tunnel", "link"],
       "light": "#e0e0e0",
       "dark": "#111318",
-      "width": { "interpolate": "exponential", "base": 1.6, "stops": [[9, 0], [9.5, 1]] },
+      "width": {
+        "interpolate": "exponential",
+        "base": 1.6,
+        "stops": [[9, 0], [9.5, 1], [18, 1], [19, 2], [20, 4], [21, 8], [22, 16]]
+      },
       "gap_width": {
         "interpolate": "exponential",
         "base": 1.6,
-        "stops": [[6, 0], [12, 1.6], [15, 3], [18, 13]]
+        "stops": [[6, 0], [12, 1.6], [15, 3], [18, 13], [19, 26], [20, 52], [21, 104], [22, 208]]
       }
     },
     {
@@ -280,12 +288,12 @@
       "width": {
         "interpolate": "exponential",
         "base": 1.6,
-        "stops": [[7, 0], [7.5, 1], [20, 15]]
+        "stops": [[7, 0], [7.5, 1], [20, 15], [21, 30], [22, 60]]
       },
       "gap_width": {
         "interpolate": "exponential",
         "base": 1.6,
-        "stops": [[3, 0], [3.5, 0.5], [18, 15]]
+        "stops": [[3, 0], [3.5, 0.5], [18, 15], [19, 30], [20, 60], [21, 120], [22, 240]]
       }
     },
     {
@@ -298,11 +306,15 @@
       "light": "#e0e0e0",
       "dark": "#111318",
       "minzoom": 13,
-      "width": { "interpolate": "exponential", "base": 1.6, "stops": [[13, 0], [13.5, 1.5]] },
+      "width": {
+        "interpolate": "exponential",
+        "base": 1.6,
+        "stops": [[13, 0], [13.5, 1.5], [18, 1.5], [19, 3], [20, 6], [21, 12], [22, 24]]
+      },
       "gap_width": {
         "interpolate": "exponential",
         "base": 1.6,
-        "stops": [[13, 0], [13.5, 1], [18, 11]]
+        "stops": [[13, 0], [13.5, 1], [18, 11], [19, 22], [20, 44], [21, 88], [22, 176]]
       }
     },
     {
@@ -316,11 +328,15 @@
       "light": "#e0e0e0",
       "dark": "#111318",
       "minzoom": 12,
-      "width": { "interpolate": "exponential", "base": 1.6, "stops": [[7, 0], [7.5, 1], [20, 15]] },
+      "width": {
+        "interpolate": "exponential",
+        "base": 1.6,
+        "stops": [[7, 0], [7.5, 1], [20, 15], [21, 30], [22, 60]]
+      },
       "gap_width": {
         "interpolate": "exponential",
         "base": 1.6,
-        "stops": [[3, 0], [3.5, 0.5], [18, 15]]
+        "stops": [[3, 0], [3.5, 0.5], [18, 15], [19, 30], [20, 60], [21, 120], [22, 240]]
       }
     },
     {
@@ -333,11 +349,15 @@
       "light": "#e0e0e0",
       "dark": "#111318",
       "minzoom": 12,
-      "width": { "interpolate": "exponential", "base": 1.6, "stops": [[9, 0], [9.5, 1.5]] },
+      "width": {
+        "interpolate": "exponential",
+        "base": 1.6,
+        "stops": [[9, 0], [9.5, 1.5], [18, 1.5], [19, 3], [20, 6], [21, 12], [22, 24]]
+      },
       "gap_width": {
         "interpolate": "exponential",
         "base": 1.6,
-        "stops": [[7, 0], [7.5, 0.5], [18, 10]]
+        "stops": [[7, 0], [7.5, 0.5], [18, 10], [19, 20], [20, 40], [21, 80], [22, 160]]
       }
     },
     {
@@ -350,11 +370,15 @@
       "light": "#e0e0e0",
       "dark": "#111318",
       "minzoom": 12,
-      "width": { "interpolate": "exponential", "base": 1.6, "stops": [[13, 0], [13.5, 0.8]] },
+      "width": {
+        "interpolate": "exponential",
+        "base": 1.6,
+        "stops": [[13, 0], [13.5, 0.8], [18, 0.8], [19, 1.6], [20, 3.2], [21, 6.4], [22, 12.8]]
+      },
       "gap_width": {
         "interpolate": "exponential",
         "base": 1.6,
-        "stops": [[11, 0], [12.5, 0.5], [15, 2], [18, 11]]
+        "stops": [[11, 0], [12.5, 0.5], [15, 2], [18, 11], [19, 22], [20, 44], [21, 88], [22, 176]]
       }
     },
     {
@@ -367,11 +391,15 @@
       "light": "#e0e0e0",
       "dark": "#111318",
       "minzoom": 12,
-      "width": { "interpolate": "exponential", "base": 1.6, "stops": [[12, 0], [12.5, 1.5]] },
+      "width": {
+        "interpolate": "exponential",
+        "base": 1.6,
+        "stops": [[12, 0], [12.5, 1.5], [18, 1.5], [19, 3], [20, 6], [21, 12], [22, 24]]
+      },
       "gap_width": {
         "interpolate": "exponential",
         "base": 1.6,
-        "stops": [[13, 0], [13.5, 1], [18, 11]]
+        "stops": [[13, 0], [13.5, 1], [18, 11], [19, 22], [20, 44], [21, 88], [22, 176]]
       }
     },
     {
@@ -384,11 +412,15 @@
       "light": "#e0e0e0",
       "dark": "#111318",
       "minzoom": 12,
-      "width": { "interpolate": "exponential", "base": 1.6, "stops": [[14, 0], [20, 7]] },
+      "width": {
+        "interpolate": "exponential",
+        "base": 1.6,
+        "stops": [[14, 0], [20, 7], [21, 14], [22, 28]]
+      },
       "gap_width": {
         "interpolate": "exponential",
         "base": 1.6,
-        "stops": [[14, 0], [20, 7]]
+        "stops": [[14, 0], [20, 7], [21, 14], [22, 28]]
       }
     },
     {
@@ -400,7 +432,11 @@
       "forbid_flags": ["bridge", "tunnel"],
       "light": "#ebebeb",
       "dark": "#26282e",
-      "width": { "interpolate": "exponential", "base": 1.6, "stops": [[14, 0], [20, 7]] },
+      "width": {
+        "interpolate": "exponential",
+        "base": 1.6,
+        "stops": [[14, 0], [20, 7], [21, 14], [22, 28]]
+      },
       "dash": [3, 1]
     },
     {
@@ -416,7 +452,7 @@
       "width": {
         "interpolate": "exponential",
         "base": 1.6,
-        "stops": [[11, 0], [12.5, 0.5], [15, 2], [18, 11]]
+        "stops": [[11, 0], [12.5, 0.5], [15, 2], [18, 11], [19, 22], [20, 44], [21, 88], [22, 176]]
       }
     },
     {
@@ -431,7 +467,7 @@
       "width": {
         "interpolate": "exponential",
         "base": 1.6,
-        "stops": [[6, 0], [12, 1.6], [15, 3], [18, 13]]
+        "stops": [[6, 0], [12, 1.6], [15, 3], [18, 13], [19, 26], [20, 52], [21, 104], [22, 208]]
       }
     },
     {
@@ -446,7 +482,7 @@
       "width": {
         "interpolate": "exponential",
         "base": 1.6,
-        "stops": [[3, 0], [6, 1.1], [12, 1.6], [15, 5], [18, 15]]
+        "stops": [[3, 0], [6, 1.1], [12, 1.6], [15, 5], [18, 15], [19, 30], [20, 60], [21, 120], [22, 240]]
       }
     },
     {
@@ -461,7 +497,7 @@
       "width": {
         "interpolate": "exponential",
         "base": 1.6,
-        "stops": [[13, 0], [13.5, 1], [18, 11]]
+        "stops": [[13, 0], [13.5, 1], [18, 11], [19, 22], [20, 44], [21, 88], [22, 176]]
       }
     },
     {
@@ -477,7 +513,7 @@
       "width": {
         "interpolate": "exponential",
         "base": 1.6,
-        "stops": [[3, 0], [6, 1.1], [12, 1.6], [15, 5], [18, 15]]
+        "stops": [[3, 0], [6, 1.1], [12, 1.6], [15, 5], [18, 15], [19, 30], [20, 60], [21, 120], [22, 240]]
       }
     },
     {
@@ -493,7 +529,7 @@
       "width": {
         "interpolate": "exponential",
         "base": 1.6,
-        "stops": [[6, 0], [12, 1.6], [15, 3], [18, 13]]
+        "stops": [[6, 0], [12, 1.6], [15, 3], [18, 13], [19, 26], [20, 52], [21, 104], [22, 208]]
       }
     },
     {
@@ -509,7 +545,7 @@
       "width": {
         "interpolate": "exponential",
         "base": 1.6,
-        "stops": [[11, 0], [12.5, 0.5], [15, 2], [18, 11]]
+        "stops": [[11, 0], [12.5, 0.5], [15, 2], [18, 11], [19, 22], [20, 44], [21, 88], [22, 176]]
       }
     },
     {
@@ -525,7 +561,7 @@
       "width": {
         "interpolate": "exponential",
         "base": 1.6,
-        "stops": [[13, 0], [13.5, 1], [18, 11]]
+        "stops": [[13, 0], [13.5, 1], [18, 11], [19, 22], [20, 44], [21, 88], [22, 176]]
       }
     },
     {
@@ -538,7 +574,11 @@
       "light": "#ebebeb",
       "dark": "#26282e",
       "minzoom": 12,
-      "width": { "interpolate": "exponential", "base": 1.6, "stops": [[14, 0], [20, 7]] },
+      "width": {
+        "interpolate": "exponential",
+        "base": 1.6,
+        "stops": [[14, 0], [20, 7], [21, 14], [22, 28]]
+      },
       "dash": [2, 1]
     },
     {
@@ -551,7 +591,11 @@
       "details": ["service"],
       "light": "#ebebeb",
       "dark": "#34383f",
-      "width": { "interpolate": "exponential", "base": 1.6, "stops": [[13, 0], [18, 8]] }
+      "width": {
+        "interpolate": "exponential",
+        "base": 1.6,
+        "stops": [[13, 0], [18, 8], [19, 16], [20, 32], [21, 64], [22, 128]]
+      }
     },
     {
       "id": "roads-rail",

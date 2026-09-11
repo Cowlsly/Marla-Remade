@@ -689,6 +689,10 @@ pub fn background(variant: Variant) -> u32 {
 /// painted markings, the `junction-connector` surface that continues it through an intersection,
 /// the carriageway taper, and the road-surface turn arrows. Off for release; the code stays.
 ///
+/// **This is the map surface, not the navigation lane guidance bar.** The two share the word
+/// "lane" and nothing else: the guidance bar is a Compose overlay fed by the router's per-step
+/// lane data, it has no connection to a style layer, and it draws whatever this says. Do not
+/// read a blank map surface as the guidance bar being off, or vice versa.
 /// It works by dropping the two [`Layer::carriageway`] layers from [`layers`], which is the one
 /// point every part of the feature already funnels through. No carriageway layer means
 /// `tile::geometry`'s carriageway branch is never taken (so no ribbon mesh, no taper), and
