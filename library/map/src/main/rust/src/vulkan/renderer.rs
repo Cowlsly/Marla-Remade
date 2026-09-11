@@ -1578,10 +1578,11 @@ impl Renderer {
         // behind them. `(key, layer index)`, replayed in the same order the loop met them.
         let mut deferred_symbols: Vec<(u64, usize)> = Vec::new();
 
+        let camera_z = camera.zoom.floor().clamp(0.0, 22.0) as u8;
         for (index, layer) in layers.iter().enumerate() {
             // `min_zoom`/`max_zoom` are a data-and-cost gate, not paint: they say which zooms
             // the archive is worth asking for this layer at. Paint is the ramp below.
-            if !layer.draws_at_focused(camera.zoom.floor().clamp(0.0, 22.0) as u8, layer.focused_by(filter)) {
+            if !layer.draws_at_focused(camera_z, layer.focused_by(filter)) {
                 continue;
             }
             // Width and opacity come from the flat style, evaluated against the *camera's*
@@ -1630,6 +1631,12 @@ impl Renderer {
                 // pass so labels are not painted over, then drawn with `&mut self` for
                 // their transient uploads.
                 if layer.kind == LayerKind::Symbol {
+                    // Deeper tiles contribute no candidates (see `place_symbols`), so their
+                    // labels are already suppressed by the accept set. Skipping the job here
+                    // only avoids scanning their labels to emit nothing.
+                    if self.tiles.get(key).is_some_and(|tile| tile.z > camera_z) {
+                        continue;
+                    }
                     deferred_symbols.push((*key, index));
                     continue;
                 }
@@ -2869,11 +2876,12 @@ impl Renderer {
             }
         }
         let mut candidates: Vec<placement::SegmentedCandidate> = Vec::new();
+        let camera_z = camera.zoom.floor().clamp(0.0, 22.0) as u8;
         for (index, layer) in layers.iter().enumerate() {
             if layer.kind != LayerKind::Symbol {
                 continue;
             }
-            if !layer.draws_at_focused(camera.zoom.floor().clamp(0.0, 22.0) as u8, layer.focused_by(filter)) {
+            if !layer.draws_at_focused(camera_z, layer.focused_by(filter)) {
                 continue;
             }
             // Device px, matching `record_symbol`: `extent` below is device px, so a
@@ -2886,6 +2894,15 @@ impl Renderer {
             let (primary, alternate) = anchors_for(layer);
             for key in ordered {
                 let Some(tile) = self.tiles.get(key) else { continue };
+                // A tile deeper than the camera's own level is a stand-in kept so a zoom-out does
+                // not blank the map (`select::DESCENDANT_DEPTH`). It contributes its geometry, but
+                // not its labels: a POI's zoom floor is enforced only by which pyramid level
+                // carries it, so a retained z14 tile would otherwise draw its bus stops at camera
+                // z12. Every other layer is saved by its own camera-zoom floor; the `poi-*` layers
+                // declare none, which is why transit stops were the visible symptom.
+                if tile.z > camera_z {
+                    continue;
+                }
                 let tile_clip = camera.tile_to_clip(tile.z, tile.x, tile.y);
                 let tile_span_px = camera.tile_span_px(tile.z);
                 let wh = (extent.width, extent.height);
