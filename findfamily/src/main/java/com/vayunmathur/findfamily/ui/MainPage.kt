@@ -61,7 +61,9 @@ import com.vayunmathur.library.ui.SheetValue
 import com.vayunmathur.library.ui.Switch
 import com.vayunmathur.library.ui.Text
 import com.vayunmathur.library.ui.ToggleFloatingActionButton
-import com.vayunmathur.library.ui.TopAppBar
+import com.vayunmathur.library.ui.OverlayAction
+import com.vayunmathur.library.ui.Spacing
+import com.vayunmathur.library.ui.TopAppBarOverlay
 import com.vayunmathur.library.ui.dynamicLightColorScheme
 import com.vayunmathur.library.ui.rememberBottomSheetScaffoldState
 import com.vayunmathur.library.ui.rememberMessenger
@@ -129,7 +131,7 @@ import com.vayunmathur.library.ui.IconClose
 import com.vayunmathur.library.ui.IconCopy
 import com.vayunmathur.library.ui.IconDelete
 import com.vayunmathur.library.ui.IconEdit
-import com.vayunmathur.library.ui.IconNavigation
+import com.vayunmathur.library.ui.IconMoreVert
 import com.vayunmathur.library.ui.IconNavigationArrow
 import com.vayunmathur.library.ui.IconRestore
 import com.vayunmathur.library.ui.IconVerify
@@ -406,9 +408,9 @@ fun MainPage(
 }
 
 /**
- * The stateless map-page layout: the [BottomSheetScaffold] (top bar + sheet) with a
- * full-bleed [map] slot and the floating action button on top. It reads only [state] and
- * calls back through [actions]/[familyActions]/[personActions], so both the real app (via
+ * The stateless map-page layout: the [BottomSheetScaffold] sheet with a full-bleed [map] slot
+ * and the floating chrome (overlay bar, floating action button) on top. It reads only [state]
+ * and calls back through [actions]/[familyActions]/[personActions], so both the real app (via
  * the [MainPage] wrapper) and the store-listing previews render the *same* page — the app
  * injects the live [MapView] into [map], the previews inject a static backdrop.
  *
@@ -498,68 +500,8 @@ fun MainPageContent(
         sheetSwipeEnabled = !state.historyMode,
         sheetDragHandle = if (state.historyMode) null else { { BottomSheetDefaults.DragHandle() } },
         sheetContainerColor = MaterialTheme.colorScheme.surfaceContainerLow,
-        // Default (solid) app bar so the map stays cut off beneath it while panning.
-        topBar = {
-            TopAppBar(
-                title = {
-                    if (state.historyMode) {
-                        Text(stringResource(R.string.history_title, state.selectedUser?.name ?: ""))
-                    } else if (state.nothingSelected) {
-                        Text(stringResource(R.string.app_name))
-                    }
-                },
-                navigationIcon = {
-                    if (state.selectedUserId != null || state.selectedWaypointId != null) {
-                        IconNavigation {
-                            if (state.historyMode) {
-                                actions.setShowingPresent(true)
-                            } else {
-                                actions.clearSelection()
-                            }
-                        }
-                    }
-                },
-                actions = {
-                    if (state.selectedUserId == null &&
-                        (state.selectedWaypointId == null || state.selectedWaypointId == 0L)) {
-                        if (state.usingGpsFallback) {
-                            IconButton({ actions.onGpsWarningClick() }) {
-                                // Use Image (not the tinting IconWarning) so the
-                                // custom yellow-and-red drawable keeps both colors.
-                                Image(
-                                    painter = painterResource(R.drawable.ic_warning_gps),
-                                    contentDescription = stringResource(
-                                        R.string.gps_fallback_warning_content_description
-                                    )
-                                )
-                            }
-                        }
-                        backupButtons()
-                    } else if (state.selectedUserId != null && !state.historyMode) {
-                        if (!state.isSelfSelected) {
-                            // Find Nearby (UWB) needs both the public
-                            // android.ranging API (Android 16+) and an actual
-                            // UWB radio. Hide the entry point otherwise.
-                            if (state.uwbAvailable) {
-                                IconButton({ actions.openUwbRanging(state.selectedUserId) }) {
-                                    IconNavigationArrow()
-                                }
-                            }
-                            IconButton({ actions.onShowSecurityCode() }) {
-                                IconVerify()
-                            }
-                            IconButton({ actions.deleteSelectedUser() }) {
-                                IconDelete()
-                            }
-                        }
-                    } else if (state.selectedWaypointId != null && state.selectedWaypointId != 0L) {
-                        IconButton({ actions.deleteSelectedWaypoint() }) {
-                            IconDelete()
-                        }
-                    }
-                }
-            )
-        },
+        // No top bar: the chrome floats over the map as a TopAppBarOverlay in the content
+        // slot below, so the map gets the whole window (GitHub #680).
         sheetContent = {
             // The sheet's own content MUST be taller than the peek, or Material3 emits a single
             // anchor and the scaffold crashes.
@@ -577,7 +519,7 @@ fun MainPageContent(
                 if (state.nothingSelected) {
                 FamilyListSheet(state.familyList, familyActions)
             } else if (state.historyMode) {
-                // History mode has no sheet; the name is shown in the app bar.
+                // History mode has no sheet; the name is shown in the map overlay.
             } else if (state.selectedUserId != null) {
                 state.person?.let { PersonDetailSheet(it, personActions) }
             } else if (state.selectedWaypointId != null) {
@@ -623,6 +565,15 @@ fun MainPageContent(
             }
 
             map()
+
+            // The chrome that used to be the top bar, floating over the map instead. Colored
+            // from the light scheme for the same reason the FAB below is: the map is always
+            // light, whatever the app's theme.
+            Box(Modifier.align(Alignment.TopCenter).fillMaxWidth()) {
+                MaterialTheme(colorScheme = lightScheme) {
+                    MapOverlayBar(state, actions, backupButtons)
+                }
+            }
 
             historyScrubber()
 
@@ -698,6 +649,110 @@ fun MainPageContent(
             }
         }
     }
+}
+
+/**
+ * The map page's chrome, floating over the map rather than sitting in a bar above it.
+ *
+ * The bar this replaces was a solid [com.vayunmathur.library.ui.TopAppBar] carrying the app
+ * name and the two backup actions, and it cost the map a full bar's height on every screen
+ * (GitHub #680). Backup and restore are rare enough to live behind the overflow menu; the
+ * contextual actions for a selected person or place keep their own buttons, because they are
+ * the reason that selection is on screen.
+ *
+ * [backupButtons] is emitted inside the menu and owns the file-picker launchers and the
+ * passphrase dialog for whatever it started, so nothing here closes the menu on a tap.
+ */
+@Composable
+private fun MapOverlayBar(
+    state: MainPageUiState,
+    actions: MainPageActions,
+    backupButtons: @Composable () -> Unit,
+) {
+    var menuExpanded by remember { mutableStateOf(false) }
+
+    val gpsWarningDescription = stringResource(R.string.gps_fallback_warning_content_description)
+    val menuDescription = stringResource(R.string.map_menu_content_description)
+    val findNearbyDescription = stringResource(R.string.find_nearby_content_description)
+    val verifyDescription = stringResource(R.string.verify_security_code_content_description)
+    val deletePersonDescription = stringResource(R.string.delete_person_content_description)
+    val deletePlaceDescription = stringResource(R.string.delete_place_content_description)
+
+    val selectedUserId = state.selectedUserId
+    val selectedWaypointId = state.selectedWaypointId
+
+    val overlayActions: List<OverlayAction> =
+        if (selectedUserId == null && (selectedWaypointId == null || selectedWaypointId == 0L)) {
+            listOfNotNull(
+                if (state.usingGpsFallback) {
+                    OverlayAction(
+                        icon = {
+                            // Use Image (not the tinting IconWarning) so the
+                            // custom yellow-and-red drawable keeps both colors.
+                            Image(
+                                painter = painterResource(R.drawable.ic_warning_gps),
+                                contentDescription = gpsWarningDescription
+                            )
+                        },
+                        contentDescription = gpsWarningDescription,
+                        onClick = { actions.onGpsWarningClick() }
+                    )
+                } else null,
+                OverlayAction(
+                    icon = {
+                        IconMoreVert()
+                        // Anchored to the button's own content so the menu drops from it.
+                        DropdownMenu(menuExpanded, { menuExpanded = false }) {
+                            Row(Modifier.padding(horizontal = Spacing.xs)) { backupButtons() }
+                        }
+                    },
+                    contentDescription = menuDescription,
+                    onClick = { menuExpanded = !menuExpanded }
+                )
+            )
+        } else if (selectedUserId != null && !state.historyMode) {
+            if (state.isSelfSelected) emptyList() else listOfNotNull(
+                // Find Nearby (UWB) needs both the public android.ranging API
+                // (Android 16+) and an actual UWB radio. Hide the entry point otherwise.
+                if (state.uwbAvailable) {
+                    OverlayAction({ IconNavigationArrow() }, findNearbyDescription) {
+                        actions.openUwbRanging(selectedUserId)
+                    }
+                } else null,
+                OverlayAction({ IconVerify() }, verifyDescription) { actions.onShowSecurityCode() },
+                OverlayAction({ IconDelete() }, deletePersonDescription) { actions.deleteSelectedUser() }
+            )
+        } else if (selectedWaypointId != null && selectedWaypointId != 0L) {
+            listOf(
+                OverlayAction({ IconDelete() }, deletePlaceDescription) { actions.deleteSelectedWaypoint() }
+            )
+        } else {
+            emptyList()
+        }
+
+    TopAppBarOverlay(
+        onNavigateBack = if (selectedUserId != null || selectedWaypointId != null) {
+            {
+                if (state.historyMode) actions.setShowingPresent(true) else actions.clearSelection()
+            }
+        } else null,
+        actions = overlayActions,
+        // The overlay draws no container of its own, so the history title carries its own
+        // surface to stay legible over the map.
+        title = if (state.historyMode) {
+            {
+                Card(Modifier.padding(start = Spacing.sm)) {
+                    Text(
+                        stringResource(R.string.history_title, state.selectedUser?.name ?: ""),
+                        Modifier.padding(horizontal = Spacing.md, vertical = Spacing.sm),
+                        style = MaterialTheme.typography.titleMedium,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                }
+            }
+        } else null
+    )
 }
 
 /**

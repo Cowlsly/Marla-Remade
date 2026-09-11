@@ -104,7 +104,7 @@ data class MainPageUiState(
     /** False while viewing a contact's past track (history mode). */
     val isShowingPresent: Boolean = true,
     val usingGpsFallback: Boolean = false,
-    /** Whether UWB "Find Nearby" is available on this device (controls the top-bar entry). */
+    /** Whether UWB "Find Nearby" is available on this device (controls the overlay entry). */
     val uwbAvailable: Boolean = false,
     /** This device's own user id, so the layout can hide self-only controls. */
     val selfUserId: Long = -1L,
@@ -123,7 +123,7 @@ data class MainPageUiState(
 }
 
 /**
- * Top-bar and FAB callbacks for the map page. Same no-op-default arrangement as the sheet
+ * Map-overlay and FAB callbacks for the map page. Same no-op-default arrangement as the sheet
  * action interfaces so [Noop] is all a preview needs. The stateful `MainPage` wires these to
  * the ViewModel and nav back stack.
  */

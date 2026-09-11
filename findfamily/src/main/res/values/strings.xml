@@ -148,7 +148,7 @@
     <string name="auto_toggle_never">Never</string>
     <!-- UserPage: Auto-toggle dropdown option that flips sharing when you arrive at a saved place. %1$s = place name, e.g. Home -->
     <string name="arrival_at">Arrival at %1$s</string>
-    <!-- MainPage TopAppBar: Title when in history mode. %1$s = selected user name, e.g. Alice -->
+    <!-- MainPage map overlay: Title when in history mode. %1$s = selected user name, e.g. Alice -->
     <string name="history_title">History: <xliff:g id="person_name" example="Alice">%1$s</xliff:g></string>
     <!-- HistoryScrubber: Button label to step back 5 minutes. Verb with duration -->
     <string name="history_step_minus_5m">-5m</string>
@@ -279,8 +279,18 @@
     <!-- UwbRangingScreen: Hint when azimuth null. Instruction sentence -->
     <string name="point_the_back_of_your_phone_toward_your">Point the back of your phone toward your contact</string>
 
-    <!-- MainPage: Content description for the GPS-only fallback warning icon in the top bar. Noun phrase -->
+    <!-- MainPage: Content description for the GPS-only fallback warning icon in the map overlay. Noun phrase -->
     <string name="gps_fallback_warning_content_description">Network location unavailable</string>
+    <!-- MainPage: Content description for the overflow button on the map that opens the backup and restore actions. Noun phrase -->
+    <string name="map_menu_content_description">More options</string>
+    <!-- MainPage: Content description for the map overlay button that starts Find Nearby (UWB) for the selected person. Verb phrase -->
+    <string name="find_nearby_content_description">Find nearby</string>
+    <!-- MainPage: Content description for the map overlay button that shows the end-to-end encryption security code for the selected person. Verb phrase -->
+    <string name="verify_security_code_content_description">Verify security code</string>
+    <!-- MainPage: Content description for the map overlay button that removes the selected person. Verb phrase -->
+    <string name="delete_person_content_description">Remove person</string>
+    <!-- MainPage: Content description for the map overlay button that deletes the selected saved place. Verb phrase -->
+    <string name="delete_place_content_description">Delete saved place</string>
     <!-- GpsFallbackWarningDialog: Title of the GPS-only fallback warning dialog. Noun phrase -->
     <string name="gps_fallback_warning_title">Using GPS only</string>
     <!-- GpsFallbackWarningDialog: Body explaining network location is off and GPS drains battery. Sentence -->
