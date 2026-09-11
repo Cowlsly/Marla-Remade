@@ -70,7 +70,7 @@ impl Pick {
     /// # Safety
     ///
     /// `context` must be live; call [`destroy`](Self::destroy) while the device is idle.
-    pub unsafe fn new(context: &Context) -> Result<Pick, String> {
+    pub unsafe fn new(context: &Context, cache: vk::PipelineCache) -> Result<Pick, String> {
         let device = &context.device;
 
         // One colour attachment, cleared to "miss", stored, and left in TRANSFER_SRC so the pixel
@@ -130,7 +130,7 @@ impl Pick {
             }
         };
 
-        let pipeline = match build_pipeline(device, render_pass, layout) {
+        let pipeline = match build_pipeline(device, cache, render_pass, layout) {
             Ok(p) => p,
             Err(e) => {
                 device.destroy_pipeline_layout(layout, None);
@@ -452,6 +452,7 @@ impl PickTarget {
 /// blend), no depth or stencil, writing the slot id.
 unsafe fn build_pipeline(
     device: &ash::Device,
+    cache: vk::PipelineCache,
     render_pass: vk::RenderPass,
     layout: vk::PipelineLayout,
 ) -> Result<vk::Pipeline, String> {
@@ -534,11 +535,7 @@ unsafe fn build_pipeline(
         .render_pass(render_pass)
         .subpass(0);
 
-    let result = device.create_graphics_pipelines(
-        vk::PipelineCache::null(),
-        std::slice::from_ref(&info),
-        None,
-    );
+    let result = device.create_graphics_pipelines(cache, std::slice::from_ref(&info), None);
     device.destroy_shader_module(vert, None);
     device.destroy_shader_module(frag, None);
     result.map(|pipelines| pipelines[0]).map_err(|(_, e)| format!("pick create_graphics_pipelines {e:?}"))

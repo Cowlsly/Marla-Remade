@@ -218,7 +218,14 @@ pub extern "system" fn Java_com_vayunmathur_library_map_MapNative_create<'l>(
     }
     unsafe { ANativeWindow_acquire(window) };
 
-    let renderer = match unsafe { Renderer::new(window, width.max(1) as u32, height.max(1) as u32) } {
+    let renderer = match unsafe {
+        Renderer::new(
+            window,
+            width.max(1) as u32,
+            height.max(1) as u32,
+            std::path::Path::new(&cache_dir),
+        )
+    } {
         Ok(r) => r,
         Err(e) => {
             log(&format!("Vulkan init failed: {e}"));

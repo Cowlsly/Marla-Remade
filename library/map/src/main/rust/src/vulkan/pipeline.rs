@@ -241,11 +241,19 @@ impl Pipelines {
     /// descriptor set layout [`images::AtlasSet`] built — `None` on a host
     /// build that never creates pipelines (tests link this module for the
     /// [`Push`] size asserts only).
+    ///
+    /// `cache` is [`crate::vulkan::cache::ShaderCache`]'s handle, or
+    /// [`vk::PipelineCache::null`] for no cache. Every one of the twelve pipelines below is built
+    /// through it, and they share shader modules heavily — `fill` is also `depth`, `mask` and
+    /// `scrim`, and `symbol`'s billboard vertex shader is also `icon`'s — so even a cold cache
+    /// pays for itself within this one call: the driver populates it as it goes, and the repeats
+    /// hit rather than recompile.
     pub unsafe fn new(
         device: &ash::Device,
         render_pass: vk::RenderPass,
         samples: vk::SampleCountFlags,
         atlas_layout: Option<vk::DescriptorSetLayout>,
+        cache: vk::PipelineCache,
     ) -> Result<Pipelines, String> {
         let push_range = vk::PushConstantRange::default()
             .stage_flags(vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT)
@@ -410,6 +418,7 @@ impl Pipelines {
             &fill_attributes,
             Stencil::Ignore,
             Depth::Off,
+            cache,
         );
         let line = build(
             device,
@@ -422,6 +431,7 @@ impl Pipelines {
             &line_attributes,
             Stencil::Ignore,
             Depth::Off,
+            cache,
         );
         // Road carriageways. Same fixed-function state as `line` — a carriageway is flat basemap,
         // so depth stays off and layer order does the compositing exactly as it does for a stroke.
@@ -438,6 +448,7 @@ impl Pipelines {
             &ribbon_attributes,
             Stencil::Ignore,
             Depth::Off,
+            cache,
         );
         // The depth-tested variant of `fill`: same shaders and vertex format, depth test + write
         // on. WS-A/WS-G draw their extruded/relief geometry through pipelines built like this so
@@ -453,6 +464,7 @@ impl Pipelines {
             &fill_attributes,
             Stencil::Ignore,
             Depth::TestWrite,
+            cache,
         );
         // The 3D building pipeline: its own shaders and 7-float vertex, depth test + write on so
         // buildings occlude correctly. Push-only layout — colour is per-vertex, not a uniform.
@@ -467,6 +479,7 @@ impl Pipelines {
             &building_attributes,
             Stencil::Ignore,
             Depth::TestWrite,
+            cache,
         );
         // The 3D terrain pipeline: its own shaders and 6-float vertex, depth test + write on so the
         // relief occludes correctly. Push-only layout — the ground colour is the pushed `earth`
@@ -483,6 +496,7 @@ impl Pipelines {
             &terrain_attributes,
             Stencil::Ignore,
             Depth::TestWrite,
+            cache,
         );
 
         // The symbol pipeline needs the atlas descriptor set, so it gets its own
@@ -529,6 +543,7 @@ impl Pipelines {
             &symbol_billboard_attributes,
             Stencil::Ignore,
             Depth::Off,
+            cache,
         );
         // POI icons: the billboard vertex shader (so they face the camera under tilt, exactly as
         // the text beside them does) paired with the sprite fragment shader (because an icon is a
@@ -544,6 +559,7 @@ impl Pipelines {
             &symbol_billboard_attributes,
             Stencil::Ignore,
             Depth::Off,
+            cache,
         );
         let sprite = build(
             device,
@@ -556,6 +572,7 @@ impl Pipelines {
             &symbol_attributes,
             Stencil::Ignore,
             Depth::Off,
+            cache,
         );
 
         // The overlay quad is position-only in -1..1, so it shares the fill vertex
@@ -571,6 +588,7 @@ impl Pipelines {
             &fill_attributes,
             Stencil::Ignore,
             Depth::Off,
+            cache,
         );
 
         // The region mask and its scrim. Both are position-only quads/triangles in the same
@@ -587,6 +605,7 @@ impl Pipelines {
             &fill_attributes,
             Stencil::Write,
             Depth::Off,
+            cache,
         );
         let scrim = build(
             device,
@@ -599,6 +618,7 @@ impl Pipelines {
             &fill_attributes,
             Stencil::TestOutside,
             Depth::Off,
+            cache,
         );
 
         // The modules are only needed while the pipelines are being created.
@@ -724,6 +744,7 @@ pub enum Depth {
     TestWrite,
 }
 
+#[allow(clippy::too_many_arguments)]
 unsafe fn build(
     device: &ash::Device,
     layout: vk::PipelineLayout,
@@ -735,6 +756,7 @@ unsafe fn build(
     attributes: &[vk::VertexInputAttributeDescription],
     stencil: Stencil,
     depth: Depth,
+    cache: vk::PipelineCache,
 ) -> Result<vk::Pipeline, String> {
     let entry = c"main";
     let stages = [
@@ -847,7 +869,7 @@ unsafe fn build(
         .subpass(0);
 
     device
-        .create_graphics_pipelines(vk::PipelineCache::null(), std::slice::from_ref(&info), None)
+        .create_graphics_pipelines(cache, std::slice::from_ref(&info), None)
         .map(|pipelines| pipelines[0])
         .map_err(|(_, e)| format!("create_graphics_pipelines {e:?}"))
 }

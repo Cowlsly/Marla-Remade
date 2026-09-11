@@ -8,6 +8,7 @@ use crate::style::{Anchor, Layer, LayerKind, Palette};
 use crate::tile::geometry::{self, TileMesh};
 use crate::tile::select;
 use crate::vulkan::buffers::{Buffer, ScratchRing};
+use crate::vulkan::cache::ShaderCache;
 use crate::vulkan::context::{ANativeWindow, Context};
 use crate::vulkan::images::{AtlasSet, SampledImage};
 use crate::vulkan::pick::Pick;
@@ -378,6 +379,11 @@ pub struct Renderer {
     tiles: HashMap<u64, ResidentTile>,
     /// Retired buffers waiting for the frames that might still reference them.
     retiring: Vec<(usize, ResidentTile)>,
+    /// The persistent shader-compilation cache, seeded from disk at startup and shared by every
+    /// pipeline and by [`Pick`]. Outlives [`Pipelines`], which is destroyed and rebuilt whenever
+    /// the render pass changes — that is the whole point, since the rebuild is what used to
+    /// recompile twelve pipelines inside a frame.
+    pipeline_cache: ShaderCache,
     /// Transient per-frame symbol buffers, same grace rule as `retiring`.
     transients: Vec<TransientBuffers>,
     /// One scratch bump allocator per frame in flight, which every symbol draw's geometry is
@@ -488,15 +494,30 @@ impl Renderer {
         window: *mut ANativeWindow,
         width: u32,
         height: u32,
+        cache_dir: &std::path::Path,
     ) -> Result<Renderer, String> {
         let context = Context::new(window)?;
         let swapchain = Swapchain::new(&context, width, height)?;
         let atlas_set = AtlasSet::new(&context.device)?;
+        // Before any pipeline is created, so the very first launch's twelve compiles are the ones
+        // that get recorded. Its own subdirectory of `cache_dir`, not `cache_dir` itself: the tile
+        // range cache deletes every *file* in its directory when the archive origin changes
+        // (`tile::cache::RangeCache::invalidate_on_origin_change`), so a blob there would be wiped
+        // by an unrelated archive republish and read as a random cold start. That deletion is
+        // `remove_file`, which does not recurse into a subdirectory.
+        let cache_path = cache_dir.join("pipeline");
+        let mut pipeline_cache = ShaderCache::open(
+            &context.instance,
+            context.physical_device,
+            &context.device,
+            Some(&cache_path),
+        );
         let pipelines = Pipelines::new(
             &context.device,
             swapchain.render_pass,
             swapchain.samples,
             Some(atlas_set.layout),
+            pipeline_cache.handle(),
         )?;
 
         let pool_info = vk::CommandPoolCreateInfo::default()
@@ -594,7 +615,11 @@ impl Renderer {
 
         // The offscreen id-buffer pass for tap picking. Self-contained and format-stable, so it is
         // built once here and survives swapchain rebuilds (only its target is resized).
-        let pick = Pick::new(&context)?;
+        let pick = Pick::new(&context, pipeline_cache.handle())?;
+        // Everything that compiles a shader has now run once. On a cold cache this is the write
+        // that makes every later launch cheap; on a warm one the blob has not grown and this does
+        // nothing.
+        pipeline_cache.persist(&context.device);
 
         Ok(Renderer {
             context,
@@ -610,6 +635,7 @@ impl Renderer {
             frame_index: 0,
             tiles: HashMap::new(),
             retiring: Vec::new(),
+            pipeline_cache,
             transients: Vec::new(),
             scratch: (0..FRAMES_IN_FLIGHT).map(|_| ScratchRing::default()).collect(),
             window,
@@ -3087,7 +3113,10 @@ impl Renderer {
     fn rebuild(&mut self) -> Result<(), String> {
         unsafe {
             let _ = self.context.device.device_wait_idle();
-            // The pipelines reference the old render pass, so they go with it.
+            // The pipelines reference the old render pass, so they go with it. This is the
+            // expensive part and the reason `pipeline_cache` exists: without it every one of the
+            // twelve is recompiled from SPIR-V here, on the Choreographer callback, inside a
+            // frame.
             self.pipelines.destroy(&self.context.device);
             self.swapchain.destroy(&self.context.device);
             self.swapchain = Swapchain::new(&self.context, self.width, self.height)?;
@@ -3096,7 +3125,11 @@ impl Renderer {
                 self.swapchain.render_pass,
                 self.swapchain.samples,
                 Some(self.atlas_set.layout),
+                self.pipeline_cache.handle(),
             )?;
+            // Only writes if the driver actually added something — a rebuild to the same sample
+            // count adds nothing, so the steady state costs no I/O on the frame path.
+            self.pipeline_cache.persist(&self.context.device);
         }
         self.width = self.swapchain.extent.width;
         self.height = self.swapchain.extent.height;
@@ -3255,6 +3288,7 @@ impl Drop for Renderer {
             self.quad.vertices.destroy(&self.context.device);
             self.quad.indices.destroy(&self.context.device);
             self.pick.destroy(&self.context.device);
+            self.pipeline_cache.destroy(&self.context.device);
             self.atlas_set.destroy(&self.context.device);
             self.pipelines.destroy(&self.context.device);
             self.swapchain.destroy(&self.context.device);

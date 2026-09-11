@@ -9,6 +9,7 @@
 //! it inherits two black-screen fixes from it — see [`swapchain`].
 
 pub mod buffers;
+pub mod cache;
 pub mod context;
 pub mod images;
 pub mod pick;

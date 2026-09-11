@@ -35,6 +35,7 @@
 pub mod camera;
 pub mod marker;
 pub mod overlay;
+pub mod pipeline_cache;
 pub mod style;
 pub mod tess;
 pub mod tile;
