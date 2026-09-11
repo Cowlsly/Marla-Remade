@@ -207,8 +207,16 @@
     <string name="trust_fdroid_check_chained">Every entry in that list is chained back to the signature</string>
     <string name="trust_fdroid_check_rebuilt">Versions F-Droid\'s second build server reproduced bit-for-bit are badged as reproducible</string>
     <string name="trust_fdroid_check_hash_and_key">The hash and the signing key both come from the signed list</string>
-    <string name="trust_fdroid_limits">F-Droid holds the signing key, not the developer, so its build servers can sign anything. Nobody checks what an app does, only that it matches its source. Updates wait to be rebuilt, which can take days or weeks — security fixes included — and there is no way to pull a bad app back off phones.</string>
-
+    <string name="trust_fdroid_limits">F-Droid holds the signing key, not the developer, so its build servers can sign anything. Nobody checks what an app does, only that it matches its source. Updates wait to be rebuilt, which can take days or weeks - security fixes included - and there is no way to pull a bad app back off phones.</string>
+    <string name="trust_grapheneos_title">GrapheneOS</string>
+    <string name="trust_grapheneos_summary">Google\'s own signed builds of the Sandboxed Google Play components, re-hosted by GrapheneOS behind a signed list naming each file\'s hash and signing key.</string>
+    <string name="trust_grapheneos_practice_official">The files are Google\'s own signed builds, re-hosted unchanged rather than rebuilt</string>
+    <string name="trust_grapheneos_practice_signed_index">GrapheneOS signs the list of versions, file hashes and expected signing keys with its release key</string>
+    <string name="trust_grapheneos_practice_matched">Only the builds that match the compatibility layer your OS ships are offered</string>
+    <string name="trust_grapheneos_check_index_signed">That signed list is checked against a key built into this store</string>
+    <string name="trust_grapheneos_check_rollback">A list older than the last one seen is refused, so an old build cannot be pushed back onto you</string>
+    <string name="trust_grapheneos_check_hash_and_key">Every downloaded file matches the hash and the signing key that list names for it</string>
+    <string name="trust_grapheneos_limits">These are Google\'s closed-source apps. Nothing is built from published source and nothing is reproducible, so what is proven is that you received the file GrapheneOS listed, not anything about what that file does. The source carries only the Sandboxed Google Play components, and there is no way to pull a bad release back off phones.</string>
     <string name="trust_play_title">Google Play</string>
     <string name="trust_play_summary">Reviewed, scanned and signed by Google, who verify who the developer is and can pull an app from every phone at once.</string>
     <string name="trust_play_practice_identity">Developers have to prove who they are, with a real name and address on file</string>
