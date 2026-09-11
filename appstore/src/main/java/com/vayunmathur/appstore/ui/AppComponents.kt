@@ -25,6 +25,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
@@ -263,15 +264,25 @@ fun AppTile(
             modifier = Modifier.heightIn(min = 32.dp),
         )
         // An in-flight install replaces the rating line rather than adding a third one, so a
-        // tile mid-install stays roughly the height of its neighbours.
-        when {
-            stage != null -> StageProgress(stage)
-            isInstalled -> Text(
-                stringResource(R.string.installed),
-                style = MaterialTheme.typography.labelSmall,
-                color = MaterialTheme.colorScheme.primary,
-            )
-            else -> RatingLabel(app)
+        // tile mid-install stays roughly the height of its neighbours. The slot holds a label
+        // line even when it has nothing to say, because most catalogue entries carry no rating
+        // and RatingLabel then draws nothing at all — an installed tile would be a whole line
+        // taller than the ones either side of it, and a LazyRow takes the height of its tallest
+        // visible child, so the carousel and everything below it would move as those tiles
+        // scrolled in.
+        val statusHeight = with(LocalDensity.current) {
+            MaterialTheme.typography.labelSmall.lineHeight.toDp()
+        }
+        Box(Modifier.heightIn(min = statusHeight), contentAlignment = Alignment.Center) {
+            when {
+                stage != null -> StageProgress(stage)
+                isInstalled -> Text(
+                    stringResource(R.string.installed),
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.primary,
+                )
+                else -> RatingLabel(app)
+            }
         }
     }
 }
