@@ -14,8 +14,8 @@ data class TsSpan(val start: Int, val end: Int, val kind: TsKind)
  * missing for the current ABI (e.g. the reproducible `.so` was not built), so callers fall back to
  * the regex tokenizer instead of crashing. This mirrors the `PdfNative` graceful-degradation pattern.
  *
- * [highlight] is blocking (it parses the whole file), so callers must cache its result off the hot
- * path — see `remember(text, language)` in the editors.
+ * [highlight] is blocking (it parses the whole file), so callers must run it off the main thread and
+ * cache the result — see `rememberTreeSitterSpans` in the editors.
  */
 object TreeSitterNative {
 

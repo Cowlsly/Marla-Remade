@@ -119,8 +119,9 @@ fun CodeEditorView(
     }
     val diagnosticsByLine = remember(diagnostics) { diagnostics.groupBy { it.line } }
     val spec = tab.language.spec
-    // Native tree-sitter spans (cached); null → the regex tokenizer in [annotatedLine] is used.
-    val tsSpans = remember(text, tab.language, colors) { treeSitterColorSpans(text, tab.language, colors) }
+    // Native tree-sitter spans (parsed off the main thread); null → the regex tokenizer in
+    // [annotatedLine] is used, both while the parse is in flight and when it is unavailable.
+    val tsSpans = rememberTreeSitterSpans(text, tab.language, colors)
 
     val measurer = rememberTextMeasurer()
     val density = LocalDensity.current
@@ -438,9 +439,20 @@ fun CodeEditorView(
                     drawText(arrowLayout, color = gutterColor, topLeft = Offset(2f, y))
                 }
 
-                val annotated = annotatedLine(lineText, spec, colors, tsSpans, lineStart)
-                val layout = measurer.measure(annotated, style)
-                drawText(layout, topLeft = Offset(gutterWidth - scrollX, y))
+                // Lines past MAX_LINE_HIGHLIGHT render unstyled, so only the columns inside the
+                // viewport need measuring — a one-line multi-megabyte document (a minified JSON
+                // blob, say) would otherwise lay its whole line out on every frame.
+                if (lineLen > MAX_LINE_HIGHLIGHT) {
+                    val firstCol = (scrollX / charWidth).toInt().coerceIn(0, lineLen)
+                    val lastCol = (firstCol + (size.width / charWidth).toInt() + 2).coerceAtMost(lineLen)
+                    if (lastCol > firstCol) {
+                        val slice = measurer.measure(AnnotatedString(lineText.substring(firstCol, lastCol)), style)
+                        drawText(slice, topLeft = Offset(gutterWidth + firstCol * charWidth - scrollX, y))
+                    }
+                } else {
+                    val annotated = annotatedLine(lineText, spec, colors, tsSpans, lineStart)
+                    drawText(measurer.measure(annotated, style), topLeft = Offset(gutterWidth - scrollX, y))
+                }
 
                 if (caret in lineStart..(lineStart + lineLen)) {
                     val cx = gutterWidth + (caret - lineStart) * charWidth - scrollX

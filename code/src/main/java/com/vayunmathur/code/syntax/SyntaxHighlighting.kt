@@ -23,6 +23,17 @@ import com.vayunmathur.library.ui.MaterialTheme
  */
 enum class TokenKind { COMMENT, STRING, NUMBER, ANNOTATION, KEYWORD }
 
+/**
+ * Above this many characters no whole-document highlighting is attempted at all.
+ *
+ * Every whole-document pass — the regex tokenizer, the native tree-sitter parse, and the
+ * per-character rainbow-bracket scan — is O(document) and produces one span per token, and the
+ * resulting spans are re-applied by Compose on every text layout. 150k characters is roughly a
+ * 4000-line source file: larger than anything hand-written, and small enough that a single pass
+ * stays in the low tens of milliseconds. Past it the file still opens and edits fine, uncolored.
+ */
+const val MAX_HIGHLIGHT_CHARS = 150_000
+
 /** Precompiled tokenizer for one language: the alternation regex + per-group kinds. */
 class LanguageSpec(private val parts: List<Pair<TokenKind, String>>) {
     private val kinds: List<TokenKind> = parts.map { it.first }
@@ -589,8 +600,9 @@ class SyntaxTransformation(
             }
         }
 
-        val highlight = spec != null && raw.length <= MAX_HIGHLIGHT_LENGTH
-        if (tsSpans != null) {
+        val withinBudget = raw.length <= MAX_HIGHLIGHT_CHARS
+        val highlight = spec != null && withinBudget
+        if (tsSpans != null && withinBudget) {
             // Rainbow brackets first; tree-sitter colours paint on top.
             if (colors.brackets.isNotEmpty()) {
                 var depth = 0
@@ -663,8 +675,9 @@ class SyntaxTransformation(
             }
         }
 
-        // Bracket matching: check the char before and at the caret.
-        if (caret in 0..raw.length) {
+        // Bracket matching: check the char before and at the caret. Finding the partner is a scan
+        // that can run to the end of the document, so it shares the highlighting budget.
+        if (withinBudget && caret in 0..raw.length) {
             val candidate = when {
                 caret > 0 && raw[caret - 1] in "()[]{}" -> caret - 1
                 caret < raw.length && raw[caret] in "()[]{}" -> caret
@@ -693,9 +706,6 @@ class SyntaxTransformation(
     }
 
     private companion object {
-        // Above this size, skip tokenization: a single regex pass over hundreds of KB per
-        // keystroke would jank. The file still opens and edits fine, just uncolored.
-        const val MAX_HIGHLIGHT_LENGTH = 150_000
         val FUNCTION_REGEX = Regex("\\b[A-Za-z_]\\w*(?=\\s*\\()")
         val TYPE_REGEX = Regex("\\b[A-Z]\\w*\\b")
         val TRAILING_WS_REGEX = Regex("[ \\t]+$", RegexOption.MULTILINE)

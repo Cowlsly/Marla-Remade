@@ -110,6 +110,16 @@ class EditorInputTest {
     }
 
     @Test
+    fun editThatIsNotAPlainInsertionAtTheCaretIsReturnedUnchanged() {
+        // Same length delta as typing one character, but the surrounding text also changed, so
+        // smart input must not treat it as an insertion of "(" and auto-close it.
+        val old = TextFieldValue("foo", TextRange(3))
+        val new = TextFieldValue("f(oo", TextRange(4))
+        val result = apply(old, new)
+        assertEquals("f(oo", result.text)
+    }
+
+    @Test
     fun lineStartOffsetFindsLineStarts() {
         val text = "a\nbb\nccc"
         assertEquals(0, lineStartOffset(text, 1))

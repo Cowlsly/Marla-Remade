@@ -75,8 +75,13 @@ object TextEncoding {
         return if (crlf > 0 && crlf >= lf) LineEnding.CRLF else LineEnding.LF
     }
 
-    /** Collapses CRLF and lone CR to LF so the editor buffer is always `\n`-terminated. */
-    fun normalizeToLf(text: String): String = text.replace("\r\n", "\n").replace('\r', '\n')
+    /**
+     * Collapses CRLF and lone CR to LF so the editor buffer is always `\n`-terminated. Returns the
+     * input untouched when there is no CR at all, which is the common case: the two `replace` calls
+     * each copy the whole document, so on a large file they were the bulk of the open cost.
+     */
+    fun normalizeToLf(text: String): String =
+        if (text.indexOf('\r') < 0) text else text.replace("\r\n", "\n").replace('\r', '\n')
 
     private fun bomFor(charset: Charset): ByteArray = when (charset) {
         Charsets.UTF_8 -> UTF8_BOM

@@ -24,6 +24,18 @@ private fun matchingCloser(opener: Char): Char = when (opener) {
     else -> opener
 }
 
+/**
+ * True when [new] is [old] with exactly [length] characters inserted so that the insertion ends at
+ * [caret]. Compared in place: the equivalent `substring + concat + equals` allocated three copies
+ * of the whole buffer on every keystroke, which is what made typing in a multi-megabyte file stall.
+ */
+private fun isPlainInsertion(old: String, new: String, caret: Int, length: Int): Boolean {
+    val prefixLength = caret - length
+    if (prefixLength < 0 || new.length != old.length + length) return false
+    return new.regionMatches(0, old, 0, prefixLength) &&
+        new.regionMatches(caret, old, prefixLength, old.length - prefixLength)
+}
+
 fun applyEditorInput(
     old: TextFieldValue,
     new: TextFieldValue,
@@ -38,9 +50,7 @@ fun applyEditorInput(
     // Paste: a multi-character insertion containing a newline. Re-base its indentation onto the
     // caret line so pasted blocks line up with their new surroundings.
     if (diff > 1 && caret >= diff) {
-        val cleanInsertion =
-            old.text == new.text.substring(0, caret - diff) + new.text.substring(caret)
-        if (cleanInsertion) {
+        if (isPlainInsertion(old.text, new.text, caret, diff)) {
             val pasted = new.text.substring(caret - diff, caret)
             if (autoIndent && pasted.contains('\n')) {
                 return reindentPaste(old.text, caret - diff, pasted, indentUnit)
@@ -51,7 +61,7 @@ fun applyEditorInput(
 
     // Must be exactly one character longer, inserted so that removing it reproduces the old text.
     if (diff != 1 || caret < 1) return new
-    if (old.text != new.text.substring(0, caret - 1) + new.text.substring(caret)) return new
+    if (!isPlainInsertion(old.text, new.text, caret, 1)) return new
 
     val c = new.text[caret - 1]
     val pos = caret - 1 // index in old.text where the character was inserted

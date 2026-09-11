@@ -14,6 +14,7 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.produceState
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.res.stringResource
@@ -25,6 +26,7 @@ import androidx.compose.ui.window.Popup
 import androidx.compose.ui.window.PopupProperties
 import com.vayunmathur.code.R
 import com.vayunmathur.code.syntax.Language
+import com.vayunmathur.code.syntax.MAX_HIGHLIGHT_CHARS
 import com.vayunmathur.code.syntax.SyntaxColors
 import com.vayunmathur.code.syntax.TsColorSpan
 import com.vayunmathur.code.util.Completion
@@ -39,6 +41,8 @@ import com.vayunmathur.library.ui.MaterialTheme
 import com.vayunmathur.library.ui.OutlinedTextField
 import com.vayunmathur.library.ui.Text
 import com.vayunmathur.library.ui.TextButton
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 
 /**
  * Shared editor chrome used by both the classic [CodeEditor] and the experimental
@@ -208,7 +212,29 @@ fun SyntaxColors.tsColor(kind: TsKind): Color = when (kind) {
 /**
  * Native tree-sitter colour spans for [text] in [language] resolved against [colors], or null when
  * tree-sitter is unavailable / the language is unsupported — signalling the regex fallback. Blocking
- * (parses the whole file), so callers must cache it via `remember(text, language)`.
+ * (parses the whole file), so composables must go through [rememberTreeSitterSpans] rather than
+ * calling this directly.
  */
 fun treeSitterColorSpans(text: String, language: Language, colors: SyntaxColors): List<TsColorSpan>? =
     TreeSitterNative.spans(text, language)?.map { TsColorSpan(it.start, it.end, colors.tsColor(it.kind)) }
+
+/**
+ * [treeSitterColorSpans] parsed off the main thread.
+ *
+ * `remember` caches the result but still runs the parse during composition, so opening a large
+ * file blocked the main thread for the whole parse — and did it again on every keystroke, since
+ * the buffer text is a key. This starts at null (the per-line regex tokenizer takes over) and
+ * swaps the spans in when the parse finishes. Documents past [MAX_HIGHLIGHT_CHARS] are never
+ * parsed: applying that many spans on every text layout costs more than the colours are worth.
+ */
+@Composable
+internal fun rememberTreeSitterSpans(
+    text: String,
+    language: Language,
+    colors: SyntaxColors,
+): List<TsColorSpan>? = produceState<List<TsColorSpan>?>(null, text, language, colors) {
+    value = null
+    if (text.length <= MAX_HIGHLIGHT_CHARS) {
+        value = withContext(Dispatchers.Default) { treeSitterColorSpans(text, language, colors) }
+    }
+}.value

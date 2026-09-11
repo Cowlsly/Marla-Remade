@@ -4,6 +4,7 @@ import kotlin.test.Test
 import kotlin.test.assertContentEquals
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
+import kotlin.test.assertSame
 import kotlin.test.assertTrue
 
 /** Unit tests for the pure encoding / line-ending detection and round-tripping. */
@@ -30,6 +31,12 @@ class TextEncodingTest {
     @Test
     fun normalizeCollapsesCrlfAndLoneCr() {
         assertEquals("a\nb\nc", TextEncoding.normalizeToLf("a\r\nb\rc"))
+    }
+
+    @Test
+    fun normalizeReturnsTheSameStringWhenThereIsNothingToDo() {
+        val text = "a\nb\nc"
+        assertSame(text, TextEncoding.normalizeToLf(text))
     }
 
     @Test

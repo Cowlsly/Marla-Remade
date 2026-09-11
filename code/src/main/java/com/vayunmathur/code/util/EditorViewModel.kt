@@ -197,6 +197,7 @@ class EditorViewModel(application: Application) : AndroidViewModel(application),
     val completions = mutableStateListOf<Completion>()
     var showCompletions by mutableStateOf(false)
         private set
+    private var completionsJob: Job? = null
 
     // ---- Diagnostics ----
     val diagnostics = mutableStateListOf<Diagnostic>()
@@ -704,8 +705,14 @@ class EditorViewModel(application: Application) : AndroidViewModel(application),
 
     override fun requestCompletions() = updateCompletions()
 
-    /** Recomputes the completion list from the caret's word prefix and the open buffers. */
+    /**
+     * Recomputes the completion list from the caret's word prefix and the open buffers.
+     *
+     * Debounced and computed off the main thread: scanning every open buffer for identifiers is
+     * O(all open documents), so doing it inline on each keystroke stalled typing in a large file.
+     */
     private fun updateCompletions() {
+        completionsJob?.cancel()
         val tab = currentTab
         if (tab == null || !tab.value.selection.collapsed) {
             dismissCompletions()
@@ -716,11 +723,18 @@ class EditorViewModel(application: Application) : AndroidViewModel(application),
             dismissCompletions()
             return
         }
-        val buffers = tabs.map { it.value.text }
-        val list = computeCompletions(prefix, tab.language, buffers, MAX_COMPLETIONS, userSnippets.toList())
-        completions.clear()
-        completions.addAll(list)
-        showCompletions = list.isNotEmpty()
+        val buffers = tabs.map { it.value.text }.filter { it.length <= MAX_COMPLETION_BUFFER_CHARS }
+        val language = tab.language
+        val snippets = userSnippets.toList()
+        completionsJob = viewModelScope.launch {
+            delay(COMPLETIONS_DELAY_MS)
+            val list = withContext(Dispatchers.Default) {
+                computeCompletions(prefix, language, buffers, MAX_COMPLETIONS, snippets)
+            }
+            completions.clear()
+            completions.addAll(list)
+            showCompletions = list.isNotEmpty()
+        }
     }
 
     override fun acceptCompletion(item: Completion) {
@@ -739,6 +753,7 @@ class EditorViewModel(application: Application) : AndroidViewModel(application),
     }
 
     override fun dismissCompletions() {
+        completionsJob?.cancel()
         if (completions.isNotEmpty()) completions.clear()
         showCompletions = false
     }
@@ -1432,8 +1447,12 @@ class EditorViewModel(application: Application) : AndroidViewModel(application),
     private companion object {
         const val AUTO_SAVE_DELAY_MS = 1500L
         const val DIAGNOSTICS_DELAY_MS = 400L
+        const val COMPLETIONS_DELAY_MS = 150L
         const val MIN_COMPLETION_PREFIX = 1
         const val MAX_COMPLETIONS = 50
+        // Buffers larger than this are left out of the identifier scan. A multi-megabyte file has
+        // no useful completions in it anyway, and scanning it on every keystroke burns a core.
+        const val MAX_COMPLETION_BUFFER_CHARS = 1_000_000
         const val GIT_LOG_LIMIT = 30
         const val TERMINAL_SCROLLBACK = 2000
         const val MAX_SEARCH_RESULTS = 500
