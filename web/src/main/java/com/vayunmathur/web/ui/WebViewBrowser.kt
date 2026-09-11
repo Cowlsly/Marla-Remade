@@ -224,6 +224,10 @@ fun WebViewBrowser(
                     override fun shouldOverrideUrlLoading(view: WebView, request: WebResourceRequest): Boolean {
                         val scheme = request.url.scheme ?: return false
                         if (scheme !in setOf("http", "https", "about", "data", "blob", "javascript")) {
+                            // Swallowed rather than passed on when the tab is only being
+                            // restored: the page still renders, it just doesn't throw the
+                            // user back into the app they last left.
+                            if (!viewModel.allowExternalRedirect(tabId, request.hasGesture())) return true
                             return com.vayunmathur.web.platform.openExternalUri(
                                 ctx,
                                 request.url.toString(),

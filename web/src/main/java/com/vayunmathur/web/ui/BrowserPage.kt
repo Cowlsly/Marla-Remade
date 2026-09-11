@@ -391,7 +391,10 @@ fun BrowserPage(
                                 text = { Text(stringResource(R.string.reload)) },
                                 onClick = {
                                     showMenu = false
-                                    activeTab?.let { webViewPool[it.id]?.reload() }
+                                    activeTab?.let {
+                                        viewModel.markFreshNavigation(it.id)
+                                        webViewPool[it.id]?.reload()
+                                    }
                                 }
                             )
                         }
@@ -449,7 +452,12 @@ fun BrowserPage(
                         QuickAccess(
                             bookmarks = bookmarks.take(12),
                             history = history.take(8),
-                            onOpenUrl = { url -> activeTab?.let { viewModel.onTabUrlChange(it.id, url) } },
+                            onOpenUrl = { url ->
+                                activeTab?.let {
+                                    viewModel.markFreshNavigation(it.id)
+                                    viewModel.onTabUrlChange(it.id, url)
+                                }
+                            },
                             faviconFor = viewModel::faviconFor,
                             modifier = Modifier.fillMaxSize()
                         )
@@ -514,6 +522,7 @@ fun BrowserPage(
                             // only apply to documents that start loading after the call.
                             (webView.webViewClient as? ShieldsWebViewClient)
                                 ?.installFarbling(webView, viewModel.farblingConfig())
+                            viewModel.markFreshNavigation(tab.id)
                             webView.reload()
                         }
                     }

@@ -185,6 +185,14 @@ class WebViewModel(
     private val tabCanGoForward = mutableMapOf<String, Boolean>()
     private val tabCurrentUrl = mutableMapOf<String, String>()
 
+    /**
+     * Tabs whose content came back from the saved session and that nobody has navigated since.
+     *
+     * Only read and written from the main thread (the restore continuation and the WebView
+     * client callbacks), so a plain set is enough.
+     */
+    private val restoredTabIds = mutableSetOf<String>()
+
     // PWA / installed site detection per tab
     val pwaInfos = mutableStateMapOf<String, PwaInfo>()
 
@@ -293,6 +301,8 @@ class WebViewModel(
                                 activeTabId = activeId ?: tabs.firstOrNull()?.id
                             }
                         }
+                        decodedSaved?.forEach { restoredTabIds.add(it.id) }
+
                         activeTab?.let {
                             omniboxText = if (it.url.isBlank() || it.url == "about:blank") "" else it.url
                             searchDraft = omniboxText
@@ -533,8 +543,34 @@ class WebViewModel(
         val active = activeTab ?: return
         val dest = BrowserUtils.toNavigationUrl(input, searchEngine)
         noteNavigation(dest)
+        markFreshNavigation(active.id)
         onTabUrlChange(active.id, dest)
         omniboxFocused = false
+    }
+
+    // ---- External app redirects ----
+
+    /**
+     * Records that the user just pointed [tabId] somewhere themselves — typed an address,
+     * picked a bookmark, or reloaded — so the page it lands on is a fresh navigation again.
+     */
+    fun markFreshNavigation(tabId: String) {
+        restoredTabIds.remove(tabId)
+    }
+
+    /**
+     * Whether a navigation out of [tabId] into another app should be honoured.
+     *
+     * A restored tab is one the user never asked for on this launch, so a page that bounces
+     * into another app would drag them straight back out of the browser they just opened. The
+     * redirect is held back until they act in that tab; [userGesture] (a tap on the page) counts,
+     * as does any fresh navigation.
+     */
+    fun allowExternalRedirect(tabId: String, userGesture: Boolean): Boolean {
+        if (tabId !in restoredTabIds) return true
+        if (!userGesture) return false
+        restoredTabIds.remove(tabId)
+        return true
     }
 
     // ---- Local network permission ----
