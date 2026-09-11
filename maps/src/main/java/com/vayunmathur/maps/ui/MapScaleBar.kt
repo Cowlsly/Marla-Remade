@@ -9,7 +9,6 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.unit.dp
 import com.vayunmathur.library.ui.MaterialTheme
 import com.vayunmathur.library.ui.Surface
@@ -33,16 +32,12 @@ import kotlin.math.roundToInt
  */
 @Composable
 fun MapScaleBar(zoom: Double, latitude: Double, modifier: Modifier = Modifier) {
-    val density = LocalDensity.current
-    val maxBarPx = with(density) { 96.dp.toPx() }
-
-    // Ground resolution (meters per screen pixel) at this latitude and zoom.
-    val metersPerPixel = 156543.03392 * cos(latitude * PI / 180.0) / 2.0.pow(zoom)
-    if (!metersPerPixel.isFinite() || metersPerPixel <= 0.0) return
+    val metersPerDp = metersPerDp(zoom, latitude)
+    if (!metersPerDp.isFinite() || metersPerDp <= 0.0) return
 
     val imperial = isImperialUnits()
-    val (barMeters, label) = scaleBar(metersPerPixel * maxBarPx, imperial)
-    val barWidth = with(density) { (barMeters / metersPerPixel).toFloat().toDp() }
+    val (barMeters, label) = scaleBar(metersPerDp * MAX_BAR_DP, imperial)
+    val barWidth = (barMeters / metersPerDp).toFloat().dp
 
     Surface(
         modifier = modifier,
@@ -66,6 +61,26 @@ fun MapScaleBar(zoom: Double, latitude: Double, modifier: Modifier = Modifier) {
     }
 }
 
+/** Longest the bar is allowed to get, in dp. */
+internal const val MAX_BAR_DP = 96.0
+
+private const val EQUATOR_METERS = 40075016.686
+
+/** Logical pixels per tile. Must match `Mercator.TILE_SIZE` / the Rust renderer's `TILE_SIZE`. */
+private const val TILE_SIZE_DP = 512.0
+
+/**
+ * Web-Mercator ground resolution in metres per logical pixel (dp).
+ *
+ * Everything downstream of the camera — `Mercator`, the Rust renderer's `TILE_SIZE`, the `Dp`
+ * this bar is laid out in — is a 512-dp tile grid, so this must divide by 512 and must stay in
+ * dp. The widely quoted 156543.03392 is the same figure for a 256-px tile, which is a factor of
+ * two out here, and pairing any of it with a device pixel length brings in a second factor of
+ * the screen density.
+ */
+internal fun metersPerDp(zoom: Double, latitude: Double): Double =
+    EQUATOR_METERS * cos(latitude * PI / 180.0) / (TILE_SIZE_DP * 2.0.pow(zoom))
+
 /** Largest value of the form 1/2/5 × 10ⁿ that is ≤ [maxMeters]. */
 private fun niceRoundDistance(maxMeters: Double): Double {
     if (maxMeters <= 0.0) return 1.0
@@ -83,7 +98,7 @@ private fun niceRoundDistance(maxMeters: Double): Double {
  * it in the regional unit ([imperial] = ft/mi, else m/km). Returns the distance
  * in METERS (for bar width) paired with the display label.
  */
-private fun scaleBar(maxMeters: Double, imperial: Boolean): Pair<Double, String> {
+internal fun scaleBar(maxMeters: Double, imperial: Boolean): Pair<Double, String> {
     if (imperial) {
         val maxMiles = maxMeters / 1609.34
         return if (maxMiles < 1.0) {

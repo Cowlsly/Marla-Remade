@@ -683,12 +683,49 @@ pub fn background(variant: Variant) -> u32 {
     }
 }
 
+/// Whether the lane-level road rendering is built and drawn at all.
+///
+/// The one switch for the whole feature set: the `roads-carriageway` asphalt surface and its
+/// painted markings, the `junction-connector` surface that continues it through an intersection,
+/// the carriageway taper, and the road-surface turn arrows. Off for release; the code stays.
+///
+/// It works by dropping the two [`Layer::carriageway`] layers from [`layers`], which is the one
+/// point every part of the feature already funnels through. No carriageway layer means
+/// `tile::geometry`'s carriageway branch is never taken (so no ribbon mesh, no taper), and
+/// [`road_carriageway_layer`] answers `None`, which is what
+/// [`crate::vulkan::renderer::Renderer::record_arrows`] gates the turn arrows on. Dropping the
+/// layers rather than clearing the flag matters: a `carriageway` layer with the flag off would
+/// fall through to the ordinary stroke path and draw a 40px grey band over every road at z20.
+///
+/// The plain road line layers (`roads-major` and friends) are untouched and already draw
+/// *underneath* the carriageway pass, so removing that pass uncovers them rather than leaving a
+/// hole — the map returns to its pre-carriageway appearance.
+///
+/// Not a [`Toggle`]: those are a host-app opt-in the user sees. This is a release kill switch,
+/// so it is a `const` and flipping it is a code change.
+///
+/// The tests that pin carriageway behaviour turn it on by reading
+/// [`layers_with_lane_rendering`] instead, so they keep asserting against the real style rather
+/// than being weakened to match the switch.
+pub const LANE_RENDERING: bool = false;
+
 /// Every layer the renderer draws, in draw order.
 ///
 /// A borrow rather than a fresh list: the flat style is a constant table that happens to need a
 /// parser, so it is parsed once for the process and handed out.
+///
+/// Carries no carriageway layer while [`LANE_RENDERING`] is off.
 pub fn layers() -> &'static [Layer] {
     &paint::style().layers
+}
+
+/// Every layer the style declares, carriageways included, whatever [`LANE_RENDERING`] says.
+///
+/// For the tests that pin carriageway behaviour: they assert against the feature as authored, so
+/// they have to name it explicitly rather than read a layer set the switch may have emptied.
+#[cfg(test)]
+pub fn layers_with_lane_rendering() -> &'static [Layer] {
+    &paint::style_with_lane_rendering().layers
 }
 
 /// The road carriageway layer, whose zoom window gates the per-lane road detail and whose width
@@ -848,10 +885,13 @@ mod tests {
     /// fixture would have passed.
     #[test]
     fn turn_arrows_are_gated_by_the_road_lane_layer() {
-        let gate = road_carriageway_layer(layers()).expect("the road carriageway layer");
+        // With lane rendering forced on: the gate is what the switch removes, so asserting it
+        // against the shipped set would only re-state that the switch is off.
+        let all = layers_with_lane_rendering();
+        let gate = road_carriageway_layer(all).expect("the road carriageway layer");
         assert_eq!(gate.id, "roads-carriageway", "not `transit-rail`, which has a spread");
 
-        let rail = find("transit-rail");
+        let rail = all.iter().find(|l| l.id == "transit-rail").expect("transit-rail");
         assert!(rail.lane_fan(), "the rail corridor fan is what made the naive predicate wrong");
         assert!(!rail.carriageway, "and a corridor fan is not a carriageway");
         assert!(rail.min_zoom < gate.min_zoom, "and it is the earlier of the two");
@@ -872,7 +912,8 @@ mod tests {
     /// order irrelevant, and a `find` cannot tell one match from the first of several.
     #[test]
     fn the_arrow_gate_does_not_depend_on_the_declaration_order() {
-        let matches: Vec<&str> = layers()
+        let all = layers_with_lane_rendering();
+        let matches: Vec<&str> = all
             .iter()
             .filter(|l| l.carriageway && l.source_layer_id == dict::LAYER_ROADS)
             .map(|l| l.id.as_str())
@@ -880,7 +921,8 @@ mod tests {
         assert_eq!(matches, vec!["roads-carriageway"], "the gate predicate must name one layer");
 
         // The layer that would answer instead, and the two halves of why it does not.
-        let connector = find("junction-connector");
+        let connector =
+            all.iter().find(|l| l.id == "junction-connector").expect("junction-connector");
         assert!(connector.carriageway, "a connector draws as a road surface as well");
         assert_ne!(
             connector.source_layer_id,
@@ -889,8 +931,43 @@ mod tests {
         );
     }
 
-    /// A kind the authored `case` gives its own colour has its own layer, and a kind that shares
-    /// a colour with another sits in the same layer rather than adding a draw.
+    /// [`LANE_RENDERING`] decides whether the shipped layer set carries the carriageways at all,
+    /// and the roads it uncovers are still there.
+    ///
+    /// The second half is the point. The carriageway pass draws *over* the flat layer loop, so
+    /// switching it off has to leave the pre-carriageway road lines drawing rather than a hole —
+    /// and `roads-carriageway` had to be dropped rather than have its flag cleared, because a
+    /// `carriageway: false` layer of that width would fall through to the stroke path and paint a
+    /// band over every road it names.
+    #[test]
+    fn the_lane_rendering_switch_removes_the_carriageways_and_nothing_else() {
+        let shipped: Vec<&str> =
+            layers().iter().filter(|l| l.carriageway).map(|l| l.id.as_str()).collect();
+        if LANE_RENDERING {
+            assert_eq!(shipped, vec!["roads-carriageway", "junction-connector"]);
+            assert!(road_carriageway_layer(layers()).is_some(), "and the turn arrows are gated on");
+        } else {
+            assert!(shipped.is_empty(), "no surface layer, so no asphalt, markings or taper");
+            assert!(road_carriageway_layer(layers()).is_none(), "which is the turn-arrow gate");
+        }
+
+        // Either way the plain road lines are untouched, and they draw to the top of the range.
+        for id in ["roads-major", "roads-highway", "roads-minor", "roads-link"] {
+            let road = find(id);
+            assert!(!road.carriageway, "{id} is a stroke and stays one");
+            assert!(road.draws_at(16) && road.draws_at(22), "{id} covers the carriageway's window");
+        }
+
+        // And the switch removes exactly the two, leaving every other layer in its place.
+        let dropped: Vec<&str> = layers_with_lane_rendering()
+            .iter()
+            .filter(|l| !layers().iter().any(|kept| kept.id == l.id))
+            .map(|l| l.id.as_str())
+            .collect();
+        let expected: Vec<&str> =
+            if LANE_RENDERING { Vec::new() } else { vec!["roads-carriageway", "junction-connector"] };
+        assert_eq!(dropped, expected);
+    }
     #[test]
     fn a_data_driven_fill_is_one_layer_per_colour() {
         let park: Vec<&Layer> =

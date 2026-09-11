@@ -463,6 +463,59 @@ fn polyline_length(pts: &[(f32, f32)]) -> f32 {
     sum
 }
 
+/// The sharpest turn a run may be laid across, at a single vertex.
+///
+/// MapLibre's `symbol-max-angle` default. A corner sharper than this cannot carry legible
+/// glyphs, and — more importantly here — it is what a *discontinuity* looks like: a line
+/// feature's parts are joined end to end before they reach this module, so a multi-part road
+/// arrives as one polyline with a phantom connector segment bridging the gap. That connector
+/// inflates the arc length (so an over-long name passes the fit test) and points nowhere near
+/// the road (so the glyphs that land on it fly off at their own angle). Both of the reported
+/// symptoms — a name that stops mid-word, and letters kinked away from the line — are that.
+const MAX_TURN_RAD: f32 = std::f32::consts::FRAC_PI_4;
+
+/// The longest stretch of `pts` containing no turn sharper than [`MAX_TURN_RAD`].
+///
+/// A label is laid along this rather than the whole polyline, which is the cheap version of
+/// "put the run where it fits": no placement search, just the single best-behaved stretch.
+fn longest_smooth_run(pts: &[(f32, f32)]) -> &[(f32, f32)] {
+    if pts.len() < 3 {
+        return pts;
+    }
+    let cos_max = MAX_TURN_RAD.cos();
+    let direction = |a: (f32, f32), b: (f32, f32)| {
+        let (dx, dy) = (b.0 - a.0, b.1 - a.1);
+        let len = (dx * dx + dy * dy).sqrt();
+        (len > 0.0).then_some((dx / len, dy / len))
+    };
+    let (mut best_start, mut best_end) = (0usize, pts.len());
+    let mut best_len = -1.0f32;
+    let mut start = 0usize;
+    let mut previous: Option<(f32, f32)> = None;
+    for i in 0..pts.len() - 1 {
+        // A repeated vertex has no direction of its own; it bridges its neighbours rather than
+        // ending the run, exactly as `sample_polyline` skips it.
+        let Some(d) = direction(pts[i], pts[i + 1]) else { continue };
+        if let Some(p) = previous {
+            if p.0 * d.0 + p.1 * d.1 < cos_max {
+                let len = polyline_length(&pts[start..=i]);
+                if len > best_len {
+                    best_len = len;
+                    (best_start, best_end) = (start, i + 1);
+                }
+                // The corner vertex belongs to both runs: it is the end of one and the start
+                // of the next, so no arc length is lost between them.
+                start = i;
+            }
+        }
+        previous = Some(d);
+    }
+    if polyline_length(&pts[start..]) > best_len {
+        (best_start, best_end) = (start, pts.len());
+    }
+    &pts[best_start..best_end]
+}
+
 /// The point and unit tangent at arc length `d` along `pts`, clamped to the ends. Degenerate
 /// (zero-length) segments are skipped so a repeated vertex cannot produce a NaN tangent.
 fn sample_polyline(pts: &[(f32, f32)], d: f32) -> ((f32, f32), (f32, f32)) {
@@ -501,7 +554,12 @@ fn sample_polyline(pts: &[(f32, f32)], d: f32) -> ((f32, f32), (f32, f32)) {
 /// measured in (`text_px / UP_EM / tile_span_px`), so the along-line spacing tracks the frame's
 /// text size exactly as [`emit`]'s does. Returns one [`CurvedGlyph`] per glyph, or an empty vec
 /// when the run is longer than the centreline — it does not fit and the label should not be
-/// placed at all, which is what stops a long name spilling off a short road.
+/// placed at all, which is what stops a long name spilling off a short road. A half-drawn street
+/// name is worse than none: the reader cannot tell it is incomplete.
+///
+/// The run is measured and laid along the [longest smooth stretch](longest_smooth_run) of the
+/// centreline, not the whole of it, so a corner or a join between two parts of the feature
+/// neither lends its length to the fit test nor carries any glyph.
 pub fn layout_along_line(
     line: &ShapedLine,
     centreline: &[(f32, f32)],
@@ -510,7 +568,11 @@ pub fn layout_along_line(
     if centreline.len() < 2 || line.glyphs.is_empty() || px_per_font_unit <= 0.0 {
         return Vec::new();
     }
-    let total_len = polyline_length(centreline);
+    let smooth = longest_smooth_run(centreline);
+    if smooth.len() < 2 {
+        return Vec::new();
+    }
+    let total_len = polyline_length(smooth);
     let run_len = line.advance * px_per_font_unit;
     if run_len <= 0.0 || run_len > total_len {
         return Vec::new();
@@ -518,19 +580,34 @@ pub fn layout_along_line(
     // Read the line in whichever direction keeps it upright: a polyline whose net heading points
     // leftwards would otherwise draw every glyph upside down. Reverse the *walk*, not the glyph
     // order, so the run still spells left-to-right on screen.
-    let net_dx = centreline[centreline.len() - 1].0 - centreline[0].0;
+    let net_dx = smooth[smooth.len() - 1].0 - smooth[0].0;
     let reversed: Vec<(f32, f32)>;
     let path: &[(f32, f32)] = if net_dx < 0.0 {
-        reversed = centreline.iter().rev().copied().collect();
+        reversed = smooth.iter().rev().copied().collect();
         &reversed
     } else {
-        centreline
+        smooth
     };
     let start = (total_len - run_len) * 0.5;
+    // One em either side: the window each glyph's heading is averaged over. Wide enough that a
+    // vertex is inside it for a few consecutive glyphs (so a bend is shared between them rather
+    // than taken in one step) and that the direction noise of extent-quantised coordinates
+    // averages out, narrow enough that the run still tracks a real curve.
+    let half_window = UP_EM as f32 * px_per_font_unit;
     let mut out = Vec::with_capacity(line.glyphs.len());
     for g in &line.glyphs {
         let d = start + g.pen_x * px_per_font_unit;
-        let (pen, tangent) = sample_polyline(path, d);
+        let (pen, segment_tangent) = sample_polyline(path, d);
+        // The chord across that window, not the tangent of the segment the pen happens to sit
+        // on. The segment tangent is a step function of `d`: every glyph on one segment shares
+        // an angle, the angle jumps at each vertex, and on a finely-digitised road it jitters
+        // with the coordinate quantisation — which is the faceted, individually-rotated look.
+        // A chord between two points of a continuous polyline turns continuously.
+        let (behind, _) = sample_polyline(path, d - half_window);
+        let (ahead, _) = sample_polyline(path, d + half_window);
+        let (dx, dy) = (ahead.0 - behind.0, ahead.1 - behind.1);
+        let chord = (dx * dx + dy * dy).sqrt();
+        let tangent = if chord > 1e-7 { (dx / chord, dy / chord) } else { segment_tangent };
         out.push(CurvedGlyph { glyph: *g, pen, tangent });
     }
     out
@@ -1265,5 +1342,105 @@ mod tests {
         for chunk in v.chunks(FLOATS_PER_VERTEX) {
             assert!((0.0..=1.0).contains(&chunk[2]) && (0.0..=1.0).contains(&chunk[3]));
         }
+    }
+
+    /// A synthetic run of `n` identical square glyphs, each one font-unit-em wide. Lets the
+    /// along-line layout be tested without staged fonts, since it never touches the atlas.
+    fn block_run(n: usize) -> ShapedLine {
+        let em = UP_EM as f32;
+        let glyphs: Vec<ShapedGlyph> = (0..n)
+            .map(|i| ShapedGlyph {
+                pen_x: i as f32 * em,
+                ch: 'x',
+                advance: em,
+                bearing_x: 0.0,
+                top: em,
+                w: em,
+                h: em,
+            })
+            .collect();
+        ShapedLine { glyphs, advance: n as f32 * em }
+    }
+
+    #[test]
+    fn a_join_between_two_parts_lends_no_length_to_the_fit_test() {
+        // The reported truncation: a feature's parts are concatenated into one polyline, so a
+        // multi-part road carries a phantom connector between them. Its length used to count
+        // toward the fit test, letting a name that fits on neither part be accepted and then
+        // run off the end of the first one. The name must now be rejected outright.
+        let run = block_run(10); // ten ems long
+        let ppfu = 1.0 / UP_EM as f32; // one em == one tile-local unit, so run_len == 10.0
+        // Two collinear-but-disjoint parts of 6, bridged by a connector that doubles back.
+        let two_parts = [(0.0f32, 0.0), (6.0, 0.0), (0.0, 4.0), (6.0, 4.0)];
+        assert!(
+            polyline_length(&two_parts) > 10.0,
+            "the concatenated length alone would pass the fit test"
+        );
+        assert!(
+            layout_along_line(&run, &two_parts, ppfu).is_empty(),
+            "a run that fits no single part of the feature must not be drawn at all"
+        );
+    }
+
+    #[test]
+    fn a_run_is_laid_on_the_longer_part_not_across_the_join() {
+        // When one part *is* long enough, the label goes there — the cheap version of "put it
+        // where it fits" — and no glyph lands on the connector between the parts.
+        let run = block_run(4);
+        let ppfu = 1.0 / UP_EM as f32;
+        // A short stub, then a sharp turn, then the real road: y == 4 for its whole length.
+        let path = [(0.0f32, 0.0), (2.0, 0.0), (0.0, 4.0), (9.0, 4.0)];
+        let placed = layout_along_line(&run, &path, ppfu);
+        assert_eq!(placed.len(), 4, "the run fits the longer part");
+        for cg in &placed {
+            assert!((cg.pen.1 - 4.0).abs() < 1e-4, "glyph left the long part at y {}", cg.pen.1);
+            assert!((cg.tangent.0 - 1.0).abs() < 1e-4, "and faces along it");
+        }
+    }
+
+    #[test]
+    fn a_single_sharp_corner_does_not_carry_glyphs() {
+        // A right-angle bend is the degenerate case of the same rule: the run takes one arm.
+        let run = block_run(3);
+        let ppfu = 1.0 / UP_EM as f32;
+        let elbow = [(0.0f32, 0.0), (4.0, 0.0), (4.0, 9.0)];
+        let placed = layout_along_line(&run, &elbow, ppfu);
+        assert_eq!(placed.len(), 3);
+        let spread = placed
+            .iter()
+            .map(|c| heading(c.tangent))
+            .fold(f32::NEG_INFINITY, f32::max)
+            - placed.iter().map(|c| heading(c.tangent)).fold(f32::INFINITY, f32::min);
+        assert!(spread < 1e-3, "no glyph straddles the corner, heading spread {spread}");
+    }
+
+    #[test]
+    fn a_gentle_bend_turns_glyph_by_glyph_instead_of_in_steps() {
+        // The kinked-rotation symptom. Two long segments meeting at a shallow angle used to
+        // give every glyph on a segment one identical heading and then jump, so the run read as
+        // separately-rotated letters. Sampling the chord each glyph spans turns it continuously:
+        // consecutive headings differ, and none differs by the whole corner at once.
+        let run = block_run(8);
+        let ppfu = 1.0 / UP_EM as f32;
+        // A 30-degree bend — inside the max turn, so it stays one run.
+        let corner = 30.0f32.to_radians();
+        let bend = [(0.0f32, 0.0), (6.0, 0.0), (6.0 + 6.0 * corner.cos(), 6.0 * corner.sin())];
+        let placed = layout_along_line(&run, &bend, ppfu);
+        assert_eq!(placed.len(), 8);
+        let headings: Vec<f32> = placed.iter().map(|c| heading(c.tangent)).collect();
+        let steps: Vec<f32> =
+            headings.windows(2).map(|w| (w[1] - w[0]).abs()).collect();
+        assert!(
+            headings.last().unwrap() - headings[0] > 1e-3,
+            "the run still follows the bend overall"
+        );
+        assert!(
+            steps.iter().all(|s| *s < corner * 0.75),
+            "no single glyph absorbs the whole corner: steps {steps:?}"
+        );
+        assert!(
+            steps.iter().filter(|s| **s > 1e-4).count() >= 2,
+            "the turn is shared across glyphs rather than taken in one step: {steps:?}"
+        );
     }
 }

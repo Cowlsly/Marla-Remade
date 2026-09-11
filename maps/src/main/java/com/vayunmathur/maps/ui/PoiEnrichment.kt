@@ -63,13 +63,6 @@ fun GooglePoiEnrichment(info: GooglePoiInfo, section: PoiSection, showHours: Boo
             PoiSection.PHOTOS -> PhotosSection(info.photoUrls)
             PoiSection.REVIEWS -> ReviewsSection(info)
         }
-
-        // Trademark attribution ("Google Maps" is non-translatable, see strings.xml).
-        Text(
-            stringResource(R.string.poi_google_attribution),
-            style = MaterialTheme.typography.labelSmall,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-        )
     }
 }
 

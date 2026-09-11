@@ -369,13 +369,22 @@ pub fn build_toggled(
     let mut building_vertices: Vec<f32> = Vec::new();
     let mut building_indices: Vec<u32> = Vec::new();
     let ground_width_m = tile_ground_width_m(z, y);
+    let deepest = z.saturating_add(ANCESTOR_DEPTH);
     // Every point in this tile where the carriageway changes width. Scanned once, tile-wide,
     // because the step it removes is *between* two features — `coalesce`'s merge key includes
     // the lane count, so a road whose count changes arrives as two — and no per-feature pass
     // can see a pair.
-    let transitions = taper::Nodes::scan(tile);
+    //
+    // Only when a carriageway will actually be built from it: with `style::LANE_RENDERING` off
+    // the style carries no carriageway layer at all, and outside its zoom window none draws, so
+    // otherwise this is a walk over every road feature in the tile for a result nothing reads.
+    // An empty scan tapers nothing, so getting this condition wrong costs a step, not a blank map.
+    // Written as the layer loop's own zoom test rather than a helper, so the two cannot drift.
+    let carriageway_here =
+        layers.iter().any(|l| l.carriageway && l.min_zoom <= deepest && l.max_zoom >= z);
+    let transitions =
+        if carriageway_here { taper::Nodes::scan(tile) } else { taper::Nodes::default() };
     let taper_run = taper::taper_run(ground_width_m);
-    let deepest = z.saturating_add(ANCESTOR_DEPTH);
     let extent = tile.extent as u32;
 
     for (index, layer) in layers.iter().enumerate() {
@@ -1347,8 +1356,12 @@ mod tests {
     }
 
     /// The `roads-carriageway` layer as a one-layer slice, so a test states its own layer set.
+    ///
+    /// Read with lane rendering forced on: [`style::LANE_RENDERING`] is off for release, so the
+    /// shipped layer set carries no carriageway at all and the tests below would have nothing to
+    /// assert against.
     fn carriageway_only() -> &'static [Layer] {
-        let all = style::layers();
+        let all = style::layers_with_lane_rendering();
         let at = all.iter().position(|l| l.carriageway).expect("the carriageway layer");
         all.get(at..=at).expect("a one-layer slice")
     }
@@ -1697,7 +1710,7 @@ mod tests {
 
     /// The `junction-connector` layer as a one-layer slice, matching [`carriageway_only`].
     fn connector_only() -> &'static [Layer] {
-        let all = style::layers();
+        let all = style::layers_with_lane_rendering();
         let at = all.iter().position(|l| l.id == "junction-connector").expect("the connector layer");
         all.get(at..=at).expect("a one-layer slice")
     }
@@ -1743,7 +1756,7 @@ mod tests {
     /// they meet the kerb.
     #[test]
     fn connectors_and_roads_are_separate_draws_with_the_connector_over_the_road() {
-        let layers = style::layers();
+        let layers = style::layers_with_lane_rendering();
         let roads = layers.iter().position(|l| l.id == "roads-carriageway").expect("roads");
         let connectors =
             layers.iter().position(|l| l.id == "junction-connector").expect("connectors");
@@ -1771,7 +1784,7 @@ mod tests {
     /// would actually reach a screen.
     #[test]
     fn a_tile_with_no_junction_layer_is_untouched_by_the_connector_layer() {
-        let layers = style::layers();
+        let layers = style::layers_with_lane_rendering();
         let connectors =
             layers.iter().position(|l| l.id == "junction-connector").expect("connectors");
 

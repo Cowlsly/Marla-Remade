@@ -523,6 +523,21 @@ fn parse_hex(source: &str) -> Option<u32> {
 /// blank map with no diagnostic — is strictly worse than a crash that names the line.
 pub fn style() -> &'static Style {
     static STYLE: OnceLock<Style> = OnceLock::new();
+    STYLE.get_or_init(|| {
+        let mut style = parse(FLAT).unwrap_or_else(|e| panic!("style/basemap.flat.json: {e}"));
+        if !super::LANE_RENDERING {
+            style.layers.retain(|layer| !layer.carriageway);
+        }
+        style
+    })
+}
+
+/// The style as authored, carriageways included, whatever [`super::LANE_RENDERING`] says.
+///
+/// Behind [`super::layers_with_lane_rendering`]; see that for why the tests need it.
+#[cfg(test)]
+pub fn style_with_lane_rendering() -> &'static Style {
+    static STYLE: OnceLock<Style> = OnceLock::new();
     STYLE.get_or_init(|| parse(FLAT).unwrap_or_else(|e| panic!("style/basemap.flat.json: {e}")))
 }
 
@@ -543,6 +558,17 @@ mod tests {
 
     fn find(id: &str) -> &'static Layer {
         layers().iter().find(|layer| layer.id == id).unwrap_or_else(|| panic!("{id}"))
+    }
+
+    /// A layer from the set with lane rendering forced on.
+    ///
+    /// [`crate::style::LANE_RENDERING`] is off for release, so the carriageway layers are absent
+    /// from [`layers`] and the tests that pin them have to name the authored set explicitly.
+    fn find_lane(id: &str) -> &'static Layer {
+        crate::style::layers_with_lane_rendering()
+            .iter()
+            .find(|layer| layer.id == id)
+            .unwrap_or_else(|| panic!("{id}"))
     }
 
     // --- the loader --------------------------------------------------------
@@ -1610,14 +1636,15 @@ mod tests {
     /// so a two-lane street and an eight-lane motorway come off the same ramp at their true widths.
     #[test]
     fn the_carriageway_is_gated_and_sized_by_the_lane() {
-        let layer = find("roads-carriageway");
+        let all = crate::style::layers_with_lane_rendering();
+        let layer = find_lane("roads-carriageway");
         assert!(layer.carriageway, "roads-carriageway must draw as a surface");
         // Two layers draw a surface now. `road_carriageway_layer` no longer picks between them by
         // declaration order — it names the roads source — so this list is pinning *draw order*,
         // not the gate: the connector has to come second, or the road surface paints over the
         // connector at the mouth of the junction and clips its edge lines short of the kerb.
         assert_eq!(
-            layers().iter().filter(|l| l.carriageway).map(|l| l.id.as_str()).collect::<Vec<_>>(),
+            all.iter().filter(|l| l.carriageway).map(|l| l.id.as_str()).collect::<Vec<_>>(),
             vec!["roads-carriageway", "junction-connector"],
             "the layers drawn as road surfaces, in draw order",
         );
@@ -1625,7 +1652,7 @@ mod tests {
         // connector is put first, which is what `turn_arrows_are_gated_by_the_road_lane_layer`
         // relies on and what the flag alone could not promise.
         assert_eq!(
-            super::super::road_carriageway_layer(layers()).map(|l| l.id.as_str()),
+            super::super::road_carriageway_layer(all).map(|l| l.id.as_str()),
             Some("roads-carriageway"),
         );
         assert_eq!(layer.min_zoom, 16, "the dense lane detail is gated to high zoom");
@@ -1665,7 +1692,8 @@ mod tests {
     /// width steps in or out at the kerb. Cheaper to pin than to notice on a screenshot.
     #[test]
     fn a_connector_matches_the_carriageway_it_continues() {
-        let (road, connector) = (find("roads-carriageway"), find("junction-connector"));
+        let (road, connector) =
+            (find_lane("roads-carriageway"), find_lane("junction-connector"));
         assert_eq!(connector.light, road.light, "a connector is the same asphalt");
         assert_eq!(connector.dark, road.dark);
         for zoom in [16.0, 17.5, 18.0, 20.0, 22.0] {
