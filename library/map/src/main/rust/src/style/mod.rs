@@ -972,6 +972,9 @@ mod tests {
             if LANE_RENDERING { Vec::new() } else { vec!["roads-carriageway", "junction-connector"] };
         assert_eq!(dropped, expected);
     }
+
+    /// A kind the authored `case` gives its own colour has its own layer, and a kind that shares
+    /// a colour with another sits in the same layer rather than adding a draw.
     #[test]
     fn a_data_driven_fill_is_one_layer_per_colour() {
         let park: Vec<&Layer> =

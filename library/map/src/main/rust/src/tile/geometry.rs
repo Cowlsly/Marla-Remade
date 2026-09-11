@@ -1579,6 +1579,8 @@ mod tests {
         assert_eq!(mesh.carriageways.len(), 2);
     }
 
+    /// A road with no `lanes` tag — most of OSM — still gets a carriageway, because a zero lane
+    /// count would push a zero width and draw nothing at all where a road plainly is.
     #[test]
     fn an_untagged_road_falls_back_to_one_lane_each_way() {
         let mesh = build(&carriageway_body(&[(0, false), (0, true)]), carriageway_only(), 16, 0, 0, false);

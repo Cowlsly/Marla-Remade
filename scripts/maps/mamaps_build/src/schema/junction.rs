@@ -111,6 +111,26 @@
 //! The practical consequence: do not judge a change to the geometry above by how much asphalt
 //! appears. Judge it by where the markings fall.
 //!
+//! **First, though, check that connectors are drawn at all.** `style::LANE_RENDERING` is a release
+//! kill switch that defaults to `false`, and it works by dropping every `carriageway: true` layer
+//! from `style::layers()` — which is `roads-carriageway` *and* `junction-connector`. It is a
+//! *drawing* gate and it is not this module's. The tiler does not link the renderer, so connectors
+//! are written into the archive exactly as before and only the painting stops: the screen goes
+//! empty rather than going wrong.
+//!
+//! **So a blank connector screenshot is not evidence about [`MIN_ZOOM`], and must not be read as
+//! any.** The two gates are independent and are currently in opposite states — [`MIN_ZOOM`] decides
+//! what reaches the archive and is satisfied; the style layer decides what is painted and is
+//! switched off. Debugging an empty screen inward lands on the tiler, and "fixing" a tiling gate
+//! that is already right is what silently shipped an archive with zero junction features once
+//! already. That failure is documented at [`MIN_ZOOM`]; this is the same confusion running the
+//! other way. Nothing in this module can cause a blank screen and nothing in this module can fix
+//! one.
+//!
+//! The renderer's own tests read `style::layers_with_lane_rendering()` so they keep asserting
+//! against the real style, which is right — but it does mean a green test run says nothing about
+//! whether the switch is on.
+//!
 //! # Lateral offset is baked in projected units, not ground metres
 //!
 //! Each connector's polyline already carries its lane's offset across the carriageway. That offset
@@ -1130,6 +1150,16 @@ mod tests {
     /// Distinct endpoints are deliberately *not* asserted. With one real lane per direction the
     /// movements out of an arm share it, so `d` distinct endpoints at a degree-`d` junction is the
     /// correct answer; separating them would mean drawing lanes that are not there.
+    ///
+    /// **This test assumes the carriageway is one lane each way, and that assumption is no longer
+    /// universally true.** It holds here because the fixture is untagged and [`effective_lanes`]
+    /// and the renderer then agree on 1. [`crate::lanefill`] now fills the lane *count* of a
+    /// junction stub from the road it interrupts, so at a divided arterial the carriageway is
+    /// painted several lanes wide while this layer, which reads `turn:lanes` masks that `lanefill`
+    /// deliberately does not write, still lays connectors out one lane per direction. The two
+    /// disagree there and this test cannot see it: connectors hug the centreline of a wide
+    /// intersection rather than running off it, so nothing here fails. Closing that needs the
+    /// filled count carried to the directed edge this layer sees, which is not yet possible.
     #[test]
     fn a_connector_starts_and_ends_on_the_painted_carriageway() {
         let (emitted, lines) = stream(&crossroads(&[]));

@@ -22,13 +22,25 @@
 // screen measurement that ramps continuously with zoom, so baking it into vertices
 // would re-tessellate every road in every visible tile on every zoom step, while
 // panning, on the critical path. The tessellator emits the centreline point, the
-// unit normal of the join and `t`; the half-width arrives as a push constant and the
-// offset is
+// join normal and `t`; the half-width arrives as a push constant and the offset is
 //
 //   offset = normal * (t * halfWidth)
 //
 // `t` doubles as the extrusion multiplier and as the fragment stage's marking
 // coordinate, which is what keeps the vertex to six floats.
+//
+// # Do not normalise `inNormal`
+//
+// It is the *miter* normal, not a unit vector: `tess::ribbon::join_normal` lengthens the
+// bisector by `1/cos(theta/2)`, clamped at `stroke::MITER_LIMIT`, and the taper scales it
+// again below 1 where a section abuts one of a different lane count. Unit length holds
+// only on a straight run.
+//
+// That extra length is load-bearing. It is what keeps the kerb at `|t| = 1` through a
+// bend; with a unit normal the carriageway pinches at every join and every marking slides
+// sideways with it, because a marking's position is a fraction of a width that is no
+// longer the width it should be. `normalize(inNormal)` compiles, warns about nothing, and
+// silently breaks the joins and the taper together.
 layout(location = 0) in vec2 inPosition;
 layout(location = 1) in vec2 inNormal;
 layout(location = 2) in float inT;
@@ -59,8 +71,9 @@ void main() {
     // the difference back off as alpha. Identical to `line.vert`, so a hairline road at
     // low zoom fades rather than snapping to full strength.
     float halfWidthPx = max(wantHalfPx, MIN_HALF_WIDTH_PX);
-    // The offset is a pixel distance and the normal is a unit vector in tile-local
-    // space, so dividing by the tile's pixel size converts one to the other.
+    // The offset is a pixel distance and the normal is in tile-local space, so dividing by
+    // the tile's pixel size converts one to the other. The normal's own length is a
+    // deliberate miter/taper factor and is meant to survive this — see the header.
     vec2 offsetTile = inNormal * (inT * halfWidthPx / tilePx);
     gl_Position = push.tileToClip * vec4(inPosition + offsetTile, 0.0, 1.0);
     outT = inT;
