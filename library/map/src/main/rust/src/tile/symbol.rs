@@ -27,12 +27,22 @@ use tilecodec::mamaps::body::{Body, Feature};
 /// reads the per-vertex ground anchor to stay upright under tilt.
 pub const FLOATS_PER_VERTEX: usize = text::FLOATS_PER_VERTEX;
 
-/// Floats per vertex for a POI **icon** quad: `x, y, u, v`.
+/// Floats per vertex for a POI **icon** quad: `x, y, u, v, ax, ay` — the same layout the text
+/// beside it uses, because an icon billboards the same way its label does.
 ///
-/// Icons keep the original 4-float layout and draw through the on-ground sprite pipeline (shared
-/// with the app markers, which also push 4-float quads), so they are not billboarded under tilt —
-/// only the text is. Keeping the icon format unchanged is what lets the marker path stay untouched.
-pub const ICON_FLOATS_PER_VERTEX: usize = 4;
+/// An icon carries the ground anchor on every corner and draws through the billboard pipeline, so
+/// under tilt it stands up to face the camera instead of foreshortening into the ground plane.
+/// Sharing one mechanism with the text is deliberate rather than incidental: an icon and its label
+/// hang off the same anchor in the same pass, so a second billboard implementation could disagree
+/// with the first and slide the pictogram off the name it belongs to.
+pub const ICON_FLOATS_PER_VERTEX: usize = text::FLOATS_PER_VERTEX;
+
+/// Floats per vertex for an app **marker** quad: `x, y, u, v`.
+///
+/// Markers resolve their corners to clip space on the CPU and draw through the plain on-ground
+/// sprite pipeline with an identity matrix, so there is no tile-local anchor for a vertex shader
+/// to project and this format must not grow.
+pub const MARKER_FLOATS_PER_VERTEX: usize = 4;
 
 /// Shape one place label into a [`ShapedLabel`] candidate. `weight` follows the
 /// layer's `medium` flag (country and big-city labels); the authored
@@ -299,7 +309,11 @@ pub fn emit_label(
 /// draw even though they share a pipeline layout and a vertex format.
 ///
 /// `rotation` counter-rotates the quad exactly as it does for the text beside it, so a POI
-/// pictogram stays the right way up under a heading-up camera.
+/// pictogram stays the right way up under a heading-up camera. Tilt is handled separately and
+/// on the GPU: every corner carries the label's ground anchor, and the billboard vertex shader
+/// projects that anchor and hangs the corner off it at a constant screen offset, so the icon
+/// faces the camera at any pitch. The half-extents below stay a tile-local offset *from* the
+/// anchor rather than a resolved screen position, which is what lets the shader do that.
 #[allow(clippy::too_many_arguments)]
 pub fn emit_icon(
     label: &ShapedLabel,
@@ -327,11 +341,16 @@ pub fn emit_icon(
     let (v0, v1) = (uv.v0 + dv, uv.v1 + dv);
     let base = (vertices.len() / ICON_FLOATS_PER_VERTEX) as u32;
     let start = vertices.len();
-    vertices.extend_from_slice(&[x0, y0, uv.u0, v0]);
-    vertices.extend_from_slice(&[x1, y0, uv.u1, v0]);
-    vertices.extend_from_slice(&[x1, y1, uv.u1, v1]);
-    vertices.extend_from_slice(&[x0, y1, uv.u0, v1]);
+    // Trailing `cx, cy` is the ground anchor, repeated on all four corners. The corner positions
+    // are the anchor plus a tile-local half-extent, so the shader recovers the screen offset by
+    // subtracting the two — the same contract `tess::text::emit` writes for a glyph.
+    vertices.extend_from_slice(&[x0, y0, uv.u0, v0, cx, cy]);
+    vertices.extend_from_slice(&[x1, y0, uv.u1, v0, cx, cy]);
+    vertices.extend_from_slice(&[x1, y1, uv.u1, v1, cx, cy]);
+    vertices.extend_from_slice(&[x0, y1, uv.u0, v1, cx, cy]);
     indices.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
+    // Rotates the corner positions about the anchor and leaves the anchor itself alone, so the
+    // offset the shader reconstructs is the counter-rotated one.
     text::upright_stride(&mut vertices[start..], label.anchor, rotation, ICON_FLOATS_PER_VERTEX);
 }
 
@@ -728,5 +747,129 @@ mod tests {
         let far = ndc_offset((0.5, 0.30));
         assert!((near.0 - far.0).abs() < 1e-5 && (near.1 - far.1).abs() < 1e-5,
             "screen offset changed with depth: {near:?} vs {far:?}");
+    }
+
+    // --- POI icon billboarding ----------------------------------------------
+
+    #[test]
+    fn an_icon_quad_carries_its_ground_anchor_on_every_corner() {
+        // The billboard shader recovers a corner's screen offset as `position - anchor`, so all
+        // four corners must name the same anchor or the quad tears apart under tilt.
+        let label = icon_label((0.4, 0.6));
+        let (mut vertices, mut indices) = (Vec::new(), Vec::new());
+        emit_icon(&label, test_sprite(), false, 1.0, 512.0, (1.0, 0.0), &mut vertices, &mut indices);
+        assert_eq!(vertices.len(), 4 * ICON_FLOATS_PER_VERTEX, "expected one quad");
+        for corner in vertices.chunks_exact(ICON_FLOATS_PER_VERTEX) {
+            assert_eq!((corner[4], corner[5]), label.anchor, "corner lost its anchor");
+        }
+    }
+
+    #[test]
+    fn an_icon_corner_offset_is_a_tile_local_offset_from_the_anchor() {
+        // Not a resolved screen position: the offset has to survive into the vertex as something
+        // the shader can rotate, or billboarding would have to happen on the CPU per frame.
+        let label = icon_label((0.4, 0.6));
+        let (mut vertices, mut indices) = (Vec::new(), Vec::new());
+        let (density, tile_span_px) = (2.0f32, 512.0f32);
+        let sprite = test_sprite();
+        emit_icon(&label, sprite, false, density, tile_span_px, (1.0, 0.0), &mut vertices,
+            &mut indices);
+        let half_w = sprite.width_dp * density * 0.5 / tile_span_px;
+        let half_h = sprite.height_dp * density * 0.5 / tile_span_px;
+        let first = &vertices[..ICON_FLOATS_PER_VERTEX];
+        assert!((first[0] - first[4] + half_w).abs() < 1e-6, "x offset is not the half-width");
+        assert!((first[1] - first[5] + half_h).abs() < 1e-6, "y offset is not the half-height");
+    }
+
+    #[test]
+    fn a_billboarded_icon_stays_the_same_screen_size_at_any_pitch() {
+        // The bug being fixed: on the ground plane a tilted camera foreshortens the quad, so its
+        // screen height collapses. Billboarded, the icon must measure the same in NDC at pitch 60
+        // as it does flat on — that is what "faces the camera" means here.
+        let sprite = test_sprite();
+        let (z, x, y) = CENTRED_TILE;
+        let ndc_height = |pitch: f64, billboard: bool| {
+            let cam = camera(pitch);
+            let m = cam.tile_to_clip(z, x, y);
+            let o = ortho2x2(&cam, z, x, y);
+            let label = icon_label(CENTRE_ANCHOR);
+            let (mut vertices, mut indices) = (Vec::new(), Vec::new());
+            emit_icon(&label, sprite, false, 1.0, cam.tile_span_px(z) as f32, (1.0, 0.0),
+                &mut vertices, &mut indices);
+            let corner = |i: usize| {
+                let v = &vertices[i * ICON_FLOATS_PER_VERTEX..];
+                let c = billboard_clip(&m, o, (v[0], v[1]), (v[4], v[5]), billboard);
+                c[1] / c[3]
+            };
+            (corner(2) - corner(0)).abs()
+        };
+        let flat = ndc_height(0.0, false);
+        let tilted = ndc_height(60.0, true);
+        assert!((tilted - flat).abs() < 1e-5, "icon changed screen height under tilt: \
+            {flat} flat vs {tilted} tilted");
+        // And the bug really was a bug: left on the ground plane, pitch 60 squashes it.
+        let squashed = ndc_height(60.0, false);
+        assert!(squashed < flat * 0.9, "expected the on-ground quad to foreshorten, got {squashed} \
+            against {flat} flat");
+    }
+
+    #[test]
+    fn a_billboarded_icon_stays_pinned_to_its_ground_point() {
+        // Facing the camera must not mean floating free of the feature: the quad's centre has to
+        // land exactly where the plain projection puts the POI's ground point.
+        let cam = camera(55.0);
+        let (z, x, y) = CENTRED_TILE;
+        let m = cam.tile_to_clip(z, x, y);
+        let o = ortho2x2(&cam, z, x, y);
+        let label = icon_label(CENTRE_ANCHOR);
+        let (mut vertices, mut indices) = (Vec::new(), Vec::new());
+        emit_icon(&label, test_sprite(), false, 1.0, cam.tile_span_px(z) as f32, (1.0, 0.0),
+            &mut vertices, &mut indices);
+        let centre_ndc = |axis: usize| {
+            let mut sum = 0.0;
+            for v in vertices.chunks_exact(ICON_FLOATS_PER_VERTEX) {
+                let c = billboard_clip(&m, o, (v[0], v[1]), (v[4], v[5]), true);
+                sum += c[axis] / c[3];
+            }
+            sum / 4.0
+        };
+        let ground = billboard_clip(&m, o, CENTRE_ANCHOR, CENTRE_ANCHOR, false);
+        assert!((centre_ndc(0) - ground[0] / ground[3]).abs() < 1e-5, "icon drifted in x");
+        assert!((centre_ndc(1) - ground[1] / ground[3]).abs() < 1e-5, "icon drifted in y");
+    }
+
+    /// The z14 tile holding [`camera`]'s centre, and the tile-local point inside it that the
+    /// centre falls on. Projecting an icon here keeps it near the middle of the viewport at any
+    /// pitch — far from the horizon, where a clip `w` near zero would swamp the measurement.
+    const CENTRED_TILE: (u8, u32, u32) = (14, 2620, 6332);
+    const CENTRE_ANCHOR: (f32, f32) = (0.6, 0.4);
+
+    /// A minimal POI label anchored at `anchor`. No shaped text: `emit_icon` reads only the
+    /// anchor and the sprite.
+    fn icon_label(anchor: (f32, f32)) -> ShapedLabel {
+        ShapedLabel {
+            layer_index: 0,
+            anchor,
+            name: "Cafe".to_string(),
+            lines: Vec::new(),
+            total_advance: 0.0,
+            weight: Weight::Regular,
+            rank: 4,
+            pop: 0,
+            sprite: None,
+            kind: 0,
+            feature_id: tilecodec::mamaps::body::ID_NONE,
+            centreline: None,
+        }
+    }
+
+    /// A 20x24 Dp icon somewhere in the middle of the sheet. Deliberately non-square, so a test
+    /// that confused the two half-extents would fail.
+    fn test_sprite() -> Sprite {
+        Sprite {
+            uv: crate::tile::glyph::UvRect { u0: 0.1, v0: 0.2, u1: 0.15, v1: 0.28 },
+            width_dp: 20.0,
+            height_dp: 24.0,
+        }
     }
 }

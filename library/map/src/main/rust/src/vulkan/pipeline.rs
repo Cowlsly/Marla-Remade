@@ -203,11 +203,16 @@ pub struct Pipelines {
     /// vertex shader collapses the grid to the flat footprint, so the overhead map is unchanged.
     pub terrain: vk::Pipeline,
     pub symbol: vk::Pipeline,
-    /// POI icons. Same vertex format, same push block and the same
-    /// [`symbol_layout`](Self::symbol_layout) as [`symbol`](Self::symbol) — only the
-    /// fragment shader differs, because an icon is a picture and a glyph is a distance
-    /// field. Sharing the layout is what lets the renderer swap atlases with a descriptor
-    /// bind instead of a second pipeline layout.
+    /// POI icons. The billboard vertex shader from [`symbol`](Self::symbol) paired with the sprite
+    /// fragment shader, on the same 6-float format and the same
+    /// [`symbol_layout`](Self::symbol_layout): an icon faces the camera under tilt exactly as its
+    /// label does, but samples a picture rather than a distance field. Deliberately the *same*
+    /// vertex shader as the text so the two can never disagree about where the anchor projects.
+    pub icon: vk::Pipeline,
+    /// App markers. The plain on-ground vertex shader on the 4-float
+    /// [`MARKER_FLOATS_PER_VERTEX`](crate::tile::symbol::MARKER_FLOATS_PER_VERTEX) format: markers
+    /// resolve their quads to clip space on the CPU and draw through an identity matrix, so they
+    /// need no per-vertex anchor and no billboard branch.
     pub sprite: vk::Pipeline,
     /// Screen-anchored overlay quads — today only the user puck. Takes the push-only
     /// [`layout`](Self::layout), not [`symbol_layout`](Self::symbol_layout), because it
@@ -322,9 +327,10 @@ impl Pipelines {
                 .format(vk::Format::R32_SFLOAT)
                 .offset(20),
         ];
-        // Sprite (POI icons + app markers): position (tile-local / clip) + uv (atlas), 4 floats.
-        // The on-ground path — not billboarded — so no per-vertex anchor. Shared with the marker
-        // path, which pushes 4-float clip-space quads, which is why this format must not grow.
+        // Sprite (app markers): position (already clip-space) + uv (atlas), 4 floats. Markers
+        // resolve their corners on the CPU and draw through an identity matrix, so there is no
+        // tile-local anchor to project and this format must not grow. POI icons no longer use it —
+        // they moved to the billboard format below so they face the camera under tilt.
         let symbol_attributes = [
             vk::VertexInputAttributeDescription::default()
                 .location(0)
@@ -337,9 +343,10 @@ impl Pipelines {
                 .format(vk::Format::R32G32_SFLOAT)
                 .offset(8),
         ];
-        // Symbol text (billboarded): position (tile-local) + uv (atlas) + ground anchor
-        // (tile-local), 6 floats. The anchor lets `symbol_billboard.vert` keep point labels upright
-        // and pinned to the ground under tilt; at pitch 0 it is ignored and output is unchanged.
+        // Symbol text and POI icons (billboarded): position (tile-local) + uv (atlas) + ground
+        // anchor (tile-local), 6 floats. The anchor lets `symbol_billboard.vert` keep point labels
+        // and their icons upright and pinned to the ground under tilt; at pitch 0 it is ignored and
+        // output is unchanged. One format for both is what keeps an icon on top of its label.
         let symbol_billboard_attributes = [
             vk::VertexInputAttributeDescription::default()
                 .location(0)
@@ -523,6 +530,21 @@ impl Pipelines {
             Stencil::Ignore,
             Depth::Off,
         );
+        // POI icons: the billboard vertex shader (so they face the camera under tilt, exactly as
+        // the text beside them does) paired with the sprite fragment shader (because an icon is a
+        // picture, not a distance field). No new shader — both halves already existed.
+        let icon = build(
+            device,
+            symbol_layout,
+            render_pass,
+            samples,
+            symbol_billboard_vert,
+            sprite_frag,
+            (symbol::ICON_FLOATS_PER_VERTEX * 4) as u32,
+            &symbol_billboard_attributes,
+            Stencil::Ignore,
+            Depth::Off,
+        );
         let sprite = build(
             device,
             symbol_layout,
@@ -530,7 +552,7 @@ impl Pipelines {
             samples,
             symbol_vert,
             sprite_frag,
-            (symbol::ICON_FLOATS_PER_VERTEX * 4) as u32,
+            (symbol::MARKER_FLOATS_PER_VERTEX * 4) as u32,
             &symbol_attributes,
             Stencil::Ignore,
             Depth::Off,
@@ -597,7 +619,8 @@ impl Pipelines {
         device.destroy_shader_module(terrain_vert, None);
         device.destroy_shader_module(terrain_frag, None);
 
-        match (fill, line, ribbon, depth, building, terrain, symbol, sprite, puck, mask, scrim) {
+        match (fill, line, ribbon, depth, building, terrain, symbol, icon, sprite, puck, mask, scrim)
+        {
             (
                 Ok(fill),
                 Ok(line),
@@ -606,6 +629,7 @@ impl Pipelines {
                 Ok(building),
                 Ok(terrain),
                 Ok(symbol),
+                Ok(icon),
                 Ok(sprite),
                 Ok(puck),
                 Ok(mask),
@@ -620,14 +644,29 @@ impl Pipelines {
                 building,
                 terrain,
                 symbol,
+                icon,
                 sprite,
                 puck,
                 mask,
                 scrim,
             }),
-            (fill, line, ribbon, depth, building, terrain, symbol, sprite, puck, mask, scrim) => {
+            (
+                fill,
+                line,
+                ribbon,
+                depth,
+                building,
+                terrain,
+                symbol,
+                icon,
+                sprite,
+                puck,
+                mask,
+                scrim,
+            ) => {
                 for created in [
-                    fill, line, ribbon, depth, building, terrain, symbol, sprite, puck, mask, scrim,
+                    fill, line, ribbon, depth, building, terrain, symbol, icon, sprite, puck, mask,
+                    scrim,
                 ]
                 .into_iter()
                 .flatten()
@@ -652,6 +691,7 @@ impl Pipelines {
         device.destroy_pipeline(self.building, None);
         device.destroy_pipeline(self.terrain, None);
         device.destroy_pipeline(self.symbol, None);
+        device.destroy_pipeline(self.icon, None);
         device.destroy_pipeline(self.sprite, None);
         device.destroy_pipeline(self.puck, None);
         device.destroy_pipeline(self.mask, None);

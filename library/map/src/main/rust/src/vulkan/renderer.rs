@@ -7,7 +7,7 @@ use crate::style::paint::Stroke;
 use crate::style::{Anchor, Layer, LayerKind, Palette};
 use crate::tile::geometry::{self, TileMesh};
 use crate::tile::select;
-use crate::vulkan::buffers::Buffer;
+use crate::vulkan::buffers::{Buffer, ScratchRing};
 use crate::vulkan::context::{ANativeWindow, Context};
 use crate::vulkan::images::{AtlasSet, SampledImage};
 use crate::vulkan::pick::Pick;
@@ -162,6 +162,36 @@ struct TransientBuffers {
     vbuf: Buffer,
     ibuf: Buffer,
     frames: usize,
+}
+
+/// What the symbol placer accepted: candidate id → (it took its alternate anchor, where in
+/// acceptance order it landed).
+type AcceptSet = HashMap<u64, (bool, u32)>;
+
+/// Everything [`Renderer::place_symbols`] reads that can change what it decides.
+///
+/// Floats are compared as bit patterns rather than by value. This is an identity test — "is this
+/// the same camera the last accept-set was computed from" — and not a question about numeric
+/// closeness, so bits are both the correct comparison and the one that needs no epsilon.
+#[derive(PartialEq, Eq)]
+struct PlacementKey {
+    center_lon: u64,
+    center_lat: u64,
+    zoom: u64,
+    bearing: u64,
+    pitch: u64,
+    width_dp: u32,
+    height_dp: u32,
+    density: u32,
+    extent: (u32, u32),
+    filter: crate::style::KindFilter,
+    /// Every resident tile with its upload stamp, so a tile that arrives or is replaced re-places
+    /// even though the camera has not moved. `camera.time_seconds` is deliberately *not* in this
+    /// key: it changes every frame and enters no collision box.
+    tiles: Vec<(u64, u32)>,
+    /// The style, by layer count. A style or toggle change re-tessellates the resident set, which
+    /// restamps every tile above, so this only has to catch the layer set itself changing.
+    layers: usize,
 }
 
 /// Per-frame synchronisation and its command buffer.
@@ -350,6 +380,10 @@ pub struct Renderer {
     retiring: Vec<(usize, ResidentTile)>,
     /// Transient per-frame symbol buffers, same grace rule as `retiring`.
     transients: Vec<TransientBuffers>,
+    /// One scratch bump allocator per frame in flight, which every symbol draw's geometry is
+    /// suballocated from. Indexed by [`frame_index`](Self::frame_index) and reset once that
+    /// frame's fence has signalled. See [`ScratchRing`].
+    scratch: Vec<ScratchRing>,
     window: *mut ANativeWindow,
     pub width: u32,
     pub height: u32,
@@ -372,6 +406,13 @@ pub struct Renderer {
     /// anchor lon/lat — so `pick_labels` answers without re-tessellating.
     /// Refreshed by `record_inner` every frame; read by the JNI pick path.
     placed: std::cell::RefCell<Vec<PlacedHit>>,
+    /// The last symbol placement and the state it was computed from.
+    ///
+    /// [`place_symbols`](Self::place_symbols) projects a collision box for every glyph of every
+    /// curved label and then runs a solver that is quadratic in accepted boxes, all of it on the
+    /// Choreographer callback. None of that depends on the frame clock, so a camera that has not
+    /// moved gets last frame's answer instead of the same computation again.
+    placement_cache: std::cell::RefCell<Option<(PlacementKey, AcceptSet)>>,
     /// What this frame draws on top of every tile, in order. See [`Overlay`].
     overlays: Vec<Overlay>,
     /// The geometry every overlay shares, uploaded once.
@@ -570,12 +611,14 @@ impl Renderer {
             tiles: HashMap::new(),
             retiring: Vec::new(),
             transients: Vec::new(),
+            scratch: (0..FRAMES_IN_FLIGHT).map(|_| ScratchRing::default()).collect(),
             window,
             width,
             height,
             needs_rebuild: false,
             submitted_draws: Cell::new(0),
             placed: std::cell::RefCell::new(Vec::new()),
+            placement_cache: std::cell::RefCell::new(None),
             overlays: Vec::new(),
             quad,
             selected_region: None,
@@ -1217,6 +1260,9 @@ impl Renderer {
         }
         // Only now is it safe to free what previous frames referenced.
         self.collect_retired();
+        // Same fence, same reason: it says this frame slot's previous commands have retired, so
+        // nothing is still reading the scratch they drew from.
+        unsafe { self.scratch[self.frame_index].reset() };
 
         let frame = &self.frames[self.frame_index];
         let acquired = unsafe {
@@ -1278,9 +1324,23 @@ impl Renderer {
                 .image_indices(&indices);
             match loader.queue_present(queue, &present) {
                 Ok(false) => {}
-                // Suboptimal or out of date: the window changed under us, so rebuild
-                // before the next frame rather than drawing into a stale swapchain.
-                Ok(true) | Err(vk::Result::ERROR_OUT_OF_DATE_KHR) => self.needs_rebuild = true,
+                // `VK_SUBOPTIMAL_KHR` is a success code, not an error: the swapchain still
+                // presents correctly, it just no longer matches the surface's ideal properties.
+                // Rebuilding on it is disproportionate — `rebuild` is a `device_wait_idle`, a
+                // swapchain teardown and a recompile of every pipeline, on the Choreographer
+                // callback, inside a frame.
+                //
+                // It is also not self-limiting. Nothing guarantees the rebuild clears the
+                // condition, and on Android it routinely does not: a swapchain whose
+                // `preTransform` does not match the display's `currentTransform` reports
+                // suboptimal on *every* present, so the old code recompiled all eleven pipelines
+                // every frame for as long as that held. Note `acquire_next_image` above already
+                // discards its own suboptimal flag, so this is now consistent rather than novel.
+                //
+                // The two cases that genuinely invalidate the swapchain still rebuild:
+                // `ERROR_OUT_OF_DATE_KHR` here and at acquire, and `resize` from the host.
+                Ok(true) => {}
+                Err(vk::Result::ERROR_OUT_OF_DATE_KHR) => self.needs_rebuild = true,
                 Err(e) => return Err(format!("queue_present {e:?}")),
             }
         }
@@ -2537,11 +2597,12 @@ impl Renderer {
         // borrows `self`, and buffer upload takes `&self.context` while retiring
         // takes `&mut self`.
         let tile_clip = camera.tile_to_clip(tz, tx, ty);
-        // Billboarding under tilt (point labels only): the shader projects each glyph's ground
-        // anchor through `tile_clip` (perspective) and hangs the glyph off it at a constant screen
-        // offset, reconstructed from the pitch-0 tile matrix's linear 2x2. At pitch 0 the flag is
-        // clear and the shader draws straight through `tile_clip`, byte-identical to before. Curved
-        // labels carry each vertex as its own anchor, so they stay on the ground regardless.
+        // Billboarding under tilt (point labels and their icons): the shader projects each corner's
+        // ground anchor through `tile_clip` (perspective) and hangs the corner off it at a constant
+        // screen offset, reconstructed from the pitch-0 tile matrix's linear 2x2. At pitch 0 the
+        // flag is clear and the shader draws straight through `tile_clip`, byte-identical to
+        // before. Curved labels carry each vertex as its own anchor, so they stay on the ground
+        // regardless — a road name lies along the road, which is the one case where flat is right.
         let flat_clip = Camera { pitch_deg: 0.0, ..*camera }.tile_to_clip(tz, tx, ty);
         let ortho2x2 = [flat_clip[0], flat_clip[1], flat_clip[4], flat_clip[5]];
         let billboard_flag = if camera.pitch_deg != 0.0 { 1.0 } else { 0.0 };
@@ -2629,20 +2690,24 @@ impl Renderer {
                 // Only the alpha is read by `sprite.frag`: an icon draws in its own
                 // colours, since the reference sets no `icon-color`.
                 color,
-                line: [0.0, 0.0, 0.0, 0.0],
+                // `sprite.frag` reads none of `line`; `w` is the billboard flag the shared vertex
+                // shader reads, so an icon stands up under tilt on the same terms as its label.
+                line: [0.0, 0.0, 0.0, billboard_flag],
                 misc: [tile_span_px, 0.0, 0.0, 0.0],
-                morph: MORPH_NONE,
+                // The pitch-0 linear 2x2, as for the text below — the same matrix, so the icon and
+                // the name beside it resolve their screen offsets identically.
+                morph: [ortho2x2[0], ortho2x2[1], ortho2x2[2], ortho2x2[3]],
             };
             self.draw_symbol_batch(
                 command_buffer,
-                self.pipelines.sprite,
+                self.pipelines.icon,
                 sprite_set,
                 &icon_vertices,
                 &icon_indices,
                 &push,
                 submitted,
             );
-            // The sprite pipeline shares `LayerKind::Symbol`, so this still forces the
+            // The icon pipeline shares `LayerKind::Symbol`, so this still forces the
             // fill/line path to rebind. The symbol pipeline is bound again immediately
             // below whenever there is any text — and a label with an icon always has
             // text, because `shape_label` returns nothing for an empty name.
@@ -2675,11 +2740,14 @@ impl Renderer {
         }
     }
 
-    /// Upload one transient vertex/index pair, bind `pipeline` with `set`, and draw it.
+    /// Suballocate one vertex/index pair out of this frame's scratch ring, bind `pipeline` with
+    /// `set`, and draw it.
     ///
     /// The icon and text paths differ only in which pipeline and atlas they bind, so they
-    /// share this. Buffers retire on the frames-in-flight grace count: last frame's
-    /// command buffer may still reference them.
+    /// share this. Geometry goes into [`Renderer::scratch`] rather than into a buffer of its own:
+    /// a screenful of labels is several hundred of these a frame, and a `vkAllocateMemory` per
+    /// draw is both slow and bounded by `maxMemoryAllocationCount`. The ring is reset at the top
+    /// of the frame under the in-flight fence, which is what makes the memory safe to reuse.
     #[allow(clippy::too_many_arguments)]
     unsafe fn draw_symbol_batch(
         &mut self,
@@ -2691,28 +2759,26 @@ impl Renderer {
         push: &Push,
         submitted: &mut usize,
     ) {
+        let frame_index = self.frame_index;
         let device = &self.context.device;
-        let Ok(vbuf) = Buffer::upload(
+        // Disjoint field borrows, deliberately not `self.context.device.clone()` as the frame path
+        // does once per frame: `ash::Device` clones its whole function-pointer table, and this
+        // runs a few hundred times a frame.
+        let Some((vbuf, voffset)) = self.scratch[frame_index].push(
             &self.context.instance,
             self.context.physical_device,
             device,
-            vk::BufferUsageFlags::VERTEX_BUFFER,
             vertices,
         ) else {
             return;
         };
-        let ibuf = match Buffer::upload(
+        let Some((ibuf, ioffset)) = self.scratch[frame_index].push(
             &self.context.instance,
             self.context.physical_device,
             device,
-            vk::BufferUsageFlags::INDEX_BUFFER,
             indices,
-        ) {
-            Ok(b) => b,
-            Err(_) => {
-                vbuf.destroy(device);
-                return;
-            }
+        ) else {
+            return;
         };
         device.cmd_bind_pipeline(command_buffer, vk::PipelineBindPoint::GRAPHICS, pipeline);
         device.cmd_bind_descriptor_sets(
@@ -2730,11 +2796,10 @@ impl Renderer {
             0,
             push.as_bytes(),
         );
-        device.cmd_bind_vertex_buffers(command_buffer, 0, &[vbuf.buffer], &[0]);
-        device.cmd_bind_index_buffer(command_buffer, ibuf.buffer, 0, vk::IndexType::UINT32);
+        device.cmd_bind_vertex_buffers(command_buffer, 0, &[vbuf], &[voffset]);
+        device.cmd_bind_index_buffer(command_buffer, ibuf, ioffset, vk::IndexType::UINT32);
         device.cmd_draw_indexed(command_buffer, indices.len() as u32, 1, 0, 0, 0);
         *submitted += 1;
-        self.transients.push(TransientBuffers { vbuf, ibuf, frames: FRAMES_IN_FLIGHT });
     }
 
     /// The per-frame symbol pre-pass: one collision candidate per shaped label
@@ -2751,8 +2816,32 @@ impl Renderer {
         ordered: &[u64],
         extent: vk::Extent2D,
         filter: &crate::style::KindFilter,
-    ) -> HashMap<u64, (bool, u32)> {
+    ) -> AcceptSet {
         use crate::tile::placement;
+        let key = PlacementKey {
+            center_lon: camera.center_lon.to_bits(),
+            center_lat: camera.center_lat.to_bits(),
+            zoom: camera.zoom.to_bits(),
+            bearing: camera.bearing_deg.to_bits(),
+            pitch: camera.pitch_deg.to_bits(),
+            width_dp: camera.width_dp.to_bits(),
+            height_dp: camera.height_dp.to_bits(),
+            density: camera.density.to_bits(),
+            extent: (extent.width, extent.height),
+            filter: filter.clone(),
+            tiles: ordered
+                .iter()
+                .map(|key| {
+                    (*key, self.tiles.get(key).map(|t| t.uploaded_at).unwrap_or(0.0).to_bits())
+                })
+                .collect(),
+            layers: layers.len(),
+        };
+        if let Some((cached, accepted)) = self.placement_cache.borrow().as_ref() {
+            if *cached == key {
+                return accepted.clone();
+            }
+        }
         let mut candidates: Vec<placement::SegmentedCandidate> = Vec::new();
         for (index, layer) in layers.iter().enumerate() {
             if layer.kind != LayerKind::Symbol {
@@ -2839,11 +2928,13 @@ impl Renderer {
         // acceptance order it landed**. `place_segmented` returns its winners in priority order and
         // a `HashMap` would throw that away, which is what made `pick_labels`' "topmost first" a
         // claim rather than a fact.
-        placement::place_segmented(&candidates)
+        let accepted: AcceptSet = placement::place_segmented(&candidates)
             .into_iter()
             .enumerate()
             .map(|(order, (id, flipped))| (id, (flipped, order as u32)))
-            .collect()
+            .collect();
+        *self.placement_cache.borrow_mut() = Some((key, accepted.clone()));
+        accepted
     }
 
     /// Task-17 pick: the placed labels of the last frame whose screen boxes
@@ -3145,6 +3236,10 @@ impl Drop for Renderer {
                 transient.ibuf.destroy(&self.context.device);
             }
             self.transients.clear();
+            for ring in &self.scratch {
+                ring.destroy(&self.context.device);
+            }
+            self.scratch.clear();
             for frame in &self.frames {
                 self.context.device.destroy_fence(frame.in_flight, None);
                 self.context.device.destroy_semaphore(frame.image_available, None);

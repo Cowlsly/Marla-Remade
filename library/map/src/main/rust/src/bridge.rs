@@ -96,6 +96,20 @@ const WORKER_COUNT: usize = 4;
 /// screen.
 const RESIDENT_TILE_CAP: usize = 64;
 
+/// How many finished tiles may be uploaded in one frame.
+///
+/// The drain used to be unbounded, so however many tiles the workers happened to finish between
+/// two frames all landed in the next one. Uploading a tile is around a hundred `vkAllocateMemory`
+/// calls, on the Choreographer callback, and a burst of them is what the frame-time tail is made
+/// of. What is left stays in the channel and is picked up next frame — nothing is dropped, and
+/// the tile is not re-requested, because its key is only removed from `in_flight` once it is
+/// actually drained.
+///
+/// Four is a deliberate middle: a screenful is a couple of dozen tiles, so a cold pan fills in
+/// over roughly ten frames, which is a fraction of the fetch and decode latency that preceded it
+/// and so is not visible. Lower would start to look like a trickle; higher gives the tail back.
+const UPLOADS_PER_FRAME: usize = 4;
+
 /// What a worker reports back about a tile.
 enum TileResult {
     /// Tessellated and ready to upload.
@@ -531,12 +545,16 @@ pub extern "system" fn Java_com_vayunmathur_library_map_MapNative_render<'l>(
     // Task-17 pick needs the frame's density for Dp→device-px; remember it.
     map.density = density;
 
-    // Upload whatever the workers finished. Doing it here rather than on a worker keeps
-    // every Vulkan call on one thread.
-    while let Ok((key, result)) = map.finished.try_recv() {
+    // Upload whatever the workers finished, up to `UPLOADS_PER_FRAME`. Doing it here rather than
+    // on a worker keeps every Vulkan call on one thread; bounding it keeps a burst of finished
+    // tiles from landing in a single frame.
+    let mut uploads = 0usize;
+    while uploads < UPLOADS_PER_FRAME {
+        let Ok((key, result)) = map.finished.try_recv() else { break };
         map.in_flight.remove(&key);
         match result {
             TileResult::Ready(mesh) => {
+                uploads += 1;
                 if let Err(e) = map.renderer.upload(key, &mesh) {
                     log(&format!("uploading a tile failed: {e}"));
                 }

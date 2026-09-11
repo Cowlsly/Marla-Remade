@@ -5,8 +5,10 @@
 // thresholded, smoothed and haloed; an icon is already the picture. Sampling it through
 // the SDF path would read its red channel as a distance and draw a smeared silhouette.
 //
-// Shares `symbol.vert` and the symbol pipeline layout verbatim — same vertex format, same
-// push block, same descriptor set slot. Only the bound atlas and this shader differ.
+// Pairs with `symbol_billboard.vert` for POI icons (which billboard under tilt like the text
+// beside them) and with `symbol.vert` for app markers (already resolved to clip space on the
+// CPU). Same pipeline layout, same push block prefix, same descriptor set slot in both cases —
+// only the bound atlas and this shader differ from the glyph path.
 layout(location = 0) in vec2 inUv;
 layout(location = 0) out vec4 outColor;
 layout(push_constant) uniform Push {
