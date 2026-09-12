@@ -205,4 +205,13 @@
     <string name="source_play_pin">Inget att låsa: Google har signeringsnyckeln</string>
     <string name="source_accrescent">Accrescent</string>
     <string name="source_accrescent_pin">Fastlåst till Accrescents repodata-signeringsnyckel (ed25519)</string>
+    <string name="trust_grapheneos_title">GrapheneOS</string>
+    <string name="trust_grapheneos_summary">Googles egna signerade byggen av komponenterna i Google Play i sandlåda, som GrapheneOS tillhandahåller genom en signerad lista som anger varje fils hashvärde och signeringsnyckel.</string>
+    <string name="trust_grapheneos_practice_official">Filerna är Googles egna signerade byggen, som omvärdas oförändrade i stället för att byggas om</string>
+    <string name="trust_grapheneos_practice_signed_index">GrapheneOS signerar listan över versioner, filernas hashvärden och förväntade signeringsnycklar med sin release-nyckel</string>
+    <string name="trust_grapheneos_practice_matched">Endast de byggen som stämmer med kompatibilitetslagret som ditt operativsystem levereras med erbjuds</string>
+    <string name="trust_grapheneos_check_index_signed">Den signerade listan kontrolleras mot en nyckel som är inbyggd i den här butiken</string>
+    <string name="trust_grapheneos_check_rollback">En lista som är äldre än den senast sedda avvisas, så att ett gammalt bygge inte kan tvingas på dig igen</string>
+    <string name="trust_grapheneos_check_hash_and_key">Varje hämtad fil stämmer med det hashvärde och den signeringsnyckel som listan anger</string>
+    <string name="trust_grapheneos_limits">Det här är Googles appar med sluten källkod. Ingenting byggs från publicerad källkod och inget bygge går att reproducera, så det som bevisas är att du har fått filen som GrapheneOS listade, inte vad den gör. Källan omfattar bara komponenterna i Google Play i sandlåda, och en felaktig utgåva kan inte dras tillbaka från telefoner.</string>
 </resources>
