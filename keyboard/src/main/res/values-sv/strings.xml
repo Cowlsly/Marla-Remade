@@ -17,4 +17,15 @@
     <string name="clear_clipboard">Rensa allt</string>
     <string name="clear_clipboard_history">Rensa urklippshistoriken</string>
     <string name="copied_text_shows_up_here">Kopierad text och kopierade bilder visas här</string>
+    <string name="voice_input">Röstinmatning</string>
+    <string name="voice_listening">Lyssnar …</string>
+    <string name="voice_transcribing">Transkriberar …</string>
+    <string name="voice_unavailable">Ingen app för taligenkänning är installerad</string>
+    <string name="voice_permission_denied">Röstinmatning behöver mikrofonen</string>
+    <string name="voice_permission_blocked">Tillåt mikrofonen i Inställningar</string>
+    <string name="voice_network">Röstinmatning behöver en anslutning</string>
+    <string name="voice_no_speech">Uppfattade inte det</string>
+    <string name="voice_busy">Taligenkännaren är upptagen</string>
+    <string name="voice_audio_error">Det gick inte att spela in ljud</string>
+    <string name="voice_failed">Röstinmatningen misslyckades</string>
 </resources>
