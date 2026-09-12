@@ -41,4 +41,5 @@
     <string name="brightness">Ljusstyrka</string>
     <string name="shadows">Skuggor</string>
     <string name="warmth">Värme</string>
+    <string name="qr_scanning_paused">QR-skanning pausad</string>
 </resources>
