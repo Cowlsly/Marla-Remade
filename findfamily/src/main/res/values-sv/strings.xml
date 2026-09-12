@@ -150,4 +150,15 @@
     <string name="poweroff_finding_limit">Detta fungerar i ungefär tre dagar efter att du har stängt av telefonen och upphör sedan. Det är en begränsning i Bluetooth-chippet, inte en inställning.</string>
     <string name="poweroff_finding_off_hint">Stäng av detta så sänder telefonen ingenting alls när den är avstängd.</string>
     <string name="poweroff_finding_unsupported">Telefonens Bluetooth-chip kan inte fortsätta vara sökbart när den är avstängd.</string>
+    <string name="map_menu_content_description">Fler alternativ</string>
+    <string name="find_nearby_content_description">Hitta i närheten</string>
+    <string name="verify_security_code_content_description">Verifiera säkerhetskod</string>
+    <string name="delete_person_content_description">Ta bort person</string>
+    <string name="delete_place_content_description">Ta bort sparad plats</string>
+    <string name="poweroff_grant_tracking_warning">Vem som helst du väljer kan också själv söka efter den här telefonen när som helst, så länge de finns kvar på listan. Att läsa var telefonen har setts och att söka efter den använder samma nyckel, så det går inte att ge den ena rättigheten utan den andra. Välj endast personer som du är bekväm med att låta hitta den här telefonen.</string>
+    <string name="poweroff_grant_revoke_warning">Att ta bort någon från listan hindrar personen från att se vart den här telefonen tar vägen från och med då. Det kan inte återta platser som personen redan har samlat in, och det kan inte få personen att glömma. Platser där telefonen nyligen har setts, men som ingen ännu har hämtat, kan också gå förlorade för dig.</string>
+    <string name="poweroff_grant_no_peers">När du är ansluten till någon kan du välja personen här.</string>
+    <string name="permission_grant_bluetooth">Tillåt Bluetooth</string>
+    <string name="permission_bluetooth_granted">Bluetooth är tillåtet</string>
+    <string name="permission_bluetooth_explanation">Behövs för att hitta enheter i närheten.</string>
 </resources>
