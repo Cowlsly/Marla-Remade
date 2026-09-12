@@ -4,4 +4,5 @@
     <string name="action_update">Uppdatera</string>
     <string name="language">Språk</string>
     <string name="off">Av</string>
+    <string name="label_description">Beskrivning</string>
 </resources>
